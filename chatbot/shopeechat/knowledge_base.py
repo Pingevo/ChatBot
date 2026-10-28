@@ -19,12 +19,14 @@ import re
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .route_context import RetrievalProfile
 
+from . import generation_pointer as _gen
 from dotenv import load_dotenv
 from pathlib import Path
 from pymongo import MongoClient
@@ -433,12 +435,14 @@ def build_general_context(
         faq = get_general_faq(kb_topic) if kb_topic else None
         faq_answer = (faq or {}).get("answer", "") or ""
 
-        # 2. ดึงจาก Mongo description — เฉพาะ return/shipping (ไม่ใช่ warranty)
-        #    สำหรับ warranty: ใช้แค่ general_faq เพราะเป็นเงื่อนไขทั่วไป
+        # 2. ดึงจาก Mongo description — เฉพาะ shipping เท่านั้น
+        #    Phase 5: return_policy ห้ามใช้ desc-scrape — prose ต่อชิ้นของสินค้า
+        #    ไม่ใช่หลักฐาน eligibility (ตัดสินด้วย PolicyDecision เท่านั้น)
+        #    warranty: ใช้แค่ general_faq เพราะเป็นเงื่อนไขทั่วไป
         #    ถ้าดึงจาก description สินค้า จะทำให้ LLM ยกตัวอย่างสินค้าเฉพาะมาตอบ
         #    ทั้งที่ลูกค้ายังไม่ได้ถามสินค้าใดเฉพาะเจาะจง
         mongo_sections = ""
-        if mongo_db is not None and qtype != "warranty_policy":
+        if mongo_db is not None and qtype == "shipping_policy":
             coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
             mongo_coll = mongo_db[coll_name]
             policy_key = qtype.replace("_policy", "")
@@ -665,6 +669,7 @@ def format_kb_context(
 
 
 def lookup_kb(message: str, *,
+              snap=_gen.SNAP_UNSET,
               retrieval_profile: RetrievalProfile | None = None) -> dict[str, Any] | None:
     """ค้น KB ตามข้อความลูกค้า.
 
@@ -818,7 +823,9 @@ _KNOWN_BRAND_SET = {
     "70mai", "viomi", "qcy", "ticwatch", "pioneer", "hoco", "adata",
     "apacer", "asus", "bear", "freetie", "binnifa", "godung",
 }
-_brand_cache: set[str] | None = None
+# entry เดียวต่อ generation — {"gen": gid|None, "ts": float, "brands": set}
+# (unit-derived brands เป็นของ gen ที่ capture — gen อื่นห้าม reuse)
+_brand_cache: dict | None = None
 # ค่า brand ใน DB ที่ไม่ใช่แบรนด์จริง / คำทั่วไปที่จะ false-detect ในข้อความลูกค้า
 _BRAND_JUNK = {
     "nobrand", "tws", "tws true wireless", "tripod", "vr toys", "free fire",
@@ -838,31 +845,43 @@ def _norm_brand(raw) -> str:
     return s if len(s) >= 3 and s not in _BRAND_JUNK else ""
 
 
-_brand_ts: float = 0.0
-
-
-def _known_brands() -> set[str]:
+def _known_brands(snap=_gen.SNAP_UNSET) -> set[str]:
     """แบรนด์ที่รู้จัก = _KNOWN_BRAND_SET ∪ distinct(brand) จาก kb_products+sellable_units.
 
-    แบรนด์ใหม่เข้าร้านได้ scope protection โดยไม่ต้องแก้ list — TTL 5 นาที (refresh
-    fail → ใช้ของเก่า), DB ล่มตั้งแต่แรก → baseline (fail-open เหมือนเดิม).
+    แบรนด์ใหม่เข้าร้านได้ scope protection โดยไม่ต้องแก้ list — TTL 5 นาที **ต่อ
+    generation** (unit-derived brands ผูกกับ snapshot ที่ capture — request ของ
+    gen อื่นห้าม reuse; read fail บน gen นั้น → baseline ของ gen นั้น ไม่ใช่
+    cache ของ gen เก่า), DB ล่มตั้งแต่แรก → baseline (fail-open เหมือนเดิม).
     """
-    global _brand_cache, _brand_ts
-    if _brand_cache is not None and time.time() - _brand_ts < _QA_DOCS_TTL:
-        return _brand_cache
+    global _brand_cache
+    snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+    gen = snap.generation_id if snap is not None else None
+    if (_brand_cache is not None and _brand_cache["gen"] == gen
+            and time.time() - _brand_cache["ts"] < _QA_DOCS_TTL):
+        return _brand_cache["brands"]
     brands = set(_KNOWN_BRAND_SET)
+    ok = False
+    # 2 source อิสระ — failure ของฝั่งใดฝั่งหนึ่ง ห้ามลบ brands ของอีกฝั่ง
     try:
-        from . import units as _u
         raw = list(_kb_products_coll().distinct("brand"))
-        raw += list(_u._units_coll().distinct("brand.original_brand_name"))
         brands |= {b for b in (_norm_brand(x) for x in raw) if b}
-        _brand_cache = brands          # assign เฉพาะตอน distinct สำเร็จ
-        _brand_ts = time.time()
+        ok = True
     except Exception:
-        if _brand_cache is None:       # cold start + DB ล่ม → baseline
-            _brand_cache = brands
-            _brand_ts = time.time()
-    return _brand_cache
+        pass
+    if snap is not None:      # captured None → generated-unit read = 0
+        try:
+            from . import units as _u
+            raw = list(_u._units_coll(snap).distinct(
+                "brand.original_brand_name"))
+            brands |= {b for b in (_norm_brand(x) for x in raw) if b}
+            ok = True
+        except Exception:
+            pass
+    # ล้มทั้ง 2 source + มี entry ของ gen เดียวกัน → reuse stale ต่อ (TTL เดิม);
+    # อย่างอื่น cache ผล union ภายใต้ generation identity ของ request นี้
+    if ok or _brand_cache is None or _brand_cache["gen"] != gen:
+        _brand_cache = {"gen": gen, "ts": time.time(), "brands": brands}
+    return _brand_cache["brands"]
 
 
 # recall gate เท่านั้น — precision อยู่ที่ scoring (substring/sim/anchor)
@@ -954,8 +973,8 @@ def _qa_embed_missing(docs: list[dict]) -> None:
 
 
 def search_qa(message: str, *, model_codes: set[str] | None = None,
-              anchor_item_id: str | None = None,
-              known_brand: str | None = None, limit: int = 3) -> list[dict]:
+              anchor_item_id: str | None = None, known_brand: str | None = None,
+              snap=_gen.SNAP_UNSET, limit: int = 3) -> list[dict]:
     """ค้น kb_qa — hybrid: embedding sim + substring + model/item anchor boost.
 
     Model rules (กันคำแนะนำข้ามรุ่น):
@@ -1009,7 +1028,7 @@ def search_qa(message: str, *, model_codes: set[str] | None = None,
         elif known_brand:
             # generic doc แต่ topic เป็นแบรนด์อื่น → ข้าม (คำแนะนำแบรนด์อื่นไม่ใช่ generic จริง)
             topic_low = (d.get("topic") or "").lower()
-            topic_brand = next((b for b in _known_brands() if topic_low.startswith(b)), None)
+            topic_brand = next((b for b in _known_brands(snap) if topic_low.startswith(b)), None)
             if topic_brand and topic_brand != known_brand.lower():
                 continue
             if topic_brand:
@@ -1030,6 +1049,7 @@ def search_qa(message: str, *, model_codes: set[str] | None = None,
 
 
 def qa_context(message: str, *, conversation_id=None, claim: bool = False,
+               snap=_gen.SNAP_UNSET,
                retrieval_profile: RetrievalProfile | None = None) -> str:
     """context block '=== คำแนะนำจากฐานความรู้ (QA) ===' หรือ '' — entry ที่ app.py เรียก.
 
@@ -1050,7 +1070,7 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
     if conversation_id:
         try:
             from . import conversation_products as _cp
-            card = _cp.get_active_product(conversation_id)
+            card = _cp.get_active_product(conversation_id, snap=snap)
             if card:
                 anchor_iid = card.get("item_id")
                 for c in (card.get("model_codes") or []):
@@ -1062,16 +1082,16 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
     if codes:
         try:
             from . import units as _units_mod
-            doc = _units_mod._units_coll().find_one(
+            doc = _units_mod._units_coll(snap).find_one(
                 {"model_codes": {"$in": list(codes)}}, {"brand": 1})
             b = (doc or {}).get("brand")
             known_brand = (b.get("original_brand_name") if isinstance(b, dict) else str(b or "")) or None
         except Exception:
             pass
     if not known_brand:
-        known_brand = next((b for b in _known_brands() if b in low), None)
+        known_brand = next((b for b in _known_brands(snap) if b in low), None)
     hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
-                     known_brand=known_brand)
+                     known_brand=known_brand, snap=snap)
     if not hits:
         return ""
     print(f"[QA] hits={len(hits)} levels={[h['_qa_level'] for h in hits]} "
@@ -1089,7 +1109,7 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
 
 def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
                          min_sim: float = 0.5, min_answer_len: int = 30,
-                         limit: int = 2) -> list[str]:
+                         limit: int = 2, snap=_gen.SNAP_UNSET) -> list[str]:
     """คืน list คำแนะนำแก้ปัญหาเบื้องต้น (field `a`) สำหรับ troubleshoot-first claim flow.
 
     Gate 3 ชั้น (กัน tips ไม่เกี่ยว):
@@ -1109,7 +1129,7 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
     if conversation_id:
         try:
             from . import conversation_products as _cp
-            card = _cp.get_active_product(conversation_id)
+            card = _cp.get_active_product(conversation_id, snap=snap)
             if card:
                 anchor_iid = anchor_iid or card.get("item_id")
                 for c in (card.get("model_codes") or []):
@@ -1121,7 +1141,7 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
     if codes:
         try:
             from . import units as _units_mod
-            doc = _units_mod._units_coll().find_one(
+            doc = _units_mod._units_coll(snap).find_one(
                 {"model_codes": {"$in": list(codes)}}, {"brand": 1})
             b = (doc or {}).get("brand")
             known_brand = (b.get("original_brand_name") if isinstance(b, dict) else str(b or "")) or None
@@ -1129,9 +1149,9 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
             pass
     if not known_brand:
         low = message.lower()
-        known_brand = next((b for b in _known_brands() if b in low), None)
+        known_brand = next((b for b in _known_brands(snap) if b in low), None)
     hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
-                     known_brand=known_brand)
+                     known_brand=known_brand, snap=snap)
     return [(h.get("a") or "").strip() for h in hits
             if h.get("_qa_level") in ("model", "item", "brand")
             and h.get("_qa_sim", 0.0) >= min_sim
@@ -1155,3 +1175,125 @@ def _kb_doc_to_card(doc: dict) -> dict:
         "source": "knowledge_base",
         "source_file": doc.get("source_file", ""),
     }
+
+
+def _kb_model_row_match(doc: dict, token: str) -> dict | None:
+    """model row แรกที่ model_name boundary-match token — None เมื่อไม่ match
+    (matcher เดียวกับ product_store._model_token_in_name — ไม่เพิ่ม regex)"""
+    from . import product_store as _ps
+    for row in doc.get("model") or ():
+        if isinstance(row, dict) and _ps._model_token_in_name(
+                row.get("model_name") or "", token):
+            return row
+    return None
+
+
+@dataclass(frozen=True)
+class KbEvidenceResult:
+    """ผล KB product evidence resolution — cards (live listing ที่ model
+    match) + attachments (item-domain joins) + supporting (name-only/
+    unmatched — ห้ามกลายเป็น candidate)"""
+    cards: tuple[dict, ...] = ()
+    supporting_evidence: tuple[dict, ...] = ()
+    attachment_evidence: tuple = ()
+    raw_count: int = 0
+    trace: tuple[str, ...] = ()
+
+
+def kb_product_evidence(
+    db,
+    kb_docs,
+    *,
+    shop: str | None = None,
+    message: str = "",
+    limit: int = 20,
+) -> KbEvidenceResult:
+    """KB product docs → evidence channels — bounded + shop-scoped.
+
+    - doc มี item_id → attachment domain `item` (pool join เอง — ไม่ query)
+    - doc มี model → lookup เดียว fetch_products_by_models (1 bounded query,
+      shop-scoped) → live listing docs → cards (live truth เจ้าของ
+      publish/stock/link); kb spec → attachment ต่อ matched item
+    - doc name-only / model ไม่ match listing ในร้าน → supporting เท่านั้น
+      (KB text ไม่มีสิทธิ์สร้าง sellable candidate — ไม่เคย)
+    """
+    from . import product_store as _ps
+    from .candidate_pool import EvidenceAttachment
+    from .retrieval_policy import _norm_id
+
+    docs = [d for d in (kb_docs or ()) if isinstance(d, dict)]
+    cards: list[dict] = []
+    sup: list[dict] = []
+    atts: list[EvidenceAttachment] = []
+    trace: list[str] = []
+
+    def _payload(d: dict) -> dict:
+        return {k: d.get(k) for k in
+                ("brand", "model", "specs", "warranty_period",
+                 "warranty_note", "highlights")
+                if d.get(k) not in (None, "", {})}
+
+    def _sup(d: dict, why: str) -> None:
+        sup.append({"kind": "kb_product",
+                    "text": (f"{d.get('brand', '')} {d.get('model', '')}"
+                             .strip() or str(d.get("_id") or "kb")),
+                    "payload": _payload(d), "reason": why})
+
+    model_docs: list[dict] = []
+    for d in docs:
+        iid = d.get("item_id")
+        if iid is not None:
+            sid = _norm_id(iid)
+            atts.append(EvidenceAttachment(
+                kind="kb_product", identity=f"i:{sid}", item_id=sid,
+                linked_candidate=None, identity_domain="item",
+                payload=_payload(d), trace=("kb_item_id",)))
+        elif str(d.get("model") or "").strip():
+            model_docs.append(d)
+        else:
+            _sup(d, "name_only")
+
+    tokens = [str(d["model"]).strip() for d in model_docs]
+    if tokens:
+        found = _ps.fetch_products_by_models(
+            db, tokens, shop=shop, limit=limit)
+        trace.append(f"model_lookup={len(tokens)}tok/{len(found)}hit")
+        # per-doc exact match — payload ของ doc ไปเฉพาะ item/model ที่
+        # boundary-match token ของ doc นั้น (K9 ไม่ชน K90); unmatched doc
+        # → supporting รายตัว (ไม่ใช่ all-or-nothing)
+        seen_cards: dict[str, dict] = {}
+        for d in model_docs:
+            tok = str(d["model"]).strip()
+            hit = False
+            for doc in found:
+                iid = _norm_id(doc.get("item_id"))
+                row = _kb_model_row_match(doc, tok)
+                if row is None and not _ps._doc_matches_model(doc, tok):
+                    continue
+                hit = True
+                if iid not in seen_cards:
+                    seen_cards[iid] = _ps.to_product_card(doc, message)
+                mid = (_norm_id(row.get("model_id"))
+                       if row is not None
+                       and row.get("model_id") is not None else None)
+                if mid is not None:
+                    atts.append(EvidenceAttachment(
+                        kind="kb_product", identity=f"v:{iid}#{mid}",
+                        item_id=iid, linked_candidate=None,
+                        identity_domain="model",
+                        payload=_payload(d), trace=("kb_model_match",)))
+                else:
+                    atts.append(EvidenceAttachment(
+                        kind="kb_product", identity=f"i:{iid}", item_id=iid,
+                        linked_candidate=None, identity_domain="item",
+                        payload=_payload(d), trace=("kb_model_match",)))
+            if not hit:
+                _sup(d, "no_shop_listing")
+        cards.extend(seen_cards.values())
+    else:
+        trace.append("model_lookup=0")
+
+    return KbEvidenceResult(
+        cards=tuple(cards), supporting_evidence=tuple(sup),
+        attachment_evidence=tuple(atts), raw_count=len(docs),
+        trace=tuple(trace))

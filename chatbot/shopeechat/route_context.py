@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,10 +45,41 @@ _SUPERLATIVE_KW = ("สุด", "ที่สุด", "แรงสุด", "ไ
 #   กัน false positive ของ _SUPERLATIVE_KW เช่น "ตัวนี้ชาร์จเร็วไหม" (ไม่ใช่ set question)
 _SINGLE_ITEM_REF_KW = ("ตัวนี้", "รุ่นนี้", "อันนี้", "ชิ้นนี้", "สินค้านี้", "เรือนนี้")
 
+# superlative → canonical spec field (ย้ายมาจาก app.py superlative block —
+# kw → (field, direction) เจ้าของเดียว; spec fields ตาม CSV schema)
+_RANK_FIELD_KWS = (
+    (("ไว", "แรง", "เร็ว", "w", "watt", "ชาร์จไว", "จ่ายไฟ"),
+     "output_power_w", "max"),
+    (("จุ", "ความจุ", "mah", "capacity", "แบตเยอะ", "แบตมาก"),
+     "capacity_mah", "max"),
+    (("เบา", "น้ำหนัก", "weight", "เบาสุด", "น้อยสุด"),
+     "package_weight", "min"),
+)
+
+
+def detect_ranking(low: str) -> tuple[str, str] | None:
+    """superlative message → (canonical spec field, "max"|"min") ตามลำดับ
+    wattage → capacity → weight (parity กับ app.py เดิม); ไม่ match → None"""
+    for kws, field, direction in _RANK_FIELD_KWS:
+        if any(kw in low for kw in kws):
+            return (field, direction)
+    return None
+
 
 @dataclass
 class RouteContext:
-    """ข้อมูล routing ที่ resolve แล้วจาก message เดียว."""
+    """ข้อมูล routing ที่ resolve แล้วจาก message เดียว.
+
+    devices/subject_devices/target_devices = device names ที่ผ่าน
+    authoritative validation (`_lookup_spec_db`/`_SPEC_INDEX`) เท่านั้น —
+    subject/target domain split ตาม position vs first relation connector
+    (`_REL_CONN_RE` grammar owner) — เป็น structural surface ไม่ใช่ role
+    verdict; `decide_turn` assign role ให้แต่ละ need จาก surface เหล่านี้.
+    spec_tokens = spec-claim tokens (`policy_resolver._spec_tokens` owner)
+    — IP rating/protocol/wattage — ไม่ใช่ product identity.
+    device_mode = `_dc._compat_mode` — domain ของ device ใน ask
+    (model_fit/charging = device เป็น constraint; self_compat = device คือ
+    สิ่งที่ถาม; unknown/skip = ไม่มี typed role)."""
     message: str                      # message หลัง normalize
     product_types: set[str] = field(default_factory=set)
     charger_subtype: str | None = None
@@ -56,6 +88,13 @@ class RouteContext:
     needs_warranty: bool = False
     needs_shipping: bool = False
     corrections: dict[str, str] = field(default_factory=dict)  # typo → คำที่แก้
+    devices: tuple[str, ...] = ()          # validated device mentions (order)
+    subject_devices: tuple[str, ...] = ()  # validated devices ก่อน first connector
+    target_devices: tuple[str, ...] = ()   # validated devices หลัง first connector
+    target_codes: tuple[str, ...] = ()     # model codes หลัง first connector (structural split เดียวกับ target_devices)
+    device_spans: tuple[str, ...] = ()     # raw device-candidate spans (ทุก candidate — code containment surface)
+    spec_tokens: tuple[str, ...] = ()      # spec claims — ไม่ใช่ identity
+    device_mode: str = "unknown"           # _dc._compat_mode device-role domain
 
 
 _typo_sets: dict[str, set[str]] | None = None
@@ -108,12 +147,83 @@ def normalize_message(message: str) -> tuple[str, dict[str, str]]:
     return "".join(tokens), corrections
 
 
+def intent_confidence(intent_result: dict | None) -> float:
+    """intent confidence → float ∈ [0,1] — normalize owner เดียวของ intent
+    fields; bool/non-finite/out-of-range/malformed/หาย → 0.0 (consumer
+    ห้าม float() ซ้ำ)"""
+    raw = (intent_result or {}).get("confidence")
+    if isinstance(raw, bool):
+        return 0.0
+    try:
+        conf = float(raw) if raw is not None else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+    return conf if math.isfinite(conf) and 0.0 <= conf <= 1.0 else 0.0
+
+
+def intent_product_scope(intent_result: dict | None
+                          ) -> tuple[str | None, str | None]:
+    """intent → (product_type, charger_subtype) proposals — type name จริง
+    เท่านั้น; ค่า subtype domain (เช่น "cable") → subtype (model พูด subtype
+    แทน type); charger_subtype field นับเฉพาะเมื่อ product_type=="charger"
+    """
+    if not intent_result:
+        return None, None
+    from . import product_store as _ps
+    pt = intent_result.get("product_type")
+    st = intent_result.get("charger_subtype")
+    if not isinstance(pt, str):
+        pt = None
+    if not isinstance(st, str):
+        st = None
+    if pt in _ps._CHARGER_SUBTYPES:
+        return None, pt
+    if pt == "charger" and st in _ps._CHARGER_SUBTYPES:
+        return pt, st
+    return (pt or None), None
+
+
+def intent_fact_scope(intent_result: dict | None
+                      ) -> tuple[tuple[str, ...], tuple[str, ...],
+                                 tuple[tuple[str, str, float], ...],
+                                 tuple[str, ...]]:
+    """intent → (requested_facts, required_features, spec_constraints,
+    capability_asks) — typed fact/spec/capability contract accessor เดียว
+    (consumer ห้ามอ่าน raw keys ตรง); closed enums อยู่ที่ producer
+    (intent_classifier) — accessor re-validate shape แล้ว drop ค่านอก
+    contract (fail closed); capability_asks = open labels — shape check
+    เท่านั้น (non-empty str), ไม่มี vocabulary gate"""
+    if not intent_result:
+        return (), (), (), ()
+    from . import intent_classifier as _ic
+    rf = intent_result.get("requested_facts")
+    facts = tuple(dict.fromkeys(
+        str(x) for x in (rf if isinstance(rf, (list, tuple)) else ())
+        if str(x) in _ic.REQUESTED_FACTS))
+    fx = intent_result.get("required_features")
+    feats = tuple(dict.fromkeys(
+        str(x) for x in (fx if isinstance(fx, (list, tuple)) else ())
+        if str(x) in _ic.REQUIRED_FEATURES))
+    ca = intent_result.get("capability_asks")
+    asks = tuple(dict.fromkeys(
+        s for s in (str(x).strip() for x in
+                    (ca if isinstance(ca, (list, tuple)) else ()))
+        if s))
+    return facts, feats, _ic.norm_spec_constraints(
+        intent_result.get("spec_constraints")), asks
+
+
 def resolve_route(message: str, intent_result: dict | None = None) -> RouteContext:
-    """Resolve routing ครั้งเดียว: normalize → types/subtype/codes/needs.
+    """Resolve routing ครั้งเดียว: normalize → types/subtype/codes/needs +
+    structured device/spec surfaces (validated devices, connector-position
+    split, spec claims, device-role mode) สำหรับ role assignment ที่
+    `decide_turn` — ทุกอย่างมาจาก existing structured extractors เท่านั้น.
 
     intent_result: ผล intent_classifier (ใช้เป็น fallback เมื่อ msg ไม่มี subtype)
     """
     from . import product_store as _ps
+    from . import device_compat as _dc
+    from . import policy_resolver as _pr
     from .scripts.unit_classifier import _extract_codes
 
     msg, corrections = normalize_message(message or "")
@@ -121,20 +231,52 @@ def resolve_route(message: str, intent_result: dict | None = None) -> RouteConte
 
     ptypes = _ps._detect_product_types(msg)
     subtype = _ps._detect_charger_subtype(msg)
-    if not subtype and intent_result and intent_result.get("product_type") == "charger":
-        v = intent_result.get("charger_subtype")
-        if v in ("adapter", "cable", "set", "car_charger", "wireless", "desktop", "socket"):
-            subtype = v
+    if not subtype:
+        subtype = intent_product_scope(intent_result)[1]
+
+    # validated device mentions — authority rule เดียวกับ _local_target_device
+    # (spec db หรือ registered alias canon เท่านั้น); position vs relation
+    # connectors → structural subject/target domains
+    devices: list[str] = []
+    subj_devs: list[str] = []
+    tgt_devs: list[str] = []
+    spans: list[str] = []
+    conns = list(_REL_CONN_RE.finditer(low))
+    for raw, canon in _dc._device_candidates(msg):
+        if raw not in spans:
+            spans.append(raw)
+        name = canon or raw
+        if name in devices or not (
+                _dc._lookup_spec_db(raw)
+                or (canon and canon in _dc._SPEC_INDEX)):
+            continue
+        devices.append(name)
+        occ = _device_occurrence(low, name)
+        (tgt_devs if occ and any(cm.end() <= occ[0] for cm in conns)
+         else subj_devs).append(name)
+
+    codes = _extract_codes(msg)
+    # code ที่ occurrence แรกอยู่หลัง connector = counterpart domain
+    # (structural split เดียวกับ target_devices — ไม่ใช่ role verdict)
+    tgt_codes = tuple(c for c in codes if conns and any(
+        cm.end() <= low.find(c.lower()) for cm in conns))
 
     return RouteContext(
         message=msg,
         product_types=ptypes,
         charger_subtype=subtype,
-        model_codes=_extract_codes(msg),
+        model_codes=codes,
         needs_spec=any(w in low for w in _SPEC_WORDS),
         needs_warranty=any(w in low for w in _WARRANTY_WORDS),
         needs_shipping=any(w in low for w in _SHIPPING_WORDS),
         corrections=corrections,
+        devices=tuple(devices),
+        subject_devices=tuple(subj_devs),
+        target_devices=tuple(tgt_devs),
+        target_codes=tgt_codes,
+        device_spans=tuple(spans),
+        spec_tokens=_pr._spec_tokens(msg),
+        device_mode=_dc._compat_mode(None, msg)[0],
     )
 
 
@@ -189,6 +331,20 @@ class RetrievalProfile:
     compat_mode: str
     anchor_item_ids: tuple[str, ...] = ()
     fact_sources: tuple[tuple[str, str], ...] = ()
+    # typed value constraints (งบ/ช่วงราคา) — parse ครั้งเดียวที่นี่ผ่าน
+    # product_store._extract_price_range (owner เดียว) — retrieval และ
+    # AnswerTask consume typed result เดียวกัน ไม่มี downstream re-parse
+    value_constraints: tuple[tuple[str, int], ...] = ()
+    # phrase-shaped named-product candidates — soft lookup hints ไม่ใช่
+    # trusted identity (ต่างจาก model_codes ที่เป็น code-shape hard identity)
+    model_terms: tuple[str, ...] = ()
+    # typed spec contract จาก intent boundary (conf ≥0.7):
+    #   spec_constraints = (field, op, value) canonical — producer:
+    #   intent_classifier.norm_spec_constraints; required_features =
+    #   closed feature tokens (เช่น "magnetic") — eval owner:
+    #   policy_resolver.eval_spec_constraints (ผ่าน AnswerContext)
+    spec_constraints: tuple[tuple[str, str, float], ...] = ()
+    required_features: tuple[str, ...] = ()
 
 
 def _bounded_history_facts(history: list[dict] | None) -> dict:
@@ -219,7 +375,8 @@ def _bounded_history_facts(history: list[dict] | None) -> dict:
         if not facts["subtype"]:
             facts["subtype"] = _ps._detect_charger_subtype(text)
         if not facts["device"]:
-            facts["device"] = _dc._extract_device_token(text)
+            facts["device"] = next((cn or rw for rw, cn in
+                                    _dc._device_candidates(text)), None)
         if not facts["codes"]:
             facts["codes"] = tuple(_extract_codes(text))
     return facts
@@ -312,6 +469,7 @@ def build_retrieval_profile(
     shop: str | None,
     platform: str = "shopee",
     anchor_cards: list[dict] | None = None,
+    history_cards: list[dict] | None = None,
 ) -> RetrievalProfile:
     """สร้าง RetrievalProfile เดียวต่อ request — reconcile precedence ต่อ field อิสระ.
 
@@ -328,21 +486,28 @@ def build_retrieval_profile(
     low = msg.lower()
     anchors = list(anchor_cards or [])
     intent_result = intent_result or {}
-    confidence = float(intent_result.get("confidence") or 0.0)
+    confidence = intent_confidence(intent_result)
     sources: list[tuple[str, str]] = []
 
     # ── current message facts ──
     cur_types = frozenset(_ps._detect_product_types(msg))
     cur_subtype = _ps._detect_charger_subtype(msg)
-    cur_codes = tuple(_extract_codes(msg))
-    cur_device = _dc._extract_device_token(msg)
-    if cur_device:
-        # code ที่คือ device mention เอง (alias/spec/span เดียวกัน) ไม่ใช่ model code
-        cur_codes = tuple(c for c in cur_codes
-                          if not _code_is_device(c, cur_device, low))
-    _code_set = {c.replace(" ", "").upper() for c in cur_codes}
-    if cur_device and cur_device.replace(" ", "").upper() in _code_set:
-        cur_device = None  # token คือ model code ของสินค้า ไม่ใช่ device เป้าหมาย
+    # model_codes = trusted code-shape identity (_extract_codes); span ที่
+    #   device owner เคลมเป็น candidate ไม่ใช่ product code
+    _dev_spans = {cand for cand, _ in _dc._device_candidates(msg)}
+    cur_codes = tuple(dict.fromkeys(
+        c for c in _extract_codes(msg)
+        if not any(c.lower() in s for s in _dev_spans)))
+    # compat-connector target เท่านั้น (explicit subject = TurnNeed.subject_refs)
+    cur_device = _local_target_device(msg, None)
+    # model_terms = unverified phrase evidence — dedupe กับ roles ที่ prove
+    #   แล้วเท่านั้น ไม่ classify ด้วย keyword/guard chains
+    cur_terms = tuple(dict.fromkeys(
+        t for t in _ps._raw_model_tokens(msg)
+        if t not in cur_codes
+        and not (cur_device and _code_is_device(t, cur_device, low))))
+    if cur_terms:
+        sources.append(("model_terms", "message"))
     cur_variants = _variant_terms(msg)
 
     # ── anchor facts (compatible = current ไม่ได้ตั้ง family อื่นไว้) ──
@@ -369,12 +534,31 @@ def build_retrieval_profile(
             itypes = frozenset({iv})
         elif isinstance(iv, (list, tuple, set)):
             itypes = frozenset(str(x) for x in iv if x)
-        sv = intent_result.get("charger_subtype")
-        if sv in ("adapter", "cable", "set", "car_charger", "wireless", "desktop", "socket"):
-            isubtype = sv
+        # ค่า subtype domain (เช่น "cable") ไม่ใช่ type proposal — normalize
+        # ไปที่ subtype แทน ไม่ให้ปนเข้า product_types
+        itypes = frozenset(t for t in itypes if t not in _ps._CHARGER_SUBTYPES)
+        isubtype = intent_product_scope(intent_result)[1]
         dv = intent_result.get("target_device")
         if dv:
             idevice = str(dv)
+
+    # typed spec contract (closed enums — accessor เดียว; conf gate เดียว
+    #   กับ product scope)
+    if confidence >= 0.7:
+        _rf, req_features, spec_constraints, _ = intent_fact_scope(
+            intent_result)
+    else:
+        req_features, spec_constraints = (), ()
+
+    # ── history cards (persisted subject cards ของ app.py — category carry
+    #   เมื่อ current message elliptical; identity ไม่ carry — resolver เท่านั้น) ──
+    hc_types: set[str] = set()
+    hc_subtype: str | None = None
+    for c in (history_cards or ()):
+        name = str(c.get("name") or "")
+        hc_types |= _ps._detect_product_types(name)
+        if not hc_subtype:
+            hc_subtype = _ps._detect_charger_subtype(name)
 
     # ── bounded history + carry gate ──
     hist = _bounded_history_facts(history)
@@ -391,6 +575,9 @@ def build_retrieval_profile(
     elif itypes:
         product_types = itypes
         sources.append(("product_types", "intent"))
+    elif is_followup and hc_types:
+        product_types = frozenset(hc_types)
+        sources.append(("product_types", "history_cards"))
     elif is_followup and hist["types"]:
         product_types = hist["types"]
         sources.append(("product_types", "history"))
@@ -406,6 +593,9 @@ def build_retrieval_profile(
         subtype, subtype_src = anchor_subtype, "anchor"
     elif isubtype and (not cur_types or "charger" in cur_types):
         subtype, subtype_src = isubtype, "intent"
+    elif is_followup and hc_subtype and (
+            not cur_types or "charger" in cur_types):
+        subtype, subtype_src = hc_subtype, "history_cards"
     elif is_followup and hist["subtype"] and (not cur_types or "charger" in cur_types):
         subtype, subtype_src = hist["subtype"], "history"
     elif cur_subtype:
@@ -414,6 +604,10 @@ def build_retrieval_profile(
         sources.append(("subtype", subtype_src or "message"))
         if "charger" not in product_types:
             product_types = product_types | {"charger"}  # subtype ⇒ charger family
+        # subtype ⇒ unit-domain types (เช่น "สาย"→cable, wireless→wireless_charger)
+        #   map เดียวกับ retrieval_executor — listing type ≠ unit type
+        from .units import _SUBTYPE_TO_TYPES
+        product_types = product_types | _SUBTYPE_TO_TYPES.get(subtype, set())
 
     if cur_codes:
         model_codes = cur_codes
@@ -444,13 +638,36 @@ def build_retrieval_profile(
         target_device = cur_device
         sources.append(("target_device", "message"))
     elif idevice:
-        target_device = idevice
-        sources.append(("target_device", "intent"))
+        # target_device = counterpart เท่านั้น — label ที่ codes ทับกับ
+        #   subject-side codes ของ message นี้ (connector split owner:
+        #   resolve_route) คือ product ที่ลูกค้าถามเอง ไม่ใช่ counterpart
+        #   (W01 live incident: model mis-slot "IMILAB W01" ลง target)
+        _rt = resolve_route(msg, intent_result)
+        _tgt_code_l = {c.lower() for c in _rt.target_codes}
+        _subj_code_l = {c.lower() for c in _rt.model_codes
+                        if c.lower() not in _tgt_code_l}
+        if {c.lower() for c in _extract_codes(idevice)} & _subj_code_l:
+            target_device = None
+        else:
+            target_device = idevice
+            sources.append(("target_device", "intent"))
     elif is_followup and hist["device"]:
         target_device = hist["device"]
         sources.append(("target_device", "history"))
     else:
         target_device = None
+
+    # value constraints — existing parser เดียว parse ครั้งเดียวต่อ turn
+    _vmin, _vmax = _ps._extract_price_range(msg)
+    value_constraints: tuple[tuple[str, int], ...] = tuple(
+        ([("price_min", _vmin)] if _vmin is not None else [])
+        + ([("price_max", _vmax)] if _vmax is not None else []))
+    if value_constraints:
+        sources.append(("value_constraints", "message"))
+    if spec_constraints:
+        sources.append(("spec_constraints", "intent"))
+    if req_features:
+        sources.append(("required_features", "intent"))
 
     intent = _resolved_intent(msg, intent_result, model_codes, anchors)
 
@@ -468,6 +685,10 @@ def build_retrieval_profile(
         compat_mode=_compat_mode(product_types, subtype, target_device),
         anchor_item_ids=anchor_ids,
         fact_sources=tuple(sources),
+        value_constraints=value_constraints,
+        model_terms=cur_terms,
+        spec_constraints=spec_constraints,
+        required_features=req_features,
     )
 
 
@@ -515,6 +736,14 @@ class RetrievalSlot:
     compat_mode: str
     confidence: float
     fact_sources: tuple[tuple[str, str], ...] = ()
+    variant_terms: tuple[str, ...] = ()   # requested option(s) ของ slot นี้
+    # typed roles — owner = TurnNeed.subject_refs/target_refs verbatim (r8)
+    subject_refs: tuple[str, ...] = ()
+    target_refs: tuple[str, ...] = ()
+    # typed spec contract จาก TurnNeed (verbatim propagate — eval ที่
+    #   AnswerContext ผ่าน policy_resolver.eval_spec_constraints)
+    spec_constraints: tuple[tuple[str, str, float], ...] = ()
+    required_features: tuple[str, ...] = ()
 
 
 def _kw_positions(low: str, kw: str) -> list[int]:
@@ -656,7 +885,8 @@ def _code_is_device(code: str, device: str, low: str) -> bool:
 def _product_brands(text: str, brands: list[str],
                     target: str | None) -> list[str]:
     """brand ที่เป็น product evidence — occurrence ทั้งหมดของ brand ต้องไม่อยู่
-    ภายใน target-device span ('เคส iphone 15' → iphone คือ device ไม่ใช่ brand)"""
+    ภายใน target-device span ('เคส iphone 15' → iphone คือ device ไม่ใช่ brand);
+    target มาจาก typed target_refs/connector — ไม่ infer device spans เอง"""
     if not target:
         return list(brands)
     occ = _device_occurrence(text.lower(), target)
@@ -679,25 +909,29 @@ def _product_brands(text: str, brands: list[str],
     return out
 
 
-def _local_target_device(seg: str, shared: str | None,
-                         slot_types: frozenset[str]) -> str | None:
-    """device token ใน segment ที่เป็น target จริง — (a) ตามหลัง compat connector
-    หรือ (b) family ของ token ไม่ตรง slot ("ฟิล์ม iphone 15" → iphone 15 เป็น
-    target; "นาฬิกา mi watch 8" → mi watch 8 คือตัวสินค้า ไม่นับ)"""
+def _local_target_device(seg: str, shared: str | None) -> str | None:
+    """compat-target device ของ segment — validated device หลัง compat
+    connector เท่านั้น (`_REL_CONN_RE` — grammar owner เดียวกับ relation
+    parser): candidate ต้องยืนยันใน _SPEC_INDEX (fabricated alias เช่น
+    "ip68"→"iphone 68" = unverified); source role ถูกลบ (r7) — explicit
+    subject = TurnNeed.subject_refs เท่านั้น"""
     from . import device_compat as _dc
-    from . import product_store as _ps
-    d = _dc._extract_device_token(seg)
-    if not d or d == shared:
-        return None
-    pos = _span_device_position(seg.lower(), d)
-    if pos < 0:
-        return None
-    if any(kw in seg.lower()[:pos] for kw in
-           ("ใช้กับ", "รองรับ", "สำหรับ", "เชื่อมต่อ", "เข้ากัน")):
-        return d
-    dev_types = _ps._detect_product_types(d)
-    if dev_types and not (dev_types & slot_types):
-        return d
+    low = seg.lower()
+    for cand, canon in _dc._device_candidates(seg):
+        name = canon or cand
+        if name == shared:
+            continue
+        # authoritative resolution เท่านั้น — _lookup_spec_db หรือ registered
+        # alias canon (fabricated alias เช่น "ip68"→"iphone 68" = unverified)
+        if not (_dc._lookup_spec_db(cand)
+                or (canon and canon in _dc._SPEC_INDEX)):
+            continue
+        occ = _device_occurrence(low, name)
+        if occ is None:
+            continue
+        # connector position จาก _REL_CONN_RE — grammar owner เดียวกับ parser
+        if any(cm.end() <= occ[0] for cm in _REL_CONN_RE.finditer(low)):
+            return name
     return None
 
 
@@ -723,18 +957,23 @@ def _ambiguous_device_target(low: str, target: str | None) -> bool:
     return True
 
 
-def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...]:
+def build_retrieval_slots(profile: RetrievalProfile,
+                          needs: tuple = ()) -> tuple[RetrievalSlot, ...]:
     """แยก resolved profile เป็น product-request slots — deterministic เท่านั้น.
 
     span rule: window ของ type mention คือ text จาก mention นั้นจนถึง mention
     ของ type อื่นถัดไป → brand/model/subtype ผูกกับ product ที่ระบุใกล้สุด
     device ที่ตามหลัง ≥2 distinct types (หรือผูก span ไม่ได้) → target_scope=shared
     0/1 distinct typed span → slot เดียวเทียบเท่า profile (behavior เดิม)
+    needs = TurnNeed tuple ที่สร้างแล้ว (decide_turn — call เดียวต่อ turn)
+    → `subject_refs` ของ productish need ถูก propagate เป็น slot.subject_refs
+    (owner เดียว — ไม่ infer จาก prose)
     ไม่เรียก LLM · ไม่สรุป compatibility (compat_mode เป็น hint เท่านั้น)
     """
     from . import product_store as _ps
     from . import device_compat as _dc
     from .scripts.unit_classifier import _extract_codes
+    from .turn_decision import PRODUCTISH_NEED_KINDS as _PK
 
     msg = profile.message or ""
     low = msg.lower()
@@ -742,6 +981,17 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
     mentioned = {t for _, t, _ in mentions}
     explicit = {t for _, t, s in mentions if s == "kw"}
     carry = profile.product_types - mentioned  # type จาก anchor/history/intent
+    # typed role carriers — consume verbatim (ไม่ re-parse, ไม่ filter refs
+    # ผ่าน span/code/device domain — roles ถูก owner ที่ decide_turn assign
+    # แล้ว): product/compare needs stamp slot เสมอ; compat needs stamp slot
+    # เฉพาะเมื่อไม่มี product/compare need (compat-only turn → slot request
+    # คือ surface เดียวของ relation — refs ของ compat need ไม่ไหลไป slot
+    # ของ product need อื่น)
+    from .turn_decision import _SCOPE_NEED_KINDS as _SK
+    scope_needs = [n for n in needs
+                   if getattr(n, "kind", None) in _SK]
+    prodish = scope_needs or [n for n in needs
+                              if getattr(n, "kind", None) in _PK]
 
     # effective types จุดเดียว: explicit kw = product request จริง;
     # regex-only mention = device phrase (target ไม่ใช่ slot) — มี explicit แล้ว drop;
@@ -757,13 +1007,43 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
     if len(distinct) <= 1:
         subs = _all_charger_subtypes(low) or (
             frozenset({profile.subtype}) if profile.subtype else frozenset())
-        target = (profile.target_device
-                  or _local_target_device(low, None, effective))
-        # brand ใน device span ไม่ใช่ product-brand evidence — เว้นแต่ device
-        # คือสินค้าเอง (family ตรง slot, เช่น "อยากได้ iphone 15")
-        _own_dev = bool(target and _ps._detect_product_types(target) & effective)
-        brands = _ps._detect_brands(msg) if _own_dev else \
-            _product_brands(low, _ps._detect_brands(msg), target)
+        # need product scope เป็น typed surface เดียวกัน — slot ห้ามเสีย
+        #   type/subtype ที่ need declare (subtype → listing types ผ่าน map
+        #   เดียวกับ profile)
+        need_types = frozenset(
+            t for n in prodish for t in getattr(n, "product_types", ()))
+        need_subs = frozenset(
+            s for n in prodish for s in getattr(n, "subtypes", ()))
+        if need_subs:
+            from .units import _SUBTYPE_TO_TYPES
+            for s in need_subs:
+                need_types |= _SUBTYPE_TO_TYPES.get(s, set())
+            subs = subs | need_subs
+        effective = effective | need_types
+        target = profile.target_device or _local_target_device(low, None)
+        # need refs verbatim — productish needs ทุกตัวครอบ slot เดียวของ
+        # turn; typed target เดียวชนะ span target (owner เดียวกัน)
+        refs = tuple(dict.fromkeys(
+            r for n in prodish for r in n.subject_refs))
+        trefs = tuple(dict.fromkeys(
+            r for n in prodish for r in n.target_refs))
+        # typed spec contract verbatim จาก productish needs
+        cons = tuple(dict.fromkeys(
+            c for n in prodish
+            for c in getattr(n, "spec_constraints", ())))
+        feats = tuple(dict.fromkeys(
+            f for n in prodish
+            for f in getattr(n, "required_features", ())))
+        # target_device = device view ของ typed target เท่านั้น —
+        # app/service/code target (เช่น strava/ad1404t) อยู่ target_refs ไม่ใช่
+        # target_device; validate ผ่าน authority เดียวกับ resolve_route
+        _td = next((t for t in trefs if _dc._lookup_spec_db(t)
+                    or _dc.normalize_device_alias(t) in _dc._SPEC_INDEX),
+                   None)
+        if _td:
+            target = _td
+        brands = _product_brands(low, _ps._detect_brands(msg), target)
+        mterms = _model_terms(low, brands)
         return (RetrievalSlot(
             slot_id=f"slot-{next(iter(effective), 'open')}",
             source_span=msg,
@@ -772,14 +1052,19 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
             primary_subtype=profile.subtype,
             brand_hints=tuple(brands),
             model_codes=profile.model_codes,
-            model_terms=_model_terms(low, brands),
+            model_terms=mterms,
             target_device=target,
+            subject_refs=refs,
+            target_refs=trefs,
             target_scope="slot" if target else "none",
             availability_mode=profile.availability_mode,
             compat_mode=profile.compat_mode,
             confidence=0.6 if _ambiguous_device_target(
                 low, target) else (1.0 if effective else 0.4),
             fact_sources=profile.fact_sources,
+            variant_terms=profile.variant_terms,
+            spec_constraints=cons,
+            required_features=feats,
         ),)
 
     # multi-slot: window ของ mention = [pos, next different-type pos)
@@ -793,7 +1078,8 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
         windows[t].append(low[pos:end])
 
     # shared device: อยู่หลัง ≥2 distinct types, ก่อน mention แรก, หรือผูก span ไม่ได้
-    dev_tok = profile.target_device or _dc._extract_device_token(msg)
+    dev_tok = profile.target_device or next(
+        (cn or rw for rw, cn in _dc._device_candidates(msg)), None)
     dev_pos = _span_device_position(low, dev_tok)
     types_before = {t for pos, t, _ in mentions if pos < dev_pos}
     shared_dev = dev_tok if dev_tok and (
@@ -811,16 +1097,42 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
         brands = _ps._detect_brands(span)
         codes = tuple(dict.fromkeys(
             c for seg in windows[t] for c in _extract_codes(seg)))
-        local_dev = next(
-            (d for seg in windows[t]
-             for d in [_local_target_device(seg, shared_dev,
-                                            frozenset({t}))] if d), None)
+        local_dev = None
+        for seg in windows[t]:
+            _d = _local_target_device(seg, shared_dev)
+            local_dev = local_dev or _d
         target = local_dev or shared_dev
         scope = "slot" if local_dev else ("shared" if shared_dev else "none")
-        _own_dev = bool(
-            target and _ps._detect_product_types(target) & {t})
-        if not _own_dev:
-            brands = _product_brands(span, brands, target)
+        # need→slot association ผ่าน typed product_types scope เท่านั้น —
+        # scope ว่าง (ไม่มี association ชัด) → ไม่ stamp (fail closed; ไม่
+        # flatten refs ข้าม slots); typed target เดียวชนะ span target
+        def _need_covers(n) -> bool:
+            # need→slot association ผ่าน typed scope เท่านั้น — subtype-only
+            #   scope (เช่น cable) ผูกกับ charger slot; scope ว่าง → ไม่ stamp
+            #   (fail closed; ไม่ flatten refs ข้าม slots)
+            nts = frozenset(getattr(n, "product_types", ()) or ())
+            return bool(nts & {t}) or (
+                t == "charger" and bool(getattr(n, "subtypes", ())))
+        assoc = [n for n in prodish if _need_covers(n)]
+        if t == "charger":
+            for n in assoc:
+                subs = subs | frozenset(getattr(n, "subtypes", ()) or ())
+        refs = tuple(dict.fromkeys(
+            r for n in assoc for r in n.subject_refs))
+        trefs = tuple(dict.fromkeys(
+            r for n in assoc for r in n.target_refs))
+        acons = tuple(dict.fromkeys(
+            c for n in assoc
+            for c in getattr(n, "spec_constraints", ())))
+        afeats = tuple(dict.fromkeys(
+            f for n in assoc
+            for f in getattr(n, "required_features", ())))
+        _td = next((t for t in trefs if _dc._lookup_spec_db(t)
+                    or _dc.normalize_device_alias(t) in _dc._SPEC_INDEX),
+                   None)
+        if _td:
+            target, scope = _td, "slot"
+        brands = _product_brands(span, brands, target)
         sources: list[tuple[str, str]] = [("product_types", "message")]
         if subs:
             sources.append(("subtypes", "span"))
@@ -830,6 +1142,12 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
             sources.append(("model_codes", "span"))
         if target:
             sources.append(("target_device", scope))
+        vterms = _variant_terms(span)
+        if vterms:
+            sources.append(("variant_terms", "span"))
+        mterms = _model_terms(span, brands)
+        if refs or trefs:
+            sources.append(("subject_refs", "needs"))
         slots.append(RetrievalSlot(
             slot_id=f"slot-{t}",
             source_span=span,
@@ -838,13 +1156,18 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
             primary_subtype=primary_sub,
             brand_hints=tuple(brands),
             model_codes=codes,
-            model_terms=_model_terms(span, brands),
+            model_terms=mterms,
             target_device=target,
+            subject_refs=refs,
+            target_refs=trefs,
             target_scope=scope,
             availability_mode=profile.availability_mode,
             compat_mode=_compat_mode(frozenset({t}), primary_sub, target),
             confidence=0.8,
             fact_sources=tuple(sources),
+            variant_terms=vterms,
+            spec_constraints=acons,
+            required_features=afeats,
         ))
     return tuple(slots)
 
@@ -855,6 +1178,7 @@ def build_retrieval_slots(profile: RetrievalProfile) -> tuple[RetrievalSlot, ...
 
 _REL_CONN_RE = re.compile(
     r"ใช้คู่กับ|ใช้คู่กัน|ใช้ได้กับ|ใช้ร่วมกับ|ใช้กับ|เข้ากัน|เข้ากับ|"
+    r"เชื่อมต่อกับ|เชื่อมต่อ|เชื่อมกับ|สำหรับ|"
     r"รองรับ|คู่กัน|คู่กับ")
 _REL_QUESTION = ("ไหน", "อะไร", "แบบไหน", "ตัวไหน", "รุ่นไหน",
                  "ยี่ห้อไหน", "ได้บ้าง")
@@ -971,6 +1295,19 @@ def _mention_subtype(low: str, pos: int, t: str) -> str | None:
     return best_sub
 
 
+def _kw_span_len(low: str, pos: int, t: str) -> int:
+    """ความยาว kw ของ type t ที่ match ตรง pos (ยาวสุดชนะ — 'สายชาร์จ' > 'สาย')"""
+    from . import product_store as _ps
+    best = 0
+    for name, kws, _rx in _ps.PRODUCT_TYPES:
+        if name != t:
+            continue
+        for kw in kws:
+            if low.startswith(kw, pos) and len(kw) > best:
+                best = len(kw)
+    return best
+
+
 def _strap_compound_mention(low: str, pos: int) -> bool:
     """kw mention ที่เป็น tail ของ strap compound ('สายนาฬิกา' ทำ 'นาฬิกา' ไม่ใช่
     smartwatch mention) — compound ที่เป็น kw เอง (สายคล้อง) ไม่โดน"""
@@ -979,7 +1316,9 @@ def _strap_compound_mention(low: str, pos: int) -> bool:
 
 def build_retrieval_relations(
         profile: RetrievalProfile,
-        slots: tuple[RetrievalSlot, ...]
+        slots: tuple[RetrievalSlot, ...],
+        *,
+        allow_reversed: bool = False
 ) -> tuple[RetrievalRelation, ...]:
     """หา product-to-product relations — deterministic เท่านั้น.
 
@@ -988,6 +1327,8 @@ def build_retrieval_relations(
     "หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน" = source AD1404T, target cable request
     connector ลงท้าย "คู่กัน" = สองฝั่งนำหน้า connector
     device/target-device mention (ip14, mi watch 8) ไม่ใช่ target — type kw เท่านั้น
+    reversed order ("สายที่ใช้กับ AD1404T") เปิดเฉพาะ `allow_reversed` —
+    typed eligibility จาก TurnPlan productish need (caller derive)
     ไม่เรียก LLM · ไม่สรุป compatibility positive
     """
     msg = profile.message or ""
@@ -1011,9 +1352,15 @@ def build_retrieval_relations(
     for cm in _REL_CONN_RE.finditer(low):
         conn = cm.group(0)
         symmetric = conn.endswith("คู่กัน")
+        # reversed order: "สายที่ใช้กับ AD1404T" — target (สิ่งที่อยากได้) อยู่
+        # ก่อน "ที่" + connector, source ตามหลัง — semantics เดียวกับ forward
+        reversed_order = (
+            not symmetric
+            and low[max(0, cm.start() - len("ที่")):cm.start()] == "ที่")
         shorthand_sub: str | None = None
         src_sub: str | None = None
         tgt_sub: str | None = None
+        tgt_head_start = -1
         if symmetric:
             before = [(p, t) for p, t in all_mentions if p < cm.start()]
             # shorthand-only source ไม่พอ — ต้องมี kw/code evidence จริง
@@ -1029,6 +1376,46 @@ def build_retrieval_relations(
                        else _mention_subtype(low, tgt_pos, tgt_type))
             q_seg = low[cm.end():cm.end() + 30]
             tail = low[cm.end():]
+        elif reversed_order:
+            if not allow_reversed:
+                continue  # typed eligibility: no productish need → fail closed
+            # target = head noun ก่อน "ที่" — kw mention สุดท้าย หรือ bare
+            # 'สาย'/'หัว' (compound blacklist เหมือน shorthand อื่น)
+            pre = low[:cm.start() - len("ที่")]
+            kw_head = [(p, t) for p, t in kw_mentions if p < cm.start()]
+            if kw_head:
+                tgt_pos, tgt_type = kw_head[-1]
+                tgt_head_start = tgt_pos
+                tgt_sub = _mention_subtype(low, tgt_pos, tgt_type)
+            else:
+                tm = re.search(r"(สาย|หัว)\s*$", pre)
+                if not tm:
+                    continue
+                tgt_pos = tm.start(1)
+                tgt_head_start = tgt_pos
+                tgt_type = "charger"
+                tgt_sub = "cable" if tm.group(1) == "สาย" else "adapter"
+                shorthand_sub = tgt_sub  # shorthand target → conf 0.7
+            # source = code ก่อน (exact identity ชนะ) ไม่ก็ kw mention หลัง connector
+            code_after = [(p, c) for p, c in code_mentions
+                          if cm.end() <= p <= cm.end() + 30]
+            kw_after = [(p, t) for p, t in kw_mentions
+                        if cm.end() <= p <= cm.end() + 30]
+            src_type = None
+            if code_after:
+                src_pos, src_code = code_after[0]
+                src_end = src_pos + len(src_code)
+                if kw_after and kw_after[0][0] < src_pos:
+                    src_type = kw_after[0][1]
+                    src_sub = _mention_subtype(low, kw_after[0][0],
+                                               src_type)
+            elif kw_after:
+                src_pos, src_type = kw_after[0]
+                src_end = src_pos + _kw_span_len(low, src_pos, src_type)
+                src_sub = _mention_subtype(low, src_pos, src_type)
+            else:
+                continue
+            tail = low[src_end:]
         else:
             cand = [(p, t) for p, t in all_mentions if p < cm.start()]
             code_before = [(p, c) for p, c in code_mentions if p < cm.start()]
@@ -1061,7 +1448,11 @@ def build_retrieval_relations(
                                                  cand[-1][1]))
             q_seg = low[tgt_pos:tgt_pos + 30]
             tail = low[tgt_pos:]
-        if not any(q in q_seg for q in _REL_QUESTION):
+        # request-marker gate — forward เท่านั้น: question kw หลัง target;
+        #   reversed order ใช้ intent eligibility (ข้างบน) + structural
+        #   parse เป็น boundary ("สายที่ใช้กับ X เสีย" ถูก claim intent กัน)
+        if (not reversed_order
+                and not any(q in q_seg for q in _REL_QUESTION)):
             continue
         src_slot = _slot_id_for(slots, src_type) if src_type else (
             slots[0].slot_id if slots else "slot-open")
@@ -1070,7 +1461,9 @@ def build_retrieval_relations(
         if key in seen:
             continue
         seen.add(key)
-        start = src_pos if not symmetric else min(src_pos, tgt_pos)
+        start = (tgt_head_start if reversed_order
+                 else src_pos if not symmetric
+                 else min(src_pos, tgt_pos))
         cons = _relation_constraints(tail)
         if tgt_sub:
             cons += (("target_subtype", tgt_sub),)
@@ -1078,7 +1471,10 @@ def build_retrieval_relations(
             cons += (("source_subtype", src_sub),)
         # query_hint = text ฝั่ง target (target kw + constraints tail) — executor
         # ใช้เป็น query แทน message เต็มที่มี source terms ปน
-        cons += (("query_hint", low[tgt_pos:tgt_pos + 200].strip()),)
+        hint = (f"{low[tgt_pos:cm.start() - len('ที่')].strip()} "
+                f"{tail.strip()}"
+                if reversed_order else low[tgt_pos:tgt_pos + 200].strip())
+        cons += (("query_hint", hint),)
         rels.append(RetrievalRelation(
             source_slot_id=src_slot,
             target_slot_id=tgt_slot,

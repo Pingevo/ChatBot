@@ -48,7 +48,7 @@ def _exec(reqs, units_docs=(), legacy_docs=()):
 
     return execute_grouped_retrieval_requests(
         reqs, message="x", shop="KingGadgets",
-        fetcher=units_fetcher, legacy_fetcher=legacy_fetcher)
+        fetcher=units_fetcher, legacy_fetcher=legacy_fetcher, snap=None)
 
 
 def test_two_source_attempts_per_request():
@@ -100,7 +100,7 @@ def test_multi_slot_quota_not_shared():
 
     results = execute_grouped_retrieval_requests(
         reqs, message="x", shop="KingGadgets",
-        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [])
+        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [], snap=None)
     pool = build_candidate_pool(results)
     by_req = dict(pool.by_request)
     case_req = next(k for k, v in by_req.items()
@@ -126,7 +126,7 @@ def test_relation_base_and_target_groups():
 
     results = execute_grouped_retrieval_requests(
         reqs, message="x", shop="KingGadgets",
-        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [])
+        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [], snap=None)
     pool = build_candidate_pool(results)
     types = {c.product_type for c in pool.eligible}
     assert "charger" in types and "cable" in types
@@ -165,7 +165,7 @@ def test_source_error_isolated():
         fetcher=lambda m, **kw: UnitEvidenceFetchResult(
             cards=(_card("เคส U", "case", unit_id="u1"),),
             raw_count=1, sellable_count=1, unavailable_count=0, trace=("u",)),
-        legacy_fetcher=broken)
+        legacy_fetcher=broken, snap=None)
     r = results[0]
     assert r.eligible_candidates
     legacy = next(a for a in r.source_attempts if a.source == "legacy")

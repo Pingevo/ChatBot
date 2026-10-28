@@ -2,7 +2,7 @@
 // body: { session_id, message, shop, platform }
 // คืน: { status: "buffered", buffered_count, buffer_config }
 //
-// ⚠️ ไม่ได้ส่งให้ bot ทันที — client ต้องเรียก /api/test-chat/flush เพื่อ flush
+// ⚠️ ไม่ได้ส่งให้ bot ทันที — client เรียก /api/test-chat/dispatch เพื่อ flush+dispatch
 // (เหมือนลูกค้าจริงที่ข้อความเข้า buffer ก่อน แล้ว bot worker ถึง flush)
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";

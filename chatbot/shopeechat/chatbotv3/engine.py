@@ -80,6 +80,7 @@ from . import or_client
 from . import system_prompt
 from . import shop_link
 from . import rich_parse
+from .. import generation_pointer as _gen
 from . import product_match
 from . import emotion
 
@@ -357,7 +358,7 @@ def _make_answer_response(
     }
 
 
-def chat_v3(req: Any) -> dict:
+def chat_v3(req: Any, snap=_gen.SNAP_UNSET) -> dict:
     """main entry สำหรับ chatbotv3.
 
     Args:
@@ -368,6 +369,9 @@ def chat_v3(req: Any) -> dict:
     """
     _t0 = time.time()
     _steps: list[dict] = []
+    # Phase 4B — captured snapshot จาก /chat owner; standalone → resolve ครั้งเดียว
+    if snap is _gen.SNAP_UNSET:
+        snap = _gen.resolve_snapshot()
 
     # ---- 1. extract fields จาก request ----------------------------------------
     message = (req.message or "").strip()
@@ -574,6 +578,7 @@ def chat_v3(req: Any) -> dict:
             shop_filter=shop_name,
             db=db,
             limit=limit,
+            snap=snap,
         )
         _steps.append({"name": "product_match", "model": "product_match", "detail": f"matched {len(matched_products)} products"})
     except Exception as e:

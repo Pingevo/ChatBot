@@ -1,17 +1,22 @@
-"""Extract structured text จากรูปใน description_info ด้วย Gemini vision (sellable first).
+"""Extract structured text จากรูปด้วย Gemini vision — bounded incremental OCR
+ของ evidence generation (Phase 4B).
 
 วิธีใช้:
-    .venv/bin/python chatbot/shopeechat/scripts/build_image_texts.py [--limit N] [--max-calls N]
+    .venv/bin/python chatbot/shopeechat/scripts/build_image_texts.py \
+        --export exports/gen/<gid>/ShpProducts.export.json \
+        --gen-dir exports/gen/<gid> --gid <gid> --scope sellable \
+        [--max-calls N] [--max-runtime-min M] [--limit N] [--shard K/N]
 
-ผลลัพธ์:
-    exports/image_texts.jsonl — 1 line/รูป:
-        {image_id, image_url, kind, text, is_template, used_by, status,
-         model, prompt_tokens, output_tokens, cost_usd, finish_reason,
-         attempts, error, ts}
-    resume: รันซ้ำจะข้าม image_id ที่ status=="ok" แล้ว (error ถูก retry ใหม่)
+ผลลัพธ์ (generation-scoped):
+    exports/gen/<gid>/image_texts.jsonl — evidence set สมบูรณ์ของ gen
+        {image_id, image_url, kind, text, truncated, item_ids} — reuse (unchanged)
+        + fresh (new/changed/retryable) เท่านั้น; error/deferred ไม่อยู่ใน set
 
-Rate limit (รวมทุก key ตาม quota จริง): ≤80 calls/min → sleep 0.78s/call,
-≤--max-calls ต่อ run (default 4000/day) → หยุดสะอาด รันซ้ำวันถัดไป resume ต่อ
+OCR cache = shared collection `image_texts` (runtime ไม่อ่าน — published evidence
+อยู่ image_texts_g<gid>): fingerprint(image_id+normalized_url), status
+(ok|error|deferred), error_class, attempts_total, last_generation_id
+classify: unchanged|new|changed|retryable_error|deferred|removed
+quota/budget/เวลาหมด → เหลือเป็น deferred (ไม่ใช่ error) run-level stop
 
 ทุก call → _log_ai_usage เข้า AI Usage Hub (reuse web_search._log_ai_usage)
 """
@@ -37,7 +42,6 @@ load_dotenv(ROOT / ".env")
 from chatbot.shopeechat import llm, web_search  # noqa: E402
 
 EXPORT_PATH = ROOT / "exports" / "ShpProducts.export.json"
-OUTPUT_PATH = ROOT / "exports" / "image_texts.jsonl"
 USAGE_LOG_PATH = ROOT / "exports" / "image_texts_usage.jsonl"
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
 MIN_INTERVAL = float(os.environ.get("IMGTXT_MIN_INTERVAL", "0.78"))  # ~77/min หลาย key; key เดียว (15 RPM/model) ใช้ ~4.1
@@ -105,39 +109,368 @@ def _doc_images(d: dict) -> dict[str, str]:
     return ids
 
 
-def _collect_worklist(path: Path) -> list[dict]:
-    """คืน list ของ {image_id, image_url, used_by, is_template} เฉพาะรูปใน sellable docs."""
-    used_by: collections.Counter = collections.Counter()
-    sellable: dict[str, str] = {}
-    n_docs = n_sellable = 0
+def _discover_images(path: Path) -> dict[str, dict]:
+    """image_id → {image_url, used_by, item_ids, sellable_item_ids} จาก export ทั้งก้อน.
+
+    discovery owner เดียวของ generation — materialize/classify/units ใช้ map เดียวกัน
+    """
+    info: dict[str, dict] = {}
+    n_docs = 0
     for d in _iter_export_docs(path):
         n_docs += 1
-        ids = _doc_images(d)
-        for iid in ids:
-            used_by[iid] += 1
-        if d.get("item_status") == "NORMAL" and _doc_stock(d) > 0:
-            n_sellable += 1
-            sellable.update(ids)
-    print(f"docs={n_docs} sellable_docs={n_sellable} unique_images(sellable)={len(sellable)}")
-    return [
-        {"image_id": iid, "image_url": url, "used_by": used_by[iid],
-         "is_template": used_by[iid] > TEMPLATE_MIN_USED_BY}
-        for iid, url in sorted(sellable.items())
-    ]
+        sellable = d.get("item_status") == "NORMAL" and _doc_stock(d) > 0
+        try:
+            item_id = int(d.get("item_id"))
+        except (TypeError, ValueError):
+            continue
+        for iid, url in _doc_images(d).items():
+            e = info.setdefault(iid, {"image_url": url, "used_by": 0,
+                                      "item_ids": set(), "sellable_item_ids": set()})
+            e["used_by"] += 1
+            e["item_ids"].add(item_id)
+            if sellable:
+                e["sellable_item_ids"].add(item_id)
+    print(f"docs={n_docs} unique_images={len(info)}")
+    return info
 
 
-def _load_done(path: Path) -> set[str]:
-    """image_id ที่ extract สำเร็จแล้ว — resume ข้าม."""
-    done = set()
-    if path.exists():
-        with open(path, encoding="utf-8") as f:
-            for line in f:
-                try:
-                    if json.loads(line).get("status") == "ok":
-                        done.add(json.loads(line)["image_id"])
-                except Exception:
-                    pass
-    return done
+def _collect_worklist(path: Path, scope: str = "sellable") -> list[dict]:
+    """worklist ตาม scope — sellable=รูปที่ sellable doc ใช้, nonsellable=รูปที่
+    โผล่เฉพาะใน non-sellable docs (หัก sellable ids ทิ้งเหมือนเดิม)."""
+    info = _discover_images(path)
+    items = []
+    for iid, e in sorted(info.items()):
+        if scope == "sellable" and not e["sellable_item_ids"]:
+            continue
+        if scope == "nonsellable" and e["sellable_item_ids"]:
+            continue
+        items.append({"image_id": iid, "image_url": e["image_url"],
+                      "used_by": e["used_by"],
+                      "is_template": e["used_by"] > TEMPLATE_MIN_USED_BY,
+                      "item_ids": sorted(e["item_ids"])})
+    print(f"scope={scope} worklist={len(items)}")
+    return items
+
+
+# ---- Phase 4B: fingerprint classification + OCR cache state -----------------
+#
+# `image_texts` (shared collection) = OCR processing cache เท่านั้น — runtime
+# ไม่อ่าน; evidence ที่ลูกค้าเห็นอยู่ `image_texts_g<gid>` (materialize แยก)
+# fingerprint = image_id + normalized_url → URL เปลี่ยน = re-OCR
+
+_RETRYABLE_ERRORS = {"quota", "transient"}
+
+
+def _normalize_url(url: str) -> str:
+    """ตัด query/fragment/trailing slash — URL เดียวกันรูปแบบต่าง = fingerprint เดียว"""
+    return (url or "").split("?")[0].split("#")[0].strip().rstrip("/")
+
+
+def _fingerprint(image_id: str, url: str) -> str:
+    return f"{image_id}|{_normalize_url(url)}"
+
+
+def _error_class(msg: str) -> str:
+    """quota/transient = retryable ใน run ถัดไป; อื่น = permanent (ไม่เผา retry)"""
+    m = (msg or "").lower()
+    if "429" in m or "resource_exhausted" in m or "quota" in m:
+        return "quota"
+    if any(k in m for k in ("timeout", "timed out", "deadline", "unavailable",
+                            "500", "502", "503", "connection")):
+        return "transient"
+    return "permanent"
+
+
+def _classify_images(discovered: dict[str, str], cache: dict[str, dict]) -> dict[str, str]:
+    """image_id → unchanged|new|changed|retryable_error|deferred.
+
+    - unchanged: cache ok + fingerprint ตรง → reuse evidence (0 provider call)
+      — รวม error ที่ไม่ retryable/attempts หมดแล้วด้วย (skip — ไม่เผาอีก)
+    - new: ไม่เคยอยู่ใน cache; changed: fingerprint ต่าง (URL เปลี่ยน)
+    - retryable_error: error ที่ retry ได้และ attempts_total < MAX_ATTEMPTS
+    - deferred: run ก่อนตัดงบ — run นี้ทำต่อได้ภายใต้ budget เดียวกัน
+    - cache-only ids ไม่ถูก classify — scoped run ไม่ใช่เจ้าของ record ข้าม
+      scope (r8: ไม่มี cross-scope removed/detach; orphan ค้างใน cache
+      เฉยๆ เข้า generation ไม่ได้เพราะ evidence มาจาก worklist เท่านั้น)
+    """
+    out: dict[str, str] = {}
+    for iid, url in discovered.items():
+        doc = cache.get(iid)
+        if doc is None:
+            out[iid] = "new"
+            continue
+        fp = _fingerprint(iid, url)
+        # fingerprint-equivalence — new-schema: field fp ตรง; legacy evidence
+        #   record (ก่อน cache-state schema — ไม่มี fingerprint/status) ใช้
+        #   image_url normalize เทียบตรง (semantic เดียวกับ fp)
+        doc_fp = doc.get("fingerprint")
+        fp_match = (doc_fp == fp if doc_fp is not None else
+                    _normalize_url(doc.get("image_url"))
+                    == _normalize_url(url))
+        if not fp_match:
+            # accepted ok คงอยู่ + pending retry budget หมด → หยุด OCR (bounded
+            # ข้าม run) — เก็บ accepted เดิมไว้, ไม่ publish (fp ต่างกัน).
+            # budget เป็นของ pending_fingerprint เดียวกันเท่านั้น — fingerprint
+            # ใหม่ (C) ได้ budget ของตัวเอง ห้ามถูกบล็อกโดย B ที่ exhausted
+            if (doc.get("status") == "ok"
+                    and doc.get("pending_fingerprint") == fp
+                    and (doc.get("pending_attempts_total") or 0)
+                    >= MAX_ATTEMPTS):
+                out[iid] = "unchanged"
+            else:
+                out[iid] = "changed"
+            continue
+        status = doc.get("status")
+        if status == "deferred":
+            out[iid] = "deferred"
+        elif status == "ok":
+            out[iid] = "unchanged"
+        elif status is None:
+            # legacy evidence record — reusable เมื่อมี text; ไม่มี = changed
+            #   (ต้อง OCR ใหม่ — evidence ไม่ครบ)
+            out[iid] = "unchanged" if doc.get("text") else "changed"
+        elif (status == "error" and doc.get("error_class") in _RETRYABLE_ERRORS
+              and (doc.get("attempts_total") or 0) < MAX_ATTEMPTS):
+            out[iid] = "retryable_error"
+        else:
+            out[iid] = "unchanged"
+    return out
+
+
+_PENDING_FIELDS = ("pending_fingerprint", "pending_status", "pending_error",
+                   "pending_error_class", "pending_attempts_total",
+                   "pending_last_generation_id")
+
+
+def _cache_upsert(coll, image_id: str, unset: tuple = (), **fields) -> None:
+    """cache-state write owner (build phase เท่านั้น) — UpdateOne keyed image_id."""
+    from pymongo import UpdateOne
+    fields["image_id"] = image_id
+    fields["ts"] = int(time.time())
+    update = {"$set": fields}
+    if unset:
+        update["$unset"] = {k: "" for k in unset}
+    coll.bulk_write([UpdateOne({"image_id": image_id}, update,
+                             upsert=True)])
+
+
+def _evidence_record(item: dict, doc: dict) -> dict:
+    """published evidence shape — fields เดียวกับ cache-ok แต่ไม่มี state metadata"""
+    return {"image_id": item["image_id"], "image_url": item["image_url"],
+            "kind": doc.get("kind"), "text": doc.get("text"),
+            "truncated": doc.get("truncated"),
+            "item_ids": item.get("item_ids") or []}
+
+
+def run_generation_ocr(work: list[dict], db, gen_dir: Path, gid: str,
+                       max_calls: int, deadline_ts: float | None = None,
+                       scope: str = "") -> dict:
+    """bounded incremental OCR สำหรับ generation เดียว.
+
+    - classify vs cache → unchanged reuse evidence (0 calls), work classes OCR
+      ต่อ item ภายใต้ max_calls (นับทุก attempt) + deadline
+    - budget/เวลาหมด หรือ provider quota → ที่เหลือ status=deferred ใน cache
+      (ไม่ใช่ error, ไม่ทำ generation fail) + run-level stop
+    - scoped run classify เฉพาะ worklist ของตัวเอง — cache-only/orphan rows
+      ไม่ถูกแตะ (r8: ไม่มี cross-scope detach); evidence เข้า generation
+      เฉพาะที่ intersect export ปัจจุบันเท่านั้น
+    - merge owner เดียวของ gen_dir/image_texts.jsonl = evidence set สมบูรณ์
+      ของ gen — union ของ run ทุก scope (reuse+fresh), run evidence ชนะตาม
+      image_id, malformed rows ถูก drop + count
+    - เขียน gen_dir/image_texts.counts.json = per-scope+totals breakdown
+      (manifest/publish-gate evidence — empty publish ต้องมี record นี้)
+    """
+    coll = db["image_texts"]
+    cache_docs = list(coll.find({}))
+    cache = {d["image_id"]: d for d in cache_docs if d.get("image_id")}
+    malformed_cache = len(cache_docs) - len(cache)
+    discovered = {w["image_id"]: w["image_url"] for w in work}
+    cls = _classify_images(discovered, cache)
+    evidence: list[dict] = []
+    counts = {"unchanged": 0, "new": 0, "changed": 0, "retryable_error": 0,
+              "deferred": 0, "processed": 0, "calls": 0}
+    carried = reusable = emitted_new = 0
+    calls_used = 0
+    stop = False
+    for item in work:
+        iid = item["image_id"]
+        state = cls[iid]
+        fp = _fingerprint(iid, item["image_url"])
+        base = {"fingerprint": fp, "image_url": item["image_url"],
+                "item_ids": item.get("item_ids") or [],
+                "last_generation_id": gid}
+        if state == "unchanged":
+            counts["unchanged"] += 1
+            doc = cache.get(iid) or {}
+            dfp = doc.get("fingerprint")
+            fp_ok = (dfp == fp if dfp is not None else
+                     _normalize_url(doc.get("image_url"))
+                     == _normalize_url(item["image_url"]))
+            # publish เฉพาะ accepted record ที่ fingerprint-equivalent —
+            #   new-schema fp match หรือ legacy evidence (status ขาด) ที่
+            #   image_url ตรง; accepted fp เก่า (URL เปลี่ยน) ห้ามไหลเข้า gen
+            if (doc.get("status") in ("ok", None) and doc.get("text")
+                    and fp_ok):
+                reusable += 1
+                evidence.append(_evidence_record(item, doc))
+                carried += 1
+            continue
+        # zero-call bootstrap = read-only บน shared cache — นับ work classes
+        #   ลง sidecar เท่านั้น (deferred = ยังต้อง OCR); ไม่ upsert/pending/
+        #   extract เลย — daily refresh (budget>0) ใช้ path เดิมข้างล่าง
+        if max_calls <= 0:
+            counts[state] += 1
+            if state != "deferred":
+                counts["deferred"] += 1
+            continue
+        # accepted ok + fingerprint เปลี่ยน → เก็บ accepted ไว้, เขียน pending_*
+        has_accepted = (state == "changed"
+                        and (cache.get(iid) or {}).get("status") == "ok")
+        prev = cache.get(iid) or {}
+        # pending state เป็นของ (image_id, pending_fingerprint) — fingerprint
+        # เปลี่ยน (B→C) → attempts/error ของ fp เก่าไม่ไหลมา, C เริ่มนับใหม่
+        same_pending_fp = prev.get("pending_fingerprint") == fp
+        prev_pending_attempts = (
+            prev.get("pending_attempts_total") or 0) if same_pending_fp else 0
+        # work classes — budget/wall-clock หมด → mark deferred แทน error
+        if stop or calls_used >= max_calls or (
+                deadline_ts is not None and time.time() >= deadline_ts):
+            if has_accepted:
+                _cache_upsert(coll, iid,
+                              item_ids=item.get("item_ids") or [],
+                              last_generation_id=gid,
+                              pending_fingerprint=fp,
+                              pending_status="deferred",
+                              pending_error=(prev.get("pending_error")
+                                             if same_pending_fp else None),
+                              pending_error_class=(
+                                  prev.get("pending_error_class")
+                                  if same_pending_fp else None),
+                              pending_attempts_total=prev_pending_attempts,
+                              pending_last_generation_id=gid)
+            else:
+                _cache_upsert(coll, iid, status="deferred", **base)
+            counts["deferred"] += 1
+            continue
+        entry = _extract_one(item)
+        calls_used += int(entry.get("attempts") or 1)
+        counts["calls"] = calls_used
+        counts["processed"] += 1
+        counts[state] += 1
+        if entry["status"] == "ok":
+            _cache_upsert(coll, iid, status="ok", kind=entry.get("kind"),
+                          text=entry.get("text"),
+                          truncated=entry.get("truncated"),
+                          error=None, error_class=None, attempts_total=0,
+                          unset=_PENDING_FIELDS,
+                          **base)
+            evidence.append(_evidence_record(item, entry))
+            emitted_new += 1
+        elif entry["status"] == "deferred":
+            if has_accepted:
+                _cache_upsert(coll, iid,
+                              item_ids=item.get("item_ids") or [],
+                              last_generation_id=gid,
+                              pending_fingerprint=fp,
+                              pending_status="deferred",
+                              pending_error=entry.get("error"),
+                              pending_error_class=_error_class(
+                                  entry.get("error") or ""),
+                              pending_attempts_total=(prev_pending_attempts
+                                  + int(entry.get("attempts") or 1)),
+                              pending_last_generation_id=gid)
+            else:
+                _cache_upsert(coll, iid, status="deferred",
+                              error=entry.get("error"), **base)
+            counts["deferred"] += 1
+            stop = True            # quota exhaustion → run-level stop
+        else:
+            if has_accepted:
+                _cache_upsert(
+                    coll, iid,
+                    item_ids=item.get("item_ids") or [],
+                    last_generation_id=gid,
+                    pending_fingerprint=fp,
+                    pending_status="error",
+                    pending_error=entry.get("error"),
+                    pending_error_class=_error_class(
+                        entry.get("error") or ""),
+                    pending_attempts_total=(prev_pending_attempts
+                        + int(entry.get("attempts") or 1)),
+                    pending_last_generation_id=gid)
+            else:
+                _cache_upsert(
+                    coll, iid, status="error", error=entry.get("error"),
+                    error_class=_error_class(entry.get("error") or ""),
+                    attempts_total=(prev.get("attempts_total") or 0)
+                    + int(entry.get("attempts") or 1),
+                    **base)
+        time.sleep(MIN_INTERVAL)
+    # merge owner เดียวของ evidence file — scope runs ต้อง union ไม่ overwrite
+    #   (sellable→nonsellable ต่อเนื่อง); row ของ run นี้ชนะ image_id เดิม;
+    #   malformed/ไม่มี image_id → drop + count (fail closed — ห้าม carry ของเสีย)
+    ev_path = gen_dir / "image_texts.jsonl"
+    merged: dict[str, dict] = {}
+    malformed = malformed_cache
+    duplicate = 0
+    if ev_path.exists():
+        for line in open(ev_path, encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except Exception:
+                malformed += 1
+                continue
+            iid = row.get("image_id")
+            if not iid:
+                malformed += 1
+                continue
+            if iid in merged:
+                duplicate += 1
+            merged[iid] = row
+    for e in evidence:
+        if e["image_id"] in merged:
+            duplicate += 1
+        merged[e["image_id"]] = e
+    if merged:
+        gen_dir.mkdir(parents=True, exist_ok=True)
+        with open(ev_path, "w", encoding="utf-8") as f:
+            for iid in sorted(merged):
+                f.write(json.dumps(merged[iid], ensure_ascii=False) + "\n")
+    counts.update(carried=carried, reusable=reusable, new_evidence=emitted_new,
+                  malformed=malformed, duplicate=duplicate,
+                  evidence=len(merged), discovered=len(discovered))
+    # counts sidecar — pre-CAS publication proof เดียว (validate_generation
+    #   gate): scope ถูก mark complete ตอน write นี้สำเร็จเท่านั้น; write fail
+    #   → run fail ตาม (ห้าม print-แล้วไปต่อ — sidecar หาย = incomplete gen)
+    counts_path = gen_dir / "image_texts.counts.json"
+    side = (json.loads(counts_path.read_text(encoding="utf-8"))
+            if counts_path.exists() else {})
+    scopes = dict(side.get("scopes") or {})
+    scopes[scope or "run"] = {
+        "discovered": len(discovered), "reusable": reusable,
+        "carried": carried, "new": counts["new"],
+        "changed": counts["changed"], "deferred": counts["deferred"],
+        "malformed": malformed, "duplicate": duplicate}
+    completed = set(side.get("completed_scopes") or [])
+    if scope in ("sellable", "nonsellable"):
+        completed.add(scope)
+    unique_discovered = sum(scopes[s].get("discovered") or 0
+                            for s in ("sellable", "nonsellable")
+                            if s in scopes)
+    body = {"generation_id": gid,
+            "completed_scopes": sorted(completed),
+            "scopes": scopes,
+            "unique_discovered": unique_discovered,
+            "published_evidence": len(merged)}
+    tmp = counts_path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(body, ensure_ascii=False, indent=1) + "\n",
+                   encoding="utf-8")
+    os.replace(tmp, counts_path)
+    print(f"ocr gen={gid} counts={counts} evidence={len(evidence)}")
+    return counts
 
 
 def _fetch_bytes(url: str) -> tuple[bytes, str]:
@@ -227,10 +560,10 @@ def _extract_one(item: dict) -> dict:
         except _e.ClientError as exc:
             status, err_msg = "error", str(exc)[:300]
             entry["error"] = err_msg
-            # 429/quota — รอแล้ว retry (key ถัดไปถูก rotate ใน _client() อัตโนมัติ)
+            # 429/quota → deferred + run-level stop (ไม่เผา 65s×3 ต่อรูป)
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                time.sleep(65)
-                continue
+                status, entry["status"] = "deferred", "deferred"
+                break
             break
         except Exception as exc:  # network/parse — retry
             status, err_msg = "error", str(exc)[:300]
@@ -265,48 +598,40 @@ def _extract_one(item: dict) -> dict:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--limit", type=int, default=0, help="จำกัดจำนวนรูป (0=ไม่จำกัด)")
-    ap.add_argument("--max-calls", type=int, default=4000, help="เพดาน call ต่อ run (quota/day รวมทุก key)")
-    ap.add_argument("--shard", type=str, default="", help="K/N — รันเฉพาะ slice ที่ K (0-based) จาก N shards (parallel workers)")
+    ap.add_argument("--export", type=Path, default=EXPORT_PATH)
+    ap.add_argument("--gen-dir", type=Path, default=ROOT / "exports")
+    ap.add_argument("--gid", type=str, default="")
+    ap.add_argument("--scope", choices=["sellable", "nonsellable"],
+                    default="sellable")
+    ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--max-calls", type=int,
+                    default=int(os.environ.get("IMGTXT_MAX_CALLS", "1500")),
+                    help="เพดาน provider call ต่อ phase — นับทุก attempt")
+    ap.add_argument("--max-runtime-min", type=float,
+                    default=float(os.environ.get("IMGTXT_MAX_RUNTIME_MIN", "90")))
+    ap.add_argument("--shard", type=str, default="", help="K/N")
     args = ap.parse_args()
+    if not args.gid:
+        sys.exit("--gid required (one generation_id per refresh run)")
 
-    work = _collect_worklist(EXPORT_PATH)
-    done = _load_done(OUTPUT_PATH)
-    todo = [w for w in work if w["image_id"] not in done]
+    work = _collect_worklist(args.export, scope=args.scope)
     if args.shard:
         k, n = (int(x) for x in args.shard.split("/"))
-        todo = todo[k::n]
+        work = work[k::n]
     if args.limit:
-        todo = todo[: args.limit]
-    print(f"done={len(done)} todo={len(todo)} max_calls={args.max_calls} shard={args.shard or '-'}")
+        work = work[: args.limit]
 
-    n_ok = n_err = 0
-    cost_sum = 0.0
-    t_start = time.time()
-    with open(OUTPUT_PATH, "a", encoding="utf-8") as out:
-        for i, item in enumerate(todo):
-            if i >= args.max_calls:
-                print(f"⛔ ถึง max_calls={args.max_calls} — หยุด (รันซ้ำ resume ต่อได้)")
-                break
-            t_call = time.time()
-            entry = _extract_one(item)
-            out.write(json.dumps(entry, ensure_ascii=False) + "\n")
-            out.flush()
-            if entry["status"] == "ok":
-                n_ok += 1
-                cost_sum += entry.get("cost_usd", 0)
-            else:
-                n_err += 1
-            if (i + 1) % 25 == 0 or i < 5:
-                el = time.time() - t_start
-                print(f"[{i+1}/{len(todo)}] ok={n_ok} err={n_err} cost=${cost_sum:.3f} "
-                      f"rate={(i+1)/el:.2f}/s eta={(len(todo)-i-1)/((i+1)/el)/60:.0f}m "
-                      f"last={entry.get('kind','-')} {entry['image_id']}", flush=True)
-            time.sleep(max(0.0, MIN_INTERVAL - (time.time() - t_call)))
+    deadline = time.time() + args.max_runtime_min * 60
+    env_deadline = os.environ.get("REFRESH_DEADLINE_EPOCH")
+    if env_deadline:
+        deadline = min(deadline, float(env_deadline))
 
-    print(f"\nDone: ok={n_ok} err={n_err} cost=${cost_sum:.3f} "
-          f"(~฿{cost_sum*34:.0f}) elapsed={(time.time()-t_start)/60:.0f}m")
-    print(f"output → {OUTPUT_PATH}")
+    from chatbot.shopeechat import knowledge_base as _kb
+    db = _kb._admin_db()
+    counts = run_generation_ocr(work, db=db, gen_dir=args.gen_dir,
+                                gid=args.gid, max_calls=args.max_calls,
+                                deadline_ts=deadline, scope=args.scope)
+    print(f"Done: {counts}")
 
 
 if __name__ == "__main__":

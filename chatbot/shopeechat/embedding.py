@@ -116,3 +116,46 @@ def build_doc_text(doc: dict) -> str:
 
     parts = [p for p in (name, brand, cat, shop) if p]
     return " | ".join(parts)
+
+
+DESC_CHUNK_TOKENS = 512  # merged-paragraph budget (Phase 10B winner-B contract)
+
+
+def build_description_chunks(desc: str, *, tokenizer=None) -> list[str]:
+    """description → ordered bounded chunks (Phase 10B candidate-recall contract).
+
+    deterministic เสมอ: newline-split → strip → dedup paragraph (first
+    occurrence ชนะ ลำดับเดิม) → paragraph-merge ≤ DESC_CHUNK_TOKENS tokens;
+    paragraph เดียวเกิน budget → hard-window 512 tokens decode กลับเป็น text
+    — ไม่มี overlap, ไม่ใส่ item_name, ไม่ cap ความยาว description,
+    ไม่มี semantic/keyword/regex splitting; listing-level evidence เท่านั้น
+    (variant scope ไม่ infer — chunk text ไม่ใช่ variant authority)
+    tokenizer=None → model tokenizer ตัวเอง (build time เท่านั้น — runtime
+    fetch อ่าน texts จาก npz ไม่ re-chunk); empty/missing desc → []"""
+    paras = [p.strip() for p in (desc or "").split("\n") if p.strip()]
+    seen: set = set()
+    paras = [p for p in paras if not (p in seen or seen.add(p))]
+    if not paras:
+        return []
+    tok = tokenizer or _get_model().tokenizer
+    ids_list = tok(paras, add_special_tokens=True)["input_ids"]
+    chunks: list[str] = []
+    cur: list[str] = []
+    cur_t = 0
+    for p, ids in zip(paras, ids_list):
+        n = len(ids)
+        if n > DESC_CHUNK_TOKENS:
+            if cur:
+                chunks.append("\n".join(cur))
+                cur, cur_t = [], 0
+            for s in range(0, n, DESC_CHUNK_TOKENS):
+                chunks.append(tok.decode(ids[s:s + DESC_CHUNK_TOKENS]))
+            continue
+        if cur and cur_t + n > DESC_CHUNK_TOKENS:
+            chunks.append("\n".join(cur))
+            cur, cur_t = [], 0
+        cur.append(p)
+        cur_t += n
+    if cur:
+        chunks.append("\n".join(cur))
+    return chunks

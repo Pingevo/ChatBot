@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .route_context import RetrievalProfile
+from . import generation_pointer as _gen
 
 
 # ── Config ──────────────────────────────────────────────────────────────────
@@ -98,8 +99,10 @@ def _log_ai_usage(entry: dict) -> None:
 
 
 def is_configured() -> bool:
-    """ตรวจว่าตั้งค่า OpenRouter แล้วหรือไม่."""
-    return bool(_get_openrouter_key())
+    """ตรวจว่า web search ใช้งานได้ — global operator toggle AND OpenRouter key.
+    toggle OFF → False เสมอ (provider calls = 0 แม้ key ตั้งอยู่)"""
+    from . import runtime_config as _rc  # lazy — กัน import loop
+    return _rc.web_search_enabled() and bool(_get_openrouter_key())
 
 
 # connector vocab ที่ downstream resolver ใช้ (ตรงกับ _resolve_device_spec)
@@ -717,6 +720,7 @@ def reanswer(
     do_model_code_regex: bool = True,
     do_dedup_rerank: bool = True,
     req_limit: int = 10,
+    snap=_gen.SNAP_UNSET,
     retrieval_profile: RetrievalProfile | None = None,
 ) -> dict:
     """Web search → re-query DB → LLM2 re-answer.
@@ -803,7 +807,7 @@ def reanswer(
                 limit=llm_ctx_limit,
                 desc_message=llm_message,
                 product_types_override=_pto,
-                retrieval_profile=retrieval_profile,
+                retrieval_profile=retrieval_profile, snap=snap,
             )
             print(f"[WEB-SEARCH-REANSWER] DB re-query: {_search_query!r} → {len(_new_products)} products", file=sys.stderr)
         except Exception as _e:
@@ -826,7 +830,7 @@ def reanswer(
                             shop_filter=shop,
                             limit=3,
                             desc_message=llm_message,
-                            retrieval_profile=retrieval_profile,
+                            retrieval_profile=retrieval_profile, snap=snap,
                         )
                         _existing_ids = {p.get("item_id") or p.get("name") for p in _new_products}
                         for _cp in _code_products:
@@ -841,7 +845,8 @@ def reanswer(
         if do_kb_lookup:
             try:
                 _ws_kb_r = knowledge_base.lookup_kb(_search_query,
-                                                    retrieval_profile=retrieval_profile)
+                                                    retrieval_profile=retrieval_profile,
+                                                    snap=snap)
                 if _ws_kb_r and _ws_kb_r.get("found"):
                     _ws_kb_context = _ws_kb_r.get("context", "") or ""
                     for _kd in _ws_kb_r.get("kb_docs", [])[:3]:

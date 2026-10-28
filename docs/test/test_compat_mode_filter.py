@@ -489,6 +489,8 @@ check("unknown 'devicexyz999' → None", _sp("devicexyz999") is None)
 
 print("\n── 11g. outer web-search gate — grounded device ไม่จ่าย search ซ้ำ")
 import shopeechat.web_search as _wsm
+import shopeechat.runtime_config as _rcfg
+_rcfg.web_search_enabled = lambda: True  # Phase 10A: operator toggle ON for gate checks
 _should, _reason = _wsm.should_use_web_search(
     answer="ใช้ได้ค่ะ", products=[{"name": "x"}],
     intent_result={"intent": "compatibility_check",

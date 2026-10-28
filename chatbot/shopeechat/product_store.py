@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Iterable
 if TYPE_CHECKING:
     from .route_context import RetrievalProfile
 
+from . import generation_pointer as _gen
 from bson import ObjectId  # type: ignore
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
@@ -41,20 +42,22 @@ except ImportError:
 
 # ---- vector store (embeddings) ------------------------------------------------
 #
-# โหลด product embeddings จากไฟล์ .npz ที่สร้างโดย scripts/build_embeddings.py
-# ใช้สำหรับ semantic search (similarity ระหว่างคำถามลูกค้ากับสินค้า)
-# โหลด lazy ครั้งเดียวตอนใช้งาน แล้ว cache ไว้ตลอด session
+# product npz มาจาก EvidenceSnapshot เดียวกับ units/OCR เสมอ (Phase 4B) —
+# cache keyed by immutable generation path (ไม่ใช่ mtime — gen dir เป็น
+# immutable; path ใหม่ = generation ใหม่); pointer ยังไม่มี → canonical
+# exports npz (bootstrap path ก่อน first publish)
 
-_VECTOR_STORE: dict[str, Any] | None = None
-_VECTOR_MTIME: float = -1.0   # mtime ของ npz ที่โหลดไว้ — ไฟล์เปลี่ยน → auto-reload
+_VECTOR_STORES: dict[str, dict[str, Any]] = {}
+_VECTOR_STORE_CAP = 3
 _EMBEDDINGS_PATH = Path(__file__).resolve().parent.parent.parent / "exports" / "product_embeddings.npz"
 
 
-def _load_vector_store() -> dict[str, Any] | None:
-    """โหลด product embeddings จาก .npz — auto-reload เมื่อไฟล์เปลี่ยน (mtime).
+def _load_vector_store(snap=_gen.SNAP_UNSET) -> dict[str, Any] | None:
+    """โหลด product embeddings ของ generation ใน snapshot — cache ด้วย path.
 
-    stat ก่อน load เสมอ: ถ้า build replace ไฟล์ระหว่าง load → mtime ที่เก็บเก่ากว่าจริง
-    → request ถัดไป reload อีกครั้ง (self-healing). ไฟล์หาย/load fail → ใช้ cache เก่าต่อ.
+    snap=None → resolve pointer; ไม่มี pointer → canonical npz (bootstrap path
+    ก่อน first publish — ไม่ผูก generation contract)
+    npz ที่ฝัง generation_id ต้องตรง snap.generation_id — mismatch → fail closed.
 
     คืน dict ที่มี:
     - item_ids: numpy array ของ item_id (str)
@@ -62,41 +65,215 @@ def _load_vector_store() -> dict[str, Any] | None:
     - texts: numpy array ของ text ที่ embed
     - shops: numpy array ของ shopname (str) — ⚡ BUG-H fix สำหรับกรอง shop ก่อน similarity
     """
-    global _VECTOR_STORE, _VECTOR_MTIME
-    try:
-        mtime = _EMBEDDINGS_PATH.stat().st_mtime
-    except OSError:
-        return _VECTOR_STORE  # ไฟล์ไม่มี — เก่า→None (เหมือนเดิม), มี cache→ใช้ต่อ
-    if _VECTOR_STORE is not None and mtime == _VECTOR_MTIME:
-        return _VECTOR_STORE
+    if snap is _gen.SNAP_UNSET:
+        snap = _gen.resolve_snapshot()
+    path = Path(snap.product_npz) if snap is not None else _EMBEDDINGS_PATH
+    key = str(path)
+    if key in _VECTOR_STORES:
+        return _VECTOR_STORES[key]
     try:
         import numpy as np
         # 🔒 M1: Try loading without pickle first (safe), fall back with warning
         # ⚡ BUG-H fix — ถ้า access data["texts"] ล้มเหลว (object array) ให้ re-load ด้วย pickle
-        #   ก่อนหน้านี้: np.load(allow_pickle=False) โหลด header ได้ แต่ access ล้มเหลวที่ data["texts"]
-        #   → except ด้านนอกจับได้ → return None → vector search ใช้ไม่ได้
-        #   ตอนนี้: ถ้า access ล้มเหลว ให้ re-load ด้วย allow_pickle=True แล้วใช้ต่อ
         try:
-            data = np.load(_EMBEDDINGS_PATH, allow_pickle=False)
+            data = np.load(path, allow_pickle=False)
             _ = data["texts"]  # ทดสอบ access จริง (lazy load)
         except Exception:
             print("WARN: loading embeddings with allow_pickle=True (legacy format) — consider rebuilding with build_embeddings.py", file=sys.stderr)
-            data = np.load(_EMBEDDINGS_PATH, allow_pickle=True)
+            data = np.load(path, allow_pickle=True)
+        # Phase 4B — generation pairing: npz ของ pointer gen อื่นห้าม serve
+        if snap is not None:
+            npz_gid = (str(data["generation_id"].item())
+                       if "generation_id" in data.files else None)
+            if npz_gid != snap.generation_id:
+                print(f"[GEN] product npz generation_id={npz_gid!r} != pointer "
+                      f"{snap.generation_id} → fail closed", file=sys.stderr)
+                return _VECTOR_STORES.get(key)
         # ⚡ BUG-H fix — โหลด shops ด้วย (ถ้ามี — backward compat กับ .npz เก่าที่ไม่มี shops)
         _shops = data["shops"] if "shops" in data.files else None
-        _VECTOR_STORE = {
+        vs = {
             "item_ids": data["item_ids"],
             "embeddings": data["embeddings"],  # shape (n, 1024) float32
             "texts": data["texts"],
             "shops": _shops,  # None ถ้า .npz เก่า (ยังไม่ re-build)
         }
-        _VECTOR_MTIME = mtime
         if _shops is None:
             print("WARN: .npz ไม่มี field 'shops' — กรุณา re-build embeddings (python scripts/build_embeddings.py)", file=sys.stderr)
-        return _VECTOR_STORE
+        _VECTOR_STORES[key] = vs
+        while len(_VECTOR_STORES) > _VECTOR_STORE_CAP:
+            _VECTOR_STORES.pop(next(iter(_VECTOR_STORES)))
+        return vs
     except Exception as exc:
         print(f"WARN: cannot load vector store: {exc}")
-        return _VECTOR_STORE
+        return _VECTOR_STORES.get(key)
+
+
+# ---- description-chunk vector source (Phase 10B — grouped channel only) ----
+#
+# description_embeddings.npz = per-generation artifact (rows: item_ids,
+# chunk_ids "<item_id>:<index>", embeddings, shops, texts, generation_id).
+# Path derives from snap.generation_id (pointer/snapshot contract ไม่เปลี่ยน);
+# generation ที่ยังไม่มี artifact → loader คืน None → source นี้ว่าง (fail
+# closed — ไม่มีผลกับ gen เก่า).  item-level recall เท่านั้น: chunk hits
+# aggregate กลับ item_id ด้วย max score ก่อนสร้าง card — pool/selection
+# เป็น owner เดิมของ ranking; source นี้ไม่ใช่ stock/price/variant authority
+
+_DESC_NPZ_NAME = "description_embeddings.npz"
+_DESC_VEC_CACHE: dict[str, dict] = {}
+_DESC_VEC_CAP = 3
+
+
+def _desc_vectors(snap) -> dict | None:
+    """description-chunk vectors ของ snapshot gen — path-keyed cache + assert
+    generation_id ใน npz (contract เดียวกับ units._unit_vectors)"""
+    if snap is None:
+        return None
+    path = str(Path(__file__).resolve().parent.parent.parent
+               / "exports" / "gen" / snap.generation_id / _DESC_NPZ_NAME)
+    if path in _DESC_VEC_CACHE:
+        return _DESC_VEC_CACHE[path]
+    try:
+        import numpy as np
+        z = np.load(path, allow_pickle=True)
+        if "generation_id" not in z.files or \
+                str(z["generation_id"].item()) != snap.generation_id:
+            print(f"[DESC] npz generation_id != pointer gen "
+                  f"{snap.generation_id} → fail closed", file=sys.stderr)
+            return _DESC_VEC_CACHE.get(path)
+        vec = {"item_ids": z["item_ids"], "chunk_ids": z["chunk_ids"],
+               "emb": z["embeddings"], "shops": z["shops"],
+               "texts": z["texts"]}
+        n = len(vec["item_ids"])
+        if not (len(vec["chunk_ids"]) == len(vec["shops"])
+                == len(vec["texts"]) == len(vec["emb"]) == n):
+            print("[DESC] npz row-count mismatch → fail closed",
+                  file=sys.stderr)
+            return _DESC_VEC_CACHE.get(path)
+    except Exception as exc:
+        print(f"[DESC] vector load error: {exc}", file=sys.stderr)
+        return _DESC_VEC_CACHE.get(path)
+    _DESC_VEC_CACHE[path] = vec
+    while len(_DESC_VEC_CACHE) > _DESC_VEC_CAP:
+        _DESC_VEC_CACHE.pop(next(iter(_DESC_VEC_CACHE)))
+    return vec
+
+
+def _desc_item_docs(item_ids: list) -> dict:
+    """ShpProducts docs ของ hit item ids — read-only (item_id เป็น int ทั้งสอง
+    ฝั่ง); item ที่ listing หายไป → ไม่มี key → fetcher ข้าม (fail closed)"""
+    if not item_ids:
+        return {}
+    db_name = os.environ.get("MONGO_DB", "").strip()
+    coll = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() \
+        or "ShpProducts"
+    out: dict = {}
+    for d in get_client()[db_name][coll].find(
+            {"item_id": {"$in": list(item_ids)}}):
+        out[d["item_id"]] = d
+    return out
+
+
+def fetch_description_evidence(
+    message: str,
+    *,
+    retrieval_profile=None,
+    shop: str | None = None,
+    limit: int = 8,
+    snap=_gen.SNAP_UNSET,
+):
+    """description-chunk vector recall → 1 item candidate ต่อ item_id.
+
+    contract เดียวกับ units.fetch_unit_evidence (คืน UnitEvidenceFetchResult):
+    chunk hits aggregate max score ต่อ item (deterministic — argsort desc);
+    profile.anchor_item_ids → restrict hits เป็น item นั้นเท่านั้น (exact-item
+    ห้ามถูกแทนด้วยสินค้าที่ chunk ใกล้กว่า); shop filter ผ่าน npz shops.
+    **ไม่มี semantic threshold** — bounded recall เท่านั้น: masked/NaN/±inf
+    reject เป็น invalid row; ranking/relevance = pool/selection owner.
+    card = to_product_card + _score (field เดิมของ pool) + _desc_hit
+    {item_id, chunk_id, chunk_index, score} provenance — chunk อื่นไม่เก็บ
+    """
+    from . import units as _units   # lazy — UnitEvidenceFetchResult owner
+    snap = _units._resolve_snap(snap)
+    dv = _desc_vectors(snap)
+    empty = _units.UnitEvidenceFetchResult(
+        cards=(), raw_count=0, sellable_count=0, unavailable_count=0,
+        trace=("description: no artifact/hits",))
+    if not dv or not message:
+        return empty
+    try:
+        import numpy as np
+        from . import embedding as _emb
+
+        def _canon_iid(x) -> str | None:
+            """npz/anchor item_id → canonical digit identity; รับ digits หรือ
+            "digits.0*" (export double "x.0" ตาม convention product npz) —
+            int(whole) ตรง ไม่ผ่าน float (precision >2^53);
+            fraction/non-digit/sign/exp → None (ข้าม — fail closed)"""
+            if x is None or isinstance(x, bool):
+                return None
+            text = str(x).strip()
+            if not text:
+                return None
+            if "." in text:
+                whole, frac = text.split(".", 1)
+                if not frac or set(frac) != {"0"} or not whole.isdigit():
+                    return None
+            else:
+                whole = text
+            if not whole.isdigit():
+                return None
+            return str(int(whole))
+
+        emb, item_ids = dv["emb"], dv["item_ids"]
+        sims = emb @ _emb.embed_query(message)
+        if shop:
+            sims = np.where(
+                np.array([s == shop for s in dv["shops"]]), sims, -np.inf)
+        anchor_raw = (getattr(retrieval_profile, "anchor_item_ids", ()) or ())
+        anchors = {c for c in (_canon_iid(a) for a in anchor_raw)
+                   if c is not None}
+        if anchor_raw:
+            # anchor ระบุแต่ canon ไม่ได้เลย → restrict เป็น ∅ (fail closed)
+            sims = np.where(
+                np.array([_canon_iid(i) in anchors for i in item_ids]),
+                sims, -np.inf)
+        best: dict[str, tuple] = {}
+        for i in np.argsort(-sims)[: max(1, limit * 8)]:
+            s = float(sims[i])
+            if not np.isfinite(s):
+                continue                    # masked/NaN/±inf = invalid row
+            iid = _canon_iid(item_ids[i])
+            if iid is None:
+                continue                    # malformed identity → ข้าม
+            if iid not in best:
+                best[iid] = (s, int(i))      # argsort desc → first = max
+        top_items = sorted(best.items(), key=lambda kv: -kv[1][0])[:limit]
+        if not top_items:
+            return empty
+        docs = _desc_item_docs([int(i) for i, _ in top_items])
+        cards = []
+        for iid, (score, row) in top_items:
+            doc = docs.get(int(iid))
+            if doc is None:
+                continue
+            c = to_product_card(doc, message)
+            c["_score"] = score
+            c["_desc_hit"] = {
+                "item_id": iid,
+                "chunk_id": f"{iid}:{str(dv['chunk_ids'][row]).rsplit(':', 1)[-1]}",
+                "chunk_index": int(
+                    str(dv["chunk_ids"][row]).rsplit(":", 1)[-1]),
+                "score": score}
+            cards.append(c)
+        sellable = sum(1 for c in cards if c.get("_available_for_sale"))
+        return _units.UnitEvidenceFetchResult(
+            cards=tuple(cards), raw_count=len(best),
+            sellable_count=sellable, unavailable_count=len(cards) - sellable,
+            trace=(f"description chunks={len(item_ids)} items={len(best)} "
+                   f"cards={len(cards)}",))
+    except Exception as exc:
+        print(f"[DESC] fetch error: {exc}", file=sys.stderr)
+        return empty
 
 
 def vector_search(
@@ -104,6 +281,7 @@ def vector_search(
     top_k: int = 30,
     item_status: str | None = "NORMAL",
     shop_filter: str | None = None,
+    snap=_gen.SNAP_UNSET,
 ) -> list[str]:
     """ค้นสินค้าที่ใกล้เคียงกับ query ด้วย cosine similarity.
 
@@ -120,7 +298,7 @@ def vector_search(
 
     คืน list ของ (item_id_str, similarity_score) เรียงจาก score สูงไปต่ำ.
     """
-    vs = _load_vector_store()
+    vs = _load_vector_store(snap)
     if vs is None:
         return []
 
@@ -701,6 +879,17 @@ def resolve_availability(card_or_doc: dict, *, model_doc: dict | None = None) ->
             "total_stock": stock, "customer_visible": vis}
 
 
+# catalog_status (resolve_availability owner เดียว) → canonical publish_state
+# + precedence — consumer ทุกตัว (adapter/dedupe) ต้องใช้ map นี้ที่เดียว
+PUBLISH_STATE = {
+    "active": "published", "active_unknown_stock": "published",
+    "out_of_stock": "published",
+    "unlisted": "unpublished", "discontinued": "deleted",
+}
+# publication precedence — listing ปัจจุบันชนะ historical/hidden เสมอ
+PUBLISH_RANK = {"published": 2, "deleted": 1, "unpublished": 0, "unknown": 0}
+
+
 def _doc_sellable(doc: dict) -> bool:
     """doc ขายได้จริงตอนนี้ไหม — delegate ไป resolve_availability (owner เดียว).
 
@@ -794,6 +983,7 @@ def fuzzy_match_products(
     shop: str | None = None,
     limit: int = 5,
     score_threshold: int = 75,
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
     """ค้นสินค้าด้วย fuzzy matching (rapidfuzz) สำหรับรับพิมพ์ผิด.
 
@@ -832,7 +1022,7 @@ def fuzzy_match_products(
                "nillkin", "ks", "elite", "actor"}
     try:
         from . import knowledge_base as _kb
-        _common |= _kb._known_brands()   # แบรนด์ทั้ง 182 จาก DB — ไม่ต้อง maintain list แยก
+        _common |= _kb._known_brands(snap=snap)   # แบรนด์ทั้ง 182 จาก DB — ไม่ต้อง maintain list แยก
     except Exception:
         pass
     base_tokens = [t.lower() for t in msg_tokens if len(t) >= 4]
@@ -961,6 +1151,18 @@ def _extract_price_range(message: str) -> tuple[int | None, int | None]:
     if m:
         return None, int(m.group(1))
     return None, None
+
+
+def _price_bounds(retrieval_profile, message: str
+                  ) -> tuple[int | None, int | None]:
+    """ช่วงราคา — typed `retrieval_profile.value_constraints` ชนะเมื่อมี
+    (parse ครั้งเดียวที่ interpretation boundary = route_context);
+    caller ที่ไม่มี profile → parser เดิม fallback (owner เดียวกัน)."""
+    vc = getattr(retrieval_profile, "value_constraints", None)
+    if vc is not None:
+        d = dict(vc)
+        return d.get("price_min"), d.get("price_max")
+    return _extract_price_range(message)
 
 
 # ร้านในเครือทั้งหมด (จากข้อมูล 32 ร้าน) — ใช้จับชื่อร้านในคำถามลูกค้า
@@ -1894,15 +2096,14 @@ def _detect_charger_subtype(message: str) -> str | None:
     if "หัวชาร" in _low_fixed and "หัวชาร์จ" not in _low_fixed:
         _low_fixed = _low_fixed.replace("หัวชาร", "หัวชาร์จ")
     low = _low_fixed
-    # เช็ค set ก่อน เพราะ "ชุดชาร์จ" อาจมี "ชาร์จ" อยู่ด้วย
-    for sub, kws in _CHARGER_SUBTYPES.items():
-        if sub in ("cable", "adapter"):
-            continue  # เช็ค cable/adapter ทีหลัง เพราะต้องดู position
-        if any(kw in low for kw in kws):
-            return sub
-    # เช็ค adapter และ cable พร้อมกัน
-    adapter_kws = _CHARGER_SUBTYPES["adapter"]
     cable_kws = _CHARGER_SUBTYPES["cable"]
+    # คำนวณ cable/adapter signals ก่อน charger-form subtype loop —
+    #   cable head-noun (kw-table หรือ "สาย" shorthand) ใน text ทำให้
+    #   charger-form kw เป็น modifier ของสายชาร์จ
+    #   ('สายชาร์จแม่เหล็ก' = magnetic cable, 'สายชาร์จในรถ' = in-car
+    #   cable, 'สาย magsafe' = magsafe cable) ไม่ใช่ wireless/car/
+    #   desktop charger — precedence ของ canonical signals เดิม
+    adapter_kws = _CHARGER_SUBTYPES["adapter"]
     # "gan" ต้องเป็น word boundary ไม่ใช่ส่วนของ "gan3"/"gan2" (ชื่อรุ่น)
     _has_adapter = any(kw in low for kw in adapter_kws if kw != "gan")
     # เช็ค "gan" เป็นคำเดี่ยวเท่านั้น (ไม่ใช่ gan3, gan2, ฯลฯ)
@@ -1990,6 +2191,20 @@ def _detect_charger_subtype(message: str) -> str | None:
                 _has_adapter = True
             if not _has_cable and "สาย" in low and "ไร้สาย" not in low and "ไร้ สาย" not in low:
                 _has_cable = True
+    # เช็ค set ก่อน เพราะ "ชุดชาร์จ" อาจมี "ชาร์จ" อยู่ด้วย; form-specific
+    #   subtypes (wireless/car/desktop/socket) ไม่ apply เมื่อมี cable
+    #   head-noun แล้ว — form kw ในวลีสายชาร์จเป็น modifier ของสาย
+    for sub, kws in _CHARGER_SUBTYPES.items():
+        if sub in ("cable", "adapter"):
+            continue  # cable/adapter resolve จาก position ด้านล่าง
+        if sub == "set":
+            if any(kw in low for kw in kws):
+                return sub
+            continue
+        if _has_cable:
+            continue
+        if any(kw in low for kw in kws):
+            return sub
     # ── Compatibility constraint: "ใช้กับสาย c to c", "ใช้สาย c to c" ──
     # ถ้า message มี "ใช้กับสาย" หรือ "ใช้สาย" + cable keyword แต่ไม่มี adapter keyword
     # → ลูกค้าถามว่าหัวชาร์จที่ใช้กับสายนี้ได้ไหม (constraint) ไม่ใช่ขอซื้อสาย
@@ -2031,14 +2246,15 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
     """กรอง charger docs ตาม subtype ที่ลูกค้าถาม.
 
     ลำดับการตรวจ (priority สูง → ต่ำ เพื่อกันสินค้าตกหล่น):
-    1. set: มี "ชุด"/"set"/"combo"/"ready to go" ในชื่อ
-    2. desktop: มี "แท่นชาร์จ"/"desktop charger"/"charging station" ในชื่อ
-       (ต้องเช็คก่อน adapter เพราะ "แท่นชาร์จ desktop" มี "ชาร์จ" ลอยๆ)
-    3. car_charger: มี "car charger"/"หัวชาร์จในรถ"/"ชาร์จในรถ"/"ที่ชาร์จรถ" ในชื่อ
+    1. socket: มี "ปลั๊กไฟ"/"smart plug"/"smart socket"/"ปลั๊ก wifi" ในชื่อ
+    2. car_charger: มี "car charger"/"หัวชาร์จในรถ"/"ชาร์จในรถ"/"ที่ชาร์จรถ" ในชื่อ
        (ต้องเช็คก่อน adapter เพราะ "หัวชาร์จในรถ" มี "หัวชาร์จ" ลอยๆ)
-    4. wireless: มี "ไร้สาย"/"wireless charger"/"magsafe"/"แม็กเซฟ"/"magnetic" ในชื่อ
-       (ต้องเช็คก่อน cable เพราะ "ชาร์จไร้สาย" มี "สาย" ลอยๆ)
-    5. socket: มี "ปลั๊กไฟ"/"smart plug"/"smart socket"/"ปลั๊ก wifi" ในชื่อ
+    3. wireless: มี "ไร้สาย"/"wireless charger"/"magsafe"/"แม็กเซฟ"/"magnetic" ในชื่อ
+       (ต้องเช็คก่อน desktop/cable เพราะ "แท่นชาร์จไร้สาย" มี "แท่นชาร์จ" ลอยๆ
+       และ "ชาร์จไร้สาย" มี "สาย" ลอยๆ)
+    4. desktop: มี "แท่นชาร์จ"/"desktop charger"/"charging station" ในชื่อ
+       (ต้องเช็คก่อน adapter เพราะ "แท่นชาร์จ desktop" มี "ชาร์จ" ลอยๆ)
+    5. set: มี "ชุด"/"set"/"combo"/"ready to go" ในชื่อ
     6. adapter: มี "หัวชาร์จ"/"adapter"/"gan" ในชื่อ (ไม่ใช่ desktop/car)
     7. cable: มี "สายชาร์จ"/"cable"/"สาย type" ฯลฯ ในชื่อ (ไม่ใช่ wireless)
 
@@ -2086,12 +2302,18 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
     }
     for d in docs:
         name = (d.get("item_name") or d.get("name") or "").lower()
-        # ลำดับ priority: desktop → car_charger → wireless → socket → set → adapter → cable → other
+        # ลำดับ priority: socket → car_charger → wireless → desktop → set → adapter → cable → other
         # (เช็ค subtype เฉพาะก่อน เพื่อกัน keyword ลอยๆ ทำให้ classify ผิด)
-        is_desktop = any(kw in name for kw in desktop_kw)
-        is_car = any(kw in name for kw in car_charger_kw)
-        is_wireless = any(kw in name for kw in wireless_kw)
-        is_socket = any(kw in name for kw in socket_kw)
+        # cable head-noun = form kw ในวลีสายชาร์จเป็น modifier ของสาย
+        #   ('สายชาร์จแม่เหล็ก' = magnetic cable, 'สายชาร์จในรถ' = in-car
+        #   cable) ไม่ใช่ wireless/car/desktop/socket จริง — precedence
+        #   เดียวกับ _detect_charger_subtype: มี cable kw → form subtype
+        #   ไม่ apply (สายไม่ใช่อุปกรณ์ชาร์จ)
+        has_cable_kw = any(kw in name for kw in cable_kw)
+        is_socket = not has_cable_kw and any(kw in name for kw in socket_kw)
+        is_car = not has_cable_kw and any(kw in name for kw in car_charger_kw)
+        is_wireless = not has_cable_kw and any(kw in name for kw in wireless_kw)
+        is_desktop = not has_cable_kw and any(kw in name for kw in desktop_kw)
         # set = มี indicator ชัดเจน (ชุด/set/combo/ready to go)
         is_set = (
             any(kw in name for kw in set_kw)
@@ -2113,15 +2335,19 @@ def _filter_charger_subtype(docs: list[dict], subtype: str) -> list[dict]:
         )
 
         # classify ตาม priority — subtype เฉพาะก่อน ไม่งั้น "แท่นชาร์จ desktop"
-        # จะโดนจับเป็น adapter เพราะมี "ชาร์จ" ลอยๆ
+        # จะโดนจับเป็น adapter เพราะมี "ชาร์จ" ลอยๆ — wireless ก่อน desktop
+        # เพราะ "ไร้สาย" = functional property ('แท่นชาร์จไร้สาย' = wireless
+        # pad) ตรงกับลูกค้าที่ถาม wireless ขณะที่ 'แท่นชาร์จ' แค่บอกรูปทรง
+        # — precedence เดียวกับ _detect_charger_subtype (car → wireless →
+        # desktop)
         if is_socket:
             classified["socket"].append(d)
-        elif is_desktop:
-            classified["desktop"].append(d)
         elif is_car:
             classified["car_charger"].append(d)
         elif is_wireless:
             classified["wireless"].append(d)
+        elif is_desktop:
+            classified["desktop"].append(d)
         elif is_set:
             classified["set"].append(d)
         elif is_adapter:
@@ -2452,6 +2678,7 @@ def build_query(
     message: str,
     shop_filter: str | None = None,
     product_types: set[str] | None = None,
+    retrieval_profile=None,
 ) -> dict:
     """สร้าง MongoDB query จากคำถามลูกค้า.
 
@@ -2469,7 +2696,9 @@ def build_query(
     shops = _detect_shops(message)
     brands = _detect_brands(message)
     categories = _detect_categories(message)
-    price_min, price_max = _extract_price_range(message)
+    # typed value_constraints (parse ครั้งเดียวที่ profile) ชนะ;
+    # ไม่มี profile → parser เดิม (owner เดียว ไม่ใช่ parser ที่สอง)
+    price_min, price_max = _price_bounds(retrieval_profile, message)
     if product_types is None:
         product_types = _detect_product_types(message)
 
@@ -3037,7 +3266,7 @@ def fetch_products(
     product_types_override: set[str] | None = None,
     charger_subtype_override: str | None = None,
     filter_unavailable: bool = False,
-    retrieval_profile: RetrievalProfile | None = None,
+    snap=_gen.SNAP_UNSET, retrieval_profile: RetrievalProfile | None = None,
 ) -> list[dict]:
     """กรองและดึงสินค้าที่เกี่ยวข้อง แล้วย่อเป็น product card ส่งให้ LLM.
 
@@ -3055,6 +3284,8 @@ def fetch_products(
             จาก message ในทุกจุดกรอง charger subtype เพราะ retrieval_message อาจถูกปนเปื้อน
             จาก reference/carry logic ทำให้ detect ผิด (เช่น ถามหัวชาร์จแต่ query มีชื่อสายชาร์จจาก history)
         retrieval_profile: request facts เดียวของ request (Task 4C pass-through — ยังไม่ใช้ตัดสินใจ)
+        snap: captured EvidenceSnapshot/None จาก request owner — omitted (SNAP_UNSET)
+            → resolve ครั้งเดียวที่ entry นี้ (standalone)
 
     ใช้ hybrid approach:
     1. ถ้ามี product type regex (phone/smartwatch/earphone/ฯลฯ) ใช้ regex approach เดิม
@@ -3063,6 +3294,11 @@ def fetch_products(
        ใช้ vector search (semantic) เพราะไม่มี regex ให้กรอง
     3. ถ้า vector search ไม่พร้อม ใช้ regex approach เดิมเป็น fallback
     """
+    # Task 4B — snapshot เดียวต่อ request: product npz + unit coll/npz + OCR coll
+    #   ต้อง generation เดียวกัน — request owner (_chat_impl) capture+ส่ง snap;
+    #   standalone caller (omitted → SNAP_UNSET) resolve ครั้งเดียวที่ entry นี้
+    snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+
     # Task 4D — canonical request facts จาก RetrievalProfile
     #   profile=None → path เดิมทุกประการ; profile มีค่า → ใช้แทน detection จาก message
     _prof_types = (set(retrieval_profile.product_types)
@@ -3116,6 +3352,7 @@ def fetch_products(
                 product_types=product_types_override,
                 charger_subtype=charger_subtype_override,
                 retrieval_profile=retrieval_profile,
+                snap=snap,
             )
             if _ucards:
                 return _ucards
@@ -3205,7 +3442,10 @@ def fetch_products(
             product_types = kept_types
 
     # สร้าง filter สำหรับกรองใน Mongo
-    base_filter = build_query(message, shop_filter=shop_filter, product_types=product_types)
+    base_filter = build_query(message, shop_filter=shop_filter,
+                              product_types=product_types,
+                              retrieval_profile=retrieval_profile)
+    _price_min, _price_max = _price_bounds(retrieval_profile, message)
 
     # ตรวจ intent เพื่อใช้ใน vector search path
     # (vector search มี hardcode item_status=NORMAL เพื่อความปลอดภัย แต่ warranty intent ต้องเห็น non-NORMAL)
@@ -3224,14 +3464,14 @@ def fetch_products(
     # ใช้ vector search เฉพาะเมื่อไม่มี product type regex
     # (เพราะ regex กรองได้แม่นยำกว่าสำหรับสินค้าที่มี keyword ชัดเจน)
     if not has_type_regex:
-        vs = _load_vector_store()
+        vs = _load_vector_store(snap)
         if vs is not None:
             try:
                 # ดึงเยอะกว่า limit เพื่อให้มีตัวเลือกพอสำหรับ re-rank
                 # ⚡ BUG-H fix — ส่ง shop_filter ไป vector_search ให้กรอง shop ก่อน similarity
                 #   ก่อนหน้านี้: vector_search ค้นทุกร้าน → top_k เต็มไปด้วยสินค้าร้านอื่น
                 #   → สินค้าร้านที่ถามไม่ติด top_k → LLM ไม่เห็น → แต่ง "ทุกรุ่นเลิกจำหน่าย"
-                top_results = vector_search(message, top_k=max(limit * 4, 30), shop_filter=shop_filter)
+                top_results = vector_search(message, top_k=max(limit * 4, 30), shop_filter=shop_filter, snap=snap)
                 if top_results:
                     # top_results เป็น list ของ (item_id_str, similarity_score)
                     # สร้าง dict สำหรับเก็บ similarity score ของแต่ละ item_id
@@ -3450,7 +3690,7 @@ def fetch_products(
         relaxed_q = {k: v for k, v in base_filter.items() if k != price_key}
         # ถ้ามี price filter อยู่ก่อน แปลว่าลูกค้าถามงบ ให้เรียงตามราคาใกล้เคียงที่สุด
         if price_key in base_filter:
-            pm, pM = _extract_price_range(message)
+            pm, pM = _price_min, _price_max  # typed bounds เดียวกับ build_query
             target = pM if pM is not None else pm
             if target is not None:
                 # ดึงเยอะแล้ว sort ใน Python (เพราะ model.price_info.current_price อาจเป็น array)
@@ -3744,6 +3984,87 @@ def fetch_product_by_id(
     return to_product_card(doc, desc_message or "")
 
 
+def fetch_product_docs_by_ids(
+    db,
+    item_ids,
+    *,
+    shop_filter: str | None = None,
+    limit: int = 50,
+) -> dict[str, dict]:
+    """ดึง raw product docs หลาย item_id ด้วย $in batch เดียว — bounded.
+
+    Returns {norm_item_id_str: doc} — ใช้สำหรับ subject/anchor identity
+    resolution (แทน find_one ต่อชิ้น) · **shop_filter มี → scoped query
+    เดียวเท่านั้น (subject truth ต้อง strict shop — missing ต้อง missing
+    ห้าม fallback ไป doc ของร้านอื่น)** · ไม่มี shop_filter → 1 unscoped
+    query
+    """
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    collection = db[coll_name]
+    id_values: list = []
+    for iid in item_ids or ():
+        try:
+            f = float(iid)
+            for v in (int(f), f):
+                if v not in id_values:
+                    id_values.append(v)
+        except (ValueError, TypeError):
+            if iid not in id_values:
+                id_values.append(iid)
+    if not id_values:
+        return {}
+
+    def _norm(v) -> str:
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        if isinstance(v, str):
+            try:
+                f = float(v)
+            except ValueError:
+                return v
+            return str(int(f)) if f.is_integer() else v
+        return str(v)
+
+    out: dict[str, dict] = {}
+    if shop_filter:
+        q = {"item_id": {"$in": id_values},
+             "shopname": {"$regex": f"^{re.escape(shop_filter)}$",
+                          "$options": "i"}}
+        for doc in collection.find(q, PRODUCT_PROJECTION).limit(limit):
+            out[_norm(doc.get("item_id"))] = doc
+        return out
+    for doc in collection.find(
+            {"item_id": {"$in": id_values}}, PRODUCT_PROJECTION
+    ).limit(limit):
+        out.setdefault(_norm(doc.get("item_id")), doc)
+    return out
+
+
+def fetch_products_by_models(
+    db,
+    model_tokens,
+    *,
+    shop: str | None = None,
+    limit: int = 30,
+) -> list[dict]:
+    """bounded model-code lookup — $or regex ต่อ token เดียว query ชุดเดียว
+    scoped ร้าน (KB product evidence resolution เท่านั้น — ไม่ใช่ทั่วไป)"""
+    coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
+    collection = db[coll_name]
+    tokens = [re.escape(str(t).strip()) for t in (model_tokens or ())
+              if str(t or "").strip()]
+    if not tokens:
+        return []
+    q: dict[str, Any] = {
+        "$or": [{"item_name": {"$regex": t, "$options": "i"}}
+                for t in tokens]
+        + [{"model.model_name": {"$regex": t, "$options": "i"}}
+           for t in tokens]}
+    if shop:
+        q["shopname"] = {"$regex": f"^{re.escape(shop)}$", "$options": "i"}
+    return list(collection.find(q, PRODUCT_PROJECTION).limit(limit))
+
+
 def list_shops(db) -> list[str]:
     """รายชื่อร้านในเครือทั้งหมด."""
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
@@ -3756,20 +4077,6 @@ def list_categories(db) -> list[str]:
 
 
 # ── มอก. (TISI) certification search ──────────────────────────────────────────
-
-# Pattern สำหรับตรวจ "มอก." (TISI standard) ใน description
-# ต้องมีจุดตามหลัง "มอก" และไม่ใช่ "หมอก." หรือ "เสมอก."
-# lookbehind มี ส ด้วย — "เสมอกัน" เก็บเป็น [เ][ส][ม][อ][ก] (เ เป็นสระของ ส)
-# ตัวก่อน "มอก" คือ ส ไม่ใช่ เ → block ด้วย ส
-_TISI_PATTERN = re.compile(r"(?<![หสเ])มอก\.")
-
-
-def _has_tisi(text: str) -> bool:
-    """ตรวจว่าข้อความมี 'มอก.' (TISI standard) หรือไม่ (กรอง false positive เช่น หมอก/เสมอกัน)."""
-    if not text:
-        return False
-    return bool(_TISI_PATTERN.search(text))
-
 
 def _extract_match_context(text: str, pattern: "re.Pattern", window: int = 80) -> str:
     """ดึงข้อความรอบ match แรกของ pattern — context สั้นๆ ส่งให้ LLM/answer."""
@@ -3784,11 +4091,6 @@ def _extract_match_context(text: str, pattern: "re.Pattern", window: int = 80) -
     # ทำความสะอาด: ตัดบรรทัดว่างติดๆ
     snippet = re.sub(r"\n{3,}", "\n\n", snippet)
     return snippet
-
-
-def _extract_tisi_context(text: str, window: int = 80) -> str:
-    """ดึงข้อความรอบ 'มอก.' เพื่อสร้าง context สั้นๆ ส่งให้ LLM/answer."""
-    return _extract_match_context(text, _TISI_PATTERN, window)
 
 
 # ── cert standards search (superset ของ TISI) ────────────────────────────────
@@ -3822,6 +4124,12 @@ def _has_cert(text: str, certs: tuple[str, ...]) -> str | None:
         if pat and pat.search(text):
             return c
     return None
+
+
+# (product feature evidence ถูกลบ — sellable_units/card ไม่มี structured
+#  feature field สำหรับ closed-set tokens เช่น magnetic; runtime keyword
+#  inference บน card text ถูกยกเลิก → feature ที่ไม่มี structured evidence
+#  เป็น unknown ใน constraint eval — MISSING_STRUCTURED_PRODUCT_FEATURE_EVIDENCE)
 
 
 # ── stock DB cert source (itStock.Products — STOCK_URI/STOCK_DB) ─────────────
@@ -3886,13 +4194,20 @@ def _variant_cert_hit(option_name: str, certs: tuple[str, ...]) -> str | None:
     return None
 
 
-def _admin_image_texts_coll():
-    """collection image_texts จาก admin DB — lazy; fail → None (degrade เป็น desc-only)."""
+def _admin_image_texts_coll(snap=_gen.SNAP_UNSET, db=None):
+    """published OCR collection ของ snapshot (image_texts_g<gid>) — ไม่อ่าน
+    shared cache; ไม่มี generation/fail → None (degrade เป็น desc-only)."""
     try:
-        from . import knowledge_base as _kb
-        return _kb._admin_db()["image_texts"]
+        if snap is _gen.SNAP_UNSET:
+            snap = _gen.resolve_snapshot()
+        if snap is None:
+            return None
+        if db is None:
+            from . import knowledge_base as _kb
+            db = _kb._admin_db()
+        return db[snap.image_texts_collection]
     except Exception as exc:
-        print(f"[CERT] admin db unavailable: {exc}", file=sys.stderr)
+        print(f"[CERT] published OCR coll unavailable: {exc}", file=sys.stderr)
         return None
 
 
@@ -3919,9 +4234,10 @@ def search_cert_products(
     admin_db=None,
     type_filter: set[str] | None = None,
     stock_db=None,
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
-    """ค้นสินค้าที่มี cert ที่ถาม — 4 แหล่ง: description text + image_texts (admin DB)
-    + stock DB cert flags + variant option names.
+    """ค้นสินค้าที่มี cert ที่ถาม — 4 แหล่ง: description text + published OCR
+    (image_texts_g<gid> ใน snapshot) + stock DB cert flags + variant option names.
 
     Args:
         db: MongoDB database (product DB — read-only)
@@ -3931,6 +4247,8 @@ def search_cert_products(
             และไม่กรอง status (ตอบได้ว่ารุ่นนั้นมี/ไม่มี แม้ของหมด)
         limit: จำนวนสินค้าสูงสุด
         admin_db: admin DB handle (ทดสอบ inject ได้) — None → lazy _admin_image_texts_coll()
+        snap: EvidenceSnapshot ของ request (None → resolve ในนี้ — ต้องการ
+            published OCR collection เท่านั้น)
         type_filter: product_type ที่ลูกค้าระบุ (เช่น {"powerbank"} จาก
             _detect_product_types) — กรองเฉพาะ item_name ที่ match type นั้น
             (กันเคส "พาวแบง มี มอก." ได้ surge module ที่มี มอก. มาตอบผิดหมวด)
@@ -4012,8 +4330,10 @@ def search_cert_products(
     except Exception as exc:
         print(f"[CERT] desc search error: {exc}", file=sys.stderr)
 
-    # --- path 2: image_texts (admin DB) → item_ids → product docs ---
-    coll_it = admin_db["image_texts"] if admin_db is not None else _admin_image_texts_coll()
+    # --- path 2: published OCR evidence (image_texts_g<gid> ใน snapshot) ---
+    #   ไม่อ่าน shared cache — missing generation → skip (non-blocking)
+    snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+    coll_it = _admin_image_texts_coll(snap, db=admin_db)
     if coll_it is not None:
         try:
             # image_id → (text, item_ids); broad regex + verify ใน Python
@@ -4164,6 +4484,7 @@ def search_tisi_products(
     limit: int = 30,
     admin_db=None,
     type_filter: set[str] | None = None,
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
     """ค้นสินค้าที่มี 'มอก.' (TISI standard) — wrapper ของ search_cert_products.
 
@@ -4173,7 +4494,7 @@ def search_tisi_products(
     results = search_cert_products(
         db, ("tisi",), shop_filter=shop_filter,
         model_keyword=model_keyword, limit=limit, admin_db=admin_db,
-        type_filter=type_filter)
+        type_filter=type_filter, snap=snap)
     for r in results:
         r["tisi_context"] = r.get("cert_context", "")
     return results
@@ -4219,18 +4540,20 @@ def _dedupe_base_name(name: str) -> str:
 
 
 def _dedupe_sell_score(p: dict) -> tuple:
-    """คะแนนสำหรับเลือก listing ที่ดีที่สุดสำหรับขาย.
+    """คะแนนสำหรับเลือก listing ที่ดีที่สุดสำหรับขาย — availability semantics
+    ผ่าน resolve_availability (owner เดียว ไม่ re-derive raw status เอง).
 
     เกณฑ์ (เรียงจากสำคัญที่สุดไปน้อยที่สุด):
-    1. status=NORMAL (True > False)
-    2. ไม่ sold_out (True > False)
+    1. publication state — current published > deleted > unpublished/unknown
+       (listing ปัจจุบันต้องชนะ stale duplicate เสมอ)
+    2. ขายได้จริง (NORMAL + stock>0)
     3. stock เยอะกว่า
     4. มีโปร (True > False)
     5. ราคาต่ำสุดถูกกว่า
     """
-    status_normal = p.get("status") == "NORMAL"
-    not_sold_out = not p.get("sold_out", False)
-    stock = p.get("total_stock") or 0
+    av = resolve_availability(p)
+    pub = PUBLISH_RANK.get(PUBLISH_STATE.get(av["catalog_status"]), 0)
+    stock = av["total_stock"] or 0
     has_promo = bool(p.get("price", {}).get("min") and p.get("price", {}).get("max")
                      and p.get("price", {}).get("min") != p.get("price", {}).get("max"))
     # ราคาต่ำสุด — ถูกกว่า = ดีกว่า (ใช้ค่าติดลบเพื่อให้ถูกกว่าได้ score สูงกว่า)
@@ -4238,7 +4561,7 @@ def _dedupe_sell_score(p: dict) -> tuple:
     min_price = price_info.get("min") or 0
     # ถ้าไม่มีราคา ให้ score ราคาเป็น 0 (ไม่ดีไม่แย่)
     price_score = -min_price if min_price else 0
-    return (status_normal, not_sold_out, stock, has_promo, price_score)
+    return (pub, av["available_for_sale"], stock, has_promo, price_score)
 
 
 def _dedupe_products(products: list[dict], *, log_label: str = "DEDUP") -> list[dict]:
@@ -4292,7 +4615,6 @@ def _type_query_word(type_name: str) -> str:
         if tn == type_name and kws:
             return kws[0]
     return type_name
-
 
 
 def _shop_type_counts(db, shop: str | None) -> dict[str, int]:

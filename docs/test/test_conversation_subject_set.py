@@ -180,9 +180,12 @@ class TestIdentityDomain:
                    "card": {"item_id": 5001, "model_name": "VB"}}
         # product-DB seams pinned offline — rebuild fails → stored-card
         # fallback (same posture as the replay harness)
-        from shopeechat import product_store, units
+        from shopeechat import product_store, units, generation_pointer
         monkeypatch.setattr(product_store, "_cached_client", FakeClient())
-        monkeypatch.setattr(units, "_units_coll_cached", FakeColl([]))
+        monkeypatch.setattr(generation_pointer, "resolve_snapshot",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(units, "_units_coll",
+                            lambda snap=None: FakeColl([]))
         # array order [A(earlier mention… wait — A has NEWER ts but sits first)]
         # array-order LWW would pick B; deterministic recency must pick A.
         cards = cp.materialize_subject_cards(
@@ -213,9 +216,12 @@ class TestIdentityDomain:
             coll, "find_one",
             lambda *a, **k: calls.append(1) or real_find(*a, **k))
         _bind(monkeypatch, coll)
-        from shopeechat import product_store, units
+        from shopeechat import product_store, units, generation_pointer
         monkeypatch.setattr(product_store, "_cached_client", FakeClient())
-        monkeypatch.setattr(units, "_units_coll_cached", FakeColl([]))
+        monkeypatch.setattr(generation_pointer, "resolve_snapshot",
+                            lambda *a, **k: None)
+        monkeypatch.setattr(units, "_units_coll",
+                            lambda snap=None: FakeColl([]))
         view = cp.get_subject_set("c")
         assert len(calls) == 1                          # the single load
         cards = cp.materialize_subject_cards(
@@ -1205,6 +1211,26 @@ class TestE2E:
         t2_items = [p.get("item_id") for c in t2_llm
                     for p in (c.get("products") or [])]
         assert 4001 in t2_items or str(4001) in [str(i) for i in t2_items]
+
+    def test_noncode_product_question_resolves_persisted_subject(
+            self, monkeypatch):
+        """Spec question without model code must reach the persisted-subject
+        resolver — loose keyword extraction ('Speed','data') must not veto."""
+        calls = []
+        real = cp.resolve_subjects
+        monkeypatch.setattr(
+            cp, "resolve_subjects",
+            lambda *a, **k: calls.append(1) or real(*a, **k))
+        fx = _fx([
+            {"text": "สอบถามหน่อย", "item_id": "4001"},
+            {"text": "Speed data เท่าไหร่?ครับ"},
+        ])
+        records, captured, client = replay._replay(monkeypatch, fx)
+        assert calls, "persisted-subject resolver vetoed by non-code text"
+        t2_items = [str(replay._norm(p.get("item_id")))
+                    for c in records[1]["llm_calls"]
+                    for p in (c.get("products") or [])]
+        assert t2_items == ["4001"], t2_items
 
     def test_compare_pair_persists_and_price_followup_resolves(
             self, monkeypatch):

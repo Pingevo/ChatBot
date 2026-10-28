@@ -179,7 +179,7 @@ const ALLOWED = new Set([
   "bot_worker_enabled", "bot_worker_interval_ms",
   "bot_buffer_enabled", "bot_buffer_window_ms", "bot_buffer_max_messages",
   "bot_buffer_window_media_ms", "bot_buffer_max_media_messages",
-  "workflow_enabled", "workflow_priority", "workflow_run_timeout_ms",
+  "workflow_enabled", "workflow_run_timeout_ms",
   "shopee_bot_url", "tiktok_bot_url", "lazada_bot_url",
   "chat_engine", "llm_context_limit",
   "grouped_retrieval_shadow_enabled", "grouped_retrieval_selection_enabled",

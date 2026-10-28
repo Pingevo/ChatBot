@@ -74,6 +74,27 @@ _REWRITE_SKIP_PREFIXES = (
 #     เพราะ "ไม่รับคืน" มี "คืน" แต่เป็นความหมายตรงข้าม (NEW-3 residual)
 #   mode "stock" — grounded เมื่อมี card ที่ขายได้จริง (_available_for_sale)
 #     ไม่ใช่เช็คข้อความ (BUG-K: claim "พร้อมส่ง" ทั้งที่ทุก card หมด/เลิกขาย)
+# Phase 5 — return-claim vocabulary เดียว ใช้ร่วมกันทั้ง generic prose path
+#   (lookbehind กัน negation) และ typed-policy path (ไม่มี lookbehind —
+#   polarity ตรวจด้วย _NEGATION_RE lookback แยกเอา)
+_RETURN_CLAIM_CORE = (
+    r"(?:เปลี่ยน(?:สินค้า|ใหม่)?ได้|คืน(?:สินค้า|ของ|เงิน)ได้"
+    r"|รับเปลี่ยน|รับคืน)")
+# deterministic conclusion text ตาม typed outcome — ไม่ใช่ prose ที่ LLM เลือกเอง
+_POLICY_TEXT_ELIGIBLE = "เปลี่ยน/คืนได้ตามเงื่อนไขของทางร้านนะคะ"
+_POLICY_TEXT_INELIGIBLE = "เคสนี้ยังไม่เข้าเงื่อนไขการเปลี่ยน/คืนนะคะ"
+_POLICY_TEXT_ADMIN_REVIEW = ("เรื่องการเปลี่ยน/คืนสินค้า "
+                           "เดี๋ยวขอให้แอดมินตรวจสอบเงื่อนไขให้นะคะ")
+
+
+def policy_outcome_text(outcome: str) -> str:
+    """typed outcome → deterministic conclusion text — render owner เดียว
+    (app pure render / composition finalizer / enforce ใช้ร่วมกัน)."""
+    return (_POLICY_TEXT_ELIGIBLE if outcome == "eligible"
+            else _POLICY_TEXT_INELIGIBLE if outcome == "ineligible"
+            else _POLICY_TEXT_ADMIN_REVIEW)
+
+
 _REWRITE_RULES = (
     ("promo_claim", re.compile(
         r"(?<!ไม่)(?<!ไม่ได้)"
@@ -87,8 +108,7 @@ _REWRITE_RULES = (
      "text",
      "เรื่องของแถม/โปรโมชั่น เดี๋ยวขอให้แอดมินตรวจสอบให้นะคะ"),
     ("return_claim", re.compile(
-        r"(?<!ไม่สามารถ)(?<!ไม่)(?<!ไม่ได้)"
-        r"(?:เปลี่ยน(?:สินค้า|ใหม่)?ได้|คืน(?:สินค้า|ของ|เงิน)ได้|รับเปลี่ยน|รับคืน)"
+        r"(?<!ไม่สามารถ)(?<!ไม่)(?<!ไม่ได้)" + _RETURN_CLAIM_CORE
     ),
      re.compile(r"(?:เปลี่ยน|คืน|แลกเปลี่ยน|return|refund)", re.I),
      (),
@@ -123,7 +143,7 @@ _MODEL_TOKEN_STOP = re.compile(
 #   3 กลุ่ม: <เลข><หน่วย> / IPxx rating / protocol version (PD3.0/QC4/WiFi6)
 #   + bare protocol ที่เจาะจง (UFCS/PPS/GaN/Qi) — negation นำหน้าข้ามใน enforce
 _SPEC_CLAIM_RE = re.compile(
-    r"(?:\d+(?:\.\d+)?\s*(?:"
+    r"(?:\d+(?:[.,]\d+)*\s*(?:"
     r"mAh|mWh|Wh|mA|kW|W|kV|V|A|Hz|kHz|MHz|GHz"
     r"|GB|TB|MB|KB|Gbps|Mbps|MP|ATM|dB|nits?|ohm|Ω"
     r"|วัตต์|โวลต์|แอมป์|นิ้ว|มม\.?|ซม\.?|เมตร"
@@ -149,10 +169,13 @@ def _pos_grounded(text: str, pos_rx) -> bool:
 
 
 def _card_available(p: dict) -> bool:
-    """card ขายได้จริง — ใช้ _available_for_sale ถ้ามี, fallback status+sold_out."""
+    """card ขายได้จริง — canonical sellable → resolver stamp → resolver owner."""
+    if "sellable" in p:
+        return bool(p.get("sellable"))
     if "_available_for_sale" in p:
         return bool(p.get("_available_for_sale"))
-    return p.get("status") == "NORMAL" and not p.get("sold_out")
+    from .product_store import resolve_availability
+    return bool(resolve_availability(p or {})["available_for_sale"])
 
 
 def _grounding_text(resp) -> str:
@@ -220,14 +243,52 @@ def _evidence_pool(resp) -> str:
     return " ".join(_parts).lower()
 
 
+# clause boundary — owner เดียวสำหรับ splice ใน _replace_clause
+#   (particle ที่ตามหลัง clause ที่ถูกแทน = เศษของ clause นั้น ไม่ใช่
+#   ประโยคใหม่ — ตัดพร้อม clause; model-emitted leading particle =
+#   model residual ไม่มี compose-side cleanup)
 # boundary ของ clause: บรรทัดใหม่ / segment sep / จบประโยค EN / particle ไทย+space
 _CLAUSE_BOUNDARY = re.compile(
     r"\n|\|\|\||(?<=[.!?])\s|(?:ค่ะ|คะ|ครับ|ครับผม|จ้า|จ๊ะ|นะคะ|นะค่ะ|นะครับ)\s+")
 
 
+def _spec_fact_grounded(resp, tok: str) -> bool:
+    """Phase 5 H5/R2 — spec claim ต้อง ground ด้วย FieldEvidence ของ
+    subject เดียวกันเท่านั้น (identity-scoped).
+
+    - 0 subject_ids → legacy pool: cards ทั้งหมด + grounding_text
+    - 1 subject_id → facts ของ subject นั้นเท่านั้น
+    - >1 subject_ids → fail closed เสมอ: free-form answer ไม่มีโครงสร้าง
+      ผูก claim↔subject (answer_segments = plain text) — fact ของ A ห้าม
+      ไป ground claim ของ B และไม่มีทางรู้ว่า claim พูดถึงใคร
+    - deterministic segment claims (typed verdict/constraint/policy) ไม่
+      เข้าฟังก์ชันนี้ — enforce exempt ผ่าน composition segment marker
+      (origin+exact-text provenance) ก่อนเรียก: evidence ownership เป็น
+      typed ตั้งแต่ composer ไม่ใช่ inference จาก prose ที่ generate
+    """
+    from . import policy_resolver as _pr, candidate_pool as _cp
+    _rd = getattr(resp, "routing_decision", None)
+    _sids = set(_rd.get("subject_ids") or ()) if isinstance(_rd, dict) else set()
+    if len(_sids) > 1:
+        return False
+    cards = list(getattr(resp, "products", None) or [])
+    if _sids:
+        cards = [p for p in cards if _cp._identity_key(p)[0] in _sids]
+    for _p in cards:
+        _sid = _cp._identity_key(_p)[0]
+        if _sid and _pr.claim_supported(
+                _pr.extract_field_facts(_p), _sid, tok):
+            return True
+    if _sids:
+        return False  # subject-scoped turn — grounding_text ไม่ผูก identity
+    return tok in set(_pr._spec_tokens(_grounding_text(resp)))
+
+
 def _replace_clause(text: str, start: int, end: int, repl: str) -> str:
     """แทนที่ clause ทั้งก้อนที่ครอบ span [start,end) ด้วย repl —
-    กันเหลือเศษข้อความของ claim เดิมค้างกลางประโยค."""
+    กันเหลือเศษข้อความของ claim เดิมค้างกลางประโยค รวมถึง sentence-final
+    particle ของ clause ที่ถูกแทน (ค่ะ/ครับ/นะคะ ไม่ใช่ประโยคใหม่ —
+    คง `|||` delimiter ไว้)"""
     cs = 0
     for _m in _CLAUSE_BOUNDARY.finditer(text):
         if _m.end() <= start:
@@ -235,11 +296,20 @@ def _replace_clause(text: str, start: int, end: int, repl: str) -> str:
         elif _m.start() >= end:
             break
     ce = len(text)
+    _bm = None
     for _m in _CLAUSE_BOUNDARY.finditer(text):
         if _m.start() >= end:
-            ce = _m.start()
+            ce, _bm = _m.start(), _m
             break
-    return (text[:cs] + repl + text[ce:]).strip()
+    tail = text[ce:]
+    if (_bm is not None and _bm.group(0) not in ("\n", "|||")
+            and _bm.group(0).strip()):
+        # boundary match ที่ ce = particle+space → particle เป็น
+        #   sentence-final ของ clause ที่ถูกแทน (match เดียวกัน —
+        #   \n/|||/punct-space คือ structural ต้องคง) → ตัด particle
+        #   คง space delimiter
+        tail = " " + text[_bm.end():]
+    return (text[:cs] + repl + tail).strip()
 
 
 def enforce(resp, req):
@@ -253,11 +323,120 @@ def enforce(resp, req):
     import sys as _sys
     try:
         answer = getattr(resp, "answer", "") or ""
-        if not answer or getattr(resp, "handoff_to_admin", False):
+        if getattr(resp, "handoff_to_admin", False):
             return resp
         from . import llm as _llm
+        from . import responses as _resp_mod
+        # R3 — failure contract ก่อน policy composition เสมอ: provider
+        #   error ต้อง escalate ไม่ให้ข้อความนโยบายกลืนความล้มเหลว
         if answer == _llm.LLM_ERROR_REPLY:
             _escalate(resp, req, reason="llm_error", rule_name="llm_error")
+            return resp
+        # Phase 5 closeout — handoff-failure reply เป็น terminal: typed
+        #   policy render/rewrite tier ห้ามเขียนทับคำตอบที่บอกว่า transport
+        #   ล้มเหลว (identity check เหมือน LLM_ERROR_REPLY — ไม่ใช่ prose scan)
+        if answer == _resp_mod.HANDOFF_FAILED_REPLY:
+            return resp
+        # Phase 5 H1/R2/R3 — typed PolicyDecision ใน routing_decision เป็น
+        #   owner เดียวของ return_exchange eligibility — render deterministic
+        #   text ตาม outcome ตรงๆ: ไม่ scan LLM prose เพื่อตัดสินว่าเห็นด้วย
+        #   ไหม (phrase list ไม่มีทางครอบทุกรูปแบบคำ)
+        #   R5 closeout — mixed composition deleted: return-policy turns
+        #   ที่มี product need fail-close เป็น handoff ใน app._chat_impl
+        #   ก่อน product LLM; ที่เหลือคือ pure policy → render เต็มคำตอบ
+        #   structural marker `guard_rewritten=="policy_decision"` คือ
+        #   idempotency authority เดียว (R4)
+        _rd0 = getattr(resp, "routing_decision", None)
+        # composition provenance — marker validation จุดเดียวก่อน policy/
+        #   non-policy branch ทั้งคู่ (ผลลัพธ์เดียวกันใช้ร่วม): deterministic
+        #   segment รักษา origin + exact text → claim exemption; malformed/
+        #   missing segments → `composition_marker_invalid` + ไม่มี
+        #   exemption (fail closed — ไม่ infer จาก prose). closed schema
+        #   ต่อ segment: domain ∈ closed set ตรง composition.domains[i] ·
+        #   origin ∈ {deterministic,model} · text str · need_indices
+        #   list[int] ไม่ใช่ bool และไม่ติดลบ · subject_ids list[str] ไม่
+        #   ว่างเปล่า · compat/constraint deterministic ต้องมี owner
+        #   identities (policy/claim/model segments อาจว่างได้)
+        _det_texts: list = []
+        _doms: list = []
+        _cm = _rd0.get("composition") if isinstance(_rd0, dict) else None
+        _m_ok = False
+        if isinstance(_cm, dict) and "segments" in _cm:
+            _segs = _cm.get("segments")
+            _doms = _cm.get("domains")
+            _m_ok = (
+                isinstance(_segs, list)
+                and isinstance(_doms, list)
+                and len(_segs) == len(_doms)
+                and all(
+                    isinstance(_sg, dict)
+                    and _sg.get("domain") in (
+                        "claim", "compat", "constraint",
+                        "product", "policy")
+                    and _sg["domain"] == _doms[_si]
+                    and _sg.get("origin") in ("deterministic", "model")
+                    and isinstance(_sg.get("text"), str)
+                    and isinstance(_sg.get("need_indices"), list)
+                    and all(type(_x) is int and _x >= 0
+                            for _x in _sg["need_indices"])
+                    and isinstance(_sg.get("subject_ids"), list)
+                    and all(type(_x) is str and _x
+                            for _x in _sg["subject_ids"])
+                    and not (_sg["origin"] == "deterministic"
+                             and _sg["domain"] in (
+                                 "compat", "constraint")
+                             and not _sg["subject_ids"])
+                    for _si, _sg in enumerate(_segs)))
+            if _m_ok:
+                _det_texts = [sg["text"] for sg in _segs
+                              if sg["origin"] == "deterministic"
+                              and sg["text"]]
+            else:
+                _doms = []
+                _rd0["composition_marker_invalid"] = True
+        elif isinstance(_cm, dict):
+            _rd0["composition_marker_invalid"] = True
+        _pdec = (_rd0.get("policy_decision")
+                 if isinstance(_rd0, dict) else None)
+        _pdec_active = isinstance(_pdec, dict) and \
+            _pdec.get("policy_type") == "return_exchange"
+        if _pdec_active:
+            _oc = _pdec.get("outcome")
+            _final = policy_outcome_text(_oc)
+            # Phase 8 — composed turn: structured-marker validation เท่านั้น
+            #   (shared schema check ด้านบน + "policy" ∈ domains +
+            #   policy_text == canonical outcome text). ห้าม inspect
+            #   answer prose เลย — finalizer เป็น owner เดียวของ segment
+            #   render/insert; canonical sentence ใน product prose ไม่ใช่
+            #   structural proof.  marker valid → return resp ตรง
+            #   (byte-identical); marker invalid/mismatch → fail closed
+            #   ด้วย deterministic wholesale render เดิม (typed outcome
+            #   ชนะ — ไม่ recover จาก prose).  ไม่มี marker → wholesale
+            #   render เดิม (flag-OFF pure policy — byte-identical)
+            if _cm is not None:
+                _marker_ok = (
+                    _m_ok
+                    and "policy" in _doms
+                    and _cm.get("policy_text") == _final
+                )
+                if _marker_ok:
+                    return resp
+                resp.answer = _final
+                resp.answer_segments = _llm.split_segments(_final)
+                if isinstance(_rd0, dict):
+                    _rd0["guard_rewritten"] = "policy_decision"
+                print(f"[GUARD-ENFORCE] policy_decision outcome={_oc} "
+                      "→ invalid composition marker → deterministic render "
+                      "(fail closed)", file=_sys.stderr)
+                return resp
+            resp.answer = _final
+            resp.answer_segments = _llm.split_segments(_final)
+            if isinstance(_rd0, dict):
+                _rd0["guard_rewritten"] = "policy_decision"
+            print(f"[GUARD-ENFORCE] policy_decision outcome={_oc} "
+                  "→ deterministic render", file=_sys.stderr)
+            return resp
+        if not answer:
             return resp
         for _name, _rx, _repl in _ESCALATE_RULES:
             if _rx.search(answer):
@@ -276,6 +455,9 @@ def enforce(resp, req):
             if _is_general and _grounding_text(resp):
                 _skip = False  # มี KB context → verify ได้
             if not _skip:
+                # _det_texts (deterministic segment provenance) คำนวณครั้ง
+                #   เดียวก่อน policy branch แล้ว — claims ใน span นั้น
+                #   exempt จาก prose grounding
                 for _name, _rx, _pos_rx, _gflags, _mode, _repl in _REWRITE_RULES:
                     # re-scan จนสะอาด (≤4 รอบ) — answer อาจมี claim เดียวกันหลาย clause
                     #   เช่น "เช็คสต็อกแล้วนะคะ พร้อมส่งค่ะ" ต้องแทนทั้งคู่
@@ -284,9 +466,13 @@ def enforce(resp, req):
                         #   (repl เช่น "...โปรโมชั่น..." match claim_rx ตัวเอง — ห้ามลบ)
                         _ridx = resp.answer.find(_repl)
                         _rend = _ridx + len(_repl) if _ridx != -1 else -1
+                        _det = [(p, p + len(t)) for t in _det_texts
+                                if (p := resp.answer.find(t)) >= 0]
                         _m = next(
                             (c for c in _rx.finditer(resp.answer)
-                             if not (_ridx <= c.start() < _rend)),
+                             if not (_ridx <= c.start() < _rend)
+                             and not any(a <= c.start() < b
+                                         for a, b in _det)),
                             None,
                         )
                         if not _m or _claim_grounded(resp, _pos_rx, _gflags, _mode):
@@ -310,23 +496,42 @@ def enforce(resp, req):
                 #   = LLM แต่งชื่อรุ่น (WPB100P/PB200N ผิดจาก CTC615W)
                 #   pool = cards + grounding_text + message + history (token ที่
                 #   ลูกค้าถามเอง/history เคยพูดถึง = grounded ไม่แตะ)
+                #   loop ≤4 เคลียร์ทุก clause — เดิมแทนเฉพาะ clause ของ token
+                #   แรก ทำให้ clause ถัดไปที่มีชื่อรุ่นแต่งเองรอด (r11 live Q3)
                 if not _rewritten:
-                    _bad_tok = None
                     _pool = None
-                    for _tok in _MODEL_TOKEN_RE.findall(answer):
-                        if _MODEL_TOKEN_STOP.match(_tok):
-                            continue
-                        if _pool is None:
-                            _pool = _identity_pool(resp, req)
-                        if _tok.lower() not in _pool:
-                            _bad_tok = _tok
+                    _DEFER_MODEL = ("เรื่องรุ่น/สเปคที่กล่าวถึง "
+                                    "เดี๋ยวขอให้แอดมินตรวจสอบให้นะคะ")
+                    for _ in range(4):
+                        _ans = resp.answer
+                        _ridx = _ans.find(_DEFER_MODEL)
+                        _rend = (_ridx + len(_DEFER_MODEL)
+                                 if _ridx != -1 else -1)
+                        _bad_tok = None
+                        _tm = None
+                        _det = [(p, p + len(t)) for t in _det_texts
+                                if (p := _ans.find(t)) >= 0]
+                        for _tm in _MODEL_TOKEN_RE.finditer(_ans):
+                            if _ridx <= _tm.start() < _rend:
+                                continue
+                            if any(a <= _tm.start() < b for a, b in _det):
+                                continue
+                            if _MODEL_TOKEN_STOP.match(_tm.group(0)):
+                                continue
+                            if _pool is None:
+                                _pool = _identity_pool(resp, req)
+                            if _tm.group(0).lower() not in _pool:
+                                _bad_tok = _tm.group(0)
+                                break
+                        if _tm is None or not _bad_tok:
                             break
-                    if _bad_tok:
-                        _tm = re.search(re.escape(_bad_tok), answer)
                         _new = _replace_clause(
-                            answer, _tm.start(), _tm.end(),
-                            "เรื่องรุ่น/สเปคที่กล่าวถึง เดี๋ยวขอให้แอดมินตรวจสอบให้นะคะ")
-                        _new = re.sub(r"(?:นะคะ|ค่ะ|คะ)\s*(?:นะคะ|ค่ะ|คะ)", "นะคะ", _new)
+                            _ans, _tm.start(), _tm.end(),
+                            "" if _ridx != -1 else _DEFER_MODEL)
+                        _new = re.sub(r"(?:นะคะ|ค่ะ|คะ)\s*(?:นะคะ|ค่ะ|คะ)",
+                                      "นะคะ", _new)
+                        if _new == _ans:
+                            break
                         resp.answer = _new
                         resp.answer_segments = _llm.split_segments(_new)
                         _rd = getattr(resp, "routing_decision", None)
@@ -339,26 +544,41 @@ def enforce(resp, req):
                 #   ลูกค้าไม่ใช่หลักฐาน spec ("รองรับ 65W ไหม" ห้าม ground ตัวเอง)
                 #   negation นำหน้า ("ไม่รองรับ IP68") = ปฏิเสธ spec ไม่ใช่ claim → ข้าม
                 #   loop ≤4 เคลียร์หลาย clause; token normalize = strip ช่องว่าง+lower
+                #   Phase 5 H5 — grounding เปลี่ยนเป็น typed FieldEvidence:
+                #   routing_decision["subject_ids"] มี → เฉพาะ facts ของ subject
+                #   identity นั้นเท่านั้น (spec ของ product อื่นในหน้าไม่ ground);
+                #   ไม่มี → card ทั้งหมด + grounding_text เหมือนเดิม
                 _rd = getattr(resp, "routing_decision", None)
                 if not _rewritten and not (isinstance(_rd, dict) and _rd.get("guard_rewritten")):
-                    _pool_ns = None
+                    _DEFER_SPEC = ("เรื่องสเปก/ตัวเลขบางส่วนที่กล่าวถึง "
+                                   "เดี๋ยวขอให้แอดมินตรวจสอบให้นะคะ")
                     for _ in range(4):
                         _ans = getattr(resp, "answer", "") or ""
+                        # defer sentence ที่ replace ไปแล้ว = grounded แล้ว —
+                        #   clause ถัดไปที่ยัง ungrounded ให้ลบทิ้งแทนการแทนด้วย
+                        #   ประโยคเดิมซ้ำ (dedupe เหมือน _REWRITE_RULES loop)
+                        _ridx = _ans.find(_DEFER_SPEC)
+                        _rend = _ridx + len(_DEFER_SPEC) if _ridx != -1 else -1
                         _bad_spec = None
+                        _det = [(p, p + len(t)) for t in _det_texts
+                                if (p := _ans.find(t)) >= 0]
                         for _sm in _SPEC_CLAIM_RE.finditer(_ans):
+                            if _ridx <= _sm.start() < _rend:
+                                continue
+                            if any(a <= _sm.start() < b for a, b in _det):
+                                continue
                             if _NEGATION_RE.search(_ans[max(0, _sm.start() - 20):_sm.start()]):
                                 continue
-                            if _pool_ns is None:
-                                _pool_ns = re.sub(
-                                    r"[\s,]+", "", _evidence_pool(resp))
-                            if re.sub(r"[\s,]+", "", _sm.group(0)).lower() not in _pool_ns:
-                                _bad_spec = _sm
-                                break
+                            _tok = re.sub(r"[\s,]+", "", _sm.group(0)).lower()
+                            if _spec_fact_grounded(resp, _tok):
+                                continue
+                            _bad_spec = _sm
+                            break
                         if not _bad_spec:
                             break
                         _new = _replace_clause(
                             _ans, _bad_spec.start(), _bad_spec.end(),
-                            "เรื่องสเปก/ตัวเลขที่กล่าวถึง เดี๋ยวขอให้แอดมินตรวจสอบให้นะคะ")
+                            "" if _ridx != -1 else _DEFER_SPEC)
                         _new = re.sub(r"(?:นะคะ|ค่ะ|คะ)\s*(?:นะคะ|ค่ะ|คะ)", "นะคะ", _new)
                         if _new == _ans:
                             break

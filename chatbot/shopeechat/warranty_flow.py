@@ -1756,9 +1756,11 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
         #    ลูกค้าตอบ "ไม่หาย/ไม่ได้" → state machine (ts_suggested) เข้า claim info
         try:
             from . import knowledge_base as _kbmod
+            from . import generation_pointer as _gen
             _tips = _kbmod.qa_troubleshoot_tips(
                 req.message, conversation_id=req.conversation_id,
-                item_id=req.item_id)
+                item_id=req.item_id,
+                snap=ctx.get("snap", _gen.SNAP_UNSET))
             if _tips:
                 _ts_lines = "\n".join(f"• {t}" for t in _tips)
                 _ts_answer = (

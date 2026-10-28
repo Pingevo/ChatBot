@@ -1,12 +1,15 @@
-"""import_image_texts.py — upsert exports/image_texts.jsonl → admin DB `image_texts`.
+"""import_image_texts.py — materialize published OCR evidence ของ generation.
 
-image_id เป็น key เดียว (dedupe), เก็บล่าสุด status=ok เท่านั้น — rerun ได้เรื่อยๆ
-ตอน batch ยังไม่จบ (idempotent)
+gen_dir/image_texts.jsonl → `image_texts_g<gid>` (immutable หลัง validation —
+runtime readers อ่านผ่าน snapshot เท่านั้น; shared `image_texts` เป็น OCR cache
+ที่ build_image_texts เขียนระหว่าง build — module นี้ไม่แตะมัน)
 
-รัน: .venv/bin/python chatbot/shopeechat/scripts/import_image_texts.py
+รัน: .venv/bin/python chatbot/shopeechat/scripts/import_image_texts.py \
+        --gen-dir exports/gen/<gid> --gid <gid>
 """
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -15,67 +18,38 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "chatbot"))
 sys.path.insert(0, str(ROOT))
 
-from chatbot.shopeechat import knowledge_base  # noqa: E402
 
+def materialize_published(db, gid: str, gen_dir: Path) -> int:
+    """เขียน evidence file → image_texts_g<gid> — คืนจำนวน docs ที่ publish.
 
-def _image_item_ids() -> dict[str, list[int]]:
-    """map image_id → item_ids จาก export — logic เดียวกับ _collect_worklist
-    (3 แหล่ง: desc field_list + gallery + variant options)."""
-    from chatbot.shopeechat.scripts.build_image_texts import _iter_export_docs, _doc_images
-    export = ROOT / "exports" / "ShpProducts.export.json"
-    m: dict[str, set[int]] = {}
-    for d in _iter_export_docs(export):
-        iid_set = set(_doc_images(d))
-        try:
-            item_id = int(d.get("item_id"))
-        except (TypeError, ValueError):
-            continue
-        for iid in iid_set:
-            m.setdefault(iid, set()).add(item_id)
-    return {k: sorted(v) for k, v in m.items()}
+    collection เป็น per-generation (fresh ทุก gid) — drop ก่อนเผื่อ staging
+    รอบเดิมค้าง; docs คือ snapshot ของ evidence file — cache mutate ภายหลัง
+    ไม่กระทบ generation นี้
+    """
+    ev_path = Path(gen_dir) / "image_texts.jsonl"
+    docs = ([json.loads(l) for l in ev_path.open(encoding="utf-8")]
+            if ev_path.exists() else [])
+    name = f"image_texts_{gid}"
+    if name in db.list_collection_names():
+        db.drop_collection(name)          # stale staging รอบเดิม (gid collision เท่านั้น)
+    coll = db[name]
+    if docs:
+        coll.insert_many(docs)
+    coll.create_index("image_id", unique=True)
+    coll.create_index("item_ids")
+    return len(docs)
 
 
 def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--gen-dir", type=Path, required=True)
+    ap.add_argument("--gid", required=True)
+    args = ap.parse_args()
+    from chatbot.shopeechat import knowledge_base  # noqa: E402
     knowledge_base._load_env()
-    import os
-    from pymongo import UpdateOne
-    db = knowledge_base._build_admin_client()[os.environ.get("ADMIN_MONGO_DB", "chatbot_admin")]
-    coll = db["image_texts"]
-    coll.create_index("image_id", unique=True)
-    coll.create_index("item_ids")
-    iid_items = _image_item_ids()
-    print(f"item_ids map: {len(iid_items)} images")
-
-    best: dict[str, dict] = {}
-    for line in (ROOT / "exports" / "image_texts.jsonl").open():
-        e = json.loads(line)
-        iid = e.get("image_id")
-        if not iid or e.get("status") != "ok":
-            continue
-        prev = best.get(iid)
-        if prev is None or e.get("ts", 0) > prev.get("ts", 0):
-            best[iid] = e
-
-    ops = [
-        UpdateOne({"image_id": iid}, {"$set": {
-            "image_id": iid,
-            "image_url": e.get("image_url"),
-            "item_ids": iid_items.get(iid, []),
-            "kind": e.get("kind"),
-            "text": e.get("text"),
-            "truncated": e.get("truncated"),
-            "model": e.get("model"),
-            "ts": e.get("ts"),
-        }}, upsert=True)
-        for iid, e in best.items()
-    ]
-    res = coll.bulk_write(ops) if ops else None
-    kinds: dict[str, int] = {}
-    for e in best.values():
-        kinds[e.get("kind") or "?"] = kinds.get(e.get("kind") or "?", 0) + 1
-    print(f"image_texts: {len(best)} unique ok → upserted "
-          f"({res.upserted_count if res else 0} new, {res.modified_count if res else 0} updated)")
-    print("kinds:", kinds)
+    db = knowledge_base._admin_db()
+    n = materialize_published(db, args.gid, args.gen_dir)
+    print(f"published image_texts_{args.gid}: {n} docs")
 
 
 if __name__ == "__main__":

@@ -39,7 +39,6 @@ interface SystemConfig {
   bot_worker_interval_ms: number;
   // ⚡ Workflow engine (แบบ Zaapi Flow Builder)
   workflow_enabled: boolean;
-  workflow_priority: "workflow_first" | "trigger_first" | "both";
   workflow_run_timeout_ms: number;
   // Bot URLs
   shopee_bot_url: string;
@@ -52,6 +51,8 @@ interface SystemConfig {
   // ⚡ Task 5B3-D — grouped retrieval flags (bot อ่านจาก DB, env fallback)
   grouped_retrieval_shadow_enabled: boolean;
   grouped_retrieval_selection_enabled: boolean;
+  // ⚡ Phase 10A — global web-search operator gate (bot อ่านจาก DB ≤5s, no env fallback)
+  web_search_enabled: boolean;
   updated_by: string;
   updated_at: string;
 }
@@ -119,6 +120,7 @@ const safeSwitches: { key: keyof SystemConfig; label: string; description: strin
   { key: "mock_mode_enabled", label: "Mock Mode", description: "ใช้ข้อมูลจำลอง ไม่ยิง API จริง" },
   { key: "shadow_bot_enabled", label: "Shadow Bot", description: "bot generate reply แต่เก็บใน shadow_replies ไม่ส่งจริง" },
   { key: "bot_worker_enabled", label: "Bot Worker (Auto)", description: "ประมวลผลแชทใหม่อัตโนมัติ: trigger → bot → handoff (ต้องรัน scripts/bot-worker.ts)" },
+  { key: "web_search_enabled", label: "Web Search", description: "อนุญาต bot ค้นเว็บภายนอก (OpenRouter) เมื่อข้อมูลในระบบไม่พอ — ปิด = zero external calls ทุก path" },
   // ⚡ workflow_enabled ย้ายไป /admin-config แล้ว — admin เปิด/ปิดเองได้
 ];
 
@@ -173,6 +175,7 @@ export default function ConfigPage() {
       mock_mode_enabled: "Mock Mode",
       shadow_bot_enabled: "Shadow Bot",
       bot_worker_enabled: "Bot Worker (Auto)",
+      web_search_enabled: "Web Search",
     };
     const label = labelMap[key as string] || key;
     const ok = await confirm.ask({

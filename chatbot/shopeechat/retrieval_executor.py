@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from . import generation_pointer as _gen
 from .retrieval_planner import RetrievalRequest
 from .retrieval_policy import make_evidence_card
 from .route_context import RetrievalProfile
@@ -43,6 +44,8 @@ class RetrievalExecutionResult:
     source_attempts: tuple[SourceAttempt, ...] = ()
     hard_filters: tuple[tuple[str, str], ...] = ()
     soft_hints: tuple[tuple[str, str], ...] = ()
+    supporting_evidence: tuple = ()
+    attachment_evidence: tuple = ()
     trace: tuple[str, ...] = ()
     error: str | None = None
 
@@ -73,14 +76,21 @@ def _request_profile(req: RetrievalRequest, query: str, shop: str | None,
         product_types=frozenset(ptypes),
         subtype=subtype,
         model_codes=req.model_codes,
-        variant_terms=(),
+        variant_terms=req.variant_terms,
         target_device=req.target_device,
         availability_mode=req.availability_mode,
         compat_mode=req.compat_mode,
+        value_constraints=req.value_constraints,
+        # exact item identity — digit-shaped subject_refs = typed item ids
+        #   (r6 selection authority เดียวกัน); fetch_units อ่านผ่าน field
+        #   เดิมนี้เพื่อ item-scoped channel (name-shaped refs ไม่ใช่ item id)
+        anchor_item_ids=tuple(
+            str(r) for r in (req.subject_refs or ()) if str(r).isdigit()),
     )
 
 
-def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit):
+def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit,
+                             snap=None):
     """legacy product_store path เป็น evidence source (observe-only) —
     fetch_products behavior เดิมไม่เปลี่ยน; SystemExit จาก client → error ต่อ attempt"""
     from . import product_store as _ps
@@ -90,73 +100,112 @@ def _legacy_evidence_fetcher(message: str, *, retrieval_profile, shop, limit):
     except (Exception, SystemExit) as exc:
         raise RuntimeError(f"legacy db unavailable: {exc}")
     return _ps.fetch_products(db, message, shop_filter=shop, limit=limit,
-                              retrieval_profile=retrieval_profile)
+                              retrieval_profile=retrieval_profile, snap=snap)
 
 
 def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
-    """card → (bucket, reason) — eligible / unavailable / rejected"""
-    # UNLIST/unknown = customer_hidden (ยังไม่ publish — ห้ามใช้เป็น evidence
-    # ตอบลูกค้าเลย ทั้ง spec/compare/link) — live status ชนะ unit snapshot เสมอ
-    if card.get("customer_visible") is False:
+    """canonical card → (bucket, reason) — eligible / unavailable / rejected.
+
+    input ต้องผ่าน make_evidence_card() แล้ว — อ่าน canonical fields เท่านั้น
+    (customer_visibility/canonical_type/canonical_roles/sellable ฯลฯ)
+    """
+    # hidden (ยังไม่ publish — UNLIST/unknown) ห้ามใช้เป็น evidence ตอบลูกค้า
+    if card.get("customer_visibility") == "hidden":
         return "rejected", "customer_hidden"
     from .units import _SUBTYPE_TO_TYPES
     eff_types = set(req.product_types)
     for s in req.subtypes:
         eff_types |= _SUBTYPE_TO_TYPES.get(s, set())
-    ptype = card.get("product_type")
-    if not ptype and eff_types:
-        # legacy card ไม่มี product_type field → detect จากชื่อ (generic taxonomy)
-        from .product_store import _detect_product_types
-        det = _detect_product_types(card.get("name") or "")
-        ptype = next((t for t in eff_types if t in det), None) \
-            or next(iter(det), None)
-    if eff_types and ptype and ptype not in eff_types:
-        return "rejected", "wrong_type"
+    canon = ((card.get("_evidence") or {}).get("facts") or {}).get("canonical") or {}
+    ctypes = set(canon.get("type_candidates") or ())
+    if card.get("canonical_type"):
+        ctypes.add(card["canonical_type"])
+    card_item_ids = (card.get("_evidence") or {}).get("item_ids") or ()
+    if eff_types and ctypes and not (ctypes & eff_types):
+        # เฉพาะ trusted identity ที่ชนะ inferred type gate: canonical
+        #   item_ids ∈ typed subject_refs (exact item) หรือ model_codes
+        #   (matcher เดียวกับ fetch recall: _model_token_in_name) —
+        #   soft model_term = unverified recall evidence ไม่ใช่ authority
+        from . import product_store as _ps
+        name = card.get("name") or ""
+        if (not any(_ps._model_token_in_name(name, c)
+                    for c in req.model_codes)
+                and not any(i in req.subject_refs for i in card_item_ids)):
+            return "rejected", "wrong_type"
     if req.subtypes:
-        expanded = set()
-        for s in req.subtypes:
-            expanded |= _SUBTYPE_TO_TYPES.get(s, set())
-        csub = (card.get("charger_subtype") or card.get("cable_subtype"))
-        # reject เฉพาะเมื่อ subtype evidence ชัดและไม่ตรง — unit type เช่น
-        # cable ที่เป็น expansion ของ req subtype ถือว่าตรง (csub อาจว่าง)
-        if csub and csub not in req.subtypes \
-                and (ptype or "") not in expanded:
+        roles = set(card.get("canonical_roles") or ())
+        # reject เฉพาะเมื่อ role evidence ชัดและไม่ตรง — roles ว่าง = ไม่มี
+        # evidence พอจะตัด (เช่น generic listing ที่ชื่อไม่บอก subtype)
+        if roles and not (roles & set(req.subtypes)):
             return "rejected", "subtype_mismatch"
+    devs: list[str] = []
+    if req.target_device or req.subject_refs:
+        from .device_compat import _device_candidates
+        devs = [cn or rw for rw, cn in _device_candidates(
+            card.get("name") or "")]
+    dev = devs[0] if devs else None
+    from . import product_store as _ps
     if req.target_device:
-        from .device_compat import _extract_device_token
-        dev = _extract_device_token(card.get("name") or "")
         if dev and dev != req.target_device:
-            return "rejected", f"device_mismatch:{dev}"
-    if card.get("_available_for_sale"):
+            # own-model = structured identity เท่านั้น: typed subject refs /
+            # trusted model codes / canonical item_ids — card-name prose
+            # หรือ soft term ไม่ใช่ identity proof
+            own_model = (dev in {r.lower() for r in req.subject_refs}
+                         or any(_ps._model_token_in_name(dev, c)
+                                for c in req.model_codes)
+                         or any(i in req.subject_refs
+                                for i in card_item_ids))
+            if not own_model:
+                return "rejected", f"device_mismatch:{dev}"
+    if card.get("sellable"):
         return "eligible", "ok"
+    # card ขายได้แต่ requested option ไม่พร้อม → unavailable ด้วยเหตุ variant
+    # (ไม่ใช่ของหมดทั้งชิ้น — ตอบ "สีที่ขอหมด/ไม่มี" ได้ตรง)
+    rvs = card.get("requested_variant_state")
+    if (rvs not in (None, "not_requested", "available")
+            and card.get("publish_state") == "published"
+            and card.get("stock_state") == "in_stock"
+            and card.get("customer_visibility") == "visible"):
+        return "unavailable", f"requested_variant:{rvs}"
     return "unavailable", card.get("availability_reason") or "unavailable"
 
 
 def _run_attempt(source: str, fetch_fn, query: str, prof, shop: str,
-                 limit: int, req: RetrievalRequest
-                 ) -> tuple[list[dict], list[dict], list[dict], SourceAttempt]:
-    """fetch 1 source → tag evidence + แยก bucket — error ถูกจับใน attempt"""
+                 limit: int, req: RetrievalRequest, snap=None
+                 ) -> tuple[list[dict], list[dict], list[dict],
+                            SourceAttempt, tuple, tuple]:
+    """fetch 1 source → tag evidence + แยก bucket — error ถูกจับใน attempt;
+    คืน (elig, unav, rej, attempt, supporting, attachments) — 2 tuple ท้าย
+    จาก channel result ที่เป็น evidence records (ไม่ผ่าน canonicalize)"""
     try:
-        res = fetch_fn(query, retrieval_profile=prof, shop=shop, limit=limit)
+        res = fetch_fn(query, retrieval_profile=prof, shop=shop, limit=limit,
+                       snap=snap)
     except (Exception, SystemExit) as exc:
         return [], [], [], SourceAttempt(
             source=source, raw_count=0, eligible_count=0,
             unavailable_count=0, rejected_count=0,
-            trace=(f"{source} error",), error=str(exc))
+            trace=(f"{source} error",), error=str(exc)), (), ()
     cards = tuple(res.cards) if hasattr(res, "cards") else tuple(res)
     raw = getattr(res, "raw_count", len(cards))
+    sup = tuple(getattr(res, "supporting_evidence", ()) or ())
+    atts = tuple(getattr(res, "attachment_evidence", ()) or ())
     elig: list[dict] = []
     unav: list[dict] = []
     rej: list[dict] = []
+    # requested options = variant_terms ของ request เท่านั้น — soft_hints
+    # เป็น preference (constraint ranking) ไม่ใช่ hard option gate
+    requested = tuple(req.variant_terms or ())
     for c in cards:
-        b, why = _bucket(c, req)
-        cc = make_evidence_card(c, source=source, selection_reason=why)
+        # canonicalize ก่อน bucket เสมอ — _bucket อ่าน canonical fields เท่านั้น
+        cc = make_evidence_card(c, source=source, requested=requested)
+        b, why = _bucket(cc, req)
+        cc["_selection_reason"] = why
         (elig if b == "eligible" else
          unav if b == "unavailable" else rej).append(cc)
     return elig, unav, rej, SourceAttempt(
         source=source, raw_count=raw, eligible_count=len(elig),
         unavailable_count=len(unav), rejected_count=len(rej),
-        trace=tuple(getattr(res, "trace", ()) or ()))
+        trace=tuple(getattr(res, "trace", ()) or ())), sup, atts
 
 
 def execute_grouped_retrieval_requests(
@@ -169,14 +218,24 @@ def execute_grouped_retrieval_requests(
     observe_only: bool = True,
     fetcher=None,
     legacy_fetcher=None,
+    channels: tuple = (),
+    snap=_gen.SNAP_UNSET,
 ) -> tuple[RetrievalExecutionResult, ...]:
     """execute request plan ทีละชิ้น — evidence-preserving observe-only.
 
     source ต่อ request: units (fetcher, default=fetch_unit_evidence)
     + legacy product_store (legacy_fetcher — None=ปิด, "auto"=adapter จริง)
+    + channels (optional evidence channels — ((RetrievalRequest, fetch_fn),)
+    จาก channel_request(); run ครั้งเดียวต่อ channel ไม่ผูก slot request,
+    failure isolated ต่อ channel เหมือน source attempt ปกติ)
     ทุก card ได้ _evidence.sources + _selection_reason (private — strip
     ด้วย retrieval_policy.strip_private_evidence ก่อนเข้า LLM)
+
+    snap = captured EvidenceSnapshot/None จาก request owner; omitted (SNAP_UNSET)
+    → executor resolve ครั้งเดียวที่ entry ตัวเอง (standalone execution)
     """
+    if snap is _gen.SNAP_UNSET:
+        snap = _gen.resolve_snapshot()
     if fetcher is None:
         from . import units as _units
         fetcher = _units.fetch_unit_evidence
@@ -210,12 +269,16 @@ def execute_grouped_retrieval_requests(
         unav: list[dict] = []
         rej: list[dict] = []
         attempts: list[SourceAttempt] = []
+        sup: list = []
+        ch_atts: list = []
         for src_name, fn in sources:
-            e, u, r, att = _run_attempt(src_name, fn, query, prof, shop,
-                                        limit_per_request, req)
+            e, u, r, att, s, a = _run_attempt(src_name, fn, query, prof, shop,
+                                            limit_per_request, req, snap)
             elig += e
             unav += u
             rej += r
+            sup += s
+            ch_atts += a
             attempts.append(att)
             if att.error:
                 trace.append(f"{src_name}_error={att.error}")
@@ -236,5 +299,26 @@ def execute_grouped_retrieval_requests(
             rejected_evidence=tuple(rej),
             source_attempts=tuple(attempts),
             hard_filters=req.hard_filters, soft_hints=req.soft_hints,
+            supporting_evidence=tuple(sup),
+            attachment_evidence=tuple(ch_atts),
             trace=tuple(trace), error=req_error))
+    for req, fn in channels:
+        # channel = synthetic request + fetch เดียว — evidence channels
+        # (subjects/compat/kb/...) run ครั้งเดียวต่อ turn; error isolated —
+        # channel ที่พังไม่ทำ channel/source อื่นหาย (attempt.error ตามเดิม)
+        prof = _request_profile(req, message, shop, platform)
+        e, u, r, att, sup, ch_atts = _run_attempt(
+            req.source, fn, message, prof, shop, limit_per_request, req, snap)
+        results.append(RetrievalExecutionResult(
+            request_id=req.request_id, source=req.source,
+            slot_id=req.slot_id, relation_id=req.relation_id,
+            subtypes=req.subtypes, model_codes=req.model_codes,
+            target_device=req.target_device,
+            eligible_candidates=tuple(e),
+            unavailable_evidence=tuple(u),
+            rejected_evidence=tuple(r),
+            source_attempts=(att,),
+            supporting_evidence=tuple(sup),
+            attachment_evidence=tuple(ch_atts),
+            trace=(f"channel={req.source}",), error=att.error))
     return tuple(results)

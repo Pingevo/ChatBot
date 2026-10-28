@@ -26,7 +26,9 @@ from pydantic import BaseModel, Field
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
-from . import llm, product_store, knowledge_base, persona, conversation_products, test_chat_api, device_compat, route_context as _rc
+from . import llm, product_store, knowledge_base, persona, conversation_products, test_chat_api, device_compat, route_context as _rc, policy_resolver, candidate_pool as _cp
+from dataclasses import asdict as _dc_asdict, replace as _dc_replace
+from . import generation_pointer as _gen
 from .responses import _routing, _send_handoff
 
 app = FastAPI(
@@ -617,6 +619,214 @@ def _turn_decision_shadow(plan, steps: list[dict]) -> None:
                       "error": type(_e).__name__})
 
 
+def _typed_answer_boundary(sel: dict, *, needs: tuple, profile,
+                           shop: str | None = None,
+                           platform: str = "shopee",
+                           persona_extra: str = "", model: str | None = None,
+                           web_search_fn=None,
+                           web_configured: bool | None = None,
+                           policy_decision=None,
+                           claim_guidance: str = ""):
+    """Phase 7+8 — grouped flag-ON answer boundary เดียวต่อ turn.
+
+    typed pipeline artifacts (selection/pool/requests จาก
+    run_grouped_selection) → compile_answer_task ครั้งเดียว (owner เดียว
+    ของ deferred-kind classification — `task.deferred` typed signal) →
+    typed web admission → optional web search (producer normalize
+    specs+info → payload) → compile AnswerContext ครั้งเดียวต่อ turn →
+    zero-or-one llm.answer_typed call → compose_answer ครั้งเดียว →
+    AnswerComposition (finalizer render ที่ app — boundary ไม่ผลิต
+    customer prose); raw customer message / history / legacy products /
+    extra_context ข้าม boundary นี้ไม่ได้ (signature ไม่มีช่องรับ);
+    follow-up identity มาจาก typed needs/subject_refs/requests เท่านั้น.
+
+    Phase 8 — deferred kinds (task.deferred) ไม่ kill ทั้ง turn อีก:
+    productish tasks ทำงานต่อจน AnswerContext; typed results ที่มีผู้ผลิต
+    (policy_decision จาก policy_resolver / claim_guidance จาก warranty
+    flow / product_text จาก answer_typed) cover need ของตัวเอง — ไม่มี
+    result → unanswered (ห้าม invent).
+
+    error contract ตามจริง: sel=None/artifacts invalid/task compile fail/
+    ctx compile fail/ctx ว่าง → composition ที่มีแต่ unanswered (+typed
+    results ที่มีอยู่), answer_calls=0; web search พัง → ต่อด้วย local
+    typed evidence (answer ≤1, web_used=None); legacy llm.answer ไม่
+    re-enter; product context ไม่ consume policy decisions.
+    """
+    from . import answer_context as _acx
+    zero = {"prompt": 0, "output": 0, "total": 0}
+
+    def _done(ctx=None, adm=None, web=None, calls=0, usage=None,
+              product_text=""):
+        return _acx.compose_answer(
+            needs=needs, context=ctx, product_text=product_text,
+            policy_decision=policy_decision,
+            claim_guidance=claim_guidance,
+            usage=zero if usage is None else usage,
+            answer_calls=calls, web_used=web, admission=adm)
+    if sel is None:
+        return _done()
+    try:
+        pool = sel["pool"]
+        requests = tuple(sel["requests"])
+        selection = sel["selection"]
+    except Exception:
+        return _done()
+    # task compile ครั้งเดียว — compile_answer_task เป็น owner เดียวของ
+    # deferred-kind classification; boundary consume typed `task.deferred`
+    # เท่านั้น — ไม่ classify kind string เอง
+    try:
+        task = _acx.compile_answer_task(
+            needs=needs, selection=selection, pool=pool, requests=requests,
+            profile=profile)
+    except Exception:
+        return _done()
+    web_used = None
+    try:
+        adm = _acx.decide_web_admission(
+            needs=needs, selection=selection, pool=pool,
+            requests=requests, profile=profile, web_configured=web_configured)
+    except Exception:
+        adm = _acx.WebAdmission(False, "internal_error")
+    if adm.allowed and web_search_fn is not None:
+        try:
+            res = web_search_fn(message=adm.query, shop=shop,
+                                platform=platform,
+                                reason="phase7_external_evidence")
+            _info = (res.get("search_info") if isinstance(res, dict)
+                     else getattr(res, "search_info", "")) or ""
+            _specs = (res.get("device_specs") if isinstance(res, dict)
+                      else getattr(res, "device_specs", ())) or ()
+            if res is not None and (_info or _specs):
+                info = re.sub(r"https?://[^\s\u0e00-\u0e7f\"'\[\]{}()<>]+",
+                              "", _info).strip()
+                # producer normalize: sanitized info + structured specs →
+                # closed `payload` field เดียวก่อนเข้า compile — unknown
+                # provider fields/URL ไม่ข้าม boundary
+                payload = "\n".join(p for p in (
+                    info,
+                    json.dumps(list(_specs), ensure_ascii=False,
+                               default=str) if _specs else "") if p)
+                web_used = {"kind": "web", "target": adm.target,
+                            "need_index": adm.need_index,
+                            "payload": payload}
+                # structured spec ของ target เดียวกันเก็บเป็น typed data —
+                # coverage อ่านผ่าน device_field_facts เท่านั้น (closed
+                # `payload` ยังเป็น text เดียวกันสำหรับ model context) —
+                # selector เดียวกับ grouped producer (device_spec_for_target)
+                _sp = _acx.device_spec_for_target(_specs, adm.target)
+                if _sp is not None:
+                    web_used["data"] = {**_sp, "source": _sp.get("source")
+                                        or "web-structured"}
+        except Exception:
+            web_used = None  # web พัง → ตอบด้วย local evidence เท่านั้น
+    # final AnswerContext compile ครั้งเดียวต่อ turn (รวม web evidence)
+    try:
+        ctx = _acx.compile_answer_context(
+            needs=needs, selection=selection, pool=pool,
+            requests=requests, profile=profile, task=task,
+            web_evidence=(web_used,) if web_used else ())
+    except Exception:
+        return _done(adm=adm, web=web_used)
+    # model ถูกเรียกเฉพาะเมื่อมี task ที่ต้องตอบจริง — ctx ว่าง หรือ turn
+    # มีแต่ typed deterministic results (compat verdict / deferred) →
+    # composition อย่างเดียว, 0 answer-model call
+    if ctx.is_empty or not ctx.task.tasks:
+        return _done(ctx=ctx, adm=adm, web=web_used)
+    answer, usage = llm.answer_typed(
+        context=ctx, shop_hint=shop,
+        persona_extra=persona_extra, model=model)
+    return _done(ctx=ctx, adm=adm, web=web_used, calls=1, usage=usage,
+                 product_text=answer)
+
+
+def _render_composition(comp) -> str:
+    """AnswerComposition → answer text: canonical-order segments + dedupe
+    identical; policy outcome render ผ่าน owner เดียว
+    (guards.policy_outcome_text); provider-error sentinel ชนะทั้งหมด —
+    failure contract: enforce escalate ต้องเห็น sentinel เดี่ยวๆ."""
+    from . import answer_context as _acx
+    from . import guards as _guards
+    if any(r.text == llm.LLM_ERROR_REPLY for r in comp.results):
+        return llm.LLM_ERROR_REPLY
+    parts: list[str] = []
+    seen: set[str] = set()
+    for r in sorted(comp.results,
+                    key=lambda r: _acx._DOMAIN_ORDER.get(r.domain, 9)):
+        text = (r.text if r.domain != "policy"
+                else _guards.policy_outcome_text(r.outcome))
+        if text and text not in seen:
+            seen.add(text)
+            parts.append(text)
+    # unresolved productish needs = explicit outcome ของตัวเอง — render
+    #   ท้ายหลัง grounded segments (deterministic จาก typed fields —
+    #   deferred needs เป็นของ domain owner อื่น ไม่ render ตรงนี้)
+    for u in comp.unanswered_needs:
+        seg = _acx._unanswered_segment(u)
+        if seg and seg not in seen:
+            seen.add(seg)
+            parts.append(seg)
+    return "\n\n".join(parts)
+
+
+def _finalize_answer(comp, *, message: str, limit: int, products,
+                     source: str, shop: str | None, model: str | None,
+                     elapsed, cost, intent, timing, steps, routing_decision,
+                     image_desc: str = "") -> ChatResponse:
+    """production finalizer เดียวของ typed path — AnswerComposition →
+    ChatResponse เดียว. render/dedupe/warranty-append/segments/composition
+    marker ทำที่นี่ครั้งเดียว — sole normal-path composition renderer;
+    downstream branch ไม่แตะ prose บน valid-marker path (enforce อาจ
+    deterministic wholesale-replace ทั้ง answer เฉพาะเมื่อ marker
+    invalid — fail-closed guard, ไม่ใช่ composition); pure function
+    ของ comp (เรียกซ้ำ byte-identical)."""
+    from . import answer_context as _acx
+    from . import guards as _guards
+    answer = _render_composition(comp) or _acx.EMPTY_CONTEXT_REPLY
+    answer = _append_base_warranty(answer, message)
+    rd = dict(routing_decision or {})
+    rd["composition"] = {
+        "domains": [r.domain for r in comp.results],
+        "unanswered": [u.need_index for u in comp.unanswered_needs],
+        "policy_text": next(
+            (_guards.policy_outcome_text(r.outcome)
+             for r in comp.results if r.domain == "policy"), None),
+        # structured provenance — deterministic segment รักษา
+        #   origin+identities+exact text; enforce validate marker shape
+        #   แล้ว exempt claims ใน span นั้น (ไม่ infer identity จาก
+        #   prose — malformed/mismatch → fail closed ไม่มี exemption)
+        "segments": [
+            {"domain": r.domain, "origin": r.origin, "text": r.text,
+             "need_indices": list(r.need_indices),
+             "subject_ids": [str(x) for x in (r.subject_ids or ())]}
+            for r in comp.results]}
+    # eval-measured spec evidence = typed product evidence ผูก identity
+    #   (ask values ไม่รวม) — artifact/audit channel; deterministic
+    #   segment claims ground ผ่าน provenance marker เท่านั้น
+    if comp.context is not None:
+        rd["spec_measured"] = list(
+            comp.context.spec_measured_facts or ())
+    return ChatResponse(
+        answer=answer,
+        answer_segments=llm.split_segments(answer),
+        products=list(products or [])[:limit],
+        shop=shop,
+        model=model,
+        source=source,
+        usage=dict(comp.usage or {}),
+        elapsed=elapsed,
+        cost=cost,
+        intent=intent,
+        timing=timing,
+        web_search_used=comp.web_used is not None,
+        web_search_reason=(comp.admission.reason
+                           if comp.web_used and comp.admission else None),
+        web_search_model=None,
+        steps=steps,
+        routing_decision=rd,
+        image_desc=image_desc,
+    )
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
     # ⚡ RC-A — output policy boundary จุดเดียว: enforce หลัง engine คืนคำตอบ
@@ -626,7 +836,7 @@ def chat(req: ChatRequest) -> ChatResponse:
     return _guards.enforce(resp, req)
 
 
-def _chat_impl(req: ChatRequest) -> ChatResponse:
+def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
     import time as _time
     _total_start = _time.time()
     # ⚡ 2B.5 — post-handoff ownership lock (production owner เดียวที่ /chat
@@ -641,12 +851,17 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         return ChatResponse(**_wf_lock._build_post_handoff_response(
             req, {"steps": [], "total_start": _total_start},
             sys.modules[__name__], llm))
+    # ⚡ Phase 4B — request-wide EvidenceSnapshot (request owner = _chat_impl):
+    #   resolve pointer ครั้งเดียวต่อ /chat request — consumer generated-source
+    #   ทุกตัวรับ captured value เดียวกัน (None คือ captured-None, ไม่ re-resolve);
+    #   pointer flip/TTL expiry ระหว่าง request ไม่เปลี่ยน generation ที่เห็น
+    _snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
     # ⚡ chatbotv3 — OpenRouter-first paradigm (2026-09-20)
     #   USE_CHAT_V3=1 หรือ req.use_v3=True → route ไป chatbotv3.engine.chat_v3
     #   ไม่กระทบ legacy/v2 (default ยังใช้ legacy/v2 ตาม USE_LEGACY_CHAT)
     if req.use_v3 or os.environ.get("USE_CHAT_V3", "0") == "1":
         from . import chatbotv3
-        _resp = chatbotv3.chat_v3(req)
+        _resp = chatbotv3.chat_v3(req, snap=_snap)
         _resp["chat_engine"] = "v3"  # ⚡ บันทึกว่าใช้ chatbotv3
         return ChatResponse(**_resp)
     # ⚡ chat_v2 — pipeline ใหม่ สลับด้วย env var หรือ per-request flag
@@ -655,7 +870,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
     #   req.use_v2=True            → บังคับ chat_v2 (สำหรับ shadowbot/replay โดยไม่กระทบ traffic จริง)
     if req.use_v2 or os.environ.get("USE_LEGACY_CHAT", "1") != "1":
         from . import chat_v2
-        _resp = chat_v2.chat_v2(req)
+        _resp = chat_v2.chat_v2(req, snap=_snap)
         _resp["chat_engine"] = "v2"  # ⚡ บันทึกว่าใช้ chat_v2
         return ChatResponse(**_resp)
     _timing_breakdown: dict[str, float] = {}  # pass1, retrieval, llm, total
@@ -759,12 +974,10 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             # ไม่มี strong keyword ต่างจาก anchor → ใช้ anchor
             return _anchor_sub
 
-        # 4. ไม่มี anchor → intent
-        if intent_result and intent_result.get("product_type") == "charger":
-            _intent_sub_val = intent_result.get("charger_subtype")
-            if _intent_sub_val in ("adapter", "cable", "set", "car_charger",
-                                   "wireless", "desktop", "socket"):
-                return _intent_sub_val
+        # 4. ไม่มี anchor → intent (Phase 6: table ย้ายไป route_context helper)
+        _int_sub_norm = _rc.intent_product_scope(intent_result or {})[1]
+        if _int_sub_norm:
+            return _int_sub_norm
 
         # 5. ไม่มี anchor, ไม่มี intent → msg (แม้ไม่ใช่ strong keyword)
         if _msg_sub:
@@ -969,12 +1182,25 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #              (3) tag เคยปรากฏใน history (ลูกค้าแชร์การ์ดไว้ก่อนหน้า แล้วถามต่อ
         #                  เช่น "โหลดแอปอื่นมาดูได้ไหม") — ใช้เป็น anchor ต่อ ถ้าคำถามปัจจุบัน
         #                  ไม่ได้เอ่ยถึงรุ่น/แบรนด์อื่นที่ชัดเจน (ไม่ใช่การเปลี่ยนหัวข้อ)
+        # ⚡ Phase 8 — grouped-selection flag อ่านครั้งเดียวต่อ turn (ก่อน
+        #   item-tag block — grouped path ต้องรู้ตั้งแต่ history-anchor scan);
+        #   mid-turn flip = ทั้งก้อนเดิมใช้ค่าเดียวกัน
+        _sel_flag = False
+        try:
+            from . import runtime_config as _rcfg
+            _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
+        except Exception:
+            _sel_flag = False
         _tagged_item_id = req.item_id or _extract_item_id_tag(req.message)
         _is_from_history_anchor = False
         _hybrid_anchor_card = None  # ⚡ 2026-09-12 — anchor สำหรับ hybrid merge (compat+target_device)
         # ⚡ 2026-09-16 — default anchor_card=None (กัน UnboundLocalError เมื่อไม่มี _tagged_item_id)
         anchor_card = None
-        if not _tagged_item_id and history:
+        # ⚡ Phase 10B — grouped path มี ConversationSubjectSet + resolver เป็น
+        #   owner เดียวของ subject continuity; history tag scan ข้างล่างเป็น
+        #   legacy fallback เท่านั้น — ถ้าปล่อยทั้งสอง anchor จะไหลเข้า
+        #   tag_item_ids ทุกเทิร์น → poison subject_refs/clobber persisted set
+        if not _tagged_item_id and history and not _sel_flag:
             _current_model_kw = knowledge_base.extract_model_keywords(req.message)
             # ⚡ ถ้ามี model keyword ของสินค้าอื่น → new topic (เปลี่ยนรุ่น)
             # ⚡ ถ้ามี new topic keywords → new topic
@@ -1278,7 +1504,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         # ===== Phase 6 — แก้ hardcoded detection ให้ใช้ intent_result เป็นหลัก =====
         # Confidence threshold: ใช้ 0.7 (สอดคล้องกับ warranty override เดิม)
         _INTENT_CONF_THRESHOLD = 0.7
-        _intent_conf = float(_intent_result.get("confidence") or 0)
+        _intent_conf = _rc.intent_confidence(_intent_result)
         _intent_name = _intent_result.get("intent")
         _intent_gq = _intent_result.get("general_qtype")
 
@@ -1379,6 +1605,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 active_anchor=(
                     {"item_id": _sv.active_item_id}
                     if _sv and _sv.active_item_id else None),
+                tag_item_ids=(
+                    (_tagged_item_id,) if _tagged_item_id else ()),
                 intent_result=_intent_result,
             )
         except Exception:
@@ -1426,6 +1654,20 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 web_search_used=False, steps=list(_steps),
                 timing={"total": round(_time.time() - _total_start, 3)},
             )
+        if _turn_action == "greeting":
+            # typed social turn — deterministic greeting ตอบตรง (deterministic
+            #   reply เหมือน no_reply/clarify); ไม่เข้า retrieval/resolver
+            #   → persisted subject set ไม่ถูกแตะ
+            return ChatResponse(
+                answer="สวัสดีค่ะ สนใจสินค้าตัวไหนหรือมีอะไรให้ช่วยไหมคะ",
+                products=[], source="greeting", shop=req.shop,
+                model=model_name,
+                usage={"prompt": 0, "output": 0, "total": 0},
+                intent=(_intent_result
+                        if isinstance(_intent_result, dict) else {}),
+                web_search_used=False, steps=list(_steps),
+                timing={"total": round(_time.time() - _total_start, 3)},
+            )
         if _turn_action == "handoff":
             # ⚡ correction — plan เป็น owner เดียวของ action นี้: ส่ง decision
             #   ให้ transport (เลิก re-detect intent) + ห้าม fallthrough ไป bot
@@ -1456,6 +1698,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
 
         # ===== Tax invoice + TISI handlers (ย้ายไป handoffs.post_intent_handoffs) =====
         _phr = _handoffs.post_intent_handoffs(req, {
+            "snap": _snap,
             "is_tax_invoice": _is_tax_invoice,
             "bot_name": _bot_name,
             "steps": _steps,
@@ -1513,15 +1756,69 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if _subj_explicit:
             _subject_ev["explicit_ids"] = _subj_explicit
         if not (_tagged_item_id or anchor_card or _hybrid_anchor_card
-                or _current_has_model or _is_claim_request):
-            _subject_res = conversation_products.resolve_subjects(
-                _subject_effective, (req.message or "").lower(),
-                subject_scope=_plan_scope,
-                subject_count=_plan_count,
-                signal_confidence=_plan_sig_conf)
-            if (_subject_res.outcome == "resolved"
+                or _is_claim_request):
+            # explicit-subject gate: typed TurnPlan surface เท่านั้น —
+            #   subject_refs ไม่ว่าง = ข้อความมี explicit subject identity
+            #   ของตัวเอง (codes/item refs) → turn นี้ owned โดย explicit
+            #   channel (pair/explicit) → resolver ไม่ต้องทำงาน; target-side
+            #   codes (post-connector) ไม่ใช่ subject → ไม่ veto
+            _has_explicit_subject = bool(_turn_plan and any(
+                n.subject_refs for n in _turn_plan.needs))
+            _subj_refs_all = tuple(dict.fromkeys(
+                str(r) for n in (_turn_plan.needs if _turn_plan else ())
+                for r in n.subject_refs if str(r).strip()))
+            # item-id refs (digit) = explicit identity เดิม → veto resolver
+            #   เหมือนก่อน; code-shaped refs = name-level ref — consult
+            #   resolver เฉพาะ explicit scope เพื่อผูก persisted subject
+            #   เดิมผ่าน code index (ห้าม substitute สินค้าใหม่ด้วยของเก่า)
+            _has_item_ref = any(str(r).isdigit() for r in _subj_refs_all)
+            _consult = (not _has_item_ref
+                        and (not _has_explicit_subject
+                             or _plan_scope == "explicit"))
+            if _consult:
+                _persisted_codes = None
+                if (_has_explicit_subject
+                        and _subject_effective is not None
+                        and getattr(
+                            _subject_effective, "subject_ids", ())):
+                    # code index จาก timeline card names ที่ load อยู่แล้ว
+                    #   (canonical _extract_codes owner เดิม — DB read +0)
+                    from .scripts.unit_classifier import _extract_codes
+                    _persisted_codes = {}
+                    for _p in (_subject_products or ()):
+                        _pid = _p.get("item_id")
+                        if _pid is None:
+                            continue
+                        _sid = str(conversation_products._to_serializable(_pid))
+                        if _sid not in _subject_effective.subject_ids:
+                            continue
+                        _codes = tuple(_extract_codes(
+                            str((_p.get("card") or {}).get("name")
+                                or _p.get("name") or "")))
+                        if _codes:
+                            _persisted_codes[_sid] = _codes
+                _subject_res = conversation_products.resolve_subjects(
+                    _subject_effective, (req.message or "").lower(),
+                    subject_scope=_plan_scope,
+                    subject_count=_plan_count,
+                    signal_confidence=_plan_sig_conf,
+                    subject_refs=_subj_refs_all,
+                    persisted_code_index=_persisted_codes)
+            if (_subject_res and _subject_res.outcome == "resolved"
                     and _subject_res.subject_set):
                 _subject_ev["resolved"] = _subject_res.subject_set
+                # deictic ownership boundary: current_single resolve ได้
+                #   canonical id เดียว → stamp เข้า typed need.subject_refs
+                #   (exact-item authority — slot/request/selection จำกัด
+                #   identity เดียว; owner = turn_decision)
+                if _turn_plan is not None:
+                    _stamped_needs = _td.apply_resolved_subject_refs(
+                        _turn_plan.needs,
+                        _subject_res.subject_set.subject_ids,
+                        plan_scope=_plan_scope)
+                    if _stamped_needs != _turn_plan.needs:
+                        _turn_plan = _dc_replace(
+                            _turn_plan, needs=_stamped_needs)
         if _subject_res and _subject_res.outcome == "clarify":
             return ChatResponse(
                 answer=("ขอโทษค่ะ ลูกค้าหมายถึงสินค้าตัวไหนคะ "
@@ -1552,13 +1849,14 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         _policy_carry = _mixed_claim_carry = ""
         _conv_active_card = None
         _subject_cards: list[dict] = []
+        _ref_regex_products: list[dict] = []   # ผูกก่อนเสมอ — _rd_extra() อ่าน
         if (_subject_res and _subject_res.outcome == "resolved"
                 and _subject_res.subject_set):
             try:
                 _subject_cards = conversation_products.materialize_subject_cards(
                     db, _subject_res.subject_set.subject_ids[:5],
                     products=_subject_products,
-                    shop_filter=req.shop, message=req.message)
+                    shop_filter=req.shop, message=req.message, snap=_snap)
             except Exception as _e:
                 print(f"[SUBJECT-RES] materialize error: {_e}", file=sys.stderr)
                 _subject_cards = []
@@ -1570,6 +1868,24 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         elif anchor_card and not _hybrid_anchor_card:
             _subject_cards = [anchor_card]
             _conv_active_card = anchor_card
+        # history reference channel (grouped เท่านั้น) — subject set เดิมที่
+        #   ไม่ถูก anchor/resolve ใน turn นี้ เข้าเป็น reference evidence
+        #   (historical_evidence role) ไม่ใช่ subject ของคำถามใหม่; identity
+        #   continuity ยังเป็น resolver เจ้าของเดียว
+        _history_cards: list[dict] = []
+        if (_sel_flag and _productish_need and not _subject_cards
+                and not _has_explicit_subject
+                and _subject_effective is not None
+                and getattr(_subject_effective, "subject_ids", ())):
+            try:
+                _history_cards = conversation_products.materialize_subject_cards(
+                    db, list(_subject_effective.subject_ids)[:3],
+                    products=_subject_products,
+                    shop_filter=req.shop, message=req.message, snap=_snap)
+            except Exception as _e:
+                print(f"[HISTORY-REF] materialize error: {_e}",
+                      file=sys.stderr)
+                _history_cards = []
         # compare pair ctx — plan compare need หรือ persisted relation=compare;
         #   ต้อง subject ≥2 (set เดี่ยวไม่มีอะไรเทียบ)
         if (not _anchor_compare_ctx and len(_subject_cards) >= 2
@@ -1605,6 +1921,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
 
         # ===== Warranty claim state machine (ย้ายไป warranty_flow.handle_warranty_flow_legacy) =====
         _wfr = _warranty_flow.handle_warranty_flow_legacy(req, {
+            "snap": _snap,
             "anchor_compare_ctx": _anchor_compare_ctx,
             "bot_name": _bot_name,
             "image_desc_out": _image_desc_out,
@@ -1636,17 +1953,189 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             general_qtype = _general_qtype_bypass(general_qtype, req.message)
             if _gq_before and not general_qtype:
                 print(f"[INTENT] general_qtype {_gq_before} → bypass to product flow", file=sys.stderr)
+        _pdec = None          # typed PolicyDecision — object เดียวต่อ turn
+        _pdec_ptype = ""      # policy_type ของ decision (ใส่ใน routing_decision)
+        _pd_compose = False   # Phase 8 — typed composition gate (flag-ON only)
+        def _rd_extra() -> dict:
+            """typed decision + canonical subject identities ที่ต้องติดไป
+            กับ routing_decision ทุก return site — guards.enforce (answer
+            boundary เดียว) อ่าน policy_decision/subject_ids จากที่นี่.
+            """
+            _d: dict = {}
+            if _pdec is not None:
+                _d["policy_decision"] = {
+                    "policy_type": _pdec_ptype,
+                    **_dc_asdict(_pdec)}
+            # grouped path: subject_ids = resolved subject เท่านั้น —
+            # legacy ref-regex/anchor candidates ไม่ใช่ typed subject
+            # authority (ปนเข้า → len>1 → spec_claim fail-closed ทั้งคำตอบ)
+            _sc = list(_subject_cards or [])
+            if not _sel_flag:
+                _sc += list(_ref_regex_products or [])
+                for _ac in (anchor_card, _hybrid_anchor_card):
+                    if _ac:
+                        _sc.append(_ac)
+            from . import candidate_pool as _pool  # _cp ถูก shadow เป็น conversation_products ข้างบน
+            _sids: list[str] = []
+            for _c in _sc:
+                _k = _pool._identity_key(_c)[0]
+                if _k and _k not in _sids:
+                    _sids.append(_k)
+            if _sids:
+                _d["subject_ids"] = _sids
+            return _d
+
         if general_qtype:
+            # Phase 5 — typed policy decision ก่อน prose explanation:
+            #   records มาจาก active_policy_rules seam เท่านั้น (production
+            #   คืน () → outcome=unknown/admin_review ไม่ใช่ eligible);
+            #   FAQ prose อธิบาย process ได้ แต่ตัดสิน eligibility ไม่ได้;
+            #   object เดียวกันต้องไหลถึง answer boundary ทุก path ที่
+            #   return ออกไป (general / mixed / model-item) — H2
+            if general_qtype == "return_policy":
+                _pdec_ptype = "return_exchange"
+                _pdec = policy_resolver.resolve_policy(
+                    policy_resolver.build_policy_query(
+                        policy_type=_pdec_ptype, shop=req.shop,
+                        cards=_subject_cards or (),
+                        intent_result=_intent_result,
+                        event_time=_time.strftime("%Y-%m-%d")),
+                    policy_resolver.active_policy_rules())
+            # Phase 5 closeout — return_policy typed decision owns the
+            #   response AND required action before any LLM call:
+            #   - mixed product need → fail-closed handoff (product LLM
+            #     would see the raw policy question and can contradict the
+            #     typed outcome — R5 untyped prose blob; Phase 6/7/8 typed
+            #     segments are the replacement)
+            #   - unknown/admin_review → the answer promises admin review,
+            #     so an authoritative `_send_handoff` must confirm it;
+            #     failed transport → HANDOFF_FAILED_REPLY (never claim
+            #     review without a confirmed handoff)
+            #   - eligible/ineligible → deterministic render, zero model
+            #   typed decision stays in routing_decision as diagnostics.
+            if _pdec is not None:
+                _pd_mixed = (_current_has_model or _tagged_item_id
+                             or (_productish_need and (
+                                 _subject_cards or anchor_card
+                                 or _hybrid_anchor_card)))
+                # Phase 8 — typed composition gate: flag ON + productish
+                #   need + authoritative outcome (eligible/ineligible) →
+                #   product need ทำงานต่อผ่าน typed boundary; _pdec ไหล
+                #   เป็น typed input (ไม่ใช่ prose); unknown/admin_review/
+                #   flag OFF → precedence เดิม (handoff/pure render)
+                _pd_compose = bool(
+                    _sel_flag and _productish_need
+                    and _pdec.outcome in ("eligible", "ineligible"))
+                # already-resolved safe cards only — ห้าม fetch/retrieve
+                #   เพิ่มเพื่อ presentation
+                from . import candidate_pool as _pool
+                _pd_cards: list[dict] = []
+                _pd_seen: set = set()
+                for _c in (list(_subject_cards or [])
+                           + list(_ref_regex_products or [])
+                           + [anchor_card, _hybrid_anchor_card]):
+                    if not _c:
+                        continue
+                    _k = _pool._identity_key(_c)[0] or str(
+                        _c.get("item_id") or _c.get("name"))
+                    if _k in _pd_seen:
+                        continue
+                    _pd_seen.add(_k)
+                    _pd_cards.append(_c)
+                if (_pd_mixed and not _pd_compose) or _pdec.outcome in (
+                        "unknown", "admin_review"):
+                    from . import guards as _guards
+                    from . import responses as _resp_mod
+                    _pd_reason = ("policy_mixed_review" if _pd_mixed
+                                  else "policy_review_required")
+                    _pd_ok = bool(_send_handoff(
+                        req, None, reason=_pd_reason,
+                        claim={"topic": ("การเปลี่ยน/คืนสินค้าเฉพาะรุ่น"
+                                         if _pd_mixed
+                                         else "การเปลี่ยน/คืนสินค้า")},
+                        simulate=True,
+                        log_tag=("POLICY-MIXED" if _pd_mixed
+                                 else "POLICY-REVIEW"),
+                    )) if req.conversation_id else False
+                    _pd_text = (_guards._POLICY_TEXT_ADMIN_REVIEW if _pd_ok
+                                else _resp_mod.HANDOFF_FAILED_REPLY)
+                    print(f"[{_pd_reason.upper().replace('_', '-')}] "
+                          f"return_policy outcome={_pdec.outcome} "
+                          f"mixed={_pd_mixed} → fail-closed handoff "
+                          f"ok={_pd_ok}", file=sys.stderr)
+                    return ChatResponse(
+                        answer=_pd_text,
+                        answer_segments=llm.split_segments(_pd_text),
+                        products=_pd_cards[:req.limit],
+                        shop=req.shop,
+                        model=model_name,
+                        source=("policy_mixed_handoff" if _pd_mixed
+                                else "policy_review_handoff"),
+                        usage={"prompt": 0, "output": 0, "total": 0},
+                        intent=_intent_result if isinstance(_intent_result, dict) else {},
+                        web_search_used=False,
+                        steps=_steps,
+                        timing={"total": round(_time.time() - _total_start, 3)},
+                        handoff_to_admin=_pd_ok,
+                        handoff_reason=_pd_reason if _pd_ok else None,
+                        routing_decision={**_routing(
+                            "handoff" if _pd_ok else "bot_reply",
+                            f"return_policy {_pdec.outcome} "
+                            f"{'mixed' if _pd_mixed else 'pure'} → "
+                            "fail-closed admin review (typed decision = "
+                            "diagnostics; no LLM invoked)" if _pd_ok else
+                            f"return_policy {_pdec.outcome} "
+                            f"{'mixed' if _pd_mixed else 'pure'} → handoff "
+                            "transport failed — no eligibility conclusion "
+                            "emitted"),
+                            **_rd_extra()},
+                        image_desc=_image_desc_out,
+                    )
+                if _pd_compose:
+                    # Phase 8 — mixed compose: หลุดไป product flow โดย
+                    #   _pdec ยังผูกอยู่ (typed input ของ boundary —
+                    #   policy evidence ไม่เข้า product retrieval prompt)
+                    general_qtype = None
+                else:
+                    # pure eligible/ineligible — deterministic render เจ้าของ
+                    #   decision เดียว; enforce re-render ค่าเดิม + marker
+                    #   (byte-stable idempotent)
+                    from . import guards as _guards
+                    _pd_text = _guards.policy_outcome_text(_pdec.outcome)
+                    print(f"[POLICY-DECISION] pure return_policy → "
+                          f"deterministic outcome={_pdec.outcome}",
+                          file=sys.stderr)
+                    return ChatResponse(
+                        answer=_pd_text,
+                        answer_segments=llm.split_segments(_pd_text),
+                        products=_pd_cards[:req.limit],
+                        shop=req.shop,
+                        model=model_name,
+                        source="policy_decision",
+                        usage={"prompt": 0, "output": 0, "total": 0},
+                        intent=_intent_result if isinstance(_intent_result, dict) else {},
+                        web_search_used=False,
+                        steps=_steps,
+                        timing={"total": round(_time.time() - _total_start, 3)},
+                        routing_decision={**_routing(
+                            "bot_reply",
+                            f"pure return_policy → deterministic typed "
+                            f"outcome={_pdec.outcome} — zero model, no handoff"),
+                            **_rd_extra()},
+                        image_desc=_image_desc_out,
+                    )
             # ถ้าเป็น warranty_policy/return_policy แต่ message มี model keyword (เช่น "P01 รับประกันกี่ปี")
             # หรือมี item_id (ลูกค้าคลิกสินค้ามา) ให้ skip general flow ไป product flow แทน
             # เพราะลูกค้าถามรับประกันของสินค้าเฉพาะรุ่น ต้องดึงสินค้า (รวม UNLIST/sold_out) มาให้ LLM ตอบ
             if general_qtype in ("warranty_policy", "return_policy") and (_current_has_model or _tagged_item_id):
                 print(f"[INTENT] warranty_policy with model/item_id → skip general, go to product flow", file=sys.stderr)
                 general_qtype = None
-            elif _productish_need and (_subject_cards or _tagged_item_id or anchor_card
-                                       or _hybrid_anchor_card or _current_has_model):
-                # ⚡ Phase 2C.3 — mixed product+policy need: policy context ติดไปเป็น
-                #   extra_context ของ product answer; gate = product side มี concrete subject
+            elif (_productish_need and not _pd_compose
+                  and (_subject_cards or _tagged_item_id or anchor_card
+                       or _hybrid_anchor_card or _current_has_model)):
+                # ⚡ Phase 2C.3 — mixed product+policy need: non-eligibility
+                #   context ติดไปเป็น extra_context ของ product answer;
+                #   gate = product side มี concrete subject
                 _gen_shop_filter = req.shop if general_qtype in ("categories", "brands") else None
                 _gen_res = knowledge_base.build_general_context(
                     general_qtype, mongo_db=db, shop_filter=_gen_shop_filter,
@@ -1654,7 +2143,11 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 if _gen_shop_filter and not _gen_res:
                     _gen_res = knowledge_base.build_general_context(
                         general_qtype, mongo_db=db)
-                if _gen_res and _gen_res.get("context"):
+                # R3 — return_policy eligibility มี typed owner แล้ว:
+                #   FAQ/decision prose ห้าม delegate ให้ product LLM —
+                #   carry เฉพาะ qtype อื่น (context ที่ไม่เกี่ยว eligibility)
+                if (_gen_res and _gen_res.get("context")
+                        and general_qtype != "return_policy"):
                     _policy_carry = _gen_res["context"]
                 print(f"[MIXED-NEED] general_qtype={general_qtype} + productish need → carry policy ctx ({len(_policy_carry)} chars) ไป product flow", file=sys.stderr)
                 general_qtype = None
@@ -1703,7 +2196,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     routing_decision={**_routing("bot_reply", f"general_qtype: {general_qtype} — ไม่โดน trigger/shop_settings → บอทตอบ"),
                                       # ⚡ NEW-3 residual — แนบ KB context ให้ guards.enforce
                                       #   verify claim (เปลี่ยนได้/โปร/สต็อก) เทียบ KB จริงได้
-                                      "grounding_text": gen_context[:2000]},
+                                      "grounding_text": gen_context[:2000],
+                                      **_rd_extra()},
                     image_desc=_image_desc_out,
                 )
 
@@ -1746,7 +2240,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     cost=round(cost, 6),
                     steps=_steps,
                     routing_decision={**_routing("bot_reply", f"brand_question: {brand_q} — บอทตอบจากข้อมูลแบรนด์"),
-                                      "grounding_text": brand_result["context"][:2000]},
+                                      "grounding_text": brand_result["context"][:2000],
+                                      **_rd_extra()},
                     image_desc=_image_desc_out,
                 )
 
@@ -1779,6 +2274,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 shop=req.shop,
                 platform=req.platform or "shopee",
                 anchor_cards=_resolved_anchor_cards,
+                history_cards=_history_cards,
             )
         except Exception as _e:
             print(f"[PROFILE] build error: {_e}", file=sys.stderr)
@@ -1811,32 +2307,23 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                               "shadow_enabled": True},
                     "output": _rshadow.run_grouped_retrieval_shadow(
                         _retrieval_profile, message=req.message,
-                        shop=req.shop, platform=req.platform or "shopee"),
+                        shop=req.shop, platform=req.platform or "shopee",
+                        snap=_snap,
+                        needs=(_turn_plan.needs
+                               if _turn_plan else ())),
                 })
             except Exception as _e:
                 print(f"[SHADOW] grouped-retrieval error: {_e}",
                       file=sys.stderr)
 
         # ⚡ Task 5B3-C — grouped-retrieval selection (flag-gated)
-        #   compute ครั้งเดียว — merge เข้า products ที่ llm.answer callsites
-        #   error/empty → _grouped_sel=None → products เดิมต่อ (fallback)
+        #   flag resolution ย้ายไปก่อน _pdec gate (~1752 — Phase 8 compose
+        #   decision ต้องรู้ flag); execution ยังอยู่หลัง branch evidence
+        #   resolve (KB path ก่อน boundary ~2278 / main path ก่อน ~4459):
+        #   branch ต่อกัน mutually exclusive → run ครั้งเดียวต่อ turn
+        #   (canonical owns context เมื่อ flag ON: selected ว่าง=products ว่าง;
+        #   error/None → fail closed products=[] — legacy ไม่ re-enter เด็ดขาด)
         _grouped_sel = None
-        _sel_flag = False
-        try:
-            from . import runtime_config as _rcfg
-            _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
-        except Exception:
-            _sel_flag = False
-        if _sel_flag and _retrieval_profile is not None:
-            try:
-                from . import retrieval_runtime as _rr
-                _grouped_sel = _rr.run_grouped_selection(
-                    _retrieval_profile, message=req.message, shop=req.shop,
-                    platform=req.platform or "shopee")
-            except Exception as _e:
-                print(f"[SELECTION] grouped-retrieval error: {_e}",
-                      file=sys.stderr)
-                _grouped_sel = None
 
         # ===== ขั้นที่ 1: เช็ค Knowledge Base ก่อน =====
         # ถ้าเป็น follow-up (เช่น "เคลมยังไง", "รับประกัน") ให้เอา model จาก history มาค้น KB ด้วย
@@ -1924,7 +2411,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                             else "compat" if _compat_followup_skip_kb else "ref_indicator")
             print(f"[TIMING] KB lookup SKIPPED ({_skip_reason} follow-up)", file=sys.stderr)
         else:
-            kb_result = knowledge_base.lookup_kb(kb_query, retrieval_profile=_retrieval_profile)
+            kb_result = knowledge_base.lookup_kb(kb_query, retrieval_profile=_retrieval_profile, snap=_snap)
             print(f"[TIMING] KB lookup: {_time.time()-_t0:.2f}s  query={kb_query[:60]!r}", file=sys.stderr)
         if kb_result and kb_result.get("found"):
             kb_context = kb_result.get("context", "")
@@ -2042,7 +2529,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         shop_filter=req.shop,
                         limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
-                        retrieval_profile=_retrieval_profile,
+                        retrieval_profile=_retrieval_profile, snap=_snap,
                     )
                 print(f"[TIMING] Mongo (KB merge): {_time.time()-_t1:.2f}s  query={mongo_query[:60]!r}  products={len(mongo_products)}", file=sys.stderr)
 
@@ -2055,7 +2542,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         shop_filter=req.shop,
                         limit=_llm_ctx_limit,
                         desc_message=_desc_msg,
-                        retrieval_profile=_retrieval_profile,
+                        retrieval_profile=_retrieval_profile, snap=_snap,
                     )
                     print(f"[TIMING] Mongo (original query): {_time.time()-_t2:.2f}s  query={req.message[:60]!r}  products={len(extra_products)}", file=sys.stderr)
                     # ต่อท้าย products ที่ไม่ซ้ำ
@@ -2265,38 +2752,86 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         hybrid_anchor_card=_hybrid_anchor_card,
                         llm_ctx_limit=_llm_ctx_limit,
                         resolve_subtype_fn=_resolve_charger_subtype,
-                        retrieval_profile=_retrieval_profile,
+                        retrieval_profile=_retrieval_profile, snap=_snap,
                     )
                     if _kb_device_products:
                         merged_products = merged_products + _kb_device_products
                         print(f"[DEVICE-SPEC-LOOKUP-KB] merge {len(_kb_device_products)} สินค้าจาก re-query เข้า merged_products (now {len(merged_products)})", file=sys.stderr)
 
-                    # ⚡ Task 5B3-C — merge selected context (flag on เท่านั้น)
+                    # ⚡ Task 5B3-C — grouped execution ครั้งเดียวต่อ turn
+                    #   (หลัง branch evidence resolve: subjects/compat/kb)
+                    if _sel_flag and _retrieval_profile is not None:
+                        try:
+                            from . import retrieval_runtime as _rr
+                            _grouped_sel = _rr.run_grouped_selection(
+                                _retrieval_profile, message=req.message,
+                                shop=req.shop,
+                                platform=req.platform or "shopee",
+                                subject_cards=_subject_cards,
+                                compat_cards=_kb_device_products or (),
+                                history_cards=_history_cards,
+                                needs=(_turn_plan.needs
+                                       if _turn_plan else ()),
+                                snap=_snap,
+                                kb_fetcher=lambda *a, **k:
+                                    knowledge_base.kb_product_evidence(
+                                        db, kb_docs, shop=req.shop,
+                                        message=req.message),
+                                desc_fetcher=product_store
+                                    .fetch_description_evidence,
+                                supporting=([{"kind": "kb",
+                                              "request_id": "ch:kb",
+                                              "payload": {"text": kb_context}}]
+                                            if kb_context else ()))
+                        except Exception as _e:
+                            print(f"[SELECTION] grouped-retrieval error: {_e}",
+                                  file=sys.stderr)
+                            _grouped_sel = None
+
+                    # ⚡ Phase 7 — flag ON = typed boundary owns product context:
+                    #   AnswerTask+AnswerContext เท่านั้นที่ไปถึง LLM;
+                    #   พัง/ว่าง → deterministic reply (0 answer call);
+                    #   legacy llm.answer ไม่ re-enter
+                    if _sel_flag:
+                        from . import web_search as _ws
+                        _tb = _typed_answer_boundary(
+                            _grouped_sel,
+                            needs=(_turn_plan.needs
+                                   if _turn_plan else ()),
+                            profile=_retrieval_profile,
+                            shop=req.shop,
+                            platform=req.platform or "shopee",
+                            persona_extra=_persona_extra,
+                            model=model_name,
+                            web_search_fn=_ws.search_and_extract,
+                            policy_decision=_pdec,
+                            claim_guidance=_mixed_claim_carry)
+                        merged_products = list(
+                            _tb.context.products) if _tb.context else []
                     if _grouped_sel:
-                        merged_products = _rr.merge_selected_products(
-                            _grouped_sel["selected_cards"], merged_products,
-                            _llm_ctx_limit)
-                        if _grouped_sel.get("extra_context"):
-                            _hybrid_extra_ctx = (
-                                _hybrid_extra_ctx + "\n\n"
-                                + _grouped_sel["extra_context"]).strip()
                         _steps.append({
                             "name": "GroupedRetrievalSelection",
                             "input": {"path": "kb"},
                             "output": _grouped_sel["summary"]})
 
-                    try:
-                        answer, usage_info = llm.answer(
-                            message=req.message,
-                            products=merged_products,
-                            shop_hint=req.shop,
-                            history=_qa10,
-                            persona_extra=_persona_extra,
-                            intent_result=_intent_result,
-                            extra_context=(_vision_context + _hybrid_extra_ctx + _kb_device_extra).strip(),
-                        )
-                    except RuntimeError as exc:
-                        raise HTTPException(status_code=500, detail=str(exc))
+                    if _sel_flag:
+                        # Phase 8 M1 — callsite ไม่ render prose;
+                        #   final answer เกิดใน _finalize_answer เท่านั้น
+                        usage_info = _tb.usage
+                        answer = ""
+                    else:
+                        try:
+                            answer, usage_info = llm.answer(
+                                message=req.message,
+                                products=merged_products,
+                                shop_hint=req.shop,
+                                history=_qa10,
+                                persona_extra=_persona_extra,
+                                intent_result=_intent_result,
+                                extra_context=(_vision_context + _hybrid_extra_ctx + _kb_device_extra).strip(),
+                            )
+                        except RuntimeError as exc:
+                            raise HTTPException(status_code=500, detail=str(exc))
                     _total_elapsed = _time.time() - _total_start
 
                     prompt_t = usage_info.get("prompt", 0)
@@ -2323,6 +2858,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         },
                     })
                     # record LLM2 step for KB path
+                    #   flag ON — finalizer render เดียว → output ว่างไว้
+                    #   แล้วเติมจาก resp.answer หลัง _finalize_answer
                     _steps.append({
                         "name": "LLM2",
                         "model": model_name,
@@ -2341,6 +2878,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                             "answer_full_length": len(answer),
                         },
                     })
+                    _llm2_step_idx = len(_steps) - 1
                     # ส่ง merged_products เป็น products (เพื่อให้ frontend แสดงได้)
                     products = [knowledge_base._kb_doc_to_card(d) if "_kb_only" in d else d for d in merged_products]
                     # dedup สินค้าที่ชื่อใกล้เคียงกัน (เช่น P01 ซ้ำหลาย listing ต่าง prefix โปร)
@@ -2361,7 +2899,11 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                             "แล้วแนะนำเฉพาะสินค้า status=NORMAL เท่านั้น"
                         )
                         _add_context_note(products, _kb_unlist_note)
-                    answer = _append_base_warranty(answer, req.message, claim_guidance=_mixed_claim_carry)
+                    if not _sel_flag:
+                        # flag ON: claim guidance + warranty append เป็น
+                        #   composition segment/finalizer job — ห้ามแตะ
+                        #   answer ที่ callsite
+                        answer = _append_base_warranty(answer, req.message, claim_guidance=_mixed_claim_carry)
                     _timing_breakdown["total"] = round(_time.time() - _total_start, 3)
 
                     # ── Web search fallback (ด่านสุดท้าย) ──
@@ -2370,7 +2912,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     from . import web_search as _ws_kb_check
                     _kb_ws_used = False
                     _ws_r: dict = {"search_used": False, "search_model": ""}
-                    if _ws_kb_check.is_configured():
+                    # Phase 7 — flag ON: web admission+search ทำก่อน answer
+                    # ที่ _typed_answer_boundary แล้ว → post-answer gate ปิด
+                    if _ws_kb_check.is_configured() and not _sel_flag:
                         _kb_should_search, _kb_search_reason = _ws_kb_check.should_use_web_search(
                             answer=answer,
                             intent_result=_intent_result,
@@ -2394,6 +2938,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 vision_context=_vision_context,
                                 do_kb_lookup=False,  # KB branch ไม่ re-query KB (มี KB อยู่แล้ว)
                                 do_model_code_regex=False,  # KB branch ไม่ใช้ model code regex
+                                snap=_snap,
                                 do_dedup_rerank=False,  # KB branch ไม่ dedup/rerank (ใช้ products เดิม)
                                 req_limit=req.limit,
                                 retrieval_profile=_retrieval_profile,
@@ -2420,12 +2965,40 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 print(f"[WEB-SEARCH] KB branch reanswer done  total={_total_elapsed:.2f}s  products={len(products)}", file=sys.stderr)
 
                     # ⚡ Legacy Fix — source label สะท้อน web search ที่ใช้
-                    _kb_source = "knowledge_base+mongo+web_search" if _kb_ws_used else "knowledge_base+mongo"
+                    _kb_source = ("knowledge_base+mongo+web_search"
+                                  if (_kb_ws_used or
+                                      (_sel_flag and _tb.web_used))
+                                  else "knowledge_base+mongo")
                     # ⚡ บันทึก suggestion products ลง conversation_products timeline
                     #    กัน case: kb+mongo ตอบแล้วไม่บันทึก → active product ว่าง
                     #    → คำถามถัดไป (เช่น "ขอลิงค์กับรูป") ไม่มี active ใช้ → ดึงสินค้าอื่นมาแทน
                     _record_suggestion_products(req, products[:req.limit],
                                                 subject_evidence=_subject_ev)
+                    if _sel_flag:
+                        # Phase 8 — finalizer เดียวของ typed path;
+                        #   LLM2 step สังเกต finalized answer หลัง render
+                        #   (resp.steps เป็น list copy ของ _steps —
+                        #   patch บน resp.steps ตรง ๆ)
+                        _resp = _finalize_answer(
+                            _tb, message=req.message, limit=req.limit,
+                            products=products, source=_kb_source,
+                            shop=req.shop, model=model_name,
+                            elapsed=round(_total_elapsed, 2),
+                            cost=round(cost, 6),
+                            intent=_intent_result,
+                            timing=_timing_breakdown, steps=_steps,
+                            routing_decision={
+                                **_routing(
+                                    "bot_reply",
+                                    "kb+mongo: พบใน knowledge base + "
+                                    "product store → บอทตอบ"),
+                                **_rd_extra()},
+                            image_desc=_image_desc_out)
+                        _resp.steps[_llm2_step_idx]["output"] = {
+                            "answer": _resp.answer[:500],
+                            "answer_full_length": len(_resp.answer),
+                        }
+                        return _resp
                     return ChatResponse(
                         answer=answer,
                         answer_segments=llm.split_segments(answer),
@@ -2442,7 +3015,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         web_search_reason=_kb_search_reason if _kb_ws_used else None,
                         web_search_model=_ws_r.get("search_model") if _kb_ws_used else None,
                         steps=_steps,
-                        routing_decision=_routing("bot_reply", "kb+mongo: พบใน knowledge base + product store → บอทตอบ"),
+                        routing_decision={**_routing("bot_reply", "kb+mongo: พบใน knowledge base + product store → บอทตอบ"),
+                                          **_rd_extra()},
                         image_desc=_image_desc_out,
                     )
 
@@ -2583,7 +3157,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     constraints["material"] = mat
                     break
             # device: generic token extractor — ไม่ hardcode ชื่อรุ่น (ครอบทุก device ปัจจุบัน+อนาคต)
-            _dev_tok = device_compat._extract_device_token(low)
+            _dev_tok = next((cn or rw for rw, cn in
+                             device_compat._device_candidates(low)), None)
             if _dev_tok:
                 constraints["device"] = _dev_tok
             return constraints
@@ -3348,7 +3923,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if not _ref_regex_products and not _ref_handled:
             try:
                 _fuzzy_products = product_store.fuzzy_match_products(
-                    db, req.message, shop=req.shop, limit=5, score_threshold=75
+                    db, req.message, shop=req.shop, limit=5, score_threshold=75,
+                    snap=_snap,
                 )
                 if _fuzzy_products:
                     _ref_regex_products = _fuzzy_products
@@ -3541,7 +4117,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     is_compat_check=False,
                     skip_charger_subtype=True,
                     product_types_override=set(),
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
             else:
                 # ⚡ ใช้ charger_subtype เป็น override เพื่อกัน retrieval_message ปนเปื้อน
@@ -3593,7 +4169,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                                 shop_filter=req.shop,
                                 limit=5,
                                 desc_message=desc_message,
-                                retrieval_profile=_retrieval_profile,
+                                retrieval_profile=_retrieval_profile, snap=_snap,
                             )
                             for _p in _sub:
                                 _iid = str(_p.get("item_id") or _p.get("id") or "")
@@ -3618,7 +4194,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         skip_charger_subtype=_skip_sub,
                         charger_subtype_override=_intent_sub,
                         # ⚡ Phase 3 — RAG ไม่กรอง status/stock (LLM prompt กรองตอนแนะนำขาย)
-                        retrieval_profile=_retrieval_profile,
+                        retrieval_profile=_retrieval_profile, snap=_snap,
                     )
             # ⚡ ปิด block if not _ref_regex_products (ข้าม fetch ถ้ามี active product แล้ว)
         print(f"[TIMING] fetch_products: {_time.time()-_t1:.2f}s  (retrieval={retrieval_message!r})  products={len(products)}", file=sys.stderr)
@@ -3645,6 +4221,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 web_search_used=False,
                 steps=[],
                 timing={"total": round(_time.time() - _total_start, 3)},
+                routing_decision={**_routing(
+                    "bot_reply", "superlative_no_match: ไม่ระบุประเภทสินค้า → ถามกลับ"),
+                    **_rd_extra()},
             )
 
         # Dedup สินค้าที่ชื่อเหมือนกันหรือใกล้เคียงกันมาก
@@ -3657,64 +4236,23 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         products = product_store._dedupe_products(products, log_label="DEDUP")
 
         # ── Superlative ranking: เรียงสินค้าตามค่าที่ลูกค้าถาม "สุด" ──
-        # เช่น "ชาร์จไวสุด/แรงสุด" → extract ค่า W จากชื่อ/spec แล้ว sort จากมากไปน้อย
-        # เพื่อให้สินค้าที่แรงสุดจริงขึ้น top ของ context ที่ส่ง LLM
-        # (ปัญหาเดิม: RAG sort ตาม relevance score ทั่วไป ทำให้ P23 210W ตกไปอันดับ 11+)
-        # ใช้ spec fields จาก CSV schema: output_power_w, capacity_mah, package_weight
-        # ⚡ ขยาย: trigger เมื่อ superlative_q หรือ compatibility_check (ถามหาสินค้าที่รองรับ device)
-        # เพื่อให้สินค้าสเปคสูงสุดที่รองรับขึ้น top ของ context
-        _is_compat_check = _intent_result.get("intent") == "compatibility_check"
-        _is_charger_compat = _is_compat_check and _intent_result.get("product_type") in ("charger", "powerbank")
-        if (_is_superlative_q or _is_charger_compat) and len(products) > 1:
-            # ⚡ Phase 3b — _extract_max_watt ย้ายไปเป็น module-level helper `_extract_max_wattage`
-            def _extract_max_mah(p: dict) -> float:
-                """extract ค่า mAh สูงสุดจาก spec field ก่อน ถ้าไม่มีค่อยดึงจากชื่อ."""
-                spec_mah = p.get("capacity_mah") or p.get("specs", {}).get("capacity_mah")
-                if spec_mah and isinstance(spec_mah, (int, float)) and spec_mah > 0:
-                    return float(spec_mah)
-                variants = p.get("variants") or []
-                max_v = 0.0
-                for v in variants:
-                    vm = v.get("capacity_mah")
-                    if vm and isinstance(vm, (int, float)) and vm > max_v:
-                        max_v = float(vm)
-                if max_v > 0:
-                    return max_v
-                name = p.get("name") or p.get("item_name") or ""
-                if not name:
-                    return 0.0
-                matches = re.findall(r"(\d+(?:\.\d+)?)\s*mah\b", name.lower())
-                if not matches:
-                    return 0.0
-                return max(float(m) for m in matches)
-            def _extract_weight(p: dict) -> float:
-                """extract น้ำหนัก (kg) จาก spec field."""
-                w = p.get("package_weight") or p.get("specs", {}).get("package_weight")
-                if w and isinstance(w, (int, float)) and w > 0:
-                    return float(w)
-                return 999.0  # ถ้าไม่มีข้อมูล ให้ตกไปอยู่ท้าย (เบาสุด = น้ำหนักน้อยสุด)
-            # ตรวจว่าลูกค้าถามเรื่อง wattage (ไว/แรง) หรือ capacity (จุมากสุด) หรือ weight (เบาสุด) หรืออื่นๆ
-            _super_msg_lower = (req.message or "").lower()
-            _watt_kw = ("ไว", "แรง", "เร็ว", "w", "watt", "ชาร์จไว", "จ่ายไฟ")
-            _cap_kw = ("จุ", "ความจุ", "mah", "capacity", "แบตเยอะ", "แบตมาก")
-            _weight_kw = ("เบา", "น้ำหนัก", "weight", "เบาสุด", "น้อยสุด")
-            _is_watt_q = any(kw in _super_msg_lower for kw in _watt_kw)
-            _is_cap_q = any(kw in _super_msg_lower for kw in _cap_kw)
-            _is_weight_q = any(kw in _super_msg_lower for kw in _weight_kw)
-            # ⚡ compatibility_check สำหรับ charger/cable → sort by wattage desc เสมอ
-            # เพื่อให้สินค้าสเปคสูงสุด (เช่น 6A 240W) ขึ้น top ของ context
-            if _is_charger_compat and not _is_watt_q:
-                products.sort(key=lambda p: device_compat._extract_max_wattage(p), reverse=True)
-                print(f"[COMPAT-RANK] sort by wattage (desc)  top3: {[device_compat._extract_max_wattage(p) for p in products[:3]]}", file=sys.stderr)
-            elif _is_watt_q:
-                products.sort(key=lambda p: device_compat._extract_max_wattage(p), reverse=True)
-                print(f"[SUPERLATIVE-RANK] sort by wattage (desc)  top3: {[device_compat._extract_max_wattage(p) for p in products[:3]]}", file=sys.stderr)
-            elif _is_cap_q:
-                products.sort(key=lambda p: _extract_max_mah(p), reverse=True)
-                print(f"[SUPERLATIVE-RANK] sort by capacity (desc)  top3: {[_extract_max_mah(p) for p in products[:3]]}", file=sys.stderr)
-            elif _is_weight_q:
-                products.sort(key=lambda p: _extract_weight(p))
-                print(f"[SUPERLATIVE-RANK] sort by weight (asc)  top3: {[_extract_weight(p) for p in products[:3]]}", file=sys.stderr)
+        # Phase 6 — ranking เป็น structured field บน TurnNeed (owner:
+        #   route_context.detect_ranking + compat-check intent); compat need
+        #   ชนะ product need (parity: charger/powerbank compat → wattage เสมอ)
+        # spec fields ตาม CSV schema: output_power_w, capacity_mah, package_weight
+        _sup_rank = next(
+            (n.ranking for n in _turn_plan.needs
+             if n.ranking and n.kind == "compat"), None) or next(
+            (n.ranking for n in _turn_plan.needs if n.ranking), None)
+        if _sup_rank and len(products) > 1:
+            _rank_fn = device_compat.spec_rank_key(_sup_rank[0])
+            if _rank_fn:
+                products.sort(key=lambda p: _rank_fn(p),
+                              reverse=(_sup_rank[1] == "max"))
+                print(f"[SUPERLATIVE-RANK] sort by {_sup_rank[0]} "
+                      f"({_sup_rank[1]})  top3: "
+                      f"{[_rank_fn(p) for p in products[:3]]}",
+                      file=sys.stderr)
             # ⚡ Phase 8 — จำกัดเหลือ LLM context limit หลัง sort (ไม่ใช่ req.limit)
             #   เพราะ superlative ต้องการให้ LLM เห็นสินค้าเยอะพอเพื่อเปรียบเทียบ
             #   frontend display ยังใช้ req.limit ใน ChatResponse
@@ -3852,7 +4390,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message="charger charging adapter cable",
                     shop_filter=req.shop,
                     limit=_llm_ctx_limit,
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
                 # กรอง fallback ให้เหลือเฉพาะที่เกี่ยวข้อง:
                 # - ถ้าถาม adapter → เอา set + adapter (ไม่เอา cable เดี่ยว)
@@ -3901,7 +4439,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message="สินค้า แนะนำ มาใหม่ โปรด",  # คำค้นกว้างๆ เพื่อดึงสินค้าทั่วไปของร้าน
                     shop_filter=req.shop,
                     limit=5,
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
                 if alt_products:
                     products = alt_products
@@ -3933,7 +4471,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             _ws_guard_check.is_configured()
             and not _is_conv_active
         )
-        if not _vision_context and not _guard_ws_available:
+        if not _vision_context and not _guard_ws_available \
+                and not _sel_flag:
             try:
                 _guard_ref_models = ref_models
             except NameError:
@@ -4011,12 +4550,12 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     timing={"total": round(_time.time() - _total_start, 3)},
                     handoff_to_admin=_npf_ok,
                     handoff_reason="no_product_found" if _npf_ok else None,
-                    routing_decision=_routing(
+                    routing_decision={**_routing(
                         "handoff" if _npf_ok else "bot_reply",
                         "no_product_found: ค้นสินค้าไม่เจอ/ผลค้นไม่น่าเชื่อ → ตอบไม่พบ + handoff แอดมินตรวจสอบ"
                         if _npf_ok else
                         "no_product_found: ค้นสินค้าไม่เจอ/ผลค้นไม่น่าเชื่อ → ตอบไม่พบ (handoff ไม่สำเร็จ)",
-                    ),
+                    ), **_rd_extra()},
                 )
         # ถ้าเป็น follow-up (retrieval_message != req.message) ให้เก็บแค่สินค้า top 1
         # ที่ตรงกับ model ที่ลูกค้าถาม ไม่ส่งสินค้าอื่นปน เพื่อให้ LLM ตอบตรงจุด
@@ -4077,7 +4616,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     missing_tokens = [t for t in model_tokens if t.lower() not in seen_tokens]
                     if missing_tokens:
                         _t_kb = _time.time()
-                        kb_comp = knowledge_base.lookup_kb(" ".join(missing_tokens),
+                        kb_comp = knowledge_base.lookup_kb(" ".join(missing_tokens), snap=_snap,
                                                            retrieval_profile=_retrieval_profile)
                         if kb_comp and kb_comp.get("found"):
                             for kd in kb_comp.get("kb_docs", []):
@@ -4108,7 +4647,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     message=alt_msg,
                     shop_filter=req.shop,
                     limit=5,
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
                 # แยกกลุ่ม: UNLIST (ตอบ warranty) + NORMAL (แนะนำทางเลือก)
                 unlist_products = [p for p in products if p.get("status") != "NORMAL"]
@@ -4130,7 +4669,10 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 # สำหรับ compatibility check ให้เก็บเยอะกว่า req.limit เพื่อให้ LLM เห็นทุกรุ่น
                 # ⚡ Phase 8 — _merge_limit ใช้ _LLM_CONTEXT_LIMIT (30) ไม่ใช่ req.limit
                 #   สำหรับ compatibility check ให้เก็บเยอะกว่าปกติเพื่อให้ LLM เห็นทุกรุ่น
-                _merge_limit = max(_llm_ctx_limit * 4, 80) if _is_compat_check else _llm_ctx_limit
+                _merge_limit = max(_llm_ctx_limit * 4, 80) if (
+                    _turn_plan and any(n.kind == "compat"
+                                       for n in _turn_plan.needs)
+                ) else _llm_ctx_limit
                 products = merged[:_merge_limit]
 
         # ⚡ Phase 3d (2026-09-19) — _available_for_sale mark (ทุกกรณี นอก if has_unlist)
@@ -4384,7 +4926,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             history=history,
             existing_products=products,
             retrieval_message=retrieval_message,
-            anchor_card=anchor_card,
+            anchor_card=anchor_card, snap=_snap,
             hybrid_anchor_card=_hybrid_anchor_card,
             llm_ctx_limit=_llm_ctx_limit,
             resolve_subtype_fn=_resolve_charger_subtype,
@@ -4397,30 +4939,15 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         # ⚡ QA-KB — คำแนะนำจาก kb_qa (trigger kw เท่านั้น; model/brand scoped ใน search_qa)
         _qa_ctx = knowledge_base.qa_context(
             req.message, conversation_id=req.conversation_id,
-            retrieval_profile=_retrieval_profile)
+            retrieval_profile=_retrieval_profile, snap=_snap)
         if _qa_ctx:
             _combined_extra = (_combined_extra + "\n\n" + _qa_ctx).strip()
-        # ⚡ CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออก
-        #    ก่อน tier merge เพื่อให้ LLM เห็นเฉพาะสินค้าที่ compat จริง
-        #    ถ้ากรองแล้วว่าง/เหลือน้อย → fallback คืนทั้งหมด (ปลอดภัย ไม่ over-filter)
-        _compat_target_device = _intent_result.get("target_device") or ""
-        if _compat_target_device and products:
-            _compat_md, _asked_type = device_compat._compat_mode(
-                _intent_result.get("product_type"), req.message)
-            products = device_compat._filter_compat_products(
-                products=products,
-                device_name=_compat_target_device,
-                web_search_extra=_device_spec_extra,
-                intent_connector=_intent_result.get("device_connector"),
-                intent_min_watt=_intent_result.get("device_min_watt"),
-                compat_mode=_compat_md,
-                asked_type=_asked_type,
-                web_specs=_device_specs,
-            )
         # ⚡ Phase 3 — Tier merge ก่อนส่งเข้า LLM
         #   Tier A (exact match): MODEL-REGEX + anchor_card + hybrid_anchor_card → ใส่เสมอ ไม่ถูกตัดด้วย limit
         #   Tier B (general): vector/keyword search → เรียง normal+stock>0 ก่อน แล้วตัด limit
         #   รวม A+B เรียก _dedupe_products
+        #   (คำนวณก่อน compat filter — subject ที่ลูกค้าถามตรงรุ่นห้ามถูก
+        #    compat verdict ซ่อนออกจาก context ของคำถามตัวเอง)
         _tier_a_ids: set[str] = set()
         # เก็บ item_id จาก _ref_regex_products (MODEL-REGEX / FUZZY-MATCH / CARRY-FORWARD)
         if _ref_regex_products:
@@ -4438,6 +4965,29 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             _iid = str(_hybrid_anchor_card.get("item_id") or "")
             if _iid:
                 _tier_a_ids.add(_iid)
+        # ⚡ CODE-level compat filter — กรองสินค้าที่ connector ไม่ตรงกับอุปกรณ์ออก
+        #    ก่อน tier merge เพื่อให้ LLM เห็นเฉพาะสินค้าที่ compat จริง
+        #    ถ้ากรองแล้วว่าง/เหลือน้อย → fallback คืนทั้งหมด (ปลอดภัย ไม่ over-filter)
+        #    protected_ids = tier-A subject — ของที่ลูกค้าถามตรงไม่ถูก filter ลบ
+        # Phase 6 — device target จาก canonical profile (facts owner เดียว)
+        #   แทนการอ่าน intent_result ตรงหลัง TurnPlan
+        _compat_target_device = (
+            _retrieval_profile.target_device if _retrieval_profile else ""
+        ) or ""
+        if _compat_target_device and products:
+            _compat_md, _asked_type = device_compat._compat_mode(
+                _intent_result.get("product_type"), req.message)
+            products = device_compat._filter_compat_products(
+                products=products,
+                device_name=_compat_target_device,
+                web_search_extra=_device_spec_extra,
+                intent_connector=_intent_result.get("device_connector"),
+                intent_min_watt=_intent_result.get("device_min_watt"),
+                compat_mode=_compat_md,
+                asked_type=_asked_type,
+                web_specs=_device_specs,
+                protected_ids=_tier_a_ids,
+            )
         # ⚡ Phase 8 — Tier B limit ใช้ _LLM_CONTEXT_LIMIT (30) ไม่ใช่ req.limit
         #   เพราะนี่คือ LLM context limit (สินค้าที่ส่งเข้า llm.answer)
         #   frontend display ยังใช้ req.limit ใน products_for_response (ด้านล่าง)
@@ -4449,28 +4999,87 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         if products and _pending_context_note:
             _add_context_note(products, _pending_context_note)
             print(f"[DEBUG-3D] injected context_note len={len(_pending_context_note)} products[0]_has_note=True", file=sys.stderr)
-        # ⚡ Task 5B3-C — merge selected context (flag on เท่านั้น)
+        # ⚡ Task 5B3-C — grouped execution ครั้งเดียวต่อ turn
+        #   (หลัง branch evidence resolve: subjects/compat/QA/vision)
+        if _sel_flag and _retrieval_profile is not None:
+            # ⚡ Phase 7 — evidence เข้า typed boundary เฉพาะผ่าน closed
+            #   schema + typed attribution; raw QA prose (qa blob) ไม่ข้าม
+            #   boundary; vision ต้องผูก subject identities จาก
+            #   _subject_cards (model_codes + i:item_id)
+            _vision_refs = tuple(dict.fromkeys(
+                [m for c in (_subject_cards or [])
+                 for m in (c.get("model_codes") or ())]
+                + [f"i:{c.get('item_id')}" for c in (_subject_cards or [])
+                   if c.get("item_id")]))
+            try:
+                from . import retrieval_runtime as _rr
+                # typed data ต้องเป็น dict เดียวที่ normalize ตรง target
+                # เท่านั้น (consumer อ่านเฉพาะ dict — list shape ถูกเมิน
+                # เงียบๆ แล้วปิด web admission ผิด); ไม่ match → ไม่ emit
+                from . import answer_context as _acx
+                _device_spec_data = _acx.device_spec_for_target(
+                    _device_specs, _retrieval_profile.target_device)
+                _grouped_sel = _rr.run_grouped_selection(
+                    _retrieval_profile, message=req.message, shop=req.shop,
+                    platform=req.platform or "shopee",
+                    subject_cards=_subject_cards,
+                    compat_cards=_device_additional or (),
+                    history_cards=_history_cards,
+                    needs=(_turn_plan.needs if _turn_plan else ()),
+                    supporting=([{"kind": "vision", "text": _vision_context,
+                                   "subject_refs": _vision_refs}]
+                                if _vision_context and _vision_refs else [])
+                                + ([{"kind": "device_spec",
+                                     "target": (_retrieval_profile.target_device
+                                                or ""),
+                                     "data": {**_device_spec_data,
+                                              "source": _device_spec_data.get(
+                                                  "source") or "web-structured"}}]
+                                   if _device_spec_data else []),
+                    desc_fetcher=product_store.fetch_description_evidence,
+                    snap=_snap)
+            except Exception as _e:
+                print(f"[SELECTION] grouped-retrieval error: {_e}",
+                      file=sys.stderr)
+                _grouped_sel = None
+        # ⚡ Phase 7 — flag ON = typed boundary owns product context:
+        #   AnswerTask+AnswerContext เท่านั้นที่ไปถึง LLM; พัง/ว่าง →
+        #   deterministic reply (0 answer call); legacy llm.answer ไม่ re-enter
+        if _sel_flag:
+            from . import web_search as _ws
+            _tb = _typed_answer_boundary(
+                _grouped_sel,
+                needs=(_turn_plan.needs if _turn_plan else ()),
+                profile=_retrieval_profile,
+                shop=req.shop, platform=req.platform or "shopee",
+                persona_extra=_persona_extra,
+                model=model_name, web_search_fn=_ws.search_and_extract,
+                policy_decision=_pdec,
+                claim_guidance=_mixed_claim_carry)
+            products = list(
+                _tb.context.products) if _tb.context else []
         if _grouped_sel:
-            products = _rr.merge_selected_products(
-                _grouped_sel["selected_cards"], products, _llm_ctx_limit)
-            if _grouped_sel.get("extra_context"):
-                _combined_extra = (_combined_extra + "\n\n"
-                                   + _grouped_sel["extra_context"]).strip()
             _steps.append({"name": "GroupedRetrievalSelection",
                            "input": {"path": "main"},
                            "output": _grouped_sel["summary"]})
-        try:
-            answer, usage_info = llm.answer(
-                message=desc_message,
-                products=products,
-                shop_hint=req.shop,
-                history=_qa10,
-                persona_extra=_persona_extra,
-                intent_result=_intent_result,
-                extra_context=_combined_extra,
-            )
-        except RuntimeError as exc:
-            raise HTTPException(status_code=500, detail=str(exc))
+        if _sel_flag:
+            # Phase 8 M1 — callsite ไม่ render prose;
+            #   final answer เกิดใน _finalize_answer เท่านั้น
+            usage_info = _tb.usage
+            answer = ""
+        else:
+            try:
+                answer, usage_info = llm.answer(
+                    message=desc_message,
+                    products=products,
+                    shop_hint=req.shop,
+                    history=_qa10,
+                    persona_extra=_persona_extra,
+                    intent_result=_intent_result,
+                    extra_context=_combined_extra,
+                )
+            except RuntimeError as exc:
+                raise HTTPException(status_code=500, detail=str(exc))
         _llm_elapsed = _time.time() - _llm_start
         _total_elapsed = _time.time() - _total_start
         print(f"[TIMING] LLM: {_llm_elapsed:.2f}s  TOTAL: {_total_elapsed:.2f}s", file=sys.stderr)
@@ -4505,6 +5114,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             },
         })
         # record LLM2 step (ตัวตอบ — gemini 3.5 flash lite)
+        #   flag ON — finalizer render เดียว → output ว่างไว้
+        #   แล้วเติมจาก resp.answer หลัง _finalize_answer
         _steps.append({
             "name": "LLM2",
             "model": model_name,
@@ -4526,7 +5137,11 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                 "answer_full_length": len(answer),
             },
         })
-        answer = _append_base_warranty(answer, desc_message, claim_guidance=_mixed_claim_carry)
+        _llm2_step_idx = len(_steps) - 1
+        if not _sel_flag:
+            # flag ON: claim guidance + warranty append เป็น composition
+            #   segment/finalizer job — ห้ามแตะ answer ที่ callsite
+            answer = _append_base_warranty(answer, desc_message, claim_guidance=_mixed_claim_carry)
         # ส่ง product cards ทั้งหมดที่เป็น context ให้ frontend (เหมือนเดิม)
         # frontend จะโชว์ว่าคำตอบนี้ใช้สินค้าอะไรตัดสินใจบ้าง
         # LLM จะเลือกแนะนำไม่เกิน 3 รายการจาก context เอง (ตาม prompt)
@@ -4552,7 +5167,9 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
         #   การดึงสินค้าอื่นมาทับจะทำให้ context loss รุนแรงขึ้น
         # ⚡ Legacy Fix (2026-09-15) — ใช้ _web_search_reanswer ร่วมกับ KB branch
         from . import web_search as _ws
-        if _ws.is_configured() and not _is_conv_active:
+        # Phase 7 — flag ON: web admission+search ทำก่อน answer ที่
+        # _typed_answer_boundary แล้ว → post-answer gate (LLM2) ปิดเด็ดขาด
+        if _ws.is_configured() and not _is_conv_active and not _sel_flag:
             _should_search, _search_reason = _ws.should_use_web_search(
                 answer=answer,
                 intent_result=_intent_result,
@@ -4588,7 +5205,7 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                     do_model_code_regex=True,  # product_store branch ใช้ model code regex
                     do_dedup_rerank=True,  # product_store branch dedup + rerank
                     req_limit=req.limit,
-                    retrieval_profile=_retrieval_profile,
+                    retrieval_profile=_retrieval_profile, snap=_snap,
                 )
 
                 if _ws_r.get("search_used") and _ws_r.get("answer"):
@@ -4625,7 +5242,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
                         web_search_used=True,
                         web_search_reason=_search_reason,
                         web_search_model=_ws_r.get("search_model"),
-                        routing_decision=_routing("bot_reply", f"product_store+web_search: {_search_reason} → ค้นเพิ่มแล้วตอบ"),
+                        routing_decision={**_routing("bot_reply", f"product_store+web_search: {_search_reason} → ค้นเพิ่มแล้วตอบ"),
+                                          **_rd_extra()},
                         image_desc=_image_desc_out,
                     )
                 else:
@@ -4633,6 +5251,31 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
 
         _record_suggestion_products(req, products_for_response,
                                     subject_evidence=_subject_ev)
+        if _sel_flag:
+            # Phase 8 — finalizer เดียวของ typed path;
+            #   LLM2 step สังเกต finalized answer หลัง render
+            #   (resp.steps เป็น list copy ของ _steps —
+            #   patch บน resp.steps ตรง ๆ)
+            _resp = _finalize_answer(
+                _tb, message=desc_message, limit=req.limit,
+                products=products_for_response,
+                source=("product_store+web_search" if _tb.web_used
+                        else "product_store"),
+                shop=req.shop, model=model_name,
+                elapsed=round(_total_elapsed, 2),
+                cost=round(cost, 6),
+                intent=_intent_result, timing=_timing_breakdown,
+                steps=_steps,
+                routing_decision={
+                    **_routing("bot_reply",
+                               "product_store: ค้นพบสินค้า → บอทตอบ"),
+                    **_rd_extra()},
+                image_desc=_image_desc_out)
+            _resp.steps[_llm2_step_idx]["output"] = {
+                "answer": _resp.answer[:500],
+                "answer_full_length": len(_resp.answer),
+            }
+            return _resp
         return ChatResponse(
             answer=answer,
             answer_segments=llm.split_segments(answer),
@@ -4646,7 +5289,8 @@ def _chat_impl(req: ChatRequest) -> ChatResponse:
             intent=_intent_result,
             timing=_timing_breakdown,
             steps=_steps,
-            routing_decision=_routing("bot_reply", "product_store: ค้นพบสินค้า → บอทตอบ"),
+            routing_decision={**_routing("bot_reply", "product_store: ค้นพบสินค้า → บอทตอบ"),
+                              **_rd_extra()},
             image_desc=_image_desc_out,
         )
     finally:

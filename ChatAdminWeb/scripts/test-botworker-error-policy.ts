@@ -199,7 +199,8 @@ async function processOne(conversationId: string, mid: string, text: string, ext
   seedClaimsForCtx(ctx, conversationId);
   return svc.processMessage({
     message_id: mid, conversation_id: conversationId, shop_id: "shop_1",
-    platform: "shopee", text, claimContext: ctx, ...extra,
+    platform: "shopee", text, claimContext: ctx,
+    shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" }, ...extra,
   });
 }
 
@@ -229,7 +230,6 @@ function pauseQuery(coll: string, op: string): () => void {
 /** seed workflow ที่ trigger("wfkw") → let_ai_respond (pattern เดียวกับ E7 boundary) */
 function seedAiWorkflow() {
   mocks.state.config.workflow_enabled = true;
-  mocks.state.config.workflow_priority = "workflow_first";
   mocks.fakeColl("workflows").push({
     workflow_id: "wf_ai", name: "wf_ai", enabled: true, status: "published", is_deleted: false,
     shop_ids: ["shop_1"], platforms: ["shopee"], trigger_frequency: "every_time",
@@ -254,7 +254,7 @@ async function main() {
   svc = await import("../src/backend/service/botWorkerService");
   rt = await import("../src/backend/service/botworkerRuntime");
   botCall = (await import("../src/backend/service/botCallService")).callBot;
-  SCOPE = { config: mocks.state.config as never, global_enabled_since: new Date(0), pairs: [{ platform: "shopee", shop_id: "shop_1", cutoff: new Date(0) }] };
+  SCOPE = { config: mocks.state.config as never, global_enabled_since: new Date(0), pairs: [{ platform: "shopee", shop_id: "shop_1", config_shop_key: "shop_1", shopname: "shop_1", cutoff: new Date(0) }] };
   installFetchStub();
 
   // ═══ BW-4: HTTP error mapping → terminal bot_failed ═══════
@@ -600,9 +600,9 @@ async function main() {
     const conv = "conv_c9";
     seedConv(conv);
     seedUserMsg(conv, "m1", "q");
-    const r1 = await svc.processMessage({ message_id: "m1", conversation_id: conv, shop_id: "shop_1", platform: "shopee", text: "q" });
+    const r1 = await svc.processMessage({ message_id: "m1", conversation_id: conv, shop_id: "shop_1", platform: "shopee", text: "q", shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" } });
     assert(r1.status === "bot_answered" && callParams().fetchCalls === 1, `r1=${r1.status} fetch=${callParams().fetchCalls}`);
-    const r2 = await svc.processMessage({ message_id: "m1", conversation_id: conv, shop_id: "shop_1", platform: "shopee", text: "q" });
+    const r2 = await svc.processMessage({ message_id: "m1", conversation_id: conv, shop_id: "shop_1", platform: "shopee", text: "q", shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" } });
     assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls} — terminal must never refire`);
     assert(r2.status === "skip" || r2.status === "bot_answered" || r2.finalized === true,
       `r2=${r2.status} — terminal/duplicate must skip without refire`);

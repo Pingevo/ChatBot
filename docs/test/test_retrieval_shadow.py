@@ -105,12 +105,18 @@ def test_shadow_summary_shape_and_counts():
         return UnitEvidenceFetchResult(
             cards=({"name": "เคสทดสอบ", "product_type": "case",
                     "_available_for_sale": True, "item_id": "1",
-                    "unit_id": "u1"},),
+                    "unit_id": "u1",
+                    # canonical stamps เหมือน resolver output จริง — card ไม่มี
+                    # status fields → resolve_availability ให้ unknown/hidden
+                    # (Phase 3 semantics) ทำ eligible=0 ตั้งแต่ก่อน Phase 4A
+                    "status": "NORMAL", "total_stock": 5,
+                    "catalog_status": "active",
+                    "customer_visible": True},),
             raw_count=1, sellable_count=1, unavailable_count=0, trace=("u",))
 
     out = rs.run_grouped_retrieval_shadow(
         _profile(), message="m", shop="KingGadgets",
-        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [])
+        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [], snap=None)
     assert out["ok"] is True
     assert out["request_count"] >= 1
     assert out["counts"]["eligible"] >= 1
@@ -134,7 +140,7 @@ def test_shadow_summary_has_no_private_keys():
 
     out = rs.run_grouped_retrieval_shadow(
         _profile(), message="m", shop="s",
-        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [])
+        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [], snap=None)
     keys = set(_walk_keys(out))
     assert "_evidence" not in keys
     assert "_selection_reason" not in keys

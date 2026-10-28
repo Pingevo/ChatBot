@@ -246,6 +246,11 @@ function engineMsg(over: Record<string, unknown> = {}) {
     platform: "shopee" as const,
     text: "hello",
     testSource: "botworker" as const,
+    shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" },
+    // ⚡ EngineMessage contract — direct matchAndRun/resumeFlow callers pass the
+    //   resolved config/catalog identity as flat fields (same values as shop_ctx)
+    config_shop_key: "shop_1",
+    shopname: "shop_1",
     ...over,
   };
 }

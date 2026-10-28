@@ -365,12 +365,6 @@ def reopen_test_chat_session(session_id: str, request: Request) -> dict:
         raise HTTPException(status_code=500, detail="internal server error")
 
 
-class RateMessageRequest(_BM):
-    star_rating: float | None = _F(None, description="ดาว 0-5")
-    comment: str | None = _F(None, description="คอมเมนต์")
-    rating: str | None = _F(None, description="better|worse|tie|unrated")
-
-
 # ⚡ rate/stats ย้ายไป Next.js (admin mongo) แล้ว — ไม่ต้องยุ่งกับ Python
 
 

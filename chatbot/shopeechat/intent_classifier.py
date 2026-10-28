@@ -10,10 +10,13 @@
 คืน dict:
   {
     "intent": "product_recommend|product_spec|compatibility_check|
-               warranty_duration|warranty_claim|general_question|other",
+               warranty_duration|warranty_claim|general_question|
+               greeting|other",
     "product_type": "phone|charger|earphone|smartwatch|powerbank|case|speaker|other|null",
     "charger_subtype": "cable|adapter|set|car_charger|wireless|desktop|socket|null",
     "target_device": "iphone 4s|samsung s25 ultra|null",
+    "relation_target": "ชื่อคู่ความสัมพันธ์ที่ลูกค้าระบุในข้อความ|null",
+    "capability_asks": ["ข้อความตรงจากคำถามลูกค้าที่ถามว่าสินค้าทำ/มีไหม"],
     "needs_description": bool,
     "general_qtype": "warranty_policy|return_policy|shipping_policy|brands|categories|shops|tax_invoice|null",
     "confidence": 0.0-1.0,
@@ -37,6 +40,7 @@ intent ที่เป็นไปได้:
 - "warranty_duration": ลูกค้าถามแค่ระยะเวลารับประกัน (เช่น "CTC615W รับประกันกี่ปี", "รับประกันนานแค่ไหน")
 - "warranty_claim": ลูกค้าแจ้งเคลม/ซ่อม/สินค้าเสีย/อยากส่งเคลม (เช่น "สินค้าเสีย", "เคลมยังไง", "พัง", "ไม่ทำงาน", "อยากซ่อม")
 - "general_question": ถามนโยบายร้าน/จัดส่ง/รับคืน/แบรนด์/หมวดหมู่/ใบกำกับภาษี (เช่น "ส่งกี่วัน", "มีรับคืนไหม", "นโยบายรับประกัน", "ออกใบกำกับภาษีได้ไหม")
+- "greeting": ทักทาย/สังคม/ตอบรับสั้นๆ ที่ไม่มีคำถามหรือความต้องการสินค้า (เช่น "สวัสดีครับ", "ขอบคุณค่ะ", "ok", "ดีจ้า")
 - "other": ไม่เข้ากรณีใดข้างต้น
 
 product_type ที่เป็นไปได้ (ถ้าเป็นคำถามเกี่ยวกับสินค้า):
@@ -64,6 +68,15 @@ target_device: ถ้าลูกค้าระบุอุปกรณ์ท�
   ⚠️ สกัด target_device ทุกครั้งที่ลูกค้าระบุอุปกรณ์เป้าหมาย ไม่ว่า intent จะเป็นอะไร
   (เช่น product_recommend + "อยากได้ของที่ใช้กับ xiaomi 17 ultra" → target_device="xiaomi 17 ultra")
   ไม่ใช่เฉพาะ compatibility_check เท่านั้น
+  ⚠️ target_device คืออุปกรณ์คู่ที่ใช้ร่วมกับสินค้าเท่านั้น — ห้ามใส่ตัวสินค้าที่ลูกค้าถามถึงเอง
+  (สินค้าที่ถามไม่ใช่ counterpart ของตัวเอง; ฟังก์ชัน/ความสามารถที่ถาม → capability_asks แทน)
+
+relation_target: ถ้าลูกค้าถามความเข้ากันได้/การเชื่อมต่อ/การใช้ร่วมกับ "สิ่ง" ที่ระบุชื่อไว้ในข้อความ
+  ให้คัดชื่อนั้นตามที่ลูกค้าเขียน (อุปกรณ์ แอป บริการ หรือรุ่นสินค้าก็ได้) — หรือ null ถ้าไม่มี
+  - ต้องเป็นข้อความที่ลูกค้าเขียนจริงเท่านั้น ห้ามเดาหรือแต่งชื่อเอง
+  - ถ้าเป็นอุปกรณ์ ใส่ใน target_device ด้วยตามกติกาเดิม (relation_target = ชื่อดิบ ไม่ normalize)
+  - เช่น "w01 รองรับ strava ไหม" → relation_target="strava"; "ใช้กับ iphone 15" → "iphone 15"
+  - ไม่ใส่ spec value (ip68/65w/pd3.1/usb) และไม่ใส่คำกริยา/คำถาม
 
 device_connector: ถ้า target_device ไม่เป็น null ให้ระบุพอร์ตชาร์จของอุปกรณ์นั้น หรือ null ถ้าไม่ทราบ
   ค่าที่เป็นไปได้: "usb-c", "lightning", "micro-usb", null
@@ -83,6 +96,32 @@ device_min_watt: ถ้า target_device ไม่เป็น null ให้ร
 
 needs_description: true ถ้าต้องดึง description สินค้ามาตอบ (เช่น compatibility_check, product_spec, warranty_duration) มิฉะนั้น false
 
+requested_facts: list ของข้อเท็จจริงสินค้าที่ลูกค้าถาม (closed set; ไม่มี → [])
+- "price": ราคา · "stock": สต็อก/มีของไหม · "link": ลิงก์สินค้า
+- "description": รายละเอียด/สเปกทั่วไป · "warranty": ระยะเวลารับประกัน
+- "data_transfer_speed": ความเร็วถ่ายโอนข้อมูล (Mbps/Gbps)
+- "charging_speed": ความเร็วชาร์จ/กำลังไฟ (W) · "compatibility": ความเข้ากันได้
+⚠️ "เท่าไหร่/กี่" ไม่ได้แปลว่าราคาเสมอ — ใส่ "price" เฉพาะเมื่อลูกค้าถามราคาจริง
+   ("speed data เท่าไหร่" → ["data_transfer_speed"] ไม่ใช่ price)
+
+spec_constraints: list ของเงื่อนไขสเปกเชิงตัวเลขที่ลูกค้ากำหนด — [{"field","op","value"}]
+- field: "data_transfer_mbps" (ความเร็วข้อมูล — normalize หน่วยเอง: 10Gbps→10000,
+  480Mbps→480), "output_power_w" (กำลังไฟ W), "capacity_mah", "cable_length_m"
+- op: "gte"|"lte"|"gt"|"lt"|"eq"  (gte=ขึ้นไป/อย่างน้อย, lte=ไม่เกิน/ลงไป)
+- value: ตัวเลขในหน่วย canonical ของ field นั้น
+- ไม่มีเงื่อนไขเชิงตัวเลข → []
+
+required_features: list ของคุณสมบัติสินค้าที่ลูกค้าบังคับ (closed set; ไม่มี → [])
+- "magnetic": สายแม่เหล็ก/หัวแม่เหล็ก/ข้อต่อแม่เหล็ก (magnetic connector/cable)
+
+capability_asks: list ของความสามารถ/ฟังก์ชันที่ลูกค้าถามว่าสินค้าทำได้หรือมีไหม (ไม่มี → [])
+- เช่น "ตัดเสียงรบกวนตอนคุยโทร", "ปรับเพลงจากตัวอุปกรณ์", "กันน้ำ", "โทรออกได้"
+- ต้องคัดเป็นข้อความตรงจากคำถามลูกค้าเท่านั้น (exact excerpt — ห้าม paraphrase/แต่งเพิ่ม/แปล)
+- ห้ามซ้ำสิ่งที่สกัดไปแล้วใน relation_target/target_device หรือ requested_facts/
+  required_features/spec_constraints — capability_asks เก็บเฉพาะส่วนที่เหลือ
+- ไม่ใช่ spec ตัวเลข (→ spec_constraints), ไม่ใช่ข้อเท็จจริงมาตรฐาน (→ requested_facts),
+  ไม่ใช่คู่เชื่อมต่อ/อุปกรณ์/แอปที่ระบุชื่อ (→ target_device/relation_target)
+
 general_qtype: ถ้า intent=general_question ระบุประเภทคำถามทั่วไป (ถ้าไม่ใช่ general_question → null)
 - "warranty_policy": ถามนโยบาย/เงื่อนไขรับประกัน (เช่น "รับประกันกี่ปี", "มีประกันไหม", "เคลมยังไง")
 - "return_policy": ถามนโยบายรับคืน/เปลี่ยนสินค้า (เช่น "รับคืนไหม", "เปลี่ยนสินค้าได้ไหม")
@@ -100,6 +139,26 @@ subject_scope: ลูกค้าอ้างอิงสินค้าที�
 - "none": ไม่อ้างอิงสินค้าเดิม (คำถามใหม่/ทั่วไป/ระบุประเภทสินค้าใหม่)
 
 subject_count: ตัวเลขจำนวนสินค้าที่ลูกค้าระบุ เฉพาะเมื่อ subject_scope=current_set ("2 อันนี้"→2, "ทั้งสาม"→3) — null ถ้าไม่ระบุตัวเลขหรือ scope อื่น
+
+policy_reason: สาเหตุที่ลูกค้าอยากเปลี่ยน/คืน (เฉพาะเมื่อ general_qtype="return_policy" หรือคำถามเกี่ยวกับเปลี่ยน/คืน) — เลือกจาก:
+- "customer_wrong_model": ลูกค้าซื้อผิดรุ่นเอง / อยากเปลี่ยนเพราะเลือกผิด
+- "seller_wrong_item": ทางร้านส่งผิดรุ่น/ผิดของ
+- "defect": สินค้าชำรุด/ใช้งานไม่ได้
+- "damage": สินค้าเสียหายระหว่างขนส่ง/แกะกล่องเจอของเสีย
+- "unknown": ไม่ได้ระบุ / ไม่ใช่คำถามเปลี่ยนคืน
+
+policy_item_condition: สภาพสินค้าที่ลูกค้าบอก (เฉพาะกรณีเปลี่ยน/คืน) — เลือกจาก:
+- "sealed": ยังไม่แกะซีล/กล่อง
+- "outer_opened": แกะกล่องนอกแล้ว แต่ยังไม่ใช้งาน
+- "inner_opened": แกะซีลใน/ใช้งานครั้งเดียว
+- "used": ใช้งานแล้ว
+- "unknown": ไม่ได้ระบุ / ไม่เกี่ยวกับเปลี่ยนคืน
+
+policy_order_state: สถานะออเดอร์ที่เกี่ยวข้อง (เฉพาะกรณีเปลี่ยน/คืน) — เลือกจาก:
+- "unshipped": ยังไม่จัดส่ง
+- "shipped": จัดส่งแล้ว/อยู่ระหว่างขนส่ง
+- "delivered": ได้รับของแล้ว
+- "unknown": ไม่ได้ระบุ / ไม่เกี่ยวกับเปลี่ยนคืน
 
 confidence: ความมั่นใจ 0.0-1.0
 
@@ -147,7 +206,10 @@ confidence: ความมั่นใจ 0.0-1.0
 {"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"shipping_policy","confidence":0.95}
 
 คำถาม: "มีรับคืนไหม"
-{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"return_policy","confidence":0.95}
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"return_policy","policy_reason":"unknown","policy_item_condition":"unknown","policy_order_state":"unknown","confidence":0.95}
+
+คำถาม: "ถ้าซื้อผิดรุ่นเอง ยังไม่ได้แกะเลย เปลี่ยนได้ไหม"
+{"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"return_policy","policy_reason":"customer_wrong_model","policy_item_condition":"sealed","policy_order_state":"delivered","confidence":0.9}
 
 คำถาม: "รับประกันกี่ปี"
 {"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"warranty_policy","confidence":0.95}
@@ -160,6 +222,18 @@ confidence: ความมั่นใจ 0.0-1.0
 
 คำถาม: "ขอใบกำกับภาษี"
 {"intent":"general_question","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":"tax_invoice","confidence":0.95}
+
+คำถาม: "สวัสดีจ้า"
+{"intent":"greeting","product_type":null,"charger_subtype":null,"target_device":null,"needs_description":false,"general_qtype":null,"confidence":0.95}
+
+คำถาม: "Speed data เท่าไหร่?ครับ"
+{"intent":"product_spec","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":true,"general_qtype":null,"subject_scope":"current_single","requested_facts":["data_transfer_speed"],"confidence":0.95}
+
+คำถาม: "มีรุ่น 10Gbps ขึ้นไปและเป็นสายแม่เหล็กไหม"
+{"intent":"product_recommend","product_type":"charger","charger_subtype":"cable","target_device":null,"needs_description":false,"general_qtype":null,"subject_scope":"none","spec_constraints":[{"field":"data_transfer_mbps","op":"gte","value":10000}],"required_features":["magnetic"],"confidence":0.95}
+
+คำถาม: "หูฟังรุ่นนี้ตัดเสียงรบกวนเวลาคุยโทรได้ไหม แล้วปรับเพลงจากตัวหูฟังได้หรือไม่"
+{"intent":"product_spec","product_type":"earphone","charger_subtype":null,"target_device":null,"needs_description":true,"general_qtype":null,"subject_scope":"explicit","requested_facts":["description"],"capability_asks":["ตัดเสียงรบกวนเวลาคุยโทร","ปรับเพลงจากตัวหูฟัง"],"confidence":0.95}
 
 ตอบเป็น JSON เท่านั้น ห้ามมีคำอธิบาย
 """
@@ -174,16 +248,76 @@ _DEFAULT_RESULT: dict[str, Any] = {
     "product_type": None,
     "charger_subtype": None,
     "target_device": None,
+    "relation_target": None,
     "device_connector": None,
     "device_min_watt": None,
     "needs_description": False,
     "general_qtype": None,
     "subject_scope": "none",
     "subject_count": None,
+    # Phase 5 — typed policy signals (closed enum; invalid → "unknown")
+    "policy_reason": "unknown",
+    "policy_item_condition": "unknown",
+    "policy_order_state": "unknown",
+    # typed fact/spec contract (closed enums — normalize ด้านล่าง)
+    "requested_facts": [],
+    "required_features": [],
+    "spec_constraints": [],
+    # capability asks = residual source-grounded excerpt จาก message ลูกค้า
+    "capability_asks": [],
     "confidence": 0.0,
 }
 
 _SUBJECT_SCOPES = {"none", "explicit", "current_single", "current_set"}
+
+# closed contract enums — consumer normalize ผ่าน intent_fact_scope
+# (route_context) ซ้ำอีกชั้น ค่านอก enum → drop (fail closed)
+REQUESTED_FACTS = frozenset({
+    "price", "stock", "link", "description", "warranty",
+    "data_transfer_speed", "charging_speed", "compatibility"})
+REQUIRED_FEATURES = frozenset({"magnetic"})
+SPEC_CONSTRAINT_FIELDS = frozenset({
+    "data_transfer_mbps", "output_power_w", "capacity_mah",
+    "cable_length_m"})
+SPEC_CONSTRAINT_OPS = frozenset({"gte", "lte", "gt", "lt", "eq"})
+
+
+def norm_spec_constraints(raw) -> tuple[tuple[str, str, float], ...]:
+    """model-emitted spec constraints → canonical (field, op, float) tuple —
+    invalid entries drop (fail closed); canonical owner เดียวของ shape นี้"""
+    out: list[tuple[str, str, float]] = []
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    for c in raw:
+        if not isinstance(c, dict):
+            continue
+        field, op = str(c.get("field") or ""), str(c.get("op") or "")
+        if field not in SPEC_CONSTRAINT_FIELDS or op not in SPEC_CONSTRAINT_OPS:
+            continue
+        try:
+            out.append((field, op, float(c.get("value"))))
+        except (TypeError, ValueError):
+            continue
+    return tuple(dict.fromkeys(out))
+
+
+def _grounded_excerpt(text: str, message: str) -> str | None:
+    """source validation เดียวของ capability_asks — text ต้องเป็น substring
+    ของ message หลัง structural fold (ลบ whitespace + casefold เท่านั้น);
+    คืน span ต้นฉบับของลูกค้าเป็น display text; ไม่เจอ → None (fail closed)."""
+    needle = "".join(text.split()).casefold()
+    if not needle or len(needle) > 200:
+        return None
+    chars: list[str] = []
+    pos: list[int] = []
+    for i, c in enumerate(message):
+        if not c.isspace():
+            chars.append(c.casefold())
+            pos.append(i)
+    j = "".join(chars).find(needle)
+    if j < 0:
+        return None
+    return message[pos[j]:pos[j + len(needle) - 1] + 1].strip()
 
 
 def classify_intent(
@@ -249,12 +383,59 @@ def classify_intent(
         # validate fields
         valid_intents = {
             "product_recommend", "product_spec", "compatibility_check",
-            "warranty_duration", "warranty_claim", "general_question", "other",
+            "warranty_duration", "warranty_claim", "general_question",
+            "greeting", "other",
         }
         if result.get("intent") not in valid_intents:
             result["intent"] = "other"
         if result.get("subject_scope") not in _SUBJECT_SCOPES:
             result["subject_scope"] = "none"
+        # Phase 5 — policy signals: closed enums เท่านั้น, ค่าอื่น → unknown
+        from . import policy_resolver as _polres
+        if result.get("policy_reason") not in _polres.POLICY_REASONS:
+            result["policy_reason"] = "unknown"
+        if result.get("policy_item_condition") not in _polres.POLICY_CONDITIONS:
+            result["policy_item_condition"] = "unknown"
+        if result.get("policy_order_state") not in _polres.POLICY_ORDER_STATES:
+            result["policy_order_state"] = "unknown"
+        # typed fact/spec contract — closed enums; ค่านอก set → drop
+        _rf = result.get("requested_facts")
+        result["requested_facts"] = [
+            str(x) for x in (_rf if isinstance(_rf, (list, tuple)) else ())
+            if str(x) in REQUESTED_FACTS]
+        _feat = result.get("required_features")
+        result["required_features"] = [
+            str(x) for x in (_feat if isinstance(_feat, (list, tuple)) else ())
+            if str(x) in REQUIRED_FEATURES]
+        result["spec_constraints"] = [
+            {"field": f, "op": op, "value": v}
+            for f, op, v in norm_spec_constraints(
+                result.get("spec_constraints"))]
+        # capability_asks = residual capability questions — ต้องเป็น
+        # exact excerpt จาก message ลูกค้าเท่านั้น (source-grounded;
+        # structural fold: whitespace + casefold) — display text = span
+        # ต้นฉบับของลูกค้า; ไม่เจอใน message → drop fail-closed
+        _ca = result.get("capability_asks")
+        _seen_ca: set[str] = set()
+        _kept_ca: list[str] = []
+        for _x in (_ca if isinstance(_ca, (list, tuple)) else ()):
+            _span = _grounded_excerpt(str(_x), message)
+            if _span is None:
+                continue
+            _k = "".join(_span.split()).casefold()
+            if _k not in _seen_ca:
+                _seen_ca.add(_k)
+                _kept_ca.append(_span)
+        result["capability_asks"] = _kept_ca[:8]
+        # relation_target ต้อง grounded — คัดมาจากข้อความลูกค้าจริงเท่านั้น;
+        # ไม่ใช่ str / ไม่อยู่ใน message / spec-like → None (fail closed)
+        _rt = result.get("relation_target")
+        if not isinstance(_rt, str) or not _rt.strip() \
+                or _rt.strip().lower() not in message.lower() \
+                or _polres._spec_tokens(_rt.strip()):
+            result["relation_target"] = None
+        else:
+            result["relation_target"] = _rt.strip()
         try:
             _sc = result.get("subject_count")
             _sc = None if _sc is None else int(_sc)

@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(_REPO_ROOT / ".env")
 
-from shopeechat import warranty, product_store
+from shopeechat import warranty, product_store, generation_pointer
 
 
 def _check(label: str, actual, expected) -> bool:
@@ -141,17 +141,27 @@ def main() -> int:
         {"image_id": "img1", "text": "ผ่านมาตรฐาน CE และ มอก.", "item_ids": [2]},
         {"image_id": "img2", "text": "ผ่านมาตรฐาน CE", "item_ids": [3]},
     ]
+    # Phase 4B — published OCR อยู่ image_texts_g<gid> ใน snapshot เท่านั้น
+    _gid = "g20261019-090000-abcdef12"
+    _snap = generation_pointer.EvidenceSnapshot(
+        generation_id=_gid,
+        units_collection=f"sellable_units_{_gid}",
+        image_texts_collection=f"image_texts_{_gid}",
+        units_npz="x", product_npz="x", units_jsonl="x",
+        manifest_path="x", manifest_sha256="x", activated_at="x")
     fake_db = _FakeDb({os.environ.get("MONGO_COLLECTION", "ShpProducts"): _FakeColl(prod_docs)})
-    fake_admin = _FakeDb({"image_texts": _FakeColl(img_docs)})
+    fake_admin = _FakeDb({f"image_texts_{_gid}": _FakeColl(img_docs)})
 
     # คำถามทั่วไป (model_keyword=None) → กรองเฉพาะ NORMAL: item 3 (DELETED) ต้องหลุด
     res = product_store.search_cert_products(
-        fake_db, ("ce",), shop_filter=None, model_keyword=None, admin_db=fake_admin)
+        fake_db, ("ce",), shop_filter=None, model_keyword=None,
+        admin_db=fake_admin, snap=_snap)
     ids = sorted(r["item_id"] for r in res)
     test("ce: เจอ item 2 จาก image", ids, [2])
 
     res = product_store.search_cert_products(
-        fake_db, ("tisi",), shop_filter=None, model_keyword=None, admin_db=fake_admin)
+        fake_db, ("tisi",), shop_filter=None, model_keyword=None,
+        admin_db=fake_admin, snap=_snap)
     by_id = {r["item_id"]: r for r in res}
     test("tisi: item1+2+4 (desc+image)", sorted(by_id), [1, 2, 4])
     test("tisi: item2 via=image", by_id.get(2, {}).get("via"), "image")
@@ -159,13 +169,14 @@ def main() -> int:
 
     # model_keyword → ไม่กรอง status (ตอบได้แม้ของหมด)
     res = product_store.search_cert_products(
-        fake_db, ("ce",), model_keyword="Cable", admin_db=fake_admin)
+        fake_db, ("ce",), model_keyword="Cable", admin_db=fake_admin,
+        snap=_snap)
     test("ce + model kw: เจอ item3 แม้ DELETED", [r["item_id"] for r in res], [3])
 
-    # admin_db=None → degrade desc-only ไม่พัง
+    # ไม่มี generation (snap=None) → OCR path skip เหลือ desc-only ไม่พัง
     res = product_store.search_cert_products(
-        fake_db, ("tisi",), admin_db=None)
-    test("admin_db=None → desc-only", sorted(r["item_id"] for r in res), [1, 4])
+        fake_db, ("tisi",), admin_db=None, snap=None)
+    test("snap=None → desc-only", sorted(r["item_id"] for r in res), [1, 4])
 
     print("=== 5b. type_filter — กรองหมวดสินค้า (KingGadgets case) ===")
     # "พาวแบง" (bare) ต้อง detect เป็น powerbank — เดิม kw ต้องมี ค์/ก์ ตามท้าย
@@ -173,19 +184,22 @@ def main() -> int:
     test("type detect พาวเวอร์แบงค์", product_store._detect_product_types("หาพาวเวอร์แบงค์ที่มี มอก มีไหมครับ รองรับมาตตราฐาน ccc ด้วยนะครับ"), {"powerbank"})
     # tisi + filter powerbank → เหลือแค่ item2 (PowerBank B) — item4 surge module หลุด
     res = product_store.search_cert_products(
-        fake_db, ("tisi",), type_filter={"powerbank"}, admin_db=fake_admin)
+        fake_db, ("tisi",), type_filter={"powerbank"}, admin_db=fake_admin,
+        snap=_snap)
     test("tisi+powerbank: เฉพาะ powerbank", sorted(r["item_id"] for r in res), [2])
     # ไม่มี filter → item4 (surge มี มอก.) ยังเจอ — กัน over-filter
     res = product_store.search_cert_products(
-        fake_db, ("tisi",), type_filter=None, admin_db=fake_admin)
+        fake_db, ("tisi",), type_filter=None, admin_db=fake_admin, snap=_snap)
     test("tisi ไม่ filter: item4 ยังเจอ", 4 in [r["item_id"] for r in res], True)
     # filter หมวดที่ไม่มีของ → ว่าง (caller ใช้ fallback/handoff)
     res = product_store.search_cert_products(
-        fake_db, ("tisi",), type_filter={"smartwatch"}, admin_db=fake_admin)
+        fake_db, ("tisi",), type_filter={"smartwatch"}, admin_db=fake_admin,
+        snap=_snap)
     test("tisi+smartwatch: ว่าง", res, [])
-    # image path ก็กรองหมวด — item2 มาจาก image_texts → ยังเจอเมื่อ filter powerbank
+    # image path ก็กรองหมวด — item2 มาจาก published OCR → ยังเจอเมื่อ filter powerbank
     res = product_store.search_cert_products(
-        fake_db, ("ce",), type_filter={"powerbank"}, admin_db=fake_admin)
+        fake_db, ("ce",), type_filter={"powerbank"}, admin_db=fake_admin,
+        snap=_snap)
     test("ce+powerbank: item2 via image ผ่าน filter", sorted(r["item_id"] for r in res), [2])
 
     print("=== 5c. variant cert tokens (_variant_cert_hit) ===")
@@ -233,7 +247,8 @@ def main() -> int:
     fake_stock = _FakeDb({"Products": _FakeColl(stock_docs)})
 
     res = product_store.search_cert_products(
-        fake_db2, ("tisi",), admin_db=fake_admin, stock_db=fake_stock)
+        fake_db2, ("tisi",), admin_db=fake_admin, stock_db=fake_stock,
+        snap=_snap)
     by_id = {r["item_id"]: r for r in res}
     test("stock: item7 via=stock", by_id.get(7, {}).get("via"), "stock")
     test("stock: cert_ids มีเลข มอก.", (by_id.get(7, {}).get("cert_ids") or {}).get("tis_id"), "2879-2560")
@@ -241,7 +256,8 @@ def main() -> int:
     test("stock+desc → item1 via=both", by_id.get(1, {}).get("via"), "both")
 
     res = product_store.search_cert_products(
-        fake_db2, ("ccc",), admin_db=fake_admin, stock_db=fake_stock)
+        fake_db2, ("ccc",), admin_db=fake_admin, stock_db=fake_stock,
+        snap=_snap)
     by_id = {r["item_id"]: r for r in res}
     test("variant: item5 via=variant", by_id.get(5, {}).get("via"), "variant")
     test("variant: cert_context มีชื่อ option",
@@ -250,11 +266,12 @@ def main() -> int:
 
     # stock_db=None → degrade เหมือนเดิม (real lazy connect หรือ None ก็ไม่พัง)
     res = product_store.search_cert_products(
-        fake_db2, ("tisi",), admin_db=fake_admin, stock_db=None)
+        fake_db2, ("tisi",), admin_db=fake_admin, stock_db=None, snap=_snap)
     test("stock_db=None → ไม่พัง", isinstance(res, list), True)
 
     print("=== 6. compat — search_tisi_products wrapper ===")
-    res = product_store.search_tisi_products(fake_db, admin_db=fake_admin)
+    res = product_store.search_tisi_products(fake_db, admin_db=fake_admin,
+                                             snap=_snap)
     test("wrapper เจอทั้ง desc+image", sorted(r["item_id"] for r in res), [1, 2, 4])
     test("wrapper มี tisi_context", bool(res and "tisi_context" in res[0]), True)
 

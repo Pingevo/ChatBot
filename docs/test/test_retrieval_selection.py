@@ -18,6 +18,7 @@ from shopeechat.retrieval_planner import build_grouped_retrieval_requests  # noq
 from shopeechat.retrieval_executor import execute_grouped_retrieval_requests  # noqa: E402
 from shopeechat.candidate_pool import build_candidate_pool  # noqa: E402
 from shopeechat.retrieval_selection import select_for_llm_context  # noqa: E402
+from shopeechat.retrieval_policy import make_evidence_card  # noqa: E402
 
 AD1404T_MSG = ("หัวชาร์จ AD1404T ใช้กับสายชาร์จไหนได้บ้างในร้านเรา "
                "ขอแบบมีจอ ยาว 2 เมตรและได้เต็มสปีด")
@@ -47,21 +48,31 @@ def _pool(msg=AD1404T_MSG, adapter_cards=(), cable_cards=()):
 
     results = execute_grouped_retrieval_requests(
         reqs, message=msg, shop="KingGadgets",
-        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [])
+        fetcher=units_fetcher, legacy_fetcher=lambda m, **kw: [], snap=None)
     return build_candidate_pool(results, profile=prof), reqs, prof
+
+
+def _stamped(avail=True, **kw):
+    """resolver fields ที่ to_unit_card/to_product_card stamp เสมอใน production"""
+    return {"status": "NORMAL", "total_stock": 5 if avail else 0,
+            "catalog_status": "active" if avail else "out_of_stock",
+            "customer_visible": True, "_available_for_sale": avail,
+            "availability_reason": ("normal_positive_stock" if avail
+                                    else "normal_zero_stock"), **kw}
 
 
 def _adapter(name="CUKTECH AD1404T หัวชาร์จ 140W", **kw):
     c = {"name": name, "product_type": "charger", "charger_subtype": "adapter",
-         "_available_for_sale": True, "item_id": "a1", "unit_id": "ua1",
-         "model_codes": ["AD1404T"]}
+         "item_id": "a1", "unit_id": "ua1", "model_codes": ["AD1404T"],
+         **_stamped(kw.pop("_available_for_sale", True))}
     c.update(kw)
     return c
 
 
 def _cable(name, unit_id, **kw):
     c = {"name": name, "product_type": "cable", "cable_subtype": "cable",
-         "_available_for_sale": True, "item_id": unit_id, "unit_id": unit_id}
+         "item_id": unit_id, "unit_id": unit_id,
+         **_stamped(kw.pop("_available_for_sale", True))}
     c.update(kw)
     return c
 
@@ -115,7 +126,9 @@ def test_constraint_ranking_display_length_speed():
         ])
     sel = select_for_llm_context(pool, reqs, prof)
     targets = [s for s in sel.selected if s.role == "relation_target"]
-    assert targets[0].identity == "u-full"
+    # Phase 4A — identity = candidate key ที่มี domain prefix (owner:
+    # candidate_pool._identity_key) — raw unit_id ไม่ใช่ identity อีกต่อไป
+    assert targets[0].identity == "u:u-full"
     assert targets[0].constraint_hits
     assert "display" in targets[0].constraint_hits
 
@@ -191,7 +204,9 @@ def test_multi_subtype_quota_one_subtype_cannot_eat_all():
     res = RetrievalExecutionResult(
         request_id="req-0", source="slot", slot_id="slot-charger",
         subtypes=req.subtypes, model_codes=(),
-        eligible_candidates=tuple(cards),
+        # executor emits canonical cards เสมอ — simulate output ผ่าน adapter
+        eligible_candidates=tuple(
+            make_evidence_card(c, source="units") for c in cards),
         source_attempts=(SourceAttempt("units", 4, 4, 0, 0, ("t",)),))
     pool = build_candidate_pool((res,))
     sel = select_for_llm_context(pool, (req,), None, per_request_limit=3)
@@ -207,3 +222,124 @@ def test_no_v2_v3_caller():
             src = p.read_text()
             assert "retrieval_selection" not in src
             assert "select_for_llm_context" not in src
+
+
+def test_unavailable_subject_promotion_respects_item_pin():
+    """live repro (W-Q2 after10): request pinned to exact item via
+    subject_refs — a SELLER_DELETE sibling listing sharing the model code
+    must NOT promote into subjects (bound เดียวกับ eligible selection:
+    sibling/bundle ไม่เข้า context เงียบๆ — _code_match ไม่ใช่ identity
+    authority เมื่อ item-id pin อยู่)."""
+    from shopeechat.retrieval_planner import RetrievalRequest
+    from shopeechat.retrieval_executor import (
+        RetrievalExecutionResult, SourceAttempt)
+
+    req = RetrievalRequest(
+        "req-0", "slot-charger", "slot",
+        frozenset({"cable", "charger"}), frozenset({"cable"}),
+        ("CMC615P",), None, "answerable_all", "none",
+        subject_refs=("27639651334",))
+    pinned = _cable(
+        "CUKTECH CMC615P 6A 240W สายชาร์จแม่เหล็ก USB-C -24M",
+        "u-live", item_id="27639651334", model_codes=["CMC615P"])
+    deleted_sibling = _cable(
+        "CUKTECH CMC615P 6A 240W สายชาร์จแม่เหล็ก USB-C (ล็อตเก่า)",
+        "u-dead", item_id="28312539696", model_codes=["CMC615P"],
+        _available_for_sale=False)
+    res = RetrievalExecutionResult(
+        request_id="req-0", source="slot", slot_id="slot-charger",
+        subtypes=req.subtypes, model_codes=req.model_codes,
+        eligible_candidates=(make_evidence_card(pinned, source="units"),),
+        unavailable_evidence=(
+            make_evidence_card(deleted_sibling, source="units"),),
+        source_attempts=(SourceAttempt("units", 2, 2, 0, 0, ("t",)),))
+    pool = build_candidate_pool((res,))
+    sel = select_for_llm_context(pool, (req,), None)
+    ids = {str(s.card.get("item_id")) for s in sel.selected}
+    assert ids == {"27639651334"}, \
+        f"pinned request must not promote sibling listing: {ids}"
+
+
+def test_eligible_sibling_blocked_by_item_pin():
+    """regression pin (r3-C): exact item pin narrows request candidates
+    once at grouping — an eligible sibling sharing the model code must
+    never reach selection (bound ก่อน eligible/unavailable branches)."""
+    from shopeechat.retrieval_planner import RetrievalRequest
+    from shopeechat.retrieval_executor import (
+        RetrievalExecutionResult, SourceAttempt)
+
+    req = RetrievalRequest(
+        "req-0", "slot-charger", "slot",
+        frozenset({"cable", "charger"}), frozenset({"cable"}),
+        ("CMC615P",), None, "sellable_first", "none",
+        subject_refs=("27639651334",))
+    pinned = _cable("CUKTECH CMC615P 6A 240W สายชาร์จแม่เหล็ก -24M",
+                    "u-live", item_id="27639651334", model_codes=["CMC615P"])
+    sibling = _cable("CUKTECH CMC615P 6A 240W (อีกล็อต)", "u-sib",
+                     item_id="28312539696", model_codes=["CMC615P"])
+    res = RetrievalExecutionResult(
+        request_id="req-0", source="slot", slot_id="slot-charger",
+        subtypes=req.subtypes, model_codes=req.model_codes,
+        eligible_candidates=(make_evidence_card(pinned, source="units"),
+                             make_evidence_card(sibling, source="units")),
+        source_attempts=(SourceAttempt("units", 2, 2, 0, 0, ("t",)),))
+    pool = build_candidate_pool((res,))
+    sel = select_for_llm_context(pool, (req,), None)
+    ids = {str(s.card.get("item_id")) for s in sel.selected}
+    assert ids == {"27639651334"}, ids
+
+
+def test_linked_variant_admitted_by_item_pin():
+    """variant candidates carry linked_item_id = parent item — a pin
+    on the parent admits the variant (contract kept: linked_item_id is
+    the identity link)."""
+    from shopeechat.candidate_pool import PooledCandidate, CandidatePool
+    from shopeechat.retrieval_planner import RetrievalRequest
+
+    req = RetrievalRequest(
+        "req-0", "slot-charger", "slot",
+        frozenset({"cable"}), frozenset({"cable"}),
+        ("CMC615P",), None, "sellable_first", "none",
+        subject_refs=("27639651334",))
+    variant = PooledCandidate(
+        identity="m:var1", item_id="999888", model_id="var1",
+        unit_id="u-var1", sources=("units",), request_ids=("req-0",),
+        slot_id="slot-charger", relation_id=None, product_type="cable",
+        subtype="cable", bucket="eligible", reason="ok", score=1.0,
+        trace=(), card={"name": "CMC615P สีขาว", "item_id": "999888",
+                        "linked_item_id": "27639651334",
+                        "model_codes": ["CMC615P"]},
+        linked_item_id="27639651334")
+    pool = CandidatePool(
+        eligible=(variant,), unavailable=(), rejected=(),
+        by_request=(), evidence_pool=(), supporting_evidence=(), trace=())
+    sel = select_for_llm_context(pool, (req,), None)
+    assert {s.identity for s in sel.selected} == {"m:var1"}, \
+        [s.identity for s in sel.selected]
+
+
+def test_no_pin_keeps_model_code_behavior():
+    """no exact item-id in subject_refs → model-code matching retains
+    existing behavior (siblings sharing a code are candidates)."""
+    from shopeechat.retrieval_planner import RetrievalRequest
+    from shopeechat.retrieval_executor import (
+        RetrievalExecutionResult, SourceAttempt)
+
+    req = RetrievalRequest(
+        "req-0", "slot-charger", "slot",
+        frozenset({"cable", "charger"}), frozenset({"cable"}),
+        ("CMC615P",), None, "sellable_first", "none")
+    a = _cable("CUKTECH CMC615P 6A 240W -24M", "u-1",
+               item_id="27639651334", model_codes=["CMC615P"])
+    b = _cable("CUKTECH CMC615P 6A 240W (อีกล็อต)", "u-2",
+               item_id="28312539696", model_codes=["CMC615P"])
+    res = RetrievalExecutionResult(
+        request_id="req-0", source="slot", slot_id="slot-charger",
+        subtypes=req.subtypes, model_codes=req.model_codes,
+        eligible_candidates=(make_evidence_card(a, source="units"),
+                             make_evidence_card(b, source="units")),
+        source_attempts=(SourceAttempt("units", 2, 2, 0, 0, ("t",)),))
+    pool = build_candidate_pool((res,))
+    sel = select_for_llm_context(pool, (req,), None)
+    assert len(sel.selected) >= 2, [s.card.get("item_id")
+                                    for s in sel.selected]

@@ -11,7 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "chatbot"))
 
-from shopeechat import route_context  # noqa: E402
+from shopeechat import route_context, turn_decision as _td  # noqa: E402
 from shopeechat.units import UnitEvidenceFetchResult  # noqa: E402
 
 AD1404T_MSG = ("หัวชาร์จ AD1404T ใช้กับสายชาร์จไหนได้บ้างในร้านเรา "
@@ -37,76 +37,93 @@ def _units_fetcher(adapter_cards, cable_cards):
 
 
 def _card(name, ptype, unit_id, item_id=None, avail=True, **kw):
+    # stamp resolver fields เหมือน to_unit_card output จริง
+    # (ไม่มี → resolver นับ unknown/hidden → canonical ดร็อป)
     c = {"name": name, "product_type": ptype, "_available_for_sale": avail,
          "unit_id": unit_id, "item_id": item_id or unit_id,
+         "status": "NORMAL" if avail else "SELLER_DELETE",
+         "total_stock": 3 if avail else 0,
+         "catalog_status": "active" if avail else "discontinued",
+         "customer_visible": True,
          "availability_reason": "" if avail else "sold_out"}
     c.update(kw)
     return c
 
 
-def _prep(msg=AD1404T_MSG, adapter_cards=(), cable_cards=(),
-          base_products=(), **kw):
+def _prep(msg=AD1404T_MSG, adapter_cards=(), cable_cards=(), **kw):
     from shopeechat.retrieval_runtime import prepare_grouped_selection
+    # needs ต้องเป็น typed needs จริง (เหมือน production ส่ง _turn_plan.needs)
+    # — ว่าง → compiler attribute ไม่ได้ → products ว่างตาม contract
+    needs = _td.decide_turn(
+        msg, history=[],
+        intent_result={"intent": "product_recommend", "confidence": 0.9}
+    ).needs
     return prepare_grouped_selection(
         _profile(msg), message=msg, shop="KingGadgets", platform="shopee",
-        base_products=list(base_products), limit=10,
+        limit=10,
         fetcher=_units_fetcher(adapter_cards, cable_cards),
-        legacy_fetcher=lambda m, **k: [], **kw)
+        legacy_fetcher=lambda m, **k: [], needs=needs, snap=None, **kw)
 
 
-def test_selected_first_then_base_merged():
+def test_selected_cards_are_the_products():
+    # canonical owns context — products = selected_cards เท่านั้น
     adapter = _card("CUKTECH AD1404T หัวชาร์จ", "charger", "ua1",
                     charger_subtype="adapter", model_codes=["AD1404T"])
     cable = _card("CTC620P สายมีจอ OLED 240W", "cable", "up1",
                   cable_subtype="cable", variants=[{"name": "2 เมตร"}])
-    base = [_card("สินค้า legacy เดิม", "charger", None, item_id="b1")]
-    out = _prep(adapter_cards=[adapter], cable_cards=[cable],
-                base_products=base)
+    out = _prep(adapter_cards=[adapter], cable_cards=[cable])
     assert out and out["products"]
     names = [p.get("name") for p in out["products"]]
     assert names[0] == "CUKTECH AD1404T หัวชาร์จ" or "AD1404T" in names[0]
     assert "CTC620P สายมีจอ OLED 240W" in names
-    assert "สินค้า legacy เดิม" in names          # base ไม่หาย
-    # selected (adapter+cable) ต้องมาก่อน base legacy
-    assert names.index("CTC620P สายมีจอ OLED 240W") \
-        < names.index("สินค้า legacy เดิม")
 
 
-def test_same_item_deduped_selected_wins():
-    adapter = _card("AD1404T unit", "charger", "ua1", item_id="i1",
-                    charger_subtype="adapter", model_codes=["AD1404T"])
-    base = [_card("AD1404T legacy listing", "charger", None, item_id="i1")]
-    out = _prep(adapter_cards=[adapter], base_products=base)
-    names = [p.get("name") for p in out["products"]]
-    assert "AD1404T unit" in names
-    assert "AD1404T legacy listing" not in names  # selected ชนะ item เดียวกัน
+def test_selected_deduped_across_requests():
+    # card เดียวกัน eligible ใต้หลาย request → selector ซ้ำได้ →
+    # run ต้องคัดซ้ำตาม identity (normalize เหมือน candidate_pool._norm_id)
+    # ไม่งั้น LLM เห็นสินค้าซ้ำ (ตอบมั่ว/เสีย quota)
+    from shopeechat.retrieval_runtime import prepare_grouped_selection
+    shared = _card("shared", "charger", "u1", item_id=123,
+                   charger_subtype="adapter", model_codes=["AD1404T"])
+    needs = _td.decide_turn(
+        "m", history=[],
+        intent_result={"intent": "product_recommend", "confidence": 0.9}).needs
+    out = prepare_grouped_selection(
+        _profile(), message="m", shop="s", limit=10,
+        fetcher=lambda m, **kw: UnitEvidenceFetchResult(
+            cards=(shared,), raw_count=1, sellable_count=1,
+            unavailable_count=0, trace=("u",)),
+        legacy_fetcher=lambda m, **k: [], needs=needs, snap=None)
+    names = [p["name"] for p in (out or {}).get("products", [])]
+    assert names.count("shared") <= 1
 
 
-def test_merge_dedupes_float_int_item_id():
-    # selected item_id=123 (int) vs base 123.0 (float) / "123.0" (float-str)
-    # — ต้อง normalize เหมือน candidate_pool._norm_id ไม่งั้น duplicate หลุดเข้า LLM
-    from shopeechat.retrieval_runtime import merge_selected_products
-    out = merge_selected_products(
-        [{"name": "selected", "item_id": 123}],
-        [{"name": "base-float", "item_id": 123.0},
-         {"name": "base-fstr", "item_id": "123.0"},
-         {"name": "base-other", "item_id": 456}],
-        limit=10)
-    names = [p["name"] for p in out]
-    assert names == ["selected", "base-other"]
-
-
-def test_error_returns_none_fallback():
+def test_fetcher_error_isolated_returns_empty_not_none():
+    # source attempt error ไม่ทำ pipeline ล้ม — รันสำเร็จแต่ selected ว่าง
+    # → dict(products=[]) (canonical owns: ว่าง=ว่าง) ไม่ใช่ fallback
     from shopeechat.retrieval_runtime import prepare_grouped_selection
 
     def boom(message, **kw):
         raise RuntimeError("units exploded")
 
     out = prepare_grouped_selection(
-        _profile(), message="m", shop="s", base_products=[{"name": "b"}],
-        limit=10, fetcher=boom, legacy_fetcher=lambda m, **k: [])
-    assert out is None or not out.get("products") or \
-        out["products"] == [{"name": "b"}]
+        _profile(), message="m", shop="s",
+        limit=10, fetcher=boom, legacy_fetcher=lambda m, **k: [], snap=None)
+    assert out is not None and out["products"] == []
+
+
+def test_pipeline_exception_returns_none_fail_closed(monkeypatch):
+    # exception ระดับ pipeline (ไม่ใช่ attempt) → None → flag-ON caller fail
+    # closed เป็น product context ว่าง (legacy products ไม่ re-enter)
+    from shopeechat import retrieval_runtime as rr
+    monkeypatch.setattr(
+        rr, "build_retrieval_slots",
+        lambda p: (_ for _ in ()).throw(RuntimeError("boom")))
+    out = rr.run_grouped_selection(
+        _profile(), message="m", shop="s",
+        fetcher=lambda m, **k: None, legacy_fetcher=lambda m, **k: [],
+        snap=None)
+    assert out is None
 
 
 def test_selected_cards_stripped_and_role_tagged():
@@ -155,14 +172,17 @@ def test_unavailable_summary_not_recommendation():
     out = _prep(adapter_cards=[adapter], cable_cards=[cable_dead])
     names = [p.get("name") for p in out["products"]]
     assert "สายตาย" not in names               # ไม่ใช่ recommendation
-    extra = out.get("extra_context") or ""
-    assert "สายตาย" in extra                    # แต่เป็น evidence note
+    # typed contract — unavailable evidence อยู่ใน ctx.availability_notes
+    # (owner = answer_context compiler — ไม่ใช่ extra_context string แล้ว)
+    notes = str(out["context"].availability_notes)
+    assert "สายตาย" in notes                    # แต่เป็น evidence note
 
 
-def test_empty_selection_returns_none():
-    out = _prep(adapter_cards=[], cable_cards=[],
-                base_products=[{"name": "b"}])
-    assert out is None or out["products"] == [{"name": "b"}]
+def test_empty_selection_returns_empty_products():
+    # pipeline รันได้แต่ selected ว่าง → products ว่าง (canonical owns context
+    # — ว่าง=ว่าง ไม่ fallback legacy; None สงวนไว้เฉพาะ error)
+    out = _prep(adapter_cards=[], cable_cards=[])
+    assert out is not None and out["products"] == []
 
 
 def test_app_callsite_flag_gated_lazy():
@@ -178,12 +198,22 @@ def test_app_callsite_flag_gated_lazy():
     idx = src.index(flag_fn)
     window = src[max(0, idx - 400):idx + 1500]
     assert "import runtime_config" in window
-    assert "retrieval_runtime" in window
-    assert "run_grouped_selection" in window
-    assert "try:" in window and "except" in window
-    # merge ที่ llm.answer callsites — ต้องมีอย่างน้อย 2 จุด (KB path + main)
-    assert src.count("merge_selected_products") >= 2
-    assert "_grouped_sel" in window
+    # Phase 4A — execution ย้ายหลัง branch evidence resolve: callsite เดียวต่อ
+    # branch (KB + main, mutually exclusive → runtime ≤1 exec/turn) ทั้งคู่
+    # lazy import + try/except fail-closed เหมือนเดิม
+    n_calls = src.count("_rr.run_grouped_selection(")
+    assert n_calls == 2, f"expected exactly 2 branch callsites, got {n_calls}"
+    assert "from . import retrieval_runtime as _rr" in src
+    # flag ON → canonical selected แทน products ที่ llm.answer callsites
+    # — ห้าม merge base legacy (UNLIST re-entry) — ทั้ง KB path + main
+    assert "merge_selected_products" not in src
+    # Phase 7 — grouped flag-ON answer boundary = _typed_answer_boundary
+    # เจ้าของเดียว (KB + main callsite คนละจุด — mutually exclusive)
+    n_tb = src.count("= _typed_answer_boundary(")
+    assert n_tb == 2, f"expected exactly 2 typed boundary callsites, got {n_tb}"
+    # _grouped_sel init อยู่ใน chat() var block หลัง branch split (Phase 4A
+    # ย้าย execution ลง branch bodies — ห่าง flag_fn หลักพันบรรทัด)
+    assert "_grouped_sel" in src
 
 
 def test_no_v2_v3_caller():
@@ -194,52 +224,64 @@ def test_no_v2_v3_caller():
             assert "retrieval_runtime" not in src
             assert "prepare_grouped_selection" not in src
 
-
-def test_merge_dedupes_selected_among_themselves():
-    # regression 5E: card เดียวกัน eligible ใต้หลาย request → select_for_llm_context
-    # extend ต่อ request → selected ซ้ำ item_id → merge ต้องคัดซ้ำ (ตัวแรกชนะ)
-    # ไม่งั้น LLM เห็นสินค้าซ้ำ (ตอบมั่ว/เสีย quota)
-    from shopeechat.retrieval_runtime import merge_selected_products
-    dup_a = {"name": "first-pick", "item_id": 123, "_context_note": "r0"}
-    dup_b = {"name": "second-pick", "item_id": "123.0", "_context_note": "r1"}
-    out = merge_selected_products(
-        [dup_a, dup_b, {"name": "other", "item_id": 456}],
-        [{"name": "base-same", "item_id": 123},
-         {"name": "base-other", "item_id": 789}],
-        limit=10)
-    names = [p["name"] for p in out]
-    assert names == ["first-pick", "other", "base-other"]
-    # float/int normalize ข้าม selected ด้วย — "123.0" เท่ากับ 123
+def test_identity_keys_fallback_unit_model():
+    # Phase 4A corrected contract — candidate identity = finest key เดียว
+    # (owner: candidate_pool._identity_key — (key, domain)): unit_id→u:,
+    # item_id+model_id→v:, item_id เดี่ยว→i: — model_id เดี่ยวไม่เคยเป็น
+    # identity (model_sku ชนข้าม item ได้) และไม่มี m:-key fallback อีกต่อไป
+    from shopeechat.candidate_pool import _identity_key
+    assert _identity_key({"unit_id": "u1"}) == ("u:u1", "variant")
+    assert _identity_key({"model_id": "m9"}) == ("", "")
+    assert _identity_key({"item_id": 123.0}) == ("i:123", "item")
+    assert _identity_key({"item_id": "i9", "model_id": "m9"}) == (
+        "v:i9#m9", "variant")
 
 
-def test_merge_dedupes_selected_unit_model_fallback():
-    # card ไม่มี item_id → fallback dedupe ด้วย unit_id/model_id
-    # (unit cards ทุกใบมี item_id แต่ edge card อาจไม่มี — กันซ้ำราย variant)
-    from shopeechat.retrieval_runtime import merge_selected_products
-    out = merge_selected_products(
-        [{"name": "v1", "unit_id": "u1"},
-         {"name": "v1-dup", "unit_id": "u1"},
-         {"name": "v2", "unit_id": "u2"},
-         {"name": "m1", "model_id": "m9"},
-         {"name": "m1-dup", "model_id": "m9"}],
-        [], limit=10)
-    names = [p["name"] for p in out]
-    assert names == ["v1", "v2", "m1"]
+def test_identity_keys_blank_fields_are_not_identity():
+    # hardening 5E: "" / whitespace ไม่ใช่ identity จริง — ห้ามสร้าง key
+    # (card id ว่างห้ามถูก dedupe กันเอง)
+    from shopeechat.candidate_pool import _identity_key
+    assert _identity_key({"item_id": ""}) == ("", "")
+    assert _identity_key({"unit_id": ""}) == ("", "")
+    assert _identity_key({"model_id": "  "}) == ("", "")
+    assert _identity_key({}) == ("", "")
 
 
-def test_merge_does_not_dedupe_blank_identity_fields():
-    # hardening 5E: "" / whitespace ไม่ใช่ identity จริง — card เหล่านี้
-    # ต้องไม่ถูก dedupe กันเอง และ base ที่ id ว่างก็ห้ามถูกตัด
-    from shopeechat.retrieval_runtime import merge_selected_products
-    out = merge_selected_products(
-        [{"name": "blank-iid-1", "item_id": ""},
-         {"name": "blank-iid-2", "item_id": ""},
-         {"name": "blank-uid", "unit_id": ""},
-         {"name": "blank-mid", "model_id": "  "},
-         {"name": "no-id"}],
-        [{"name": "base-blank", "item_id": ""},
-         {"name": "base-real", "item_id": 42}],
-        limit=10)
-    names = [p["name"] for p in out]
-    assert names == ["blank-iid-1", "blank-iid-2", "blank-uid",
-                     "blank-mid", "no-id", "base-blank", "base-real"]
+# ── offline isolation regression (combined-run Mongo hang) ──────────────────
+# defect: test call sites omitted snap → SNAP_UNSET → resolve_snapshot →
+# knowledge_base._admin_db() → real MongoClient (127.0.0.1 default when a
+# sibling suite stubbed load_dotenv during collection) → ~30s server-selection
+# per call → batch hang. Owner = call sites must pass explicit captured snap.
+
+
+def test_snap_unset_still_resolves_pointer(monkeypatch):
+    """SNAP_UNSET semantics preserved: caller omitting snap → resolve once
+    (standalone callers). RED evidence for the combined-run hang was this
+    seam hit from a test callsite — fix = pass snap=None explicitly."""
+    from shopeechat import generation_pointer as _gen
+    hits = []
+    monkeypatch.setattr(
+        _gen, "resolve_snapshot",
+        lambda *a, **k: hits.append(1) or None)
+    from shopeechat.retrieval_runtime import prepare_grouped_selection
+    prepare_grouped_selection(
+        _profile(), message="m", shop="s", limit=10,
+        fetcher=lambda m, **k: None, legacy_fetcher=lambda m, **k: [])
+    assert hits == [1]
+
+
+def test_snap_none_skips_pointer_resolution(monkeypatch):
+    """REGRESSION (contract): explicit snap=None bypasses resolve_snapshot —
+    matches the proven test_phase4_source_union seam."""
+    from shopeechat import generation_pointer as _gen
+    monkeypatch.setattr(
+        _gen, "resolve_snapshot",
+        lambda *a, **k: __import__("pytest").fail(
+            "OFFLINE LEAK: resolve_snapshot reached with snap=None",
+            pytrace=False))
+    from shopeechat.retrieval_runtime import prepare_grouped_selection
+    out = prepare_grouped_selection(
+        _profile(), message="m", shop="s", limit=10,
+        fetcher=_units_fetcher((), ()), legacy_fetcher=lambda m, **k: [],
+        snap=None)
+    assert out is not None

@@ -21,6 +21,7 @@ export const COLLECTIONS = {
   workflowMessages: "workflow_messages",
   workflowReplies: "workflow_replies",
   admins: "admins",
+  sessions: "sessions",
   shopTeamAssignments: "shop_team_assignments",
   platformTeamAssignments: "platform_team_assignments",
   assignmentCursors: "assignment_cursors",

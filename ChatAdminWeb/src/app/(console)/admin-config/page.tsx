@@ -28,7 +28,6 @@ interface AdminConfig {
   // ⚡ Phase 2Q — concurrency limit
   bot_concurrency_limit: number;
   workflow_enabled: boolean;
-  workflow_priority: string;
   workflow_run_timeout_ms: number;
   // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิม
   assignment_prefer_previous_admin: boolean;
@@ -139,7 +138,6 @@ export default function AdminConfigPage() {
   // ⚡ Phase 2Q — concurrency limit state
   const [concurrencyLimit, setConcurrencyLimit] = useState(50);
   const [workflowEnabled, setWorkflowEnabled] = useState(false);
-  const [workflowPriority, setWorkflowPriority] = useState("workflow_first");
   const [workflowTimeout, setWorkflowTimeout] = useState(1800000);
   // ⚡ G2 — assignment: จ่ายงานให้แอดมินคนเดิม
   const [preferPreviousAdmin, setPreferPreviousAdmin] = useState(true);
@@ -160,7 +158,6 @@ export default function AdminConfigPage() {
       // ⚡ Phase 2Q — concurrency limit
       setConcurrencyLimit(r.data.config.bot_concurrency_limit ?? 50);
       setWorkflowEnabled(r.data.config.workflow_enabled ?? false);
-      setWorkflowPriority(r.data.config.workflow_priority ?? "workflow_first");
       setWorkflowTimeout(r.data.config.workflow_run_timeout_ms ?? 1800000);
       setPreferPreviousAdmin(r.data.config.assignment_prefer_previous_admin ?? true);
       // ⚡ Phase 8 — LLM context limit
@@ -184,7 +181,6 @@ export default function AdminConfigPage() {
       bufferMediaWindow !== (config.bot_buffer_window_media_ms ?? 12000) ||
       bufferMediaMaxMsgs !== (config.bot_buffer_max_media_messages ?? 10) ||
       concurrencyLimit !== (config.bot_concurrency_limit ?? 50) ||
-      workflowPriority !== (config.workflow_priority ?? "workflow_first") ||
       workflowTimeout !== (config.workflow_run_timeout_ms ?? 1800000) ||
       preferPreviousAdmin !== (config.assignment_prefer_previous_admin ?? true) ||
       llmContextLimit !== (config.llm_context_limit ?? 30)
@@ -208,7 +204,6 @@ export default function AdminConfigPage() {
         bot_buffer_max_media_messages: bufferMediaMaxMsgs,
         // ⚡ Phase 2Q — concurrency limit
         bot_concurrency_limit: concurrencyLimit,
-        workflow_priority: workflowPriority,
         workflow_run_timeout_ms: workflowTimeout,
         // ⚡ G2 — assignment
         assignment_prefer_previous_admin: preferPreviousAdmin,
@@ -469,7 +464,7 @@ export default function AdminConfigPage() {
             <div className="flex-1 mr-3">
               <div className="text-sm font-medium text-text">เปิด Workflow Engine</div>
               <div className="text-[11px] text-text-muted mt-0.5">
-                เปิดใช้งานระบบ flow builder — ข้อความเข้าจะ match workflow ก่อน (หรือหลัง trigger ตาม priority)
+                เปิดใช้งานระบบ flow builder — ข้อความเข้าจะ match workflow ก่อน trigger เสมอ (ลำดับคงที่)
               </div>
             </div>
             <ToggleSwitch
@@ -477,27 +472,6 @@ export default function AdminConfigPage() {
               onChange={() => editable && handleQuickToggle("workflow_enabled", !workflowEnabled)}
               disabled={!editable || saving}
             />
-          </div>
-
-          {/* Priority select */}
-          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!workflowEnabled ? "pointer-events-none opacity-60" : ""}`}>
-            <div className="flex items-center gap-2">
-              <GitBranch size={13} className="text-text-muted" />
-              <span className="text-sm font-medium text-text">ลำดับการทำงาน</span>
-            </div>
-            <p className="text-[11px] text-text-muted">
-              เมื่อข้อความเข้า — workflow และ trigger ตรวจสอบตามลำดับนี้
-            </p>
-            <select
-              value={workflowPriority}
-              onChange={(e) => setWorkflowPriority(e.target.value)}
-              disabled={!editable || !workflowEnabled}
-              className="w-full h-9 px-3 rounded-lg border border-border bg-surface text-text text-sm focus:outline-none focus:ring-2 focus:ring-brand/40"
-            >
-              <option value="workflow_first">Workflow ก่อน → ถ้าไม่ match ไป trigger</option>
-              <option value="trigger_first">Trigger ก่อน → ถ้าไม่ match ไป workflow</option>
-              <option value="both">ทั้งสองอย่าง (workflow + trigger)</option>
-            </select>
           </div>
 
           {/* Timeout slider */}

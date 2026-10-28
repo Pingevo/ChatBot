@@ -36,7 +36,7 @@ def test_iphone_cable_current_message():
     )
     assert got.platform == "shopee"
     assert got.shop == "ZMIThailand"
-    assert got.product_types == frozenset({"charger"})
+    assert got.product_types == frozenset({"charger", "cable"})
     assert got.subtype == "cable"
     assert got.target_device.lower() == "iphone 13"
     assert got.compat_mode == "connector_required"
@@ -51,7 +51,7 @@ def test_mi17_carry_cable_from_history():
         intent_result={"intent": "other", "confidence": 0.0},
         shop="KingGadgets",
     )
-    assert got.product_types == frozenset({"charger"})
+    assert got.product_types == frozenset({"charger", "cable"})
     assert got.subtype == "cable"
     assert got.target_device.lower() == "xiaomi 17 ultra"  # canonical (4F)
     assert got.compat_mode == "connector_required"
@@ -197,7 +197,7 @@ def test_history_bounded_to_four_newest_and_user_only():
         intent_result={"intent": "other", "confidence": 0.0},
         shop="AnyShop",
     )
-    assert got.product_types == frozenset({"charger"})
+    assert got.product_types == frozenset({"charger", "cable"})
     assert "powerbank" not in got.product_types
 
 
@@ -238,7 +238,7 @@ def test_profile_debug_shape():
                                       used_fields=("shop", "product_types"))
     assert dbg["source"] == "app_chat"
     assert dbg["shop"] == "ZMIThailand"
-    assert dbg["product_types"] == ["charger"]
+    assert dbg["product_types"] == ["cable", "charger"]
     assert dbg["subtype"] == "cable"
     assert dbg["target_device"] == "iphone 13"
     assert dbg["compat_mode"] == "connector_required"

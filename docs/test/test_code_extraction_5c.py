@@ -39,18 +39,42 @@ def test_both_compare_codes_in_profile():
 
 
 def test_device_aliases_stay_devices_not_codes():
-    # i14/ip14/s25/a56 = target device ไม่ใช่ model code (guard ที่ profile level)
+    # i14/ip14/s25 = target device ไม่ใช่ model code (guard ที่ profile level)
     cases = [
         ("สายชาร์จสำหรับ i14", "iphone 14"),
         ("หัวชาร์จใช้กับ ip14 ได้ไหม", "iphone 14"),
-        ("มีเคส s25 ไหม", "s25"),
-        ("a56 ใช้กับอะไรได้บ้าง", "a56"),
     ]
     for msg, dev in cases:
         p = route_context.build_retrieval_profile(
             msg, history=[], intent_result=None, shop="KingGadgets")
         assert p.target_device == dev, f"{msg}: device={p.target_device}"
         assert not p.model_codes, f"{msg}: codes leaked {p.model_codes}"
+    # "มีเคส s25 ไหม" — s25 = device constraint ของ case-need (r8 typed
+    # roles: target_refs ไม่ใช่ subject) — slot target เดินจาก need refs;
+    # ยังไม่ใช่ model code
+    from shopeechat import turn_decision as _td
+    tp = _td.decide_turn("มีเคส s25 ไหม", history=[], intent_result=None)
+    p = route_context.build_retrieval_profile(
+        "มีเคส s25 ไหม", history=[], intent_result=None,
+        shop="KingGadgets")
+    slots = route_context.build_retrieval_slots(p, needs=tp.needs)
+    assert p.target_device is None, f"target={p.target_device}"
+    assert slots[0].subject_refs == (), f"refs={slots[0].subject_refs}"
+    assert slots[0].target_refs == ("s25",), f"trefs={slots[0].target_refs}"
+    assert slots[0].target_device == "s25", f"dev={slots[0].target_device}"
+    assert not p.model_codes, f"codes leaked {p.model_codes}"
+    # "a56 ใช้กับอะไรได้บ้าง" — a56 คือ typed subject ที่ถาม compat ของ
+    # ตัวเอง (ไม่มี candidate หลัง connector) → subject_refs ไม่ใช่
+    # target_device (r7 explicit-subject ownership); ยังไม่ใช่ model code
+    tp = _td.decide_turn("a56 ใช้กับอะไรได้บ้าง", history=[],
+                         intent_result=None)
+    p = route_context.build_retrieval_profile(
+        "a56 ใช้กับอะไรได้บ้าง", history=[], intent_result=None,
+        shop="KingGadgets")
+    slots = route_context.build_retrieval_slots(p, needs=tp.needs)
+    assert p.target_device is None, f"target={p.target_device}"
+    assert slots[0].subject_refs == ("A56",), f"refs={slots[0].subject_refs}"
+    assert not p.model_codes, f"codes leaked {p.model_codes}"
 
 
 def test_no_v2_v3_caller():

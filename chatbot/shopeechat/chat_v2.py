@@ -29,6 +29,7 @@ from typing import Any
 from fastapi import HTTPException
 
 # ⚡ chat_v2 imports — ใช้ module ที่มีอยู่แล้ว ไม่สร้างใหม่
+from . import generation_pointer as _gen
 from . import (
     app as _app_module,
     conversation_products as _cp,
@@ -44,77 +45,6 @@ from . import (
 
 # ── Robust Extraction Helpers ────────────────────────────────────────────────
 # สกัดข้อมูลจาก message/history อย่างถูกต้อง — รองรับทุก format
-
-# Pattern สำหรับสกัด item_id จาก [สินค้า: XXX]
-_ITEM_TAG_RE = re.compile(r"\[สินค้า:\s*(\d+)\]")
-# Pattern สำหรับสกัด order_sn จาก [order: XXX]
-_ORDER_TAG_RE = re.compile(r"\[order:\s*([^\]]+)\]")
-# Pattern สำหรับสกัด image/video placeholder
-_IMAGE_PLACEHOLDER_RE = re.compile(
-    r"\[(?:รูปภาพ|image|วิดีโอ|video|sticker|สติกเกอร์)\]",
-    re.IGNORECASE,
-)
-# Pattern สำหรับสกัด tracking number
-_TRACKING_RE = re.compile(r"\b([A-Z]{2,4}\d{8,20})\b")
-
-
-def _extract_item_id(message: str | None) -> str:
-    """สกัด item_id จาก [สินค้า: XXX] tag ใน message."""
-    if not message:
-        return ""
-    _m = _ITEM_TAG_RE.search(message)
-    return _m.group(1) if _m else ""
-
-
-def _extract_order_sn(message: str | None) -> str:
-    """สกัด order_sn จาก [order: XXX] tag หรือ pattern อื่น."""
-    if not message:
-        return ""
-    _m = _ORDER_TAG_RE.search(message)
-    if _m:
-        return _m.group(1).strip()
-    # fallback: ใช้ order_store helper
-    return _order_store.extract_order_sn(message) or ""
-
-
-def _extract_tracking(message: str | None) -> str:
-    """สกัด tracking number จาก message."""
-    if not message:
-        return ""
-    return _order_store.extract_tracking_number(message) or ""
-
-
-def _has_image_placeholder(message: str | None) -> bool:
-    """ตรวจว่า message มี image/video placeholder ไหม."""
-    if not message:
-        return False
-    return bool(_IMAGE_PLACEHOLDER_RE.search(message))
-
-
-def _is_image_only(message: str | None) -> bool:
-    """ตรวจว่า message เป็นแค่ image/video placeholder ไหม (ไม่มี text อื่น)."""
-    if not message:
-        return False
-    _clean = _IMAGE_PLACEHOLDER_RE.sub("", message).strip()
-    return not _clean
-
-
-def _extract_product_subtype(message: str | None) -> str:
-    """สกัด charger subtype จาก message — ใช้ helper ที่มีแล้ว."""
-    if not message:
-        return ""
-    return product_store._detect_charger_subtype(message) or ""
-
-
-def _extract_product_types(message: str | None) -> set[str]:
-    """สกัด product types จาก message — ใช้ helper ที่มีแล้ว."""
-    if not message:
-        return set()
-    _types = product_store._detect_product_types(message)
-    if not _types:
-        _types = product_store._detect_product_types_fuzzy(message)
-    return _types or set()
-
 
 # ── Superlative / Multi-use-case / Charging Spec Detection ───────────────────
 # ย้ายจาก legacy app.py บรรทัด 2525-2532, 3097-3110, 4129-4141
@@ -640,10 +570,19 @@ def _check_general_question(req, ctx, history, db) -> dict | None:
     )
     if _is_followup:
         return None
-    # ดึง context จาก KB
-    _kb_ctx = knowledge_base.get_general_context(general_qtype, shop=req.shop)
-    if not _kb_ctx:
+    # ดึง context จาก KB — contract เดียวกับ legacy: shop scope เฉพาะ
+    # categories/brands; scoped ว่าง → unscoped retry ครั้งเดียว
+    _gen_shop_filter = (req.shop
+                        if general_qtype in ("categories", "brands")
+                        else None)
+    _gen_res = knowledge_base.build_general_context(
+        general_qtype, mongo_db=db, shop_filter=_gen_shop_filter)
+    if _gen_shop_filter and not _gen_res:
+        _gen_res = knowledge_base.build_general_context(
+            general_qtype, mongo_db=db)
+    if not _gen_res or not _gen_res.get("context"):
         return None
+    _kb_ctx = _gen_res["context"]
     try:
         _answer, _usage = llm.answer_general(
             message=req.message, context=_kb_ctx, qtype=general_qtype,
@@ -793,12 +732,15 @@ def _detect_anchor(req, ctx: dict, history: list[dict], db) -> dict | None:
     # บันทึก anchor ลง conversation_products timeline
     if req.conversation_id:
         try:
-            _cp.add_item_anchor(
+            _cp.add_product(
                 conversation_id=req.conversation_id,
                 platform=req.platform or "shopee",
                 shop=req.shop,
                 item_id=str(_item_id),
-                product_card=_card,
+                name=_name,
+                source="user_item_card",
+                card=_card,
+                is_anchor=True,
             )
         except Exception as _e:
             print(f"[ANCHOR-V2] save failed: {_e}", file=sys.stderr)
@@ -873,7 +815,8 @@ def _detect_followup_products(req, history: list[dict], db) -> list[dict]:
         return []
     # ดึงสินค้าจาก conversation_products timeline
     try:
-        _timeline = _cp.get_timeline(req.conversation_id, platform=req.platform or "shopee")
+        _timeline = (_cp.load_timeline(req.conversation_id) or {}
+                     ).get("products") or []
         if not _timeline:
             return []
         _products = []
@@ -999,7 +942,7 @@ def _filter_unavailable_products(products: list[dict]) -> list[dict]:
 # ── Stage 5: Retrieve Products ───────────────────────────────────────────────
 
 def _retrieve_products(req, ctx: dict, history: list[dict], intent: dict,
-                       anchor: dict | None, db) -> list[dict]:
+                       anchor: dict | None, db, snap) -> list[dict]:
     """Stage 5: RAG — KB + DB ไม่กรอง sold_out.
 
     กฎ:
@@ -1083,7 +1026,7 @@ def _retrieve_products(req, ctx: dict, history: list[dict], intent: dict,
             print(f"[MODEL-REGEX-V2] error: {_e}", file=sys.stderr)
 
     # 5.3 KB lookup
-    _kb_result = knowledge_base.lookup_kb(_retrieval_msg)
+    _kb_result = knowledge_base.lookup_kb(_retrieval_msg, snap=snap)
     _kb_context = ""
     _products: list[dict] = []
     # เพิ่ม follow-up products ก่อน (ถ้ามี)
@@ -1107,7 +1050,7 @@ def _retrieve_products(req, ctx: dict, history: list[dict], intent: dict,
         _mongo_q = " ".join(_kb_models[:5]) if _kb_models else _retrieval_msg
         _kb_products = product_store.fetch_products(
             db, message=_mongo_q, shop_filter=req.shop,
-            limit=ctx["limit"], desc_message=_desc_msg,
+            limit=ctx["limit"], desc_message=_desc_msg, snap=snap,
         )
         _products.extend(_kb_products)
         print(f"[RAG-V2] KB+Mongo: {len(_products)} products", file=sys.stderr)
@@ -1127,7 +1070,7 @@ def _retrieve_products(req, ctx: dict, history: list[dict], intent: dict,
         _more = product_store.fetch_products(
             db, message=_retrieval_msg, shop_filter=req.shop,
             limit=_fetch_limit, desc_message=_desc_msg,
-            is_compat_check=(_intent_label == "compatibility_check"),
+            is_compat_check=(_intent_label == "compatibility_check"), snap=snap,
         )
         # dedup
         _existing_ids = {p.get("item_id") or p.get("name") for p in _products}
@@ -1180,7 +1123,7 @@ def _retrieve_products(req, ctx: dict, history: list[dict], intent: dict,
 # ── Stage 6: Search if Needed ────────────────────────────────────────────────
 
 def _search_if_needed(req, ctx: dict, history: list[dict], intent: dict,
-                      products: list[dict], db) -> tuple[list[dict], str, dict]:
+                      products: list[dict], db, snap) -> tuple[list[dict], str, dict]:
     """Stage 6: web search → RAG → (ไม่ตอบตรง — ส่งกลับไป LLM2).
 
     คืน (products, extra_context, search_meta)
@@ -1239,7 +1182,7 @@ def _search_if_needed(req, ctx: dict, history: list[dict], intent: dict,
         try:
             _new_products = product_store.fetch_products(
                 db, message=_search_q, shop_filter=req.shop,
-                limit=10, desc_message=req.message,
+                limit=10, desc_message=req.message, snap=snap,
             )
             print(f"[SEARCH-V2] re-query: {_search_q!r} → {len(_new_products)} products", file=sys.stderr)
         except Exception as _e:
@@ -1464,11 +1407,14 @@ def _make_response(answer: str, products: list[dict], ctx: dict, *,
 
 # ── Main Entry Point ─────────────────────────────────────────────────────────
 
-def chat_v2(req) -> dict:
+def chat_v2(req, snap=_gen.SNAP_UNSET) -> dict:
     """Pipeline หลัก — เรียก stages ตามลำดับ ไม่มี early return ในตัว.
 
     คืน ChatResponse dict (compatible กับ ChatResponse model ของ app.py)
     """
+    # Phase 4B — captured snapshot จาก /chat owner; standalone → resolve ครั้งเดียว
+    if snap is _gen.SNAP_UNSET:
+        snap = _gen.resolve_snapshot()
     # Stage 1: context
     ctx, history, client, db = _build_context(req)
     # Stage 2: deterministic fast paths
@@ -1483,11 +1429,12 @@ def chat_v2(req) -> dict:
     _anchor = _detect_anchor(req, ctx, history, db)
 
     # Stage 5: retrieve (RAG)
-    _products = _retrieve_products(req, ctx, history, _intent, _anchor, db)
+    _products = _retrieve_products(req, ctx, history, _intent, _anchor,
+                                   db, snap)
 
     # Stage 6: search if needed
     _products, _extra_ctx, _search_meta = _search_if_needed(
-        req, ctx, history, _intent, _products, db
+        req, ctx, history, _intent, _products, db, snap
     )
 
     # Stage 7: no product guard (หลัง search)

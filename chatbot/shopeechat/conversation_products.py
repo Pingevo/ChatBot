@@ -23,6 +23,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Literal, NamedTuple
 
+from . import generation_pointer as _gen
 from . import route_context as _rc
 
 # Lazy import knowledge_base เพื่อใช้ _build_admin_client
@@ -282,7 +283,7 @@ _LIVE_CARD_TTL = 30.0  # ponytail: cache 30s ต่อ (item_id, model_name) —
 _LIVE_CARD_CACHE: dict = {}
 
 
-def _rebuild_card(p: dict, message: str = "") -> dict | None:
+def _rebuild_card(p: dict, message: str = "", snap=_gen.SNAP_UNSET) -> dict | None:
     """สร้าง card ใหม่จาก live data — unit card ถ้า entry ระดับรุ่นย่อย, listing card ถ้าไม่ใช่.
 
     unit detection: entry.model_name (user anchors ระบุรุ่นย่อย) หรือ stored card
@@ -304,11 +305,13 @@ def _rebuild_card(p: dict, message: str = "") -> dict | None:
     if model_name:
         try:
             from . import units as _units
-            u = _units._units_coll().find_one(
+            snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+            u = _units._units_coll(snap).find_one(
                 {"item_id": item_id, "model_name": model_name})
             if u:
                 # helper chain เดียวกับ fetch_unit_cards — unit card สดครบทุก field
-                u = _units.attach_image_texts(_units.attach_kb_specs([u]))[0]
+                u = _units.attach_image_texts(
+                    _units.attach_kb_specs([u]), snap)[0]
                 u["_listing"] = doc
                 return _units.to_unit_card(u)
         except Exception:
@@ -316,16 +319,21 @@ def _rebuild_card(p: dict, message: str = "") -> dict | None:
     return _ps.to_product_card(doc, message)
 
 
-def _materialize_card(p: dict, message: str = "") -> dict:
+def _materialize_card(p: dict, message: str = "", snap=_gen.SNAP_UNSET) -> dict:
     """คืน card ของ timeline entry — rebuild สดจาก DB ถ้าทำได้, fallback = stored card."""
     stored = p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
     try:
+        # cache identity รวม captured generation — card ที่สร้างจาก gen A
+        # ห้ามถูก reuse โดย request ที่ capture gen B/None (SNAP_UNSET =
+        # standalone → resolve ครั้งเดียวที่ entry นี้ ก่อนสร้าง key)
+        snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
         key = (str(_to_serializable(p.get("item_id"))),
-               str(p.get("model_name") or ""))
+               str(p.get("model_name") or ""),
+               snap.generation_id if snap is not None else None)
         hit = _LIVE_CARD_CACHE.get(key)
         if hit and (time.monotonic() - hit[0]) < _LIVE_CARD_TTL:
             return hit[1]
-        fresh = _rebuild_card(p, message=message)
+        fresh = _rebuild_card(p, message=message, snap=snap)
         if fresh:
             _LIVE_CARD_CACHE[key] = (time.monotonic(), fresh)
             return fresh
@@ -345,7 +353,7 @@ def _normalize_dt(dt: Any) -> datetime:
     return dt
 
 
-def get_active_product(conversation_id: str) -> dict | None:
+def get_active_product(conversation_id: str, snap=_gen.SNAP_UNSET) -> dict | None:
     """ดึง active product card ของแชท.
 
     Returns:
@@ -360,81 +368,8 @@ def get_active_product(conversation_id: str) -> dict | None:
     active_id_ser = _to_serializable(active_id)
     for p in doc.get("products", []):
         if _to_serializable(p.get("item_id")) == active_id_ser:
-            return _materialize_card(p)
+            return _materialize_card(p, snap=snap)
     return None
-
-
-def get_suggestion_latest(conversation_id: str) -> dict | None:
-    """ดึง suggestion product ล่าสุด (สินค้าที่ bot แนะนำ)."""
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return None
-    suggestions = [p for p in doc.get("products", []) if not p.get("is_anchor")]
-    if not suggestions:
-        return None
-    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
-    s = suggestions[0]
-    return _materialize_card(s)
-
-
-def get_latest_suggestion_batch(conversation_id: str) -> list[dict]:
-    """ดึง suggestion batch ล่าสุด — สินค้าที่ bot แนะนำใน response เดิียวกัน.
-
-    bot บันทึก suggestions ทีละชุดต่อเทิร์น (_record_suggestion_products append ต่อท้าย)
-    → batch ล่าสุด = trailing run ของ non-anchor entries ท้าย products list
-    ถ้า entry ท้ายเป็น anchor (ลูกค้าส่ง item card มาหลังสุด) → คืน []
-
-    Returns:
-        list ของ cards (ใหม่→เก่า) หรือ [] ถ้าไม่มี suggestion ท้ายลิสต์
-        (caller ตัดสินใจเองว่าต้องการกี่ตัว — batch ตัวเดียวอาจ pair กับ anchor ล่าสุด)
-    """
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return []
-    batch: list[dict] = []
-    for p in reversed(doc.get("products") or []):
-        if p.get("is_anchor"):
-            break
-        batch.append(p)
-    return [_materialize_card(p) for p in batch]
-
-
-def get_anchor_and_suggestions(conversation_id: str, limit: int = 5) -> list[dict]:
-    """ดึง anchor ล่าสุด + suggestion ล่าสุด รวมกัน (dedup) สำหรับ follow-up ขอลิงค์.
-
-    Returns:
-        list ของ product cards — anchor ก่อน แล้วตามด้วย suggestions (dedup by item_id)
-    """
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return []
-    products = doc.get("products", []) or []
-    if not products:
-        return []
-    # แยก anchor / suggestion
-    anchors = [p for p in products if p.get("is_anchor")]
-    suggestions = [p for p in products if not p.get("is_anchor")]
-    anchors.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
-    suggestions.sort(key=lambda p: _normalize_dt(p.get("mentioned_at")), reverse=True)
-    out = []
-    seen_ids = set()
-    # anchor ก่อน (ล่าสุดก่อน)
-    for p in anchors:
-        iid = _to_serializable(p.get("item_id"))
-        if iid in seen_ids:
-            continue
-        seen_ids.add(iid)
-        out.append(_materialize_card(p))
-    # แล้ว suggestions (ล่าสุดก่อน)
-    for p in suggestions:
-        iid = _to_serializable(p.get("item_id"))
-        if iid in seen_ids:
-            continue
-        seen_ids.add(iid)
-        out.append(_materialize_card(p))
-        if len(out) >= limit:
-            break
-    return out[:limit]
 
 
 # ─── Order anchor (Phase 3C) ──────────────────────────────
@@ -565,25 +500,6 @@ def get_active_order_sn(conversation_id: str) -> str | None:
     if not doc:
         return None
     return doc.get("active_order_sn")
-
-
-def get_order_anchors(conversation_id: str) -> list[dict]:
-    """ดึง order anchors ทั้งหมดของแชท.
-
-    Returns:
-        list ของ {order_sn, mentioned_at, summary} เรียงจากใหม่→เก่า
-    """
-    doc = load_timeline(conversation_id)
-    if not doc:
-        return []
-    anchors = doc.get("order_anchors", [])
-    # sort ใหม่→เก่า
-    anchors_sorted = sorted(
-        anchors,
-        key=lambda a: a.get("mentioned_at", datetime.min) if isinstance(a.get("mentioned_at"), datetime) else datetime.min,
-        reverse=True,
-    )
-    return anchors_sorted
 
 
 def resolve_active_order_sn(
@@ -1071,6 +987,8 @@ def resolve_subjects(
     subject_scope: str | None = None,
     subject_count: int | None = None,
     signal_confidence: float | None = None,
+    subject_refs: tuple = (),
+    persisted_code_index: dict | None = None,
 ) -> SubjectResolution:
     """Pure resolver — รับ persisted set ที่ load แล้ว (no hidden DB read).
 
@@ -1078,7 +996,13 @@ def resolve_subjects(
     typed input กับ persisted state เท่านั้น ไม่ interpret ภาษาเอง:
       current_set + persisted + (count absent หรือ == set size) → resolved ทั้ง set
       current_single + persisted n==1 → resolved
-      explicit → no_subject_ref (explicit identities ชนะ upstream แล้ว)
+      explicit + item-id refs (digit) → no_subject_ref (explicit identities
+        ชนะ upstream แล้ว)
+      explicit + code-shaped refs → equivalence กับ persisted_code_index
+        (item_id → codes จาก canonical _extract_codes บน card name — caller
+        สร้างจาก timeline data ที่ load อยู่แล้ว): refs ทุกตัว ⊆ codes ของ
+        persisted item เดียว → resolved narrowed set · ไม่ match/unprovable
+        → no_subject_ref (ห้าม substitute) · match >1 item → clarify
       missing set / count mismatch / unknown scope / signal conf < 0.7
         → clarify (zero guessing)
     ไม่มี structured signal → canonical language path:
@@ -1091,6 +1015,28 @@ def resolve_subjects(
         if subject_scope not in _SUBJECT_SCOPES:
             return SubjectResolution("clarify", None)
         if subject_scope == "explicit":
+            _refs = tuple(
+                str(r).strip() for r in (subject_refs or ())
+                if str(r).strip())
+            if any(r.isdigit() for r in _refs):
+                return SubjectResolution("no_subject_ref", None)
+            _want = {r.upper() for r in _refs}
+            if _want and persisted and persisted_code_index:
+                _matched = tuple(
+                    str(sid) for sid in persisted.subject_ids
+                    if _want <= {str(c).strip().upper()
+                                 for c in persisted_code_index.get(sid)
+                                 or ()})
+                if len(_matched) == 1:
+                    return SubjectResolution(
+                        "resolved", ConversationSubjectSet(
+                            subject_ids=_matched,
+                            source_turn_id=persisted.source_turn_id,
+                            relation="single",
+                            requested_operations=(),
+                            confidence=persisted.confidence))
+                if len(_matched) > 1:
+                    return SubjectResolution("clarify", None)
             return SubjectResolution("no_subject_ref", None)
         if subject_scope in ("current_single", "current_set"):
             if (signal_confidence is not None
@@ -1263,6 +1209,7 @@ def materialize_subject_cards(
     products,
     shop_filter: str | None = None,
     message: str = "",
+    snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
     """Subject ids → product cards (materialization owner — แทน timeline-getter
     path ของ subject resolver เก่าที่ถูกลบใน 2C.2).
@@ -1281,6 +1228,10 @@ def materialize_subject_cards(
     ids = _norm_subject_ids(subject_ids)
     if not ids:
         return []
+    # cache identity รวม captured generation (resolve ครั้งเดียวที่ entry —
+    # card ที่ cache จาก gen อื่นห้าม reuse; captured None = identity ของมันเอง)
+    snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+    _gen_id = snap.generation_id if snap is not None else None
     entries: dict[str, dict] = {}
     for p in products or ():
         pid = p.get("item_id")
@@ -1294,21 +1245,81 @@ def materialize_subject_cards(
                    _normalize_dt(cur.get("mentioned_at"))) if cur else None
         if cur_key is None or cand > cur_key:
             entries[sid] = p
+    # ── Phase 4A — one bounded identity batch (แทน find_one×N ของ
+    #    _rebuild_card): live listing doc เป็นเจ้าของ publish/stock/link
+    #    truth; หายจาก catalog → snapshot เท่านั้น (ขายไม่ได้/ไม่มีลิงก์)
+    docs_by_id: dict[str, dict] = {}
+    try:
+        docs_by_id = _ps.fetch_product_docs_by_ids(
+            db, ids, shop_filter=shop_filter)
+    except Exception as _e:
+        print(f"[SUBJECT-RES] batch resolve error: {_e}")
+    # ── at most one bounded units batch — เฉพาะ entries ระดับรุ่นย่อย ──
+    from . import units as _units
+    units_by_key: dict[tuple[str, str], dict] = {}
+    try:
+        wanted_iids: list = []
+        for sid in ids:
+            entry = entries.get(sid)
+            doc = docs_by_id.get(sid)
+            if entry is None or doc is None:
+                continue
+            card_stored = entry.get("card") or {}
+            vlist = card_stored.get("variants") or []
+            model_name = entry.get("model_name") or (
+                vlist[0].get("name") if len(vlist) == 1 else None)
+            if model_name:
+                wanted_iids.append(doc.get("item_id"))
+        if wanted_iids:
+            udocs = list(_units._units_coll(snap).find(
+                {"item_id": {"$in": wanted_iids}}).limit(50))
+            udocs = _units.attach_image_texts(
+                _units.attach_kb_specs(udocs), snap)
+            for u in udocs:
+                key = (str(_to_serializable(u.get("item_id"))),
+                       str(u.get("model_name") or ""))
+                units_by_key[key] = u
+    except Exception:
+        pass
     out: list[dict] = []
     for sid in ids:
         card = None
         entry = entries.get(sid)
-        if entry is not None:
+        doc = docs_by_id.get(sid)
+        ckey = (sid, str((entry or {}).get("model_name") or ""), _gen_id)
+        hit = _LIVE_CARD_CACHE.get(ckey)
+        if hit and (time.monotonic() - hit[0]) < _LIVE_CARD_TTL:
+            card = hit[1]
+        if card is None and doc is not None:
             try:
-                card = _materialize_card(entry, message=message)
+                card_stored = (entry or {}).get("card") or {}
+                vlist = card_stored.get("variants") or []
+                model_name = (entry or {}).get("model_name") or (
+                    vlist[0].get("name") if len(vlist) == 1 else None)
+                ukey = (str(_to_serializable(doc.get("item_id"))),
+                        str(model_name or ""))
+                u = units_by_key.get(ukey) if model_name else None
+                if u is not None:
+                    u = dict(u)
+                    u["_listing"] = doc
+                    card = _units.to_unit_card(u)
+                else:
+                    card = _ps.to_product_card(doc, message)
+                _LIVE_CARD_CACHE[ckey] = (time.monotonic(), card)
             except Exception:
                 card = None
         if card is None:
-            try:
-                card = _ps.fetch_product_by_id(
-                    db, sid, shop_filter=shop_filter)
-            except Exception:
-                card = None
+            # live หาย/พัง → stored snapshot เท่านั้น: identity+history —
+            # ห้าม claim live state, ขายไม่ได้, ไม่มีลิงก์ขาย
+            if entry is not None:
+                stored = dict(entry.get("card") or {
+                    "item_id": entry.get("item_id"),
+                    "name": entry.get("name")})
+                if stored:
+                    stored.pop("short_link", None)
+                    stored.pop("link", None)
+                    stored["_snapshot_only"] = True
+                    card = stored
         if card:
             out.append(card)
     return out

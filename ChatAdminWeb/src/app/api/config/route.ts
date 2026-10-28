@@ -85,10 +85,7 @@ export async function PUT(req: NextRequest) {
     }
   }
 
-  // ⚡ Workflow engine — validate priority + timeout ก่อนบันทึก
-  if ("workflow_priority" in body && !["workflow_first", "trigger_first", "both"].includes(String(body.workflow_priority))) {
-    return error("workflow_priority must be workflow_first | trigger_first | both", 422);
-  }
+  // ⚡ Workflow engine — validate timeout ก่อนบันทึก (Phase 9: order คงที่ ไม่มี priority field)
   if ("workflow_run_timeout_ms" in body) {
     const t = Number(body.workflow_run_timeout_ms);
     if (!Number.isFinite(t) || t < 60000 || t > 86400000) {
@@ -102,8 +99,8 @@ export async function PUT(req: NextRequest) {
       return error("llm_context_limit must be between 10 and 50", 422);
     }
   }
-  // ⚡ Task 5B3-D — grouped retrieval flags ต้องเป็น boolean เท่านั้น
-  for (const key of ["grouped_retrieval_shadow_enabled", "grouped_retrieval_selection_enabled"]) {
+  // ⚡ Task 5B3-D — grouped retrieval flags + Phase 10A web-search gate ต้องเป็น boolean เท่านั้น
+  for (const key of ["grouped_retrieval_shadow_enabled", "grouped_retrieval_selection_enabled", "web_search_enabled"]) {
     if (key in body && typeof body[key] !== "boolean") {
       return error(`${key} must be a boolean`, 422);
     }

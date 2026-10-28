@@ -79,6 +79,10 @@ export function resetState() {
     shop_id: "shop_1", shopname: "Shop 1", platform: "shopee",
     connected: true, bot_worker_enabled: true, bot_worker_enabled_at: new Date(0),
   });
+  // ⚡ resolver contract — transport evidence (shopee,"Shop 1")→"shop_1"
+  fm.fakeColl("conversations").push({
+    conversation_id: "conv_seed", shop_id: "shop_1", shop_name: "Shop 1", platform: "shopee",
+  });
 }
 
 // ── mongoClient mock ─────────────────────────────────────────

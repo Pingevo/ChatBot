@@ -38,20 +38,16 @@
        │
        ▼
 ┌──────────────────────────────────────────────────┐
-│ ② Priority (อ่านจาก config: workflow_priority)  │
+│ ② Priority — ⚠️ SUPERSEDED โดย Phase 9            │
 │                                                  │
-│  workflow_first (default):                       │
-│    workflow match → ฮิต+action → จบ              │
-│                  → ไม่ฮิต → trigger match         │
-│                  → ไม่ฮิต → ไป ③ (บอท)           │
+│  เดิม: อ่าน workflow_priority จาก config          │
+│  (workflow_first / trigger_first / both)          │
 │                                                  │
-│  trigger_first:                                  │
-│    trigger match → ฮิต → จบ                      │
-│                 → ไม่ฮิต → workflow match         │
-│                 → ไม่ฮิต → ไป ③ (บอท)           │
-│                                                  │
-│  both (เสี่ยงตอบซ้ำ ไม่แนะนำ):                    │
-│    รัน trigger + workflow ทั้งคู่                 │
+│  Phase 9: ลำดับคงที่ใน owner เดียว                │
+│  (workflowEngine.runInboundDispatch):             │
+│    active resume → new match → trigger → บอท      │
+│  — ไม่มี runtime branch จาก config อีก;           │
+│    "both"/"trigger_first" ถูกลบ (ตอบซ้ำ/invert)   │
 └──────────────────────────────────────────────────┘
        │
        ▼
@@ -141,7 +137,7 @@ flow: [trigger] → [C: bot ตอบ] → [wait] → [F: condition] → [node �
 | `workflowService.ts` | CRUD workflow | ใหม่ |
 | `workflowEngine.ts` | รัน flow + resume + eval condition + ทำ action | ใหม่ |
 | แก้ `processMessage` 1 จุด | เสียบ ①②③ | แก้ของเดิม |
-| `workflow_priority` config | เลือกลำดับ workflow/trigger | เพิ่มใน system_configs |
+| ~~`workflow_priority` config~~ | ~~เลือกลำดับ workflow/trigger~~ | Phase 9: ถูกถอด — ลำดับคงที่ใน owner เดียว; persisted value = inert legacy |
 | หน้า `/workflows` + `@xyflow/react` | UI ลากโนด | ใหม่ |
 
 ---
@@ -340,18 +336,10 @@ resumeFlow(run, newMessage):
     return workflowEngine.resumeFlow(activeRun, msg);
   }
 
-  // ② priority
-  const priority = config.workflow_priority; // "workflow_first" | "trigger_first" | "both"
-  if (priority === "workflow_first") {
-    const wfResult = await workflowEngine.matchAndRun(msg);
-    if (wfResult.outcome === "actioned") return wfResult;
-    // ตกไป trigger เดิม ↓
-  } else if (priority === "trigger_first") {
-    const trigger = await triggerService.matchTrigger(msg.text, {...});
-    if (trigger) { /* ทำ trigger เหมือนเดิม */ return ...; }
-    const wfResult = await workflowEngine.matchAndRun(msg);
-    if (wfResult.outcome === "actioned") return wfResult;
-  }
+  // ② — SUPERSEDED by Phase 9: workflowEngine.runInboundDispatch(msg, leaves)
+  // ลำดับคงที่ใน owner เดียว — ไม่มี priority branch:
+  //   workflow result ที่ยังตอบไม่ได้ → trigger match → miss แล้วค่อยบอท
+  //   ("both"/"trigger_first" ถูกลบ: ตอบซ้ำ / precedence invert)
 
   // ③ บอท (เหมือนเดิม ไม่แตะ)
   ...
@@ -363,7 +351,7 @@ resumeFlow(run, newMessage):
 
 | Field | Default | คำอธิบาย |
 |-------|---------|----------|
-| `workflow_priority` | `"workflow_first"` | ลำดับ: `workflow_first` / `trigger_first` / `both` |
+| ~~`workflow_priority`~~ | ~~`"workflow_first"`~~ | Phase 9: ถูกถอด — fixed order workflow→trigger→bot; ค่าเก่าใน DB = inert |
 | `workflow_enabled` | `false` | สวิตช์เปิด/ปิด workflow engine ทั้งหมด |
 | `workflow_run_timeout_ms` | `1800000` (30 นาที) | flow ที่รอ reply เกินเวลานี้ → cancel อัตโนมัติ |
 
@@ -377,7 +365,8 @@ UI: เพิ่มในหน้า `/config` ที่มีอยู่แ�
 
 1. `mongoClient.ts` — เพิ่ม `workflows` + `workflow_runs` collection + indexes
 2. `config.ts` — เพิ่ม collection names
-3. `systemConfigService.ts` — เพิ่ม `workflow_priority`, `workflow_enabled`, `workflow_run_timeout_ms`
+3. `systemConfigService.ts` — เพิ่ม ~~`workflow_priority`,~~ `workflow_enabled`, `workflow_run_timeout_ms`
+   (Phase 9: `workflow_priority` ถูกถอดออกแล้ว)
 4. `workflowService.ts` — CRUD (create/list/get/update/delete workflow)
 5. `workflowEngine.ts` — `matchAndRun`, `runFlow`, `resumeFlow`, `getActiveRun`
 6. ทดสอบด้วย insert workflow doc ทาง DB ตรงๆ
@@ -429,8 +418,8 @@ UI: เพิ่มในหน้า `/config` ที่มีอยู่แ�
    - แต่ `workflow_runs` เก็บใน DB → poll รอบถัดไปเจอ run ที่ `waiting_for_reply` → resume ได้
    - ต้องมี cleanup: run ที่เกิน `workflow_run_timeout_ms` → cancel
 
-2. **Conflict กับ trigger** — ถ้าตั้ง `both` อาจตอบซ้ำ
-   - default `workflow_first` ปลอดภัยสุด
+2. **Conflict กับ trigger** — ✅ แก้แล้วใน Phase 9: `"both"`/`"trigger_first"`
+   ถูกลบ — owner เดียวบังคับลำดับคงที่ ไม่มีการตอบซ้ำจาก priority อีก
 
 3. **Admin กำลังตอบ** — `processMessage` มี guard `assigned_to` อยู่แล้ว
    - flow ต้องเคารพ guard นี้ด้วย ถ้าแอดมินรับแชท flow ที่รอ reply ต้อง cancel อัตโนมัติ
@@ -450,7 +439,7 @@ UI: เพิ่มในหน้า `/config` ที่มีอยู่แ�
 
 | ค่า | แนะนำ | หมายเหตุ |
 |------|------|----------|
-| `workflow_priority` | `"workflow_first"` | workflow เป็นหลัก trigger เป็นตัวจับหลัง |
+| ~~`workflow_priority`~~ | ~~`"workflow_first"`~~ | Phase 9: ไม่มี field แล้ว — order คงที่ใน `runInboundDispatch` |
 | `workflow_enabled` | `false` (default) | ต้องเปิดเองในหน้า config |
 | `workflow_run_timeout_ms` | `1800000` (30 นาที) | flow รอ reply เกิน 30 นาที → cancel |
 | `false_branch_policy` | `"exit_to_bot"` | ลูกค้าเปลี่ยนเรื่อง → ปล่อยให้บอทตอบ |

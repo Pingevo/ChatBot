@@ -16,12 +16,30 @@ import { getCollection, COLLECTIONS } from "../db/mongoClient";
 // eligible ⟺ global bot_worker_enabled AND platform enabled AND exact
 //   (platform, shop_id) shop.bot_worker_enabled — snapshot เดียวต่อ cycle/pass:
 //   resolve 1 ครั้งที่ caller → ส่งลงทุก bot-invoking entry (required, ไม่มี fallback)
+//
+// ⚡ Shop Context — pair = shop entity เดียว แบก identity ทั้งสาม domain:
+//   shop_id          = transportShopId — messages/conversations/claims/buffer/
+//                      shadow_replies domain (platform-issued id เสมอ)
+//   config_shop_key  = shops.shop_id ของ admin — domain ของ workflow/trigger/
+//                      assignment config records (อาจเป็น name-fallback เก่า)
+//   shopname         = catalog key — Python /chat `shop`, persona/settings domain
+//   resolveBotworkerScope แมพ row→transport ผ่าน conversations evidence เท่านั้น
+//   (canonical id หรือ (platform,shopname)→id แบบ 1:1; missing/ambiguous → ตัดทิ้ง)
 export interface BotworkerScopePair {
   platform: string;
   shop_id: string;
+  config_shop_key: string;
+  shopname: string;
   // ⚡ effective enable cutoff = max(global edge, platform_enabled_at, shop_enabled_at)
   //   — resolver คำนวณครั้งเดียว; ทุก admission ใช้ค่านี้ (strict >)
   cutoff: Date;
+}
+
+// ⚡ context ที่ไหลผ่าน poll → buffer → claim → dispatcher — attach ที่ msg envelope;
+//   REQUIRED ทั้งสอง field — caller ที่ขาด ctx = contract violation (fail closed)
+export interface ShopMessageContext {
+  config_shop_key: string;
+  shopname: string; // ⚡ required — shops row owns it; ไม่มี name = resolve context ไม่ได้ → row ถูกตัดใน resolver
 }
 
 export interface BotworkerCycleScope {
@@ -68,11 +86,19 @@ export function withScope(base: Record<string, unknown>, scope: BotworkerCycleSc
 }
 
 /**
- * scope resolver owner เดียว — อ่าน config+shops 1 ครั้ง → snapshot exact pairs
- *   ที่ใช้ได้ทั้ง cycle (poll/recovery) และ delayed-execution boundary (buffer flush):
+ * scope resolver owner เดียว — อ่าน config+shops+conv evidence 1 ครั้ง → snapshot
+ *   pairs ที่ใช้ได้ทั้ง cycle (poll/recovery) และ delayed-execution boundary (flush):
  *   eligible ⟺ global ON ∧ platform ON(มี edge) ∧ shop ON(มี edge);
  *   pair.cutoff = max(global edge, platform_enabled_at, shop_enabled_at) — strict >
  *   switch ON แต่ timestamp ขาด → fail-closed (ไม่ใส่ pair)
+ *
+ * ⚡ transport resolution — shops.shop_id เก่าอาจเป็น name-fallback (sync writer bug):
+ *   1. row.shop_id มีอยู่ใน conv transport ids ของ platform นั้น → canonical (ใช้ตรง)
+ *   2. else (platform, row.shopname) map → transport id เดียว → ใช้ id นั้น
+ *   3. missing / multi-id → exclude row (fail-closed — ไม่เดา ไม่เขียนกลับ)
+ *   4. row ไม่มี shopname → exclude (mandatory ctx contract — /chat ต้องการ catalog key)
+ *   evidence = conversations (distinct platform|shop_id|shop_name) — 1 aggregate/resolve,
+ *   $match bounded ด้วย enabled-shop identities เท่านั้น (0 enabled rows → 0 conv query)
  */
 export async function resolveBotworkerScope(
   config: SystemConfigDoc,
@@ -86,19 +112,75 @@ export async function resolveBotworkerScope(
   );
   if (!enabled.length) return empty;
   const shopsColl = await getCollection<{
-    platform: Platform; shop_id: string; bot_worker_enabled?: boolean; bot_worker_enabled_at?: Date | null;
+    platform: Platform; shop_id: string; shopname?: string;
+    bot_worker_enabled?: boolean; bot_worker_enabled_at?: Date | null;
   }>(COLLECTIONS.shops);
   const rows = await shopsColl.find(
     { platform: { $in: enabled.slice() }, bot_worker_enabled: true },
-    { projection: { platform: 1, shop_id: 1, bot_worker_enabled_at: 1 } }
+    { projection: { platform: 1, shop_id: 1, shopname: 1, bot_worker_enabled_at: 1 } }
   ).toArray();
+  // ⚡ ไม่มี enabled row → scope ว่างโดยไม่แตะ conversations (mapping query เดียว/pass)
+  if (!rows.length) return empty;
+  // ⚡ bounded $match — conversations evidence เฉพาะ identity ของ enabled rows เท่านั้น
+  //   (ห้าม platform-wide scan): canonical candidates ใช้ {platform,shop_id} compound
+  //   index; name candidates ใช้ partial index {platform,shop_name,shop_id} ที่ declare
+  //   ใน mongoClient.ts — ⚠️ production creation/verify = operator approval gate
+  //   แยกต่างหาก (declaration = code เท่านั้น)
+  const matchOr: Record<string, unknown>[] = [];
+  for (const p of enabled) {
+    const ids = [...new Set(rows.filter((r) => r.platform === p).map((r) => r.shop_id))];
+    const names = [...new Set(rows
+      .filter((r) => r.platform === p && typeof r.shopname === "string" && r.shopname)
+      .map((r) => r.shopname as string))];
+    if (ids.length) matchOr.push({ platform: p, shop_id: { $in: ids } });
+    // ⚡ eq term ต่อ name (ไม่ใช่ $in) — partial index {platform,shop_name,shop_id}
+    //   ใช้ได้เฉพาะเมื่อ query prove `shop_name > ""` ได้; eq บนค่าคงที่ imply ได้
+    //   แต่ $in อาจไม่ (planner ไม่ prove implication) — shape นี้ index-compatible
+    for (const n of names) matchOr.push({ platform: p, shop_name: n });
+  }
+  if (!matchOr.length) return empty;
+  const convColl = await getCollection<{
+    platform?: string; shop_id?: string; shop_name?: string;
+  }>(COLLECTIONS.conversations);
+  const groups = await convColl.aggregate<{ _id: { p?: unknown; id?: unknown; n?: unknown } }>([
+    { $match: { $or: matchOr } },
+    { $group: { _id: { p: "$platform", id: "$shop_id", n: "$shop_name" } } },
+  ]).toArray();
+  const idsByPlatform = new Map<string, Set<string>>();
+  const idsByName = new Map<string, Set<string>>();
+  for (const g of groups) {
+    const p = g._id?.p; const id = g._id?.id; const n = g._id?.n;
+    if (typeof p !== "string" || typeof id !== "string" || !id) continue;
+    let ids = idsByPlatform.get(p);
+    if (!ids) idsByPlatform.set(p, (ids = new Set()));
+    ids.add(id);
+    if (typeof n === "string" && n) {
+      const key = `${p}|${n}`;
+      let s = idsByName.get(key);
+      if (!s) idsByName.set(key, (s = new Set()));
+      s.add(id);
+    }
+  }
   const pairs: BotworkerScopePair[] = [];
   for (const r of rows) {
     if (!(r.bot_worker_enabled_at instanceof Date)) continue;
+    // ⚡ mandatory context — row ไม่มี shopname = catalog key ขาด → /chat routing
+    //   ทำไม่ได้ → ตัดทิ้ง (ShopMessageContext.shopname เป็น required ตาม contract)
+    const name = typeof r.shopname === "string" && r.shopname ? r.shopname : null;
+    if (!name) continue;
+    let transportId: string | undefined;
+    if (idsByPlatform.get(r.platform)?.has(r.shop_id)) transportId = r.shop_id;
+    else {
+      const s = idsByName.get(`${r.platform}|${name}`);
+      if (s && s.size === 1) transportId = [...s][0];
+    }
+    if (!transportId) continue; // missing/ambiguous transport evidence → fail closed
     const pAt = platformAt[r.platform] as Date;
     pairs.push({
       platform: r.platform,
-      shop_id: r.shop_id,
+      shop_id: transportId,
+      config_shop_key: r.shop_id,
+      shopname: name,
       cutoff: new Date(Math.max(globalEnabledSince.getTime(), pAt.getTime(), r.bot_worker_enabled_at.getTime())),
     });
   }

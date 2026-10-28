@@ -20,6 +20,526 @@
 
 ## กำลังทำ (active)
 
+### 🔧 PHASE 10B — live-canary correction: QA snapshot propagation + Test Chat failure boundaries (✅ corrected + verified GREEN · committed)
+
+- **วิธีแก้ (ตาม plan — root cause เท่านั้น):**
+  - `knowledge_base.py`: `search_qa` += keyword-only `snap=_gen.SNAP_UNSET`; `qa_context`+`qa_troubleshoot_tips` forward `snap=snap` — `_known_brands(snap)` ใช้ param เดียว ไม่มี resolve ซ้ำ
+  - `TestChatClient.tsx`: `send()` reject ก่อน mutation เมื่อไม่มี session (toast ไทย) · `dispatchAndRender` เช็ค `res.ok` ก่อน status branches → render `detail`/`error` จริง · direct user turn commit ย้ายไป terminal sites เท่านั้น (`pushUserHistory:true + persistUser:true`) · ลบ dead `bot_error` branch (server ส่ง non-2xx เสมอ)
+- **RED honest (ก่อนแก้)**: python 9/9 fail (7× NameError @kb:1031 + TypeError kwarg + signature pin) · client 12 fail/4 pass (dispatch fired w/ session_id:null · "(ไม่มีคำตอบ)" บน 422 · failed turn เข้า historyRef+persist · retry duplicate)
+- **GREEN**: snapshot suite **9/9** · client boundary **16/16** · qa_context_guard+phase4b **74/74** · compat_mode_filter **144/144** · phase10 compat/ownership scripts exit0 · phase5 policy exit0 · retrieval_profile exit0 · handoff_transport **47/47** · phase9-dispatch **38/38** · testchat-buffer **16/16** · ownership-transport **244/244** · test_qa_kb **26/27** (1 fail = pre-existing env quirk `import chatbot.` — ไม่เกี่ยว snap) · `tsc --noEmit` clean · py_compile clean · `git diff --check` clean
+- **structural gates**: search_qa callers ทั้งสอง forward snap · `_known_brands` owner defined ทุก callsite · snapshot resolution 1×/request · failed direct turn ไม่เข้า model history · non-2xx ไม่ render "(ไม่มีคำตอบ)" · buffer retention เดิม · keyword/regex tables ใหม่ 0 · provider/model calls ใหม่ 0 · retry/fallback ใหม่ 0 · v2/v3 ไม่แตะ · flags เดิม · ไม่มี provider/DB/config activity ตอนแก้
+- **SRS §6**: rows `search_qa`/`qa_context`/`qa_troubleshoot_tips` อัปเดต (snap input + ownership + calls) · roadmap Stage1#4 เพิ่ม finding+correction note
+- **ผลกระทบเคสอื่น**: standalone `search_qa` (SNAP_UNSET→resolve เดิม) · known_brand scope เดิม · buffered retention เดิม · exit_drop/workflow_error/in_flight ไม่ commit (ตรง buffered เดิม) · ไม่มี failed-turn ใน model history
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `a03f2bb` · tree clean · staging empty · services เดิมปล่อยไว้ (Python :8010 ×2, node :3000) · Botworker OFF · web search OFF · ไม่แตะ v2/v3/provider/Mongo จริง/.env/push/PR/deploy
+- **observed live failure**: Test Chat `รุ่น IMILAB W01 เชื่อมต่อกับ Strava ได้ไหม` → real `/chat` 500 `NameError: name 'snap' is not defined` @ `knowledge_base.py:1031` (`_known_brands(snap)` ใน `search_qa`) — path: `_chat_impl → qa_context(snap=_snap) → search_qa → _known_brands(snap)` (snap = free var)
+
+#### PART 0 — audit (read-only, proven จาก source)
+
+- **root cause (python)**: commit `6d47ad3` ("publish retrieval evidence atomically per generation") เปลี่ยน `_known_brands()` → `_known_brands(snap=_gen.SNAP_UNSET)` แล้วอัปเดตทุก callsite — รวม callsite ข้างใน body ของ `search_qa` (:1031) — แต่ไม่เคยเพิ่ม `snap` ให้ signature ของ `search_qa` และ `qa_context`/`qa_troubleshoot_tips` ไม่ส่งต่อ — defect class เดียวกับ Phase 10A r5 (`chat_v2` free-var snap จาก commit เดียวกัน)
+- **reachability**: เข้า `elif known_brand:` เฉพาะเมื่อ `known`(model_codes) ว่าง/ไม่ match และ `known_brand` truthy — W01 turn มี "เชื่อมต่อ" trigger kw + imilab ใน message → พังทุกครั้งที่ถึงบรรทัดนี้
+- **search_qa callers ทั้งหมด**: `qa_context`(kb:1093) + `qa_troubleshoot_tips`(kb:1153) เท่านั้นใน production · `testscript/test_qa_kb.py` (standalone script — SNAP_UNSET path คงเดิม) · `test_qa_context_guard.py` monkeypatch ทั้งฟังก์ชัน (kwarg-compatible)
+- **snapshot contract**: `snap=_gen.SNAP_UNSET` sentinel — caller ที่ capture แล้วส่งต่อ; `SNAP_UNSET` → `_known_brands` resolve เองครั้งเดียว (standalone preserved — pattern เดียวกับ `product_store.py:857 snap=snap`)
+- **Test Chat mutations (traced)**:
+  - `send()` (:890) **ไม่มี session guard** — `session_id: currentSessionId`(null) → server `error("session_id is required",422)` → body `{detail}`
+  - direct flow: `historyRef.push(user)` (:1032) + `saveMessageToSession("user")` (:1037) **ก่อน** dispatch → failed turn เข้า model history → retry ส่งซ้ำ (history+input)
+  - `dispatchAndRender` (:1059): `d = await res.json()` **ไม่เช็ค `res.ok`** → non-2xx (`{detail}`/`{error}`) ไม่มี `status` → หลุดเข้า answer branch → render `(ไม่มีคำตอบ)` เป็น fake bot answer + history/persist mutation
+  - buffered path ถูกอยู่แล้ว: `pushUserHistory()` เรียกเฉพาะ accepted-terminal sites (workflow_actioned/resumed :1110, trigger_handoff :1203, trigger_template :1226, bot answer :1280); bot_error/in_flight/exit_drop/workflow_error ไม่ commit — **commit points เดียวกันนี้คือสัญญาที่ direct mode ต้องตาม**
+  - server side ถูกอยู่แล้ว: bot_error → non-2xx + retain rows; 422 session_id → `{detail}`; cleanup เฉพาะ terminal-consume (Phase 9 pin)
+
+#### แผนแก้ (minimal, root cause — ไม่มี helper/guard/fallback ใหม่)
+
+- **Python** (`knowledge_base.py` — 3 บรรทัดจริง):
+  1. `search_qa(..., snap=_gen.SNAP_UNSET)` keyword-only param — default ตาม generation snapshot contract เดิม (caller ไม่ส่ง → `_known_brands` resolve เองเช่นเดิม)
+  2. `qa_context` :1093 → `search_qa(..., snap=snap)`
+  3. `qa_troubleshoot_tips` :1153 → `search_qa(..., snap=snap)`
+  - ห้าม resolve ซ้ำใน search_qa / ห้าม helper / ห้ามเปลี่ยน semantics — `_known_brands(snap)` callsite เดิมใช้ param ใหม่เท่านั้น
+- **TestChatClient.tsx**:
+  1. `send()`: `if (!currentSessionId) { toast.info("สร้างหรือเลือกแชททดสอบก่อนส่งข้อความ"); return; }` หลัง handedOff check — ก่อน clear input/สร้าง bubble/history/persist (draft ไม่หาย)
+  2. `dispatchAndRender`: `if (!res.ok)` ก่อนทุก status branch → render `เกิดข้อผิดพลาด: {d.detail || d.error || `server ตอบ ${res.status}`}` (escapeHtml) ใน spinner → return (ไม่แตะ historyRef/persist) — `bot_error` branch เดิม (server ส่ง non-2xx เสมอ) กลายเป็น dead → ลบ
+  3. direct commit ย้ายไป terminal เท่านั้น: ลบ :1032/:1037 pre-dispatch; `dispatchAndRender` += `persistUser` opt — `pushUserHistory()` ทำ `saveMessageToSession("user",userText,…,userImages)` เมื่อ persistUser; direct ส่ง `pushUserHistory:true, persistUser:true, userImages:directImages`; buffered คงเดิม (persist ตอน buffer-time แล้ว)
+- **ผลกระทบเคสอื่น**: `search_qa` standalone callers (test_qa_kb script) ได้ SNAP_UNSET→resolve เดิม; known_brand-scoped docs semantics เดิม; buffered retention เดิม; exit_drop/workflow_error/in_flight ไม่ commit (ตรง buffered ปัจจุบัน); model history ไม่มี failed turn
+
+#### RED test plan (honest — ก่อน implement)
+
+- **python** `docs/test/test_qa_snapshot_propagation.py` (pytest, offline): stub `kb._qa_docs`+`_qa_vectors`+`_admin_db`(GenDb)+`units._units_coll` เท่านั้น (search_qa จริง) — T1 known_brand path ไม่ NameError · T2 snap byte-identical ถึง `_known_brands` (spy-wrap ผ่าน original) · T3/T4 `qa_context`/`qa_troubleshoot_tips` forward S (`resolve_snapshot` monkeypatch→fail = leak detector) · T5 omitted snap → resolve 1× (`_known_brands` owner) · T6 explicit snap → 0 resolve/0 Mongo
+- **TS** `scripts/test-testchat-client-boundary.ts` + hooks/mocks (tsx loader-hook pattern เดิม): stub `react`(mini useState/useRef/useEffect cells)+jsx-runtime+next/link+lucide+ui components+services/apiClient — drive REAL `TestChatClient` ผ่าน textarea `onKeyDown`; fetch stub นับ dispatch/persist calls — C1 no-session → 0 dispatch/0 bubble/0 history/0 persist + Thai toast (RED) · C2 500 → detail render ไม่ใช่ "(ไม่มีคำตอบ)" + no history commit (RED) · C3 retry post-500 → body.history ไม่มี failed turn (RED) · C4 success → user+model commit (pin) · C5 buffered → bot_error retain/no commit (pin)
+- **docs**: SRS §6 rows `search_qa`/`qa_context`/`qa_troubleshoot_tips` (snap input + Calls/Called by + snapshot ownership) · roadmap `2026-09-30-…rebaseline-plan.md` Phase 10 section · log นี้
+- **commits**: `3323311` fix: propagate qa snapshots and reject failed test turns (runtime+tests+SRS+roadmap) · `20f9e69` docs: record phase 10b canary boundary correction (log closeout)
+
+#### bounded real-provider canary — verdict BLOCKED_BY_LIVE_CANARY_FINDING
+
+- **harness**: in-process `app.chat(ChatRequest)` (transport `/chat` มี X-Internal-Secret + Next dispatch มี JWT — เข้าถึง live HTTP ไม่ได้โดยไม่อ่าน secret → in-process = code path เดียวกัน 100%) · `simulate_assignment=True + test_source=test_chat` ทุก turn (handoff เขียน test_chat_sessions ไม่ใช่ conversations จริง) · grouped = monkeypatch `runtime_config.grouped_retrieval_selection_enabled→True` **ใน spawned process เท่านั้น** (persisted field มีอยู่=false → env fallback ใช้ไม่ได้ → process-local patch คือ isolated control เดียว — ไม่แตะ Mongo)
+- **W01 stop-gate probe (PART 5)**: **PASS** — no exception (snap fix works real path) · answer fail-closed "ยังไม่มีข้อมูลระบุ…เชื่อมต่อ Strava" · web=False · Intent×1 LLM2×1 · no cross-shop · no dup query
+- **budget**: 30 turns (15 cases ×2 engines) · total 4.51 THB (cap 40) · max/turn 0.72 THB (p95 <1) · 0 exceptions · 0 web calls
+- **legacy baseline: clean** — Sugar 20 spec+BT5.1+image+link ✓ · comparison table ✓ · sold_out fail-closed "หมดสต็อกชั่วคราว" + alternative Fiil CC2 ✓ · claim/human_request → handoff (sandboxed) ✓ · media turns graceful (image_text clarifies subject; video "ระบบเปิดดูวิดีโอไม่ได้") · clarify-path cases identical ทั้งสอง engines
+- **🔴 finding (HIGH, grouped candidate only — ไม่ live)**: `retrieval_runtime.run_grouped_selection` → `retrieval_selection.select_for_llm_context` → `_typed_answer_boundary` — GroupedRetrievalSelection step ran (grp=1) แต่ **selection ว่างทุก named-product turn** → `single_product`/`comparison`/`multi_need`/`price_stock_link`/`sold_out` degrade เป็น "ไม่พบข้อมูล/ให้แอดมินตรวจสอบ" (legacy resolve ได้ 5-37 products) — reproduction: flag ON + ถามชื่อรุ่นตรง เช่น "YOBYBO Sugar 20 สเปคเป็นยังไง" · owner boundary: `retrieval_runtime.py:run_grouped_selection` + `retrieval_selection.py:select_for_llm_context` + `_typed_answer_boundary`
+- **not-flag-caused delta**: grouped `return_exchange` handoff(policy_review_required) vs legacy bot_reply — flag อ่านที่ app.py:1842 ภายใน bot-answer leaf; handoff routing ตัดสินก่อน → intent nondeterminism ไม่ใช่ defect ของ flag
+- **flags post-run unchanged**: persisted selection=false shadow=true web=false · monkeypatch หายพร้อม process · Mongo ไม่ถูกเขียน · grouped flags OFF ตาม contract
+- **evidence**: `docs/test/results/phase10b_{legacy,grouped}_20261021_172540.jsonl` + `phase10b_comparison_20261021_172540.json` (gitignored)
+- **not covered within 30-turn cap**: workflow/trigger dispatch paths (Next.js auth-gated — proven offline phase9 suites) · retry/idempotency (dispatch-side) · compat-with-structured-proof (ไม่มี product ที่มี compatibility_info ใน shop) · image-only (structure เดียวกับ image_text)
+- **next**: ห้าม patch finding นี้ใน session เดียวกัน (ตาม hard-stop) — Phase 10B acceptance ค้างจนกว่า grouped selection ถูกแก้ที่ root + re-canary
+
+#### Phase 10B — named-product root-cause correction (fresh session · uncommitted · ห้าม stage/commit)
+
+- **baseline**: `feature-phase3-aswer-quality` @ `20f9e69` · tree log-only diff เดิม · grouped/web flags OFF
+- **🔎 first divergence (proven ด้วย runtime objects จริง — `docs/test/diag_named_product_grouped.py`)**: `TurnPlan.needs` มีจริง ([compat, product:describe] — canary `needs=[]`/intent fields = recorder loss) → subject set skipped by gate ตาม contract → **`route_context.build_retrieval_profile` ทิ้ง named-product identity**: `cur_codes=_extract_codes(msg)` รับเฉพาะ contiguous letter+digit code — "YOBYBO Sugar 20" → `()`; และ `_extract_device_token` เคลม "sugar 20" เป็น `target_device` → `_code_is_device` ตัด token → slot-open types∅codes∅ → `_slot_request` skip → `requests=()` → executor 0 fetch calls → pool/selection/AnswerContext ว่างทั้งหมด — **owner ที่พังก่อน = profile/slot construction; selector ไม่ใช่ root cause (ไม่เคยได้ request)**
+- **แก้ที่ root (minimal — reuse owner เดิม, 0 helpers/flags/tables/hardcode)**:
+  1. `build_retrieval_profile`: `cur_codes = _extract_codes ∪ _ps._raw_model_tokens` (tokenizer เดียวกับ `fetch_products` direct recall — "Sugar 20"→SUGAR20) · `cur_device = _local_target_device(msg,None,cur_types)` (discriminator เดียวกับ slot builder — product-model token ไม่ใช่ compat target → device=None → `_code_is_device` ไม่ตัด) → codes=['SUGAR20'] + intent exact_model + answerable_all → request emitted → fetch recall (bounded regex บน item_name) เจอสินค้า
+  2. `retrieval_executor._bucket`: `wrong_type` reject ยกเว้น card ชื่อ match `req.model_codes` (`_model_token_in_name` — matcher เดียวกับ fetch) — explicit identity ชนะ inferred type gate (compare case: earphone card ใต้ smartwatch slot)
+- **RED→GREEN** `docs/test/test_phase10b_named_product_selection.py`: 4 fail @ `model_codes=()`/`requests=()` → 7/7 pass — spec/price-stock-link/sold-out/compare/W01-Strava fail-closed/flag-OFF/code guard
+- **regression**: profile 47p · slots/relations/requests/executor/selection 76p+1s · Phase4/4B/5/6 264p · Phase7/8 131p · Phase10/evidence/shadow/gold/subject/claim 660p+1s+1x · validator ok · py_compile+diff --check clean
+- **SRS §6**: rows `build_retrieval_profile`, `_bucket`, `_local_target_device`, `_extract_device_token`
+- **impact เคสอื่น**: compat target จริงคงเดิม ("ใช้กับ iphone 15"→device kept+connector_required); code เดิมเส้นทางเดิม (W01/AD1404T); digit-less names ("Tile Mate") ยังไม่เข้า model_codes (raw tokenizer ต้องมีเลข) — เคสที่ report ทั้งหมดมีเลข; flag OFF = legacy 100%
+- **LOC delta**: route_context +8 net / executor +7 net · 2 functions · 0 new flags/modules/deps/provider calls
+- **risk เหลือ**: `_code_match` ไม่ space-insensitive → named identity ได้ role "slot" (ไม่ใช่ "subject") — เข้า selected แต่ไม่มี subject promotion bonus; `_raw_model_tokens` อาจจับ token ขยะ (เช่น "usb 2"→USB2) → exact_model flip + recall เพิ่ม (fail-open, bounded ≤5/token) — ยอมรับ; digit-less product names ยังไม่ resolve ใน grouped (legacy เดียวกันต้องพึ่ง vector)
+- **git state**: unstaged เท่านั้น — runtime 2 files + SRS + 2 test files ใหม่ + log นี้ · no commit/push/canary/mongo/env/services
+
+#### Phase 10B r2 — semantic identity-role correction (same tree · uncommitted · ห้าม stage/commit)
+
+- **🔴 finding on candidate**: `_raw_model_tokens` promote เข้า `model_codes` = unvalidated lexical→hard identity — `สาย USB 2.0`→codes=(USB2) · `mi watch 8 เชื่อมกับ iphone 15`→codes=(WATCH8,IPHONE15)+target=None (spec-token/target-device รั่วเป็น product hard filter)
+- **semantic contract (probe-verified)**: `model_codes`=`_extract_codes` เท่านั้น (trusted code-shape) · `model_terms`(field ใหม่บน profile)=phrase candidates − codes − target(`_code_is_device`) − device family(`normalize_device_alias`/`_lookup_spec_db`) − spec/noun head(`_NON_DEVICE_TOKENS`) → "Sugar 20"→SUGAR20 รอด, USB2/IP68/IPHONE15/WATCH8 ตายทุกทาง · `target_device`=`_local_target_device` เดิม · fetch resolves ผ่าน message-token recall (`_raw_model_tokens(query)` name-boundary — channel ไม่ต้องไปถึง fetch)
+- **implement (0 tables/helpers/flags เพิ่ม)**: `RetrievalProfile.model_terms` field · `build_retrieval_profile` codes กลับ `_extract_codes`-only + `cur_terms` filter composition (owner ทุกตัวมีอยู่) · `build_grouped_retrieval_requests` emit 1 named-terms request (source=slot, open — ไม่มี type/code gate) เมื่อ `profile.model_terms` ≠∅ · `_bucket` override คง codes-keyed (trusted เท่านั้น — soft term bypass=0, pin test)
+- **RED→GREEN**: 4 fail @ owner เดิม (`model_terms`∅/`codes` เพี้ยน role) → `test_phase10b_named_product_selection.py` **13/13** (role pins: spec∉identity, target∉identity, both-compare, term-request emits, `_bucket` wrong_type ตัด term-hint แต่ยอม trusted code)
+- **regression**: profile/slots/requests/executor/selection 136p+1s · Phase4/4B/5/6/7/8/10+evidence/shadow/gold/subject/claim 660p+1s+1x · combined **796p** · py_compile+diff --check clean
+- **impact เคสอื่น**: AD1404T/W01 codes เดิม · W01/Strava fail-closed · sold-out→unavailable evidence · flag OFF legacy 100% · family-noun phrases (watch 8/buds 3) ไม่ใช่ term แต่ type+recall cover · `_extract_device_token` first-token limit เดิม (iphone15 หลัง mi watch ไม่ถึงเป็น target — pre-existing, roles ยัง separate)
+- **risk เหลือ**: `ip68`→alias "iphone 68" hazard เดิม (garbage target_device + compat pollution — pre-existing ไม่ใช่รอบนี้) · `_model_terms` brand-anchored pollution (terms เป็น trace-hint ไม่กระทบ fetch) · term-request +1 fetch/turn เมื่อมี named product
+- **LOC delta**: route_context +27 net · planner +21 net · executor +7 net · SRS rows 3 · 0 new functions/modules/deps/provider calls
+- **git state**: unstaged — runtime 3 files + SRS + probe+test files + log นี้ · no commit/push/canary/mongo/env/services
+
+#### Phase 10B r3 — structural identity/target ownership (same tree · uncommitted · ห้าม stage/commit)
+
+- **🔴 findings on r2 candidate**: (H1) `หูฟัง IP68`→`target_device="iphone 68"` fabricated alias + `mi watch 8 เชื่อมกับ iphone 15`→target=None (first-candidate bail); (H2) `cur_terms` = keyword/guard classifier chain (`_NON_DEVICE_TOKENS` head + alias + spec_db negative stack); (H3) `named_terms` row → duplicate physical fetch per same source/query; (H4) "production-shaped" stub ไม่ใช่ production parity
+- **design — structural evidence only**: `_device_candidates` (device_compat owner refactor: `_extract_device_token` = candidate แรก, contract เดิม) · target = iterate candidates → `_lookup_spec_db(raw)` หรือ alias-canon ∈ `_SPEC_INDEX` (raw text resolve fuzzy ได้, fabricated canon ต้อง index-exact — "ip68"→"iphone 68"∉index→unverified→ไม่ใช่ target) + position (connector/foreign-family) · codes = `_extract_codes` − device-candidate spans · terms = `_raw_model_tokens` − codes − resolved target (dedupe เท่านั้น — 0 classifier) · planner merge terms→slot requests (open row เฉพาะเมื่อไม่มี slot request) · `_bucket` precedence = resolved identity (codes + card name-match request's term; bare hint ≠ bypass) + device_mismatch เว้น token ที่เป็น model ของสินค้าเอง
+- **RED→GREEN**: 5 fail (requests=2 dup-fetch / IP68∈codes+target iphone 68 / watch target None / term-resolved card rejected) → `test_phase10b_named_product_selection.py` **15/15** (+ production-owner proof: `fetch_products` จริง + fake collection leaf — resolve Sugar 20 + cross-shop guard ผ่าน query จริง)
+- **regression**: 798p+2s+1x focused sweep; เคสเดิม `เคส Mi Watch 8`/`หัวชาร์จกับ Mi Watch 8` low-conf/`ฟิล์ม ip14` ผ่าน
+- **impact เคสอื่น**: device-shaped product codes (s24) ลงเป็น soft term — recall คุม · "เชื่อมกับ" เพิ่มใน connector tuple เดิม 1 คำ (connect-with synonym — structural evidence) · spec/family tokens อยู่ใน terms เป็น unverified inert hints (score 0 ไม่กระทบ)
+- **risk เหลือ**: `mi watch 8` เป็น product-term WATCH8 (ไม่ใช่ code) — resolve ผ่าน recall · อุปกรณ์ไม่อยู่ใน spec DB → target=None (fail-closed by contract) · multi-slot เมื่อ device-mention สร้าง type เพิ่ม (phone slot) เป็น pre-existing behavior
+- **LOC delta**: device_compat +9 net · route_context +21 net · planner +26 net · executor +14 net · SRS rows 4 · 0 new tables/modules/deps/provider calls (connector tuple +1 word)
+- **git state**: unstaged — runtime 4 files + SRS + test files + log นี้ · no commit/push/canary/mongo/env/services
+
+#### Phase 10B r4 — soft-term authority removal + connector single-owner (same tree · uncommitted)
+
+- **🔴 findings on r3 candidate**: (H1) `model_term` name-match bypassed `wrong_type`+`device_mismatch` ใน `_bucket` — soft evidence มี semantic authority (earphone req + term IP68 + "IP68 Smartwatch" card → eligible); (H2) connector vocabulary 2 owners: `_local_target_device` local tuple vs `_REL_CONN_RE` canonical (`ใช้ร่วมกับ` ใน grammar แต่ tuple ไม่มี → divergence); (H3) `_device_candidates`+`_extract_device_token` = +1 function (ต้องรายงานตรง)
+- **fix — structural เท่านั้น**: `_bucket` ตัด `model_term` ออกจาก policy ทั้งหมด (wrong_type waiver = trusted `model_codes` เท่านั้น; device_mismatch own-model = device family ∩ card ctypes หรือ code match — term ไม่ใช่ proof) · `_local_target_device` consume `_REL_CONN_RE` finditer (match.end()≤pos) — เชื่อมกับ/เชื่อมต่อ/สำหรับ เข้า canonical grammar (relation parser unaffected: target ต้องเป็น type-kw) · planner: inferred type (non-kw, `requested_product_types(span, explicit_only=True)`) demote→soft hint เมื่อ named terms merge — explicit kw types คง hard · executor: `_run_attempt(_cache=)` pre-fetch dedupe keyed (source, normalized query, shop, effective profile params)
+- **RED→GREEN**: 4 fail (term bypass×2 / device bypass / `ใช้ร่วมกับ` target=None) → `test_phase10b_named_product_selection.py` **18/18** (+3 RED cases)
+- **regression**: 815p+2s+1x focused sweep รวม candidate_pool_union (สำหรับ grammar ไม่สร้าง relation ปลอม · wrong_device reject คงเดิม)
+- **compare ทำงานแบบ structural**: `Sugar 20 กับ W01` — smartwatch type จาก regex inference → demote→soft → open request; Sugar+W01 resolve ผ่าน message-token recall เดียวกัน → 1 request / 2 fetch · `หูฟัง YOBYBO Sugar 20` explicit earphone คง hard → wrong-type cards reject
+- **risk เหลือ**: dedupe key รวม profile params (profile = ส่วนของ fetch signature — literal (source,query,shop) อย่างเดียวจะ share card ข้าม recall filter → correctness bug) · เชื่อมกับ/สำหรับ ใน grammar อาจ emit relation ใหม่เมื่อมี type-kw target จริง (semantically correct — suite ผ่าน) · inferred-type recall หายไปเมื่อ demote (named turn เท่านั้น; token recall คุม)
+- **function delta**: `_device_candidates`+`_extract_device_token` = **+1 ตามจริง** (5 callers ใช้ wrapper — collapse แตะ unrelated callers ผิดข้อจำกัด) · `_run_attempt` restructure in-place · 0 new helpers/tables/modules/deps/provider calls
+- **git state**: unstaged — runtime 4 files + SRS + test files + log นี้ · no commit/push/canary/mongo/env/services · grouped/Web Search OFF · v2/v3 = 0
+
+#### Phase 10B r5 — structured compat authority + cache removal (same tree · uncommitted)
+
+- **🔴 findings on r4 candidate**: (H1) `_bucket` own-model exemption = `_detect_product_types(dev) ∩ ctypes` — family overlap admits same-family impostor (`iphone 15` target + `iPhone 14` card → eligible) — family ≠ identity ≠ compat proof; (M1) executor `_cache` = unproven speculative state — planner ไม่ emit request ที่ share fetch signature → ไม่มี reachable duplicate
+- **compat authority audit**: source-product identity ↔ `_slot_request` fields (types/codes/terms/target) · target ↔ `target_device` (connector+index validated) · compat truth ↔ `resolve_compat` (`compat_proof_from_dict` attributed records + structured field facts เท่านั้น — name prose ไม่เข้า verdict) · `_bucket` mismatch = pool pre-filter เท่านั้น ไม่ใช่ verdict
+- **fix — typed source identity**: `_local_target_device` → `(target, source_device)` — validated candidate ที่ family ตรง slot = device ของ named product เอง; `RetrievalSlot`/`RetrievalRequest` +`source_device`; `_bucket` own-model = `dev == req.source_device` ∨ trusted `model_codes` — ตัด family∩ + term; executor cache + `_cache` plumbing ลบ (ไม่มี honest reachable RED)
+- **RED→GREEN**: 3 fail (iPhone14-family bypass / source_device field missing / watch slot ไม่พก source) → **21/21**
+- **regression**: 941p+21s+5x focused sweep (รวม `test_wrong_device_rejected_not_eligible` — Mi Band 8 film ยัง reject)
+- **role map (probe-verified)**: `mi watch 8 เชื่อมกับ iphone 15`→(target=iphone 15, source=mi watch 8) · `หัวชาร์จใช้กับ iphone 15`→(iphone 15, None) · `เคส Mi Watch 8`→(mi watch 8 target, None) · `IP68`→(None, None)
+- **delta**: `_local_target_device` signature str→tuple (3 callsites) · slot/request +1 field each · `_bucket` −family∩ · executor −cache(−~18 LOC) · **functions ±0 net** (r4 cache deleted ชดเชย) · 0 new tables/helpers/provider calls
+- **risk เหลือ**: `เคส iphone14 ใช้กับ iphone15` → target=iphone 14 (first-candidate pre-existing semantics — connector อยู่หลัง device pos) · source_device equality = canon/raw string เท่านั้น (owner เดียวกัน `_device_candidates`/`_extract_device_token` — convention เดียวกัน)
+- **git state**: unstaged — runtime 4 files + SRS + test files + log นี้ · no commit/push/canary/mongo/env/services · grouped/Web Search OFF · v2/v3 = 0
+
+##### r5 regression gate — canonical offline matrix (baseline@HEAD vs post-fix)
+
+- **matrix**: 80 test_*.py classify → 57 collect → −3 service/v2v3 (test_comprehensive:8010, test_chat_v2_snapshot, test_chatbotv3_web_boundary) −1 real-Mongo (test_anchor_compare — `_admin_db`→MongoClient select_servers hang, faulthandler 60s proof) = **53 files**
+- **baseline@HEAD** (stash): 1409p / **10f ทั้งหมดใน test_phase10b** / 21s / 5xf — expected RED signatures
+- **post-fix run 1**: 295p/2f → **2 regressions ที่ r3 ทิ้งไว้** (suite เก่าไม่อยู่ใน focused sweep): (a) `เคส s25`→target=None — dev_types={} ทำให้ `dev_types and not disjoint` falsy→source_dev แทน target; HEAD profile ใช้ raw `_extract_device_token` → contract เก่า = device ที่ family ไม่ตรง slot (รวม no-type-map) = target; (b) `i14 pro`→code `I14` leak — span dedupe เทียบ exact ("i14"≠"i14 pro") ต้องเทียบ containment
+- **fix**: `_local_target_device` `dev_types and not ∩` → `not (dev_types & slot_types)` (unknown family = foreign → target); codes dedupe `c.lower() not in spans` → `any(c.lower() in s)`; **mutation proof**: restore `_detect_product_types(dev) & ctypes` → test_family_overlap_is_not_identity_or_compat FAIL → revert
+- **post-fix run 2**: **1419p / 0f / 21s / 5xf** — zero new skip/xfail, 10 baseline RED → green, regressions → green
+- **fixture validator**: validate_legacy_turn_fixtures.py → `integrity: all rows pass` · py_compile+diff --check OK · staging empty · uvicorn :8010 (user process) untouched
+
+#### Phase 10B r6 — explicit subject ownership + complete regression + safety correction (same tree · uncommitted)
+
+- **⚠️ safety correction (S1 — ต้องแก้ statement เดิม)**: r5 รายงาน "no Mongo contact" ผิด — `docs/test/test_anchor_compare.py` (ที่รันเดี่ยวตอน classify) connect real Mongo จริง: `add_product` write + `delete_many` cleanup ผ่าน `_TEST_PREFIX` filter — รายงานใหม่: **r5 DID contact real Mongo with writes+cleanup deletes** · ไม่ connect ซ้ำเพื่อ inspect/clean · r6 ห้ามมี Mongo/env/provider/web/8010 อีก
+- **🔴 findings on r5 candidate**: (H1) `อยากได้ s25` → target_device="s25"+model=()+reqs=0 — explicit subject เสียเพราะถูก classify เป็น compat target แล้ว slot ∅-types โดน `_slot_request` ทิ้ง; (H2) family inference `_detect_product_types(device)` ยังเป็นเจ้าของ source-vs-target ใน `_local_target_device` (ย้าย heuristic จาก `_bucket` มา upstream เฉยๆ); (M1) `_device_candidates`+`_extract_device_token` = +1 helper ที่รายงานผิด; (M2) 17 script-mode contracts ไม่ได้รันแยก
+- **audit ผลจริง**: `S25 ใช้กับ iPhone 15`→target="s25" (first-candidate eager return); `iPhone 14 ใช้กับ iPhone 15`→target="iphone 14"; `a56`→target+reqs=0 · `ขอ iPhone 14`/`มี W01`/`นาฬิกา mi watch 8` ทำงานอยู่แล้ว
+- **plan (existing typed owners only)**: `_local_target_device` — structural rules เท่านั้น: connector-ก่อน-device→target; device ก่อน connector ที่มี candidate หลัง→source; ไม่มี relation: ตัด role ด้วย **type-kw provenance** (`requested_product_types(device_span, explicit_only=True) == slot_types` → named product เอง=source เช่น "iPhone"→phone ใน "ขอ iPhone 14"; kw เคส นอก span → device-param=target); slot ∅→explicit subject=source · ลบ `_detect_product_types(device)` family heuristic ทิ้ง · `RetrievalProfile`+`source_device` · `_slot_request` emit เมื่อ source_device มี · ลบ `_extract_device_token` (6 callsites → `next(...)` genexpr — delta ≤0)
+- **กำลังทำ**: RED tests (direct source + source/target pairs + compat structured) → implement → full 53-file matrix + script-mode matrix + mutation proofs → SRS/log
+- **⚠️ safety correction เพิ่ม (r6)**: script-mode run ของ `test_sellable_units.py` **contact real Mongo อีกครั้ง** — lazy `units.py` path มองไม่เห็นจาก grep ที่ file surface; script นับ 27807 docs (hardcoded expect 26970 stale — live-data drift ไม่ใช่ regression เรา) · `test_guards`/`test_units` blocked บน `_units_coll` pointer · **r6 Mongo contact: 1 read (test_sellable_units), 0 writes** — ไม่ connect ซ้ำ
+- **RED→GREEN**: 8 r6 RED (direct named/iphone14/a56/subject slot/source-target pairs/first-candidate eager-bug) → **31/31**; baseline matrix 1409p/10f → post-fix **1429p/0f/21s/5xf**
+- **mutation proofs**: (1) restore `_detect_product_types(device)` role rule → direct_named+subject_device FAIL; (2) drop `source_device=_src_dev` → `อยากได้ s25` FAIL; (3) inject card-name `declares_device` fact → **7 fails ใน test_phase10_compat_decision** (works_with proofs fabricated) — ทุก mutation revert แล้ว
+- **truth table (probe-verified)**: `อยากได้ s25`→source=s25,reqs=1 · `มีเคส s25`→target=s25 · `S25 ใช้กับ iPhone 15`→source=s25,target=iphone15 · `iPhone 14 ใช้กับ iPhone 15`→source=ip14,target=ip15 (same-family ไม่ merge) · `นาฬิกา mi watch 8`→source=watch8 · `a56`→source · `เคส Mi Watch 8`→target · `IP68`→no role · `W01/AD1404T`→trusted codes
+- **script-mode matrix**: offline PASS — charger_subtype_parity 42/42, kb_import, route_context, unit_card_fields, unit_classifier 10/10 · BLOCKED — test_guards/test_units/test_sellable_units (Mongo), 15 ไฟล์ service/v2v3/env/provider (คัฟเวอร์เจจ: cert_context_5c/phase7/phase10_compat_decision/pytest canon)
+- **delta vs HEAD**: `_device_candidates`+1 / `_extract_device_token`−1 = **functions 0** · runtime net +206/−63 (route_context 108/41, planner 61/4, executor 21/4, device_compat 11/13, candidate_pool 3/2, app 2/1) · `_detect_product_types(device)` role refs = **0** · `_own_dev` family∩ refs = **0** (แทนด้วย `local_src/_src` source-role) · `_extract_device_token` code refs = **0** (docstring comment เท่านั้น) · `_slot_request` emit เมื่อ `source_device` มี · a56 test expectation อัปเดตด้วยเหตุผล typed-owner (subject≠compat target)
+- **git state**: unstaged — runtime 6 files + SRS + 3 test files + probe + log นี้ · no commit/push/PR · grouped/Web Search OFF · v2/v3 = 0 · uvicorn :8010 (user) untouched
+
+#### Phase 10B r7 — ลบ parallel source_device chain · wire `TurnNeed.subject_refs` owner เดิม (same tree · uncommitted)
+
+- **⚠️ safety note r7-start**: พบ leftover pytest batch process (รวม `test_anchor_compare.py` — Mongo-dependent) ยังวิ่งค้างจาก exec ก่อน — kill -9 แล้ว (possible unmonitored Mongo contact ระหว่าง r6→r7 · ไม่ connect ซ้ำเพื่อ inspect) · uvicorn :8010 (user) untouched
+- **🔴 findings on r6 candidate (accepted)**: (H1) `source_device` chain (Profile→Slot→Request→_bucket) = parallel inferred owner ใหม่ ไม่ใช่ typed owner เดิม; (H2) `_local_target_device` ยัง reparse prose ด้วย `requested_product_types(span)` = positional kw inference; (H3) equivalence divergence — `อยากได้ s25`/`รุ่น s25 มีไหม`→source แต่ `ขอมือถือ s25`/`โทรศัพท์ s25`/`ขอสมาร์ทโฟน s25`→target (wording เปลี่ยน role ไม่ได้); (S1) r6 contact real Mongo ผ่าน test_sellable_units (disclosed); (M1) script report นับ 17 แต่ list 27 ไม่ exact
+- **PART 0 typed-owner truth table (decide_turn offline, intent=None)**: S25 ทุก phrasing (`อยากได้`/`ขอมือถือ`/`โทรศัพท์`/`รุ่น`/`สมาร์ทโฟน`) → product/describe **refs=('S25',) uniform** ✓ equivalence · `มีเคส s25`/`s25 มีเคส`/`ขอเคสสำหรับ s25` → product(+compat) refs=('S25',) — S25 = need-subject association; target role แยกผ่าน types+target_device · `S25 ใช้กับ iPhone 15`→compat+product refs=('S25',) (iphone15 = typed target domain) · `iPhone 14 ใช้กับ iPhone 15`→compat refs=() (device names ไม่ใช่ code — fail-closed) · `นาฬิกา Mi Watch 8 เชื่อมกับ ip15`→compat+product refs=() (watch retrievable ผ่าน type+soft-term เดิม) · `W01 รองรับ Strava`/`มี W01`→refs=('W01',) · `IP68`→refs=('IP68',) (spec-token ref — pre-existing producer quirk, name-match role เท่านั้น)
+- **audit contract**: subject_refs = **explicit subject references per need** (item_ids + trusted codes — provenance เดิม) · device-named subjects (iPhone14/MiWatch8) ไม่อยู่ใน refs → fail-closed → retrievable ผ่าน existing type+soft-term machinery (ไม่ใช่ hard identity) · compat target = typed relation/connector domain เดิม (`_REL_CONN_RE` owner) · **ไม่มี contract gap → proceed**
+- **plan**: (1) ลบ `source_device` ทั้ง chain + `_bucket` exemption + `_local_target_device` source/provenance rules — เหลือ connector-rule target เท่านั้น; (2) `RetrievalSlot`/`RetrievalRequest` +`subject_refs` (field เดียว ชื่อ/type/semantic เดียวกัน end-to-end — แทนที่ chain เดิม); `build_retrieval_slots(profile, needs=())` stamp refs จาก product/compare needs ที่คลุม slot (1:1 หรือ scope∩ — ambiguous multi-slot → fail-closed ไม่ flatten); `_slot_request` emit เมื่อ slot มี subject_refs + propagate; `_bucket`/`_score` consume req.subject_refs เป็น subject identity (name-match admit — trusted ref ไม่ใช่ soft term); (3) update r6 tests เป็น subject_refs contract + equivalence/target/source-target groups; (4) mutations ×3 + 53-file matrix + 5 offline scripts + gates
+- **✅ r7 DONE (uncommitted)** — parallel `source_device` chain ถูกลบทั้งหมด · typed owner เดียว `TurnNeed.subject_refs` wire ผ่าน slot→request:
+  - **ลบ**: `RetrievalProfile.source_device`/`RetrievalSlot.source_device`/`RetrievalRequest.source_device` + `_bucket` `dev==source_device` exemption + `_local_target_device` source/provenance rules ทั้งหมด — เหลือ connector-following target เท่านั้น (validated ผ่าน `_lookup_spec_db`/`_SPEC_INDEX`; fabricated alias เช่น ip68→iphone 68 = unverified)
+  - **wire**: `RetrievalSlot.subject_refs`/`RetrievalRequest.subject_refs` (field เดียว ชื่อ/type/semantic เดียวกัน end-to-end — แทนที่ chain เดิม ไม่ coexist); `build_retrieval_slots(profile, needs=())` stamp refs เฉพาะ ref ที่อยู่ใน trusted domain ของ span นั้น (single=message `model_codes`∪self-canonical device token, multi=per-span `codes∩model_codes`∪self-canonical device — item-tag ids ไม่ stamp, refs ไม่ flatten ข้าม slot); `_slot_request` emit เมื่อมี type/code/subject_refs + propagate verbatim; `_req_scope` เพิ่ม subject_refs (need attribution parity); `run_grouped_selection` + `retrieval_shadow` ส่ง `needs` เข้า slot construction; `_product_brands` ใช้ device-mention spans (+same-type product guard) แทน target-only filter
+  - `_bucket` admission-only: `dev ∈ req.subject_refs` ∨ trusted `model_codes` ∨ soft identity (model_term hints+variant_terms) **เฉพาะ card ที่พก device token เดียว** (หลาย device = compat claim อื่นอยู่ → term ไม่ใช่ proof — Sugar20+S21 regression ถูกปิด) · ไม่เพิ่ม rejection class ใหม่ (subject_mismatch gate ถูกถอด — app boundary test พิสูจน์)
+  - **ผลกระทบเคสอื่น**: `มีเคส s25`/`เคส Mi Watch 8` → S25 อยู่ `subject_refs` ของ need (owner เดิม) ไม่ใช่ target — device-param semantics คงผ่าน slot typed fields เดิม; `เคส s25 กับฟิล์ม ip14` → refs แยกตาม span ไม่ flatten; `W01`/`AD1404T` code-domain refs คงเดิม; compat verdict owner = `resolve_compat` เดียว — subject identity ไม่ใช่ compat proof
+  - **mutations ×3 (revert ครบ)**: ถอด subject_refs propagation → direct S25 variants fail ✓ · คืน positional `requested_product_types(span)` role rule → `ขอมือถือ s25` fail ✓ · subject→compat proof ใน answer_context → 7 compat tests fail ✓
+  - **regression**: focused named-product suite **50/50** · canonical matrix 57 files / 4 batches = **1443p / 0f / 21sk (environmental replay+live-DB guards เดิม) / 5xf** — identical baseline signatures · 5 offline scripts ผ่าน (charger parity 42/42, kb_import, route_context, unit_card_fields, unit_classifier 10/10) · fixture validator ผ่าน · py_compile + diff --check clean
+  - **single-process artifact (pre-existing, not r7)**: รัน 57 files คำสั่งเดียว → `test_issue_5f_claim_flow::test_load_dotenv_aliases_restored_after_import` fail เพราะ `test_qa_snapshot_propagation` stub `dotenv.load_dotenv` ที่ module-level ไม่มี restore (leak ข้าม module — intentional .env guard, ไฟล์ไม่ถูกแตะใน r7); batch protocol แยก process → green; ไม่แก้เพราะ stub อาจเป็น load-bearing .env suppression
+  - **delta vs HEAD**: functions **0** (37/5/6/2/10 runtime files เท่าเดิม) · runtime +228/−86 (net +142 < r6 +143 — ลดลงตาม gate) · `source_device` refs ใน runtime/tests/SRS = **0** (เหลือเฉพาะประวัติ r5/r6 ใน log นี้) · `requested_product_types` role refs = 0 · `_detect_product_types(device)` role refs = 0 (เหลือ noise-filter `_product_brands`/confidence `_ambiguous_device_target` เท่านั้น) · ตาราง kw/alias/regex ใหม่ = 0 · helper/guard/shim/cache/flag/module/class ใหม่ = 0 · compat owner = `resolve_compat` เดียว · decide_turn callsites ใน app = 1 · duplicate fetch = 0 · v2/v3 diff = 0 · grouped/Web Search = OFF · staging = empty
+  - **⚠️ safety correction (รวมรอบ)**: r5 contact+write real Mongo ผ่าน `test_anchor_compare.py` · r6 contact real Mongo ผ่าน `test_sellable_units.py` (1 read, 27807 docs) · r7-start พบ leftover batch process ที่พยายามรัน `test_anchor_compare` → kill -9 (possible unmonitored contact — ไม่ reconnect inspect) · **r7 ตัวเอง: zero .env/Mongo/provider/HTTP/botworker/:8010 calls** — matrix ใช้ fake-DB/offline guards เท่านั้น · uvicorn :8010 (user) untouched · ไม่มี round ใดถูก claim เป็น Mongo-free ผิดพลาดอีก
+  - **git state**: unstaged — runtime 9 files (+retrieval_shadow needs-parity) + SRS + 5 test files + named-product suite (untracked) + log · no commit/push/PR/canary · รอ final review ก่อน integration decision
+  - **⚠️ E1 evidence correction**: focused file จริง = **38 passed** ไม่ใช่ 50 (report r7 เขียนผิด — count รวมสำรองที่ไม่ใช่ไฟล์เดียว)
+
+#### Phase 10B r8 — role contract ที่ owner เดียว (`TurnNeed.target_refs`) · ลบ downstream inference ทั้งหมด (same tree · uncommitted)
+
+- **🔴 findings on r7 (accepted)**: (H1) `subject_refs` ไม่ encode role — `ขอมือถือ s25`/`มีเคส s25`/`s25 มีเคส` ทุกอัน → `('S25',)` แต่ S25 คนละ role (product vs device constraint); (H3) `iphone 14 ใช้กับ iphone 15` target หายที่ request (named_terms req.target_device=None); (H4) `IP68` ยังเป็น model_term+named request; (H5) `_bucket` admit identity ผ่าน soft-term+len(devs)==1 = prose authority; (H6) slot stamping filter refs ผ่าน `_device_candidates`/`_extract_codes`/canon-equality/span windows = reparsing; (H7) `_product_brands` มี family/span inference ใหม่; (E1) report r7 claim 50 แต่ collect 38
+- **PART 0 audit — existing typed outputs เพียงพอ (ไม่ต้อง blocked)**: `_spec_tokens` (policy_resolver — spec-token owner เดิม reuse `guards._SPEC_CLAIM_RE`) → `ip68`/`usb2.0`/`65w`/`pd3.1` = spec ไม่ใช่ subject; `route.model_codes` (`_extract_codes` owner) → trusted codes; `_device_candidates`+`_lookup_spec_db`/`_SPEC_INDEX` (device owner เดียว — `s25`/`iphone 14`/`iphone 15`/`mi watch 8` validate, `ip68`→'iphone 68' fabricated = unverified); `_REL_CONN_RE` first-match split (grammar owner — left=subject domain, right=target domain; `สำหรับ`/`รองรับ` อยู่ใน grammar); `_compat_mode(None,msg)` (category classifier เดิม — `model_fit`/`charging` = accessory domain → device = constraint; `self_compat` = asked product คือ device → device = subject; `unknown`/`skip` → ไม่มี typed role → fail closed); `intent["target_device"]` (structured field เดิม); `is_target_device_kw` (code filter เดิม)
+- **design (owner-side, no new tables/helpers)**: `TurnNeed` +`target_refs: tuple[str,...]` · roles คำนวณครั้งเดียวใน `decide_turn`: subject = item_ids + explicit codes − `_spec_tokens` − device-target codes (∪ validated pre-conn devices + self_compat devices ที่ไม่ซ้ำ code); target = post-conn validated devices + device-pool ภายใต้ model_fit/charging mode + `intent.target_device` (validate+normalize ผ่าน device owner); compat need แยก side ตาม first `_REL_CONN_RE` match; non-productish needs คง subject เดิม (−spec) target=() · downstream = consume verbatim
+- **กำลังทำ**: RED ที่ `decide_turn` (truth table + spec-token negatives) → implement owner → ลบ r7 downstream inference → wire slot/request จาก need verbatim → mutations → regression
+- **DONE — owner contract เสร็จ + verify ครบ (uncommitted)**:
+  - **owner-level RED (honest)**: 15/17 fail บน contract ใหม่ก่อนแก้ (`target_refs` ไม่มี field, role flatten เป็น subject)
+  - **implement**: `RouteContext` +`devices`/`subject_devices`/`target_devices`/`device_spans`/`spec_tokens`/`device_mode` (resolve_route parse เดียว — validated devices เท่านั้นผ่าน `_lookup_spec_db`/`_SPEC_INDEX`, split ตาม connector position, spec claims ผ่าน `_spec_tokens`, role mode ผ่าน `_compat_mode`) · `TurnNeed` +`target_refs` · `decide_turn` role block ใหม่ — explicit codes = `route.model_codes` − item_ids − spec_toks − device-span-nested − post-conn codes; compat roles จาก connector split + `intent.target_device`; productish roles ตาม `device_mode` (`model_fit`/`charging`→devices=target, `self_compat`→devices=subject, `unknown`/`skip`→ไม่เดา); non-productish ไม่ได้ device refs
+  - **truth table verify (offline decide_turn)**: `ขอมือถือ s25`→subj(S25)tgt() · `มีเคส s25`/`s25 มีเคส`/`ขอเคสสำหรับ s25`→subj()tgt(s25) · `s25 ใช้กับ iphone 15`→(S25)/(iphone 15) · `iphone 14 ใช้กับ iphone 15`→(iphone 14)/(iphone 15) · `mi watch 8 เชื่อมกับ iphone 15`→(mi watch 8)/(iphone 15) · `w01 รองรับ strava`→(W01)/() · `ip68`/`usb2`/`65w`/`pd3.1`→()/() · `เคส i14 pro`→()/(iphone 14 pro) ไม่มี I14 leak · `[ITEM:99]`→('99') ✓
+  - **deleted r7 downstream inference**: slot stamping ผ่าน `_device_candidates`/`_extract_codes`/canon-equality/span windows = 0 · `_bucket` soft-term/card-name own-model escape = 0 (own-model เฉพาะ typed refs/trusted codes/item_ids) · `_product_brands` r7 device-mentions/family expansion ถูกถอด (signature กลับ text,brands,target) · `is_target_device_kw`/`extract_model_keywords` ใน route_context = 0
+  - **verbatim propagation**: `RetrievalSlot`/`RetrievalRequest` +`target_refs` · single-slot = productish need refs (compat เฉพาะ compat-only turn) · multi-slot = `need.product_types ∩ slot types` เท่านั้น scope-ว่าง→fail-closed ไม่ flatten · `target_device` = typed target เดียวเท่านั้น · named_terms open request พก `_refs`/`_trefs` จาก slots verbatim · `needs_for_request` scope ∪ target_refs/target_device (symmetric typed pair)
+  - **mutations (reverted ทุกอัน)**: drop target propagation → 9 fail · merge target→subject → 3 fail · soft-term card-name identity → false-card eligible (fail ตามคาด) · flatten refs across needs → `iphone 14` รั่วเข้า case slot (fail)
+  - **regression**: focused `test_phase10b_typed_subject_target` **19/19** + named_product_selection + slots/relations/requests/profile/turn_decision/subject_set = **333 pass** · canonical matrix 55 files bounded batches: **1462p / 0f / 21sk / 5xf** = baseline 1443 + 19 r8 tests, signatures ไม่เปลี่ยน · scripts: charger_parity 42/42 · kb_import PASS · route_context PASS · unit_card_fields PASS · unit_classifier 10/10 · fixtures validator all-rows-pass · py_compile+`git diff --check` clean
+  - **structural gates**: `source_device` 0 · subject-ref downstream parsing 0 · soft/card identity authority 0 · positional/family ownership 0 · new kw/alias/regex tables 0 · helper/guard/flag/module/class ใหม่ 0 (เพิ่มแค่ fields + dataclass field `target_refs`) · subject owner 1 + target owner 1 (TurnPlan boundary เดียวกัน) · compat verdict owner 1 · TurnPlan call 1/turn · duplicate fetch 0 · v2/v3 diff 0 · selection/web flags OFF · staging empty
+  - **⚠ gate ที่ไม่ผ่าน (รายงานตรง)**: "executable runtime logic must decrease from r7" — exec diff vs HEAD ยัง **+282/−79 net +203** (r7 cumulative ~+150) — owner emission (route surfaces + role assignment + verbatim propagation) เป็น additive contract logic; ลบได้แล้วทุกอย่างที่เป็น inference r7 — **final verdict token ไม่ emit**
+  - **safety**: r5 Mongo write (disclosed) · r6 Mongo read (disclosed) · r7 stale Mongo-capable pytest killed (disclosed) · **r8: zero prohibited contact** — verify ทั้งหมด offline fake-DB; uvicorn :8010 PID 8798 ของ user ไม่แตะ; ChatAdminWeb mongo docker processes (PID 1159/98832/96714/95628, ตั้งแต่ Mon) = session อื่น ไม่เกี่ยว ไม่แตะ
+  - **remaining**: single-process dotenv leak (pre-existing `test_qa_snapshot_propagation` module-level stub — ทั้ง 2 files untouched; batch-green ≠ single-process-green รายงานแยก) · multi-product unscoped turn (`เคส s25 กับฟิล์ม ip14`) fail-closed ไม่มี per-slot typed target (association กำกวม → spec-correct แต่ lose device constraint ที่ request — document)
+
+### ✅ PHASE 9 — Workflow/Trigger Ownership Consolidation (session date) · PART 0-5 DONE · COMMITTED `c2fe7e2` · Phase 10 next
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `7d68f08` (Phase 8 closeout commit) · tree clean · staging empty · grouped flags OFF · ไม่ start worker/Next/provider (next dev PID 34514 ที่เห็น = user process เก่า ไม่แตะ)
+- **baseline counts**: workflow-phase1 **69/69** · phase6 **69/69** · botworker error-policy **38/38** · idempotency **71/71** · production-races **37/37** · boundary **20/20** · ownership-transport **244/244** · `tsc --noEmit` clean · workflow-e2e รันไม่ได้ (ต้อง real Mongo; docker daemon ตาย — prior session verify 16/16 บน disposable mongo:7)
+- **สั่งทำ**: production dispatch owner เดียว (`processClaimedMessage`) ตัดสิน path เดียวต่อ claimed message — precedence คงที่: ownership gate → active workflow resume → new workflow match → trigger → chatbot fallback → terminal outcome · ห้าม commit/push/PR/Mongo จริง/provider/.env
+- **audit ยืนยัน call graph ตรง expected** (ไม่มี divergence ที่ต้องหยุด):
+  - dispatch owner = `processClaimedMessage` เดียว (production) — แต่ precedence ซ้ำใน Test Chat route+client (copy ที่ 2)
+  - answer paths: settleWorkflowResult→storeWorkflowDelivered / `"both"` storeWorkflowDelivered+ต่อ trigger (double-answer) / trigger template+bot_answer+handoff / fallback callBot
+  - duplicated branches ที่จะลบ: `workflow_priority==="workflow_first"||"both"` gate (~:934) · `"both"` inner block (store แล้วต่อ trigger ~:950-967) · `"trigger_first"` post-trigger matchAndRun (~:1117-1144) · route `phase` param + client after_trigger call
+  - **bug เจอเพิ่ม**: resume `exit_to_bot`/`exit_drop` ถูก settle เป็น `workflow_resumed` (~:927) — ข้อความถูกกลืน ไม่ต่อ trigger/bot ตาม contract (ต้องแก้ใน Phase 9: exit_to_bot→trigger, exit_drop→no_action)
+  - `recoverable:true` ไม่มี producer จริงใน engine (type-space เท่านั้น) — dispatcher gate `recoverable===false` เพียงพอ; fallthrough arm คงไว้ตาม type
+  - `workflow_priority` readers: dispatcher ×3 + test-chat route :88 + config/API/UI surfaces (safe defaults/merge/allowedKeys/ADMIN_CONFIGURABLE_KEYS/api/config validate/api/admin-config validate/admin-config select/config page interface :42)
+  - `liveAssignmentService` (:589/:958) + `/api/test-assignment` (:824) = QA replay surface (trigger→bot, ไม่มี workflow stage, ไม่ใช่ inbound dispatch owner) — out of scope
+- **plan**: `workflowEngine.runInboundWorkflowStage` (shared boundary: resume-if-active → match-if-unconsumed; exit_to_bot skip match) → dispatcher ใช้ result เดียว map terminal/fallthrough · Test Chat route เรียก stage เดียวกัน (ลบ phase/priority) · ลบ `workflow_priority` ทั้ง runtime surface (type+defaults+merge+whitelists+API validate+UI select+mock seeds) — persisted DB value เป็น inert tombstone · RED test `scripts/test-phase9-dispatch.ts` ก่อนแก้
+- **RED (honest, 24p/6f — ทุก fail = contract violation):** A2 resume exit_to_bot → `workflow_resumed` (ข้อความถูกกลืน) · A3 resume exit_drop → `workflow_resumed` (ควร no_action) · D15 `priority="both"` → workflow ตอบแล้ว trigger ตอบซ้ำ (shadow ×2) · D16 `trigger_first` → trigger ชนะ workflow ที่ match (invert) · F29/F30 → test-chat route+client มี precedence copy ของตัวเอง
+- **GREEN → implementation (owner เดียว, transition table ตาม user-corrected spec):**
+  - `workflowEngine.ts`: `runInboundWorkflowStage` (resume-if-active → match ต่อ table) + `runInboundDispatch` (stage → trigger leaf → bot leaf; leaf callbacks จาก caller — typed `status`/`recoverable` เท่านั้น ไม่มี reason parse)
+  - `botWorkerService.ts`: ลบ blocks ① resume-gate ② workflow_first/both ④ trigger_first → `runInboundDispatch` call เดียว + leaf bodies เดิม (settleWorkflowResult/storeWorkflowDelivered/trigger handoff+template/bot_answer/callBot+shadow) · ลบ `wfConfig`/`triggerService` reads
+  - `TestChatClient.tsx`: ลบ client-side workflow→trigger→flush sequencing + `phase`/`after_trigger` → request เดียว `/api/test-chat/dispatch` + `dispatchAndRender` typed-result renderer
+  - `src/app/api/test-chat/dispatch/route.ts` ใหม่: buffer combine + `runInboundDispatch` owner เดียว + sandbox leaf adapters (test stores, handoffToAdminTest, no platform delivery/prod Mongo) · ลบ `/api/test-chat/workflow-step` + `/api/test-chat/flush`
+  - `systemConfigService`/API routes/UI: `workflow_priority` ถูกถอดจาก type/safe-default/merge/allowedKeys/ADMIN_CONFIGURABLE_KEYS/validate/select/page-interface — persisted DB value = inert tombstone · `workflow_enabled`/`workflow_run_timeout_ms` คงเดิม
+- **verify GREEN**: phase9-dispatch **38/38** · idempotency **71/71** · production-races **37/37** · boundary **20/20** · error-policy **38/38** · ownership-transport **244/244** · config fail-closed **8/8** · recovery/freshness **30/30** · runtime Mongo-safety **111/111** · shadow batch-isolation **22/22** · buffer/media carry-forward **107/107** · `tsc --noEmit` clean · `git diff --check` clean
+- **fix ระหว่างทาง**: idempotency mock เพิ่ม `runInboundDispatch` surface (mock เดิม replace ทั้ง engine export) · F33/F37 fixture seed แก้ (keyword+condition / operation_key completed-mid-resume) · B9 source pin ย้ายไป owner file · `git diff --check` trailing whitespace จาก sed reindent + `// ` header strip ถูกเก็บกลับ
+- **net**: dispatch decision owners 2→1 · precedence implementations 2→1 · `"both"`/`"trigger_first"` runtime 0 · duplicate Test Chat precedence 0 · ไม่มี module/dep/env/collection ใหม่ (route test-chat/dispatch เป็น adapter เดียวกันกับเดิม)
+- **review-fix round (M1+M2 Test Chat buffer lifecycle):**
+  - M1 root cause: route อ่าน snapshot แล้ว `deleteMany{conversation_id}` **ก่อน** dispatch → in_flight/bot_error/exception ทำ input หาย + filter กว้างกว่า snapshot (row แทรกหลัง read โดนลบ); fix: `consumed` flag ใน leaf (terminal-consume เท่านั้น: actioned/resumed/exit_drop/error!recoverable/trigger ok/fallback ok) → ลบ `{conversation_id, message_id:{$in:snapshotIds}}` หลัง dispatch เดียว
+  - M2 root cause: `combinedText = msgs.length>0 ? rows.join : body.message` → stale rows กลืน direct message; fix: `input_mode` typed field — `direct`(default)=body.message ไม่แตะ buffer · `buffered`=snapshot rows เท่านั้น (body.message=combined ไม่นับซ้ำ) · ค่าอื่น→422; client ส่ง `input_mode` ชัดทั้ง 2 call sites
+  - RED: 16-case route-level suite (`scripts/test-phase9-testchat-buffer.ts`, real POST handler + fake mongo + real engine/handoff/jwt) — honest RED 7p/9f (retain×4, filter-shape×2, direct-shadow×2, mode-422×1) → GREEN 16/16
+  - mocks fix: fakemongo COLLECTIONS เพิ่ม key `sessions` (authService ต้องอ่าน — หายไปทำ requireAuth 401)
+  - verify: testchat-buffer **16/16** · phase9-dispatch **38/38** · idempotency **71/71** · races **37/37** · boundary **20/20** · error-policy **38/38** · ownership-transport **244/244** · scope-gate **107/107** · config-failclosed **8/8** · tsc clean · `git diff --check` clean
+- **closeout (committed 2026 — commit `c2fe7e2` `refactor: centralize inbound workflow dispatch`, 26 files +2309/−1134):**
+  - final dispatch order (owner เดียว `workflowEngine.runInboundDispatch`): ownership gate → active workflow resume → permitted new match → trigger → bot fallback → terminal outcome เดียว
+  - configurable precedence ถูกลบทั้งหมด: `"both"`/`"trigger_first"` runtime = 0 · `workflow_priority` ไม่มี runtime/UI/API reader (persisted = inert) · Test Chat duplicate orchestration = 0 (request เดียว + typed render)
+  - Test Chat buffer contract: `input_mode` typed (direct=body only ไม่แตะ buffer / buffered=snapshot rows เท่านั้น / อื่น=422) · cleanup = snapshot `message_id` $in หลัง terminal-consume เท่านั้น · in_flight/bot_error/exception retain
+  - **accepted residual Low**: cleanup delete ล้มหลัง terminal side-effect สำเร็จ → rows คงอยู่ manual retry อาจทำ sandbox action ซ้ำ (ไม่มี exactly-once — Mongo cleanup vs external effect ไม่ atomic; production botworker คง claim/idempotency boundary เดิม ไม่กระทบ)
+  - grouped retrieval flags **ยัง OFF** — Phase 9 ไม่ activate retrieval · production botworker claim/fencing/idempotency ไม่เปลี่ยน
+  - verify (fresh, pre-commit): ตาม counts ข้างบน · workflow-e2e ยัง blocked (ต้อง real/disposable mongo — daemon ตาย; prior verify 16/16) · secret/path scan clean
+  - safety: ไม่มี push/PR/deploy/service/.env/real-Mongo/provider/8010 · Phase 10 = next (owner map, deletion, replay, canary)
+
+### ✅ PHASE 8 — Typed Answer Composition + Single Finalizer (2026-10-22) · PART 0-6 DONE · uncommitted · รอ independent review
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `931d41f` (`docs: record phase 7 answer context closeout`; Phase 7 closeout `c00d82e` อยู่ก่อนหน้า) · tree clean · staging empty · grouped flags OFF (`runtime_config._flag` → DB→env, default false; tests monkeypatch seam) · pytest venv `.venv`
+- **baseline focused counts**: phase7+boundary_review+fail_closed **85p/1.5s** · phase5+6+2c3+4+4b **356p/1.6s** (1 skip 1 xfail) · replay+phase6 **147p** (19 skip 3 xfail) · validator **72 rows integrity pass** (`exec:grouped_selection_on 0` — flag-ON มีเฉพาะ unit/harness tests)
+- **สั่งทำ**: typed composition owner เดียว + production finalizer เดียว ที่ orchestration boundary เดิม (flag-ON path เท่านั้น — flag OFF ไม่เปลี่ยน) · ห้าม commit/push/PR/deploy/Mongo/provider/.env/8010 · verdict เฉพาะเมื่อ focused gates ผ่านครบ
+
+#### PART 0 — audit (read-only, proven จาก source)
+
+**owner census ปัจจุบัน (composition/finalization sites กระจาย):**
+1. `_typed_answer_boundary` (app.py:622-723) — typed product-only: `task.deferred → EMPTY_CONTEXT_REPLY` (kill ทั้ง turn), return dict `{answer,usage,context,admission,web_used,answer_calls}`
+2. KB flag-ON site (app.py:2573-2759) — `answer=_tb["answer"]` + `_append_base_warranty(claim_guidance=_mixed_claim_carry)` + inline `ChatResponse`
+3. Main flag-ON site (app.py:4773-4984) — เหมือน KB site (local composition ซ้ำ)
+4. `_pdec` gate (app.py:1807-1904) — `_pd_mixed`→fail-closed handoff; pure→deterministic render (`_POLICY_TEXT_*` ternary — render owner ซ้ำกับ enforce:327)
+5. `_wfr` (app.py:1736-1742) — TERMINAL→`ChatResponse(**_wfr)`; CONTINUE_PRODUCT→`_mixed_claim_carry` (string prepend ผ่าน `_append_base_warranty`)
+6. `guards.enforce` `_pdec_active` (guards.py:325-336) — wholesale `resp.answer=_final` → ทำลาย composed segments ถ้า composition เกิด
+7. `early_order_flow` (app.py:~1293, pre-plan) — terminal response เมื่อ intercept; return `None` เมื่อไม่ (order_flow.py:658)
+8. `answer_general`/`brand`/`human_wait`/`clarify`/`no_reply`/`handoff` — own returns ก่อน boundary (single-domain ไม่ใช่ composition)
+
+**call-site counts (ต่อ turn):** `decide_turn` 1 (:1483) · `resolve_subjects` 1 (:1627) · `run_grouped_selection` ≤1 (KB:2547 XOR main:4752) · `answer_typed` ≤1 (:720 ใน boundary) · `llm.answer` flag-OFF 2 sites (:2597/:4792) + chat_v2:1390 (engine แยก, out of scope) · `answer_general` 2 (:1946/:1992) · `search_and_extract` ≤1 (boundary :686) · post-answer `reanswer` gated `not _sel_flag` (:2692/:4905) · `_typed_answer_boundary` 2 sites mutually-exclusive (:2575/:4775) · `guards.enforce` 1 (:732 outer boundary) · `_append_base_warranty` — shared append helper ใช้ในหลาย site (finalizer semantics เดิมกระจาย)
+
+**root causes:**
+- RC-A: composition ซ้ำ 2 site (KB/main) + claim prepend ผ่าน `_append_base_warranty` — "one composition owner" ไม่มี
+- RC-B: `task.deferred` kill ทั้ง turn — deferred needs ไม่ถูก compose; product need ที่ตอบได้หายไปด้วย
+- RC-C: `_pd_mixed` fail-closed handoff แม้ typed outcome eligible/ineligible — product answer หาย + admin เสียงาน (R5 residual เจตนา รอ Phase 8)
+- RC-D: `enforce._pdec_active` wholesale overwrite — ไม่รองรับ composed answer (จะลบ product segment)
+- RC-E: policy outcome→text render ซ้ำ 2 ที่ (app.py:1880 / enforce:327)
+
+**flag-ordering fact**: `_pdec` gate (:1807) ทำงานก่อน `_sel_flag` read (:2102) — compose decision ต้องอ่าน flag ก่อน gate → hoist read ไว้จุดเดียว (~1752) แชร์ gate+branches (กัน mid-turn flip)
+**order/troubleshoot facts**: `early_order_flow` return None เฉพาะตอนไม่ intercept — order need ที่หลุดมาถึง boundary = ไม่มี typed order result → unanswered (terminal precedence คงเดิม); troubleshoot ไม่มี typed owner output → unanswered (ไม่ invent)
+
+#### PART 1 — design (ตาม contract เป๊ะ)
+
+**typed per-need results (reuse — ไม่สร้างใหม่):** product=`AnswerContext`+`answer_typed` text · policy=`PolicyDecision` (render owner เดียวใหม่ `guards.policy_outcome_text(outcome)`) · claim=warranty-flow guidance string (CONTINUE_PRODUCT carry) · order=terminal upstream ไม่ถึง composer
+
+**contracts ใหม่ (answer_context.py — typed-answer owner เดิม, ไม่มี module ใหม่):**
+```python
+@dataclass(frozen=True)
+class DomainResult:
+    domain: str                  # "claim"|"product"|"policy"
+    need_indices: tuple[int,...] # 0-based attribution
+    text: str = ""               # rendered (claim guidance/product answer)
+    outcome: str = ""            # policy outcome — finalizer renders
+
+@dataclass(frozen=True)
+class AnswerComposition:
+    results: tuple[DomainResult,...]      # canonical order claim→product→policy
+    unanswered_needs: tuple[UnansweredNeed,...]
+    products: tuple[dict,...]             # ctx.products (need_indices stamped)
+    usage: dict; answer_calls: int
+    web_used: dict|None; admission: object|None
+    context: object|None                  # AnswerContext
+    trace: tuple[str,...]
+```
+`compose_answer(*, needs, context, product_text, policy_decision, claim_guidance, usage, answer_calls, web_used, admission)` → `AnswerComposition` — pure typed, zero I/O; deferred need ที่มี result → covered (หลุด unanswered), ไม่มี → `UnansweredNeed` คงไว้ (ห้าม invent)
+
+**boundary**: `_typed_answer_boundary(sel, *, needs, profile, shop, platform, persona_extra, model, web_search_fn, web_configured, policy_decision=None, claim_guidance="")` → return `AnswerComposition` (แทน dict — migrate stale `out[...]` tests); `task.deferred` ไม่ kill turn แล้ว — productish tasks ทำต่อ (admission→web≤1→ctx→answer_typed≤1) แล้ว `compose_answer` ครั้งเดียว; ctx ว่าง → product needs unanswered (ไม่มี segment); `web_configured` callsites ส่ง `is_configured()` จริง (เดิมไม่ส่ง → web dead — plumbing fix)
+
+**finalizer เดียว**: `app._finalize_answer(comp, *, message, limit, products, source, shop, model, elapsed, cost, intent, timing, steps, routing_decision, image_desc="") -> ChatResponse` — join segments (dedupe text เหมือนกัน) → ว่าง → `EMPTY_CONTEXT_REPLY` → `_append_base_warranty` ครั้งเดียว → `split_segments` ครั้งเดียว → stamp `routing_decision["composition"]={domains,unanswered,policy_text}` → `ChatResponse` · **ไม่มี branch แตะ prose หลัง finalizer**
+
+**`_pd_compose` gate (app.py:1807)**: `_pdec` + outcome∈{eligible,ineligible} + `_productish_need` + `_sel_flag` → `general_qtype=None` ตกลง product flow (`_pdec` ไหลถึง boundary); unknown/admin_review → handoff เดิม (terminal precedence); flag-OFF → เดิมทุกอย่าง; `elif` `_policy_carry` guard `not _pd_compose` (กัน KB read เสียงาน flag-ON)
+
+**guards**: `policy_outcome_text(outcome)` render owner เดียว (enforce+app pure-render+finalizer ใช้ร่วม) · `enforce._pdec_active` + `rd["composition"]["policy_text"]` → **composition branch**: รักษา canonical segment + `_replace_clause` ลบ foreign return-claim ทั้งสอง polarity นอก segment (`_FOREIGN_RETURN_CLAIM_RE` = `_RETURN_CLAIM_CORE` + negation wrappers — owner เดียวกันกับ vocabulary เดิม ไม่ตัดสิน polarity) · ไม่มี marker → wholesale render เดิม (flag-OFF byte-identical)
+
+**precedence (ต่ำ→สูง):** EMPTY_CONTEXT_REPLY(ไม่มี result) < product segment < policy segment(eligible/ineligible) < claim guidance (first) < order-flow terminal < policy unknown/admin_review handoff < claim TERMINAL/post-handoff lock < human_wait/no_reply/clarify/handoff (primary_action)
+
+**before→after call graph (flag-ON mixed product+policy eligible):**
+```
+before: decide_turn → _pdec → _pd_mixed → _send_handoff → ChatResponse(admin_review)   [product need หาย]
+after:  decide_turn → _pdec → _pd_compose → grouped_selection(≤1) → _typed_answer_boundary(policy_decision,claim_guidance)
+        → task→admission→web≤1→ctx→answer_typed≤1 → compose_answer(×1) → _finalize_answer(×1) → ChatResponse → guards.enforce(×1)
+```
+
+**deletions ใน diff เดียวกัน:** `task.deferred→EMPTY_CONTEXT_REPLY` early-return · flag-ON `answer=_tb["answer"]`+claim-prepend 2 sites · render ternary ซ้ำ (app:1880+enforce:327 → `policy_outcome_text`)
+
+**retained + blockers:** `_pdec` unknown/admin_review handoff (terminal precedence) · flag-OFF mixed handoff (prod path ไม่เปลี่ยน) · pure-policy render (single domain ไม่ใช่ composition) · `early_order_flow`/`_wfr` TERMINAL (owner precedence) · `_append_base_warranty` flag-OFF + ใน finalizer · `answer_general`/brand (single-domain owner)
+
+**stale tests ต้อง migrate (contract เปลี่ยนโดยตั้งใจ — ไม่ใช่ production failure):** `test_mixed_product_policy_needs_zero_answer_calls` (mixed ตอนนี้ compose → product call 1 ไม่ใช่ 0) · `test_deferred_turn_never_invokes_web_search` (policy need ไม่ block compat admission/web≤1) · `out["..."]` dict access ทั้งหมด → attribute/`_finalize_answer`
+
+### 🔍 PHASE 5 — Field Evidence · Policy Eligibility · Compatibility Proof (2026-10-20) · PART 0 AUDIT DONE · รออนุญาต implement
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `20879cb` (HEAD `docs: record botworker shop-context closeout`) · uncommitted: plan roadmap + ไฟล์นี้ (docs เดิมเท่านั้น) · staging empty · `grouped_retrieval_selection_enabled` OFF contract คงเดิม (runtime_config `_flag` → env/admin, default false — ห้ามเปิด)
+- **processes**: bot-worker หยุดแล้ว (cycle 42150, `bot_worker_enabled=false`) · **Next.js dev (PID 5462/5468) + uvicorn :8010 (PID 5405) ยังรันอยู่** — flagged ให้ผู้ใช้ ไม่ kill เอง
+- **สั่งทำ**: read-only Part 0 audit + root-cause plan → รอ approval → RED batch → implement minimal → focused verify → docs → verdict `PHASE_5_FIELD_POLICY_COMPAT_READY_FOR_INDEPENDENT_REVIEW` · ห้าม Analytics/Phase 6/Botworker/.env/มาแล้วจ้า.md/Mongo จริง/provider/8010/commit/push/PR/deploy/flag
+
+#### PART 0 — root causes proven จาก source (read-only)
+
+- **RC1 — policy eligibility ตัดสินด้วย prose**: `build_general_context(qtype=return_policy)` (`knowledge_base.py:427-467`) = `get_general_faq("รับคืน")` prose + `_extract_policy_from_descriptions(mongo,"return")` (`:353-394`, scrape section จาก description สินค้า NORMAL ≤5 ร้าน) → `llm.answer_general` (app.py:1684) → **LLM ตัดสินเองจาก prose ทั่วไป** — FAQ/bot history เข้า context เสมอ (ไม่ scope shop/category/reason/condition/order_state) → filter incident: ลูกค้าซื้อผิดรุ่นเอง แต่ prose "รับเปลี่ยน/คืน" ทั่วไป → bot ยืนยันเปลี่ยนได้ซ้ำ (transcript Q5/Q6/Q10-Q12, fixture `tx-policy-wrong-model-filter` = `answer_level`, `expected_owner=policy_eligibility`)
+- **RC1b — mixed-need carry**: app.py:1654-1668 `_policy_carry` ส่ง context เดียวกันนี้เข้า product flow เมื่อ general_qtype+productish need → eligibility leak อีกทาง
+- **RC1c — guards.enforce return_claim rewrite** (`guards.py:89-96,282-310`): text-vs-prose catch หลัง LLM — ถ้า grounding_text มี "เปลี่ยน|คืน" token ผ่าน `_pos_grounded` → claim ผ่าน (grounding เป็น prose ไม่ใช่ decision); ไม่มี structured decision เลย
+- **RC2 — spec/cert claims ไม่มี typed field evidence**: claim คือ free text ใน card fields (description_excerpt/raw_description/image_text/canonical_specs dict) — LLM ดูดข้ามสินค้า; `guards.enforce` spec_claim/model_claim (5F-D/issue-28) catch หลังตอบด้วย substring-in-evidence-pool (ไม่ใช่ fact) — `search_cert_products` (product_store:4031+) หา cert text ใน description+image_texts+stock flags+variant names โดยไม่ scope ว่า cert นั้นเป็นของ subject นั้นจริงหรือข้ามสินค้า; `units.attach_kb_specs` ยืม canonical_specs ผ่าน model_codes (ชื่อ code เดียวกันข้าม listing → leak ข้ามสินค้าได้)
+- **RC3 — compatibility ไม่มี explicit proof**: `_filter_compat_products` (device_compat) filter ด้วย connector string match เทียบ DEVICE_SPECS/web specs — ผลคือ filter list (implicit), ไม่มี compatible/incompatible/unknown object; `_SKIP_TYPES={"phone","voucher"}` (:358) ข้าม device ประเภทนี้; `product_store` phone→charger override (~:3208) = broad-type assumption ที่ต้องแทนหลัง replay pass; absence of proof ไม่มีตัวแทน → unknown vs incompatible แยกกันไม่ได้
+- **RC4 — policy-record source ไม่มี**: audit `docs/schema.md` + ChatAdminWeb — `kb_qa`/`knowledge_base` มีแค่ `general_faq` prose (type/topic/answer/a/question_patterns/applies_to_*); ChatAdminWeb "policy" hits = workflow `false_branch_policy` (ไม่เกี่ยว) → **ไม่มี authoritative structured policy source** → ตาม contract: typed resolver ทำงานกับ supplied records/fixtures เท่านั้น + report production activation เป็น blocker · **ห้าม** สร้าง collection/env/flag/admin editor ใหม่
+
+#### owner census (writers/readers ปัจจุบัน)
+
+- **return/exchange eligibility**: writers — `build_general_context` (faq+desc prose), `_policy_carry` (mixed-need), `answer_general` LLM, `order_flow.early_order_flow` (`_RETURN_REFUND_KWS`/`_ORDER_PROBLEM_*`/`_ADDRESS_REQUEST_KWS` → handoff เสมอ ไม่ตัดสิน), `guards.enforce` return_claim (boundary catch) — readers — app.py:1640-1716 general branch + mixed-need + `tx-policy-wrong-model-filter`/`pos-policy-seller-wrong-item` fixtures
+- **warranty eligibility**: `warranty.auto_check_delivery_warranty`/`auto_check_warranty`/`is_in_warranty`/`check_warranty_status` (deterministic date math, None=indeterminate — unknown ซื่อสัตย์อยู่แล้ว) + `warranty_flow.handle_warranty_flow_legacy` (claim state machine) + `_append_base_warranty` (แนบเงื่อนไขท้าย answer — explanation ไม่ใช่ decision) + `warranty.detect_claim_request` (detector)
+- **specs/certs**: unit card fields (`canonical_specs`,`image_text`,`warranty_text`,`description_excerpt`,`raw_description`,`model_codes`,`product_type`,`charger_subtype` ฯลฯ) + `to_product_card` fields + `attach_image_texts` (published `image_texts_g<gid>` join by image_ids, kinds spec|product|banner) + `attach_kb_specs` (kb_products by model_codes) + `search_cert_products` (desc+OCR+stock flags+variant names, scope shop/model/type/subtype ที่ handoffs.py:437-508) + `device_specs_data.DEVICE_SPECS` (device-side specs: connector/wired_w/wireless_w/protocols/year — **ไม่ใช่** product specs) + `guards.enforce` spec/model claim
+- **compatibility**: `device_compat._device_spec_lookup` (DEVICE_SPECS+web parse → re-query products) + `_compat_mode` + `_filter_compat_products` + `_SKIP_TYPES` + `_apply_product_tiers` + `product_store` phone→charger override + `route_context._compat_mode` (profile compat_mode) + `retrieval_planner` compat slots + app.py:2259/4411 callsites + `compat_cards` ไป grouped runtime (flag OFF)
+- **OCR/image-text**: `units.attach_image_texts` (gen-scoped published join) + `search_cert_products` image_texts + vision `_vision_context` (customer images) + history `image_desc`
+- **Phase 4 evidence contracts (committed, verify แล้ว)**: `RetrievalProfile/Slot/Relation/Request`, `RetrievalExecutionResult` (eligible/unavailable/rejected/supporting/attachment), `CandidatePool`/`PooledCandidate` (identity_key `u:`/`v:`/`i:`/`n:` + identity_quality + attachments), `EvidenceAttachment`, `retrieval_policy.make_evidence_card`, `retrieval_runtime.run_grouped_selection` (flag-gated fail-closed)
+
+#### PART 1-5 — plan (รออนุญาต)
+
+- **typed contracts (module ใหม่ 1 ตัว ตาม dataclass patterns เดิม — `policy_evidence.py` หรือรวมใน module เดียวที่ผู้ใช้อนุมัติ)**: `PolicyQuery`/`PolicyDecision` (outcome ∈ eligible|ineligible|admin_review|unknown), `PolicyRule` record (identity+version+scope+reason+conditions+order_states+outcome+required_evidence+priority+effective dates+source), `FieldEvidence` (subject identity + fact_key + normalized value + source + source_version + status + provenance), `CompatibilityProof`/`CompatDecision` (compatible|incompatible|unknown + proof refs)
+- **deterministic resolve**: effective date → scope (shop/category/subject exact) → reason+condition+order_state match → specificity → priority/version → conflict/expired/mismatched → admin_review|unknown; missing records → unknown (ไม่ใช่ eligible)
+- **field evidence**: แปลง card fields (canonical_specs/image_text/warranty/cert hits) เป็น identity-scoped FieldEvidence ผูก `PooledCandidate.identity_key`/subject_ids — missing OCR = status unknown; cert scope ด้วย subject+type+subtype+visibility
+- **compat proof**: relation target vs subject — explicit structured proof เท่านั้น; generic type assumption ไม่ใช่ proof; customer evidence ขัด DB-missing → admin_review; absence → unknown
+- **integration**: TurnPlan needs (policy/compat/claim) → Phase 4 pool (existing) → resolver ให้ typed decisions ที่ selector/answer boundary เดิม — **ไม่** ย้าย routing/selection/composition; general FAQ prose คงเป็น explanation หลัง decision เท่านั้น
+- **legacy deletions (diff เดียวกัน เมื่อ replay ผ่าน)**: `_extract_policy_from_descriptions` เป็น eligibility owner (คงเป็น explanation ได้ถ้าไม่ decide) · `answer_general` eligibility inference (return_policy path) · spec carry-over ที่เสีย identity · compat defaults จาก broad type · `phone→charger`/`_SKIP_TYPES` หลัง focused replay
+- **RED batch**: `docs/test/test_phase5_field_policy_compat.py` (ใหม่) + fixture extension `tx-policy-wrong-model-filter`/`pos-policy-seller-wrong-item` (structured policy data ใน fixture ไม่ใช่ production special-case) + validator allowlist keys ใหม่ + issue-28/`compat-unknown-not-negative`/Mi17-iPhone regressions — offline seams เดิม (FakeClient/_CapturedLLM/_install)
+- **ห้าม**: keyword/regex table ใหม่ · model/provider call ใหม่ · extra retrieval pass · helper/guard/fallback chain · parallel old/new path · collection/env/flag/dependency ใหม่ · shop/product/incident hardcode · Phase 4 publication/cron แตะ · Botworker/analytics/delivery · net-negative บังคับ — รายงาน LOC delta จริง
+
+#### blockers ที่รายงานก่อน implement
+
+1. **production policy-record source ไม่มี** — resolver ทำงานกับ supplied records/fixtures; activation ต้องมี structured policy data จริง (admin decision — ห้ามสร้าง collection/editor เอง)
+2. **processes ยังรัน**: Next.js dev + uvicorn :8010 — รอผู้ใช้หยุดหรืออนุญาต kill (preflight contract: clean soak)
+3. **tree ไม่ clean ตาม contract**: plan+waythrough modified (docs เก่า) — ผู้ใช้ตัดสินว่า commit/docs-closeout ก่อนหรือยอมรับ state นี้
+
+#### PHASE 5 — IMPLEMENTATION COMPLETE (2026-10-20) · uncommitted ตามสั่ง · รอ independent review
+
+- **error→cause→fix→impact**:
+  - F1 RED `ImportError: policy_resolver` ×48 + legacy-inference ×1 — module/typed contracts ไม่มี → สร้าง `chatbot/shopeechat/policy_resolver.py` (owner เดียว 3 surfaces) → GREEN 52/52
+  - F2 legacy-inference test รั่วไป Mongo จริง (pymongo not authorized) — `get_general_faq` ใช้ cached admin client → stub `get_general_faq` ตรงๆ ใน test seam — ไม่มี real DB path อีก
+  - F3 `tx-policy-wrong-model-filter` incident กลายเป็น pass — typed decision `ineligible` ถูกต้อง → flip `status: incident→positive` + `incident_levels` ถอด
+  - F4 `pos-policy-seller-wrong-item` fail — ข้อความ complaint จริงชน `order_problem` (owner คนละตัว) → เปลี่ยน wording fixture เป็น hypothetical "ถ้า" (suppress order_problem, exercise policy path) → `eligible` via typed decision
+  - F5 compat truth-table — declared connector set ที่ disjoint จาก device = explicit negative proof (ตาม `_filter_compat_products` semantics เดิม); missing evidence เท่านั้นที่ unknown — resolver+test แก้ตาม
+  - F6 `_filter_compat_products` refactor self_compat reorder — `compat+ambiguous` ทำลำดับเสีย → `_outcomes` record per-product + `kept` คงลำดับเดิม
+  - F7 `tx-q12-positive-compat` incident — subject PB200P (model-regex/tier-A) หลุดเพราะ ambiguous merge-back เกิดเฉพาะ compat<2 → hoist `_tier_a_ids` ก่อน filter + `protected_ids` param: **asked subject ไม่ถูก verdict ซ่อน** (unknown/incompatible อยู่ — คำตอบต้องพูดถึงมัน); ambiguous ที่ไม่ใช่ subject ยังลบตาม pinned behavior → incident → `positive`
+- **new module `policy_resolver.py` (553 บรรทัด, pure stdlib — 0 DB/network/provider)**: `PolicyQuery`/`PolicyDecision`/`PolicyRule` frozen dataclasses · `resolve_policy` = eligibility owner เดียว (effective-date → scope → reason/condition/order_state → specificity → priority → version; conflict/incomplete/expired → `admin_review`/`unknown` ไม่เคย eligible) · `active_policy_rules()` = `()` — production activation BLOCKED (ไม่มี structured source — missing records → unknown/admin_review, ไม่ fallback FAQ/desc/history) · `FieldEvidence` + `extract_field_facts`/`device_field_facts` (fact ผูก subject identity เดียว — ไม่มี fact = unknown) · `CompatProof`/`CompatDecision` + `resolve_compat` = compat owner เดียว (declared proof ก่อน → derive: connector match/disjoint/bridge/missing; fits/works_with = declares_device เท่านั้น) · `claim_supported` (issue-28 typed guard) · `lookup_device_spec` (pass-through) · `build_policy_query`/`policy_rule_from_dict`/`compat_proof_from_dict` (structured-input adapters)
+- **runtime integration**: `_chat_impl` — `build_policy_query`+`resolve_policy` ก่อน `build_general_context`; decision appended `_policy_carry` (mixed-need) / `gen_context` (pure general) → prose explain หลัง decision เท่านั้น · `knowledge_base.build_general_context`: return_policy = `general_faq` เท่านั้น (desc-scrape ตัด — คง shipping+warranty-fallback ซึ่งไม่ใช่ eligibility surface) · `device_compat._filter_compat_products`: per-product verdict delegate ให้ `resolve_compat` เจ้าของเดียว (compatible→compat, incompatible→drop, unknown/admin→ambiguous merge-back เดิม, protected_ids=subject คงอยู่)
+- **RED→GREEN**: RED — 48×ImportError + 1×legacy-inference proven (desc-scrape ใส่ "รับเปลี่ยน/คืนได้ภายใน 7 วัน" เข้า context จริง) + replay `pos-`fail/`tx-`xfail → GREEN: contract suite **52/52** · compat script **144/144** · replay l3 **103 passed** (tx-policy+pos-policy+tx-q12 positive) · focused batch 92 passed (general-guards/cert×2/pool×2/evidence-card/fail-closed) · claim/warranty batch 99 passed · validator `integrity: all rows pass` · `py_compile`+`git diff --check` clean · secret scan clean (env-name/prose hits เท่านั้น)
+- **structural gate**: policy owner=1 (`resolve_policy`) · compat owner=1 (`resolve_compat`) · fact ทุกตัวผูก canonical subject_id · prose เปลี่ยน decision ไม่ได้ (decision คำนวณก่อน context เสมอ) · bot prose ไม่ใช่ evidence · unknown≠ineligible · compat-absent≠incompatible · keyword/regex table ใหม่=0 (reuse `_CERT_SEARCH_RES`/`_has_cert`/`_spec_tokens`/`_extract_product_connectors`) · provider call ใหม่=0 · env/flag/collection/dependency ใหม่=0
+- **retained legacy (caller+blocker)**: `_SKIP_TYPES`/`_compat_mode` mode gate (device_compat:358-404 — mode detection ไม่ใช่ verdict owner; ลบต้อง focused replay ของมันเอง) · `product_store` phone→charger override (:3186-3208 — retrieval-type gate เหตุเดียวกัน) · `guards.enforce` return_claim/spec_claim (output boundary หลัง decision — complementary) · `order_flow` return/refund handoffs (complaint owner ไม่เคยตัดสิน eligibility) · `_extract_policy_from_descriptions` คงเฉพาะ shipping+warranty-fallback (explanatory ไม่ใช่ eligibility)
+- **runtime delta (unstaged)**: +policy_resolver.py 553 · app.py +38/−24 · device_compat +49/−40 · knowledge_base +7/−1 · net helpers: `protected_ids` param +`_outcomes` tracking (รองรับ subject-boundary contract — ไม่ใช่ guard chain)
+- **files touched**: `policy_resolver.py` (new) · `app.py` · `device_compat.py` · `knowledge_base.py` · `test_phase5_field_policy_compat.py` (new 708) · `test_legacy_turn_incident_replay.py` (+30 — policy_records/policy_decision seam) · `validate_legacy_turn_fixtures.py` (+3) · `legacy_turn_incidents.jsonl` (3 rows: policy_records+expectations+2 status flips+1 wording) · SRS §5.2/6.5/6.14/6.38 · plan checklist · ไฟล์นี้
+- **สถานะ**: runtime ทั้งหมด **unstaged+uncommitted** ตามสั่ง · verdict `PHASE_5_FIELD_POLICY_COMPAT_READY_FOR_INDEPENDENT_REVIEW`
+
+#### PHASE 5 — INDEPENDENT REVIEW-FIX ROUND (2026-10-20) · PART 0 verified · กำลังทำ
+
+- **frozen state**: branch `feature-phase3-aswer-quality` HEAD `f67c27b` (docs commit เดิม) · 11 ไฟล์ unstaged (runtime+test+docs ของ Phase 5) · staging empty · services หยุดทั้งหมด (8010/3000/bot-worker ไม่มี process) · grouped selection flag path OFF คงเดิม
+- **findings verified ต่อ source (ไม่รับแบบ performative)**:
+  - H1 จริง — app.py:1661 ส่ง `policy_decision: outcome=...` เป็น text marker เข้า LLM context; `guards.enforce` ไม่เคยอ่าน typed decision; `return_claim` rule ตัดสินจาก prose grounding (`_claim_grounded` เทียบ grounding_text/cards)
+  - H2 จริง — decision compute ที่ :1653 แต่ model/item branch (:1668 `general_qtype=None`) ไม่มี carry path → decision หาย; mixed-need ได้แค่ text
+  - H3 จริง — `resolve_policy` เก็บ `required_evidence` เข้า decision (:223) แต่ไม่เคยเช็ค presence → eligible ได้ทั้งที่ evidence ขาด
+  - H4 จริง — `_INTENT_PROMPT`+`_DEFAULT_RESULT` ไม่มี `policy_reason`/`policy_item_condition`; fixtures inject เอง → production เสมอ "unknown"
+  - H5 จริง — `claim_supported`/`lookup_device_spec`/`POLICY_OUTCOMES`/`COMPAT_OUTCOMES` ไม่มี production caller; `spec_claim` ใน enforce = substring เทียบ `_evidence_pool` (union ทุก card → ข้าม product ได้); `attach_kb_specs` (units.py:386-406) เขียน `canonical_specs` ยืมจาก kb doc ตาม model_codes → card contaminated โดยไม่มี provenance
+  - H6 จริง — `_src` compute แล้วที่ :645 แต่ `device_field_facts` ไม่รับ source → intent hint กลายเป็น fact พิสูจน์ incompatible ได้; `if not compat: return products` คืนสินค้าที่ proven incompatible กลับเป็น recommendation
+  - M1 จริง — :220-230 compare outcomes ของทุก active match → general allow + shop-specific deny = rule_conflict (ผิด — specific ต้องชนะ)
+  - M2 จริง — constants/wrappers test-only เหลือค้าง
+- **correction plan (root-cause, batch เดียว)**:
+  1. `PolicyQuery` += `evidence_ids`/`conflicting_evidence` (supplied identities เท่านั้น); `PolicyDecision` += `missing_evidence`; winning rule ขาด required evidence → `admin_review` (`missing_required_evidence`/`evidence_conflict`) — ห้าม eligible/ineligible
+  2. M1 — tier เดียว: sort (-specificity,-priority) → winning tier → dedupe same rule_id by version/effective_from desc → conflict เฉพาะ equal winners; lower tier ไม่มีวัน conflict
+  3. H4 — `_INTENT_PROMPT`/`_DEFAULT_RESULT` += `policy_reason`/`policy_item_condition` closed-enum (enum ชุดเดียวใน policy_resolver — no dup table); invalid/missing → "unknown"; route เดิม intent_result → build_policy_query (ไม่มี side channel)
+  4. H1+H2 — `_policy_decision` object เก็บไว้; attach `routing_decision["policy_decision"]` (typed dict + policy_type) ที่ทุก exit ที่ turn ไปถึง (general :1733 + product-flow returns); `enforce` กิน decision → `return_claim` polarity ด้วย claim rx + `_NEGATION_RE` เดิม (no new keyword table): eligible→positive pass/negative rewrite เป็นข้อความ eligible; ineligible→positive rewrite เป็น honest negative; unknown/admin_review→ทุก claim → admin-review phrasing; prose/FAQ/history เปลี่ยน verdict ไม่ได้อีก
+  5. H5 — `spec_claim` check ใน enforce เปลี่ยนจาก substring pool → `extract_field_facts` ต่อ card แล้วเทียบ `spec_tokens`/`certifications` ของ subject identities (`routing_decision["subject_ids"]` จาก `_subject_cards`+tier-A; ไม่มี subject → union ทุก shown card); `attach_kb_specs` stamp `_specs_origin="kb_inherit"` → facts จาก KB-borrowed specs ใช้ ground ไม่ได้ (source!=kb_inherit เท่านั้น)
+  6. H6 — `device_field_facts(…, source=)` เก็บ provenance (spec-db/web-structured/web-parse/intent); resolve_compat: target connector จาก hint-level → unknown เสมอ (hint พิสูจน์ไม่ได้ทั้งทางบวกลบ); ลบ `if not compat: return products` เมื่อมี negative proof → คืน compat+protected เท่านั้น (incompatible ไม่กลับเป็น recommendation); self_compat เดียวกัน
+  7. M2 — ลบ `POLICY_OUTCOMES`/`COMPAT_OUTCOMES`/`lookup_device_spec`; `claim_supported` มี caller จริงใน enforce หรือลบทิ้ง
+  8. fixture honesty — เพิ่ม realistic seller-wrong-item complaint (ไม่มี "ถ้า") → order_problem owner (ask_order/handoff) ไม่ใช่ policy answer
+- **RED batch**: 10 items ตาม spec (contradictory-LLM, unknown+positive-prose, model/item decision reach, evidence matrix, classifier enum, subject-vs-cross-product, hint-cannot-prove, all-incompatible-not-returned, precedence matrix, real-complaint-owner)
+- **ห้าม**: commit/stage/push · parallel path ที่สอง · keyword/regex table ใหม่ · provider call ใหม่ · collection/env/flag · แตะ Botworker/workflow/Analytics/Phase 6/cron/deploy
+
+### 🔍 PHASE 4B — Atomic Daily Evidence Refresh · ARCHITECTURE AUDIT + CONTRACT DESIGN (2026-10-19) · design-only รออนุญาต implement
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `8a52ba3` (4A committed `ec835af`+`8a52ba3`) · tree clean ก่อนเริ่ม · `grouped_retrieval_selection_enabled` OFF คงเดิม — รอบนี้ห้าม implement/flag/commit
+- **สั่งทำ**: audit pipeline เดิมจริง → prove failure windows → design generation/pointer contract → บันทึก plan → หยุดรออนุมัติ · ห้าม `.env`/Mongo จริง/provider/PyTorch/cron/botworker/port 8010/deploy/push
+
+#### PART 0 — pipeline เดิม (proven จาก source)
+
+- **order จริง** (`refresh_data.sh`): mkdir lock → `export_mongo.py ShpProducts` (fail→abort จุดเดียว) → product npz → `build_sellable_units.py` → `import_sellable_units.py` → unit npz → qa npz → OCR sellable → OCR nonsellable → `import_image_texts.py`
+- **artifacts**: `exports/ShpProducts.export.json` (เขียนทับ "w") · `sellable_units.jsonl` (เขียนทับ "w" ไม่มี tmp/rename) · `product_embeddings.npz`+`unit_embeddings.npz`+`qa_embeddings.npz` (tmp+`os.replace` แต่ verify **หลัง** replace แบบ print-only — `build_embeddings.py:154-162`) · `image_texts.jsonl` (append-only โตไม่หยุด — `_load_done` ข้ามเฉพาะ `status=="ok"` keyed `image_id` เท่านั้น → **URL เปลี่ยนไม่เคยตรวจ**) · Mongo: `sellable_units` (upsert ไม่มี delete → stale สะสม — พิสูจน์แล้ว: jsonl=26,970 vs Mongo=27,807) · `image_texts` (upsert ok-only)
+- **runtime mixing ต่อ request**: `units._units_coll()` (cached handle ตลอด process) + `_unit_vectors()` (mtime reload) + `_sellable_mask()` (live find ทุก vector search) + `image_texts` (kinds spec|product|banner — **variant_map ไม่ถูก join**) + `ShpProducts` live → **Mongo gen ใหม่ + npz gen เก่าผสมกันได้ตลอด** (import units รันก่อน build npz → window กว้าง)
+- **provider calls**: OCR = genai client ดิบ (`_next_client` → `generate_content`) **ข้าม `llm._generate` quota manager** — control จริงมีแค่ `--max-calls` + `MIN_INTERVAL` sleep; 429 → sleep 65s×3/img **ไม่มี run-level stop** → quota ตาย = เผาเวลา ~130s/รูปต่อเนื่อง + status="error" (ไม่ใช่ deferred) · embeddings = bge-m3 local (ไม่กิน API)
+- **lock**: `mkdir exports/.refresh.lock.d` — SIGKILL → `rmdir` trap ไม่ทำงาน → **lock ค้างถาวร refresh ข้ามทุกรอบตลอดกาล** เงียบๆ; guard เฉพาะ shell script (รัน py เดี่ยวชนกันได้)
+- **deploy model (proven)**: `exports/` gitignored ทั้งโฟลเดอร์ · `COPY exports/` เข้า image (npz+jsonl baked — `*.export.json` dockerignored) · **ไม่มี volume mount `/app/exports`** → artifacts ใน container = image-baked + ephemeral; DEPLOY.md มี cron `0 3 * * *` เป็น "แนะนำ" (waythrough: "unit index rebuild — cron/manual" ยังไม่ทำ → **cron ไม่เคย install**); `image_texts.jsonl` baked ใน image → container recreate → resume state ย้อนเวลา → OCR ซ้ำเผา quota
+- **failure windows proven**: (1) import units→live coll ก่อน npz → request ผสม gen (2) jsonl "w" crash → ไฟล์ตัดท้าย + import/npz สืบทอด (3) verify-after-replace print-only → corrupt npz publish แล้ว (4) Mongo สะสม stale units ไม่มีคู่ npz (5) `_unit_vec` เก็บ cache เก่าเมื่อ load fail → stale เงียบ (6) product npz+unit npz resolve คนละ mtime → ข้าม file gen ได้ (7) OCR quota→error เผาเวลาเป็นชม. (8) stale lock → หยุด refresh ถาวร (9) `image_texts.jsonl` append → รูปเดิมมีหลายบรรทัด latest-ts-wins แม้คุณภาพต่ำกว่า (10) container recreate → npz+jsonl ย้อน → ขาดคู่กับ Mongo gen ใหม่
+
+#### PART 1-3 — contract ที่ออกแบบ (minimal canonical)
+
+- **`generation_id`** = `gYYYYMMDD-HHMMSS` · artifacts ทุกชิ้น gen dir `exports/gen/<gid>/` {units jsonl, unit npz, product npz, ocr_results.jsonl, manifest.json} + `sellable_units_g<gid>` coll + pointer doc — gen ผิดห้าม combine
+- **order ใหม่**: lock(+pid stale-steal) → export → discover fingerprints → classify unchanged/new/changed/retryable/removed → bounded incremental OCR (quota→`deferred` run-level stop) → import image_texts (state owner, shared coll) → build units (OCR-aware search_text) → build npz (verify **ก่อน** replace + embed `generation_id`) → import `sellable_units_g<gid>` → validate counts/hashes/pairing → **pointer write เดียว** → manifest finalize → cleanup (เก็บ active+previous เท่านั้น) → unlock
+- **pointer**: `sellable_units_meta {_id:"active", generation_id, collection, units_npz, product_npz, units_jsonl, unit_count, npz_rows, previous:{...}, activated_at, manifest}` — `previous` embedded = rollback target → **rollback = pointer update เดียว**; QA npz อยู่นอก generation contract (KB domain ไม่ผูก export)
+- **request snapshot**: `units.resolve_unit_snapshot()` owner เดียว (pointer read ~30s TTL) → entry fns (`fetch_unit_cards`/`fetch_unit_evidence`) resolve ครั้งเดียวแล้ว thread `snap` ลง fetch_units/_vector_search/_sellable_mask — loaders ห้าม resolve เอง; `_units_coll()` compat wrapper (conversation_products/_known_brands ใช้ต่อได้)
+- **fail-closed**: pointer missing/invalid หรือ npz.gen≠pointer.gen → grouped semantic + unit path unavailable → legacy listing path (live ShpProducts+product npz) — **ห้ามเงียบ fallback `sellable_units` base**; base coll เป็น unreachable หลัง publish แรก (units dark จน gen แรก — runbook: refresh ทันทีหลัง deploy)
+- **OCR state owner = `image_texts` collection** (ไม่ใช่ jsonl — durable ข้าม container recreate): doc += `fingerprint`(image_id+normalized_url), `status`(ok|error|deferred), `error_class`, `attempts_total`, `last_generation_id`; removed→`item_ids=[]` detach คง audit; retry เฉพาะ retryable_error bounded; error ไม่ทับ ok record
+- **OCR→search_text**: kinds spec|variant_map|product เท่านั้น (spec≤400/vm≤200/product≤200 รวม≤800 chars) + dedupe + boilerplate filter (>K% listings ตัด) · banner→supporting-only เหมือนเดิม · full OCR ยัง attach ผ่าน `attach_image_texts`
+- **image_texts shared (ไม่ per-gen)** — additive evidence join by image_id; detach ทำผ่าน item_ids recompute ตอน import ก่อน publish
+- **execution env**: refresh รัน **ใน chatbot container** (`docker compose exec chatbot-shopee`) + เพิ่ม volume `exports_data:/app/exports` (1 บรรทัด compose — baked artifacts seed ครั้งแรก, durable ข้าม recreate) — แก้ช่องว่าง deploy model ที่ audit เจอ
+- **canonical jsonl copies**: publish copy `sellable_units.jsonl` ออก canonical path เพื่อ legacy consumers (typo_dict/diag tests) — copy หลัง pointer เท่านั้น
+- **09:00 Asia/Bangkok audit**: incremental OCR เฉลี่ยน้อย (recent daily chat usage 10-70 calls/model — headroom เยอะ) + embeddings local ไม่กิน quota → **09:00 feasible สำหรับ incremental**; แต่ OCR share `llm._API_KEYS` pool กับ chat → churn-day (รูปใหม่เยอะ) อาจแย่ง RPM — **แนะนำ dedicated `IMGTXT_GEMINI_API_KEY_*` pool (operator decision)** ไม่ใช่ blocker; รอบแรกที่ OCR backlog เต็มให้รัน manual off-hours ใน runbook; duration est: export นาที ×1 + units นาที ×1 + embed ~48k texts CPU ~1-2.5h + OCR นาที-ชม. → done ~ก่อนเที่ยง
+
+#### PART 4-6 — RED/offline tests + manifest (ย่อ — รายละเอียดใน roadmap section 4B)
+
+- **RED test file**: `docs/test/test_phase4b_refresh.py` (tmp dirs + FakeColl/fake-Mongo owners เดิม + leaf provider stub; ไม่โหลด torch/model จริง — `embed_texts`/`_extract_one` inject ได้)
+- **coverage**: B1 classify 6-state · B2 quota→deferred · B3 unchanged=0call/new=1/changed=1/retryable bounded · B4 staging coll+order · B5 verify-before-replace · B6 npz.gen≠pointer→fail-closed · B7 manifest fields no-secret · B8 publish fail→prev active · B9 kinds/caps/banner/dedupe · B10 missing OCR non-blocking · B11 concurrent 2nd run exits pre-provider · B12 stale-PID lock steal · B13 crash pre-pointer→old active / post-pointer→complete · B14 rollback pointer-only · B15 snapshot ตรึง gen เดิม mid-request · B16 prev survives cleanup, older dropped · B17 removed→detach · B18 error ไม่ทับ ok · B19 count mismatch blocks activation · B20 manifest no secrets · B21 partial OCR publish ok
+- **files to modify**: `refresh_data.sh` (rewrite order+lock+publish gate) · `build_image_texts.py`+`_nonsellable` (fingerprint/deferred/state-from-Mongo) · `import_image_texts.py` (state owner upsert+detach) · `build_sellable_units.py` (--gen-dir + OCR-aware search_text) · `build_embeddings.py` (--gen-dir + verify-before-replace + npz generation_id) · `import_sellable_units.py`→gen coll · **`publish_generation.py` NEW** (validate→pointer→manifest→cleanup = pointer owner เดียว) · `units.py` (`resolve_unit_snapshot`+thread snap+path-keyed npz cache) · `product_store.py` (`_load_vector_store` path-param) · `docker-compose.yml` (+exports_data volume) · `docs/DEPLOY.md`+`schema.md`+SRS+roadmap · test ใหม่
+- **deletion**: old publication path unreachable ใน diff เดียวกัน — `import_sellable_units` หยุดเขียน base coll, `_units_coll` resolve ผ่าน pointer เท่านั้น; `image_texts.jsonl` append-log เลิกเป็น state source (เหลือเป็น historic file); `_load_done` ถูกแทน state จาก collection
+
+#### Waythrough verdict (superseded โดย correction round ด้านล่าง)
+
+~~`PHASE_4B_DESIGN_READY_FOR_IMPLEMENTATION_APPROVAL`~~ — ถูก review ตีกลับ: 4 High + 3 Medium — design ยังไม่ atomic จริง 4 จุด
+
+#### 🔧 Phase 4B DESIGN CORRECTION round — 4 High + 3 Medium (2026-10-19) · design-only เสร็จ · รออนุญาต implement
+
+- **verify ก่อนแก้ (review findings ตรวจกับ source จริง — ถูกทั้ง 7 ข้อ)**:
+  - **H1** — `image_texts` shared+cache เป็น runtime source ตรง → รูปที่ OCR ระหว่าง build โผล่ให้ลูกค้าก่อน publish (mutable state ไม่ใช่ published evidence) — readers จริง 3 จุด: `units.attach_image_texts` (:421 `_units_coll().database["image_texts"]`), `product_store.search_cert_products` (:4108 `admin_db["image_texts"]`/`_admin_image_texts_coll`), `conversation_products` ผ่าน attach chain (:311, :1325) → แก้: **2 roles** — `image_texts` = OCR cache/state เท่านั้น (runtime ห้ามอ่าน) + `image_texts_g<gid>` = published evidence per-gen (immutable, pointer อ้างชื่อ, readers ทุกตัวกิน snapshot)
+  - **H2** — resolver ใน units.py ไม่ครอบ `product_store._load_vector_store` (product npz resolve แยกอิสระ) → แก้: `generation_pointer.py` module เดียว (owner เดียว, import แค่ knowledge_base lazy → ไม่มี cycle) — `EvidenceSnapshot` frozen dataclass ครอบ units_coll+image_texts_coll+units_npz+product_npz+jsonl+manifest; entry fns resolve ครั้งเดียว thread `snap=` ลงทุก loader; caches key ด้วย immutable path ไม่ใช่ mtime
+  - **H3** — "active+previous ปลอดภัย" เท็จ: publish ซ้ำวันเดียวกัน + request ค้าง → gen ที่ยังอ่านอยู่ถูกลบได้ → แก้: grace **24h fixed** (injected clock ใน test) — ห้ามลบ active / previous / อายุ<grace; failed staging แยก rule + ต้องพิสูจน์ absent จาก pointer ก่อน; cleanup best-effort หลัง activation เท่านั้น fail ไม่กระทบ pointer
+  - **H4** — "pointer write → manifest finalize" เท็จ (manifest pending = pointer อ้าง pending state) → แก้ order: build staging → validate → finalize files (tmp→os.replace) → **manifest finalized+verified ก่อน** → CAS pointer ครั้งเดียว → canonical copy (optional, tmp+replace) → cleanup (optional); หลัง CAS ไม่มี correctness write เหลือ
+  - **M1** — pointer `update_one` ธรรมดาแพ้ race (2 publishers เขียนทับกัน) → แก้: **CAS** `update_one({_id:"active", generation_id: expected}, …)` matched==1=won / ==0=lost→reread ครั้งเดียวไม่ retry; bootstrap = `upsert({_id:"active", generation_id:{$exists:False}}, full doc)` → doc มีอยู่→insert→DuplicateKeyError=conflict (fenced โดยไม่ต้อง transaction); rollback = CAS เดียวกัน + previous↔active swap, stale rollback matched==0 → ไม่ overwrite
+  - **M2** — custom `mkdir+PID+kill -0` protocol เปราะ → audit image จริง: **`python:3.11-slim` มี `/usr/bin/flock`** (verified `docker run` — util-linux เป็น required package) → ใช้ `exec 9>lock; flock -n 9 || exit` — auto-release ตอน exit/kill/container restart, cover ทั้ง run, ออกก่อน provider/Mongo write; fcntl stdlib เป็น contingency (ไม่ implement)
+  - **M3** — "09:00 safe จาก counter เดิม" เท็จ (batch OCR bypass quota manager — counter ไม่เคยนับ OCR) → แก้: hard contract `--max-calls` + `MAX_ATTEMPTS=3` + `--max-runtime-min` ใหม่ + limit→`deferred`; embeddings local แต่ duration = canary observation ไม่ใช่ claim; dedicated `IMGTXT_GEMINI_API_KEY_*` preferred, shared = explicit operator acceptance เท่านั้น; cron `0 9 * * *` **เปิดหลัง first-gen+timing evidence — operator gate ไม่ใช่ feasible-แล้ว**
+- **identity/bootstrap corrections เพิ่ม**: `generation_id` = `g<UTC %Y%m%d-%H%M%S>-<8hex>` (uuid4 suffix กันชน same-second) + allowlist regex `^g\d{8}-\d{6}-[0-9a-f]{8}$` validate pointer fields + derived-path check (`collection==sellable_units_{gid}`, npz path prefix `exports/gen/{gid}/`); named volume: copy-up เฉพาะ first create (image update ไม่ reseed — runbook ระบุ); pre-first-pointer: legacy listing path+canonical product npz ใช้ได้, **units/grouped path dark (fail-closed)** จนกว่า gen แรก — ไม่ claim semantic พร้อม
+- **corrected publication sequence**: flock → mint gid → export → discover/classify → bounded OCR → cache upsert → materialize `image_texts_g<gid>` → units (OCR-aware) → npz ×2 (verify ก่อน replace) → import `sellable_units_g<gid>` → validate counts/hashes/gen → **manifest finalize(tmp→replace)+verify hash** → **CAS pointer** → canonical copies (best-effort) → grace cleanup (best-effort) → lock auto-release
+- **manifest/files ที่แก้**: เพิ่ม `generation_pointer.py` (NEW resolver+dataclass owner เดียว), `import_image_texts.py` = cache-state owner เท่านั้น (เลิกเป็น runtime source), materialize `image_texts_g<gid>` ย้ายเข้า publish path; runtime: units/product_store/conversation_products/knowledge_base consumers ทุกตัวรับ `snap`; `attach_kb_specs` เปลี่ยน db handle เป็น `_kb._admin_db()` (kb_products ไม่ใช่ generated)
+- **ห้ามเหมือนเดิม**: implement/runtime edit/stage/commit/.env/Mongo จริง/provider/torch/cron/docker run/botworker/8010/deploy/flag/push — รอบนี้แก้ docs เท่านั้น (docker run เมื่อกี้เป็น read-only image inspection พิสูจน์ flock — ไม่แตะ deploy)
+
+#### Waythrough verdict (corrected)
+
+`PHASE_4B_DESIGN_CORRECTED_READY_FOR_IMPLEMENTATION_APPROVAL` — ทุก finding แก้ที่ contract (ไม่ใช่ guard patch); รอละเอียดอยู่ roadmap section 4B + รายงานรอบนี้ — **ยังไม่ implement**
+
+#### 🔨 Phase 4B IMPLEMENTATION — approved 2026-10-19 · กำลังทำ (RED→GREEN→delete→docs)
+
+- **กำลังจะทำ**: implement corrected contract ตาม roadmap 4B — RED tests ก่อน (`docs/test/test_phase4b_refresh.py`, offline: tmp dirs + FakeDb/GenColl reuse จาก replay suite + leaf stubs `_extract_one`/`embed_texts`/`_load_vector_store`-seams; ไม่มี torch/provider/Mongo จริง) → implement `generation_pointer.py` (owner เดียว: EvidenceSnapshot + validator + TTL resolver) → scripts (fingerprint classify, deferred cache, `image_texts_g<gid>` materialize, gen-dir builds, npz `generation_id` + verify-ก่อน-replace, `publish_generation.py` validate→manifest→CAS→rollback→cleanup) → runtime snap threading (units/product_store/conversation_products) → `refresh_data.sh` rewrite (flock native — verified `/usr/bin/flock` ใน python:3.11-slim) → compose `exports_data` volume → ลบ publication paths เก่าใน diff เดียวกัน → docs (SRS/schema/DEPLOY/roadmap)
+- **design ล็อกแล้ว** — ไม่ re-audit; รายละเอียดเต็มอยู่ roadmap section "Revised Phase 4B" + correction entry ด้านบน
+- **ห้าม**: .env/Mongo จริง/provider calls/torch/botworker/8010/docker exec/cron install/deploy/flag ON/push/PR; หยุดก่อน stage+commit
+
+### ✅ PHASE 4A IMPLEMENTED (uncommitted, flag OFF) + 4B design-only — Source Union + Atomic Daily Refresh · (design 2026-10-19, impl round ล่าสุด) · รอ independent review
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `3b26920` · tree clean (แก้เฉพาะไฟล์นี้+roadmap) · staging empty · `git diff --check` clean · Phase 3 impl `3e8308f` · `grouped_retrieval_selection_enabled` = OFF contract (env `"0"`, fail-closed runtime_config, admin default false — live DB ไม่ได้อ่านเพราะห้าม Mongo)
+- **active blocker**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — executor union วันนี้มีแค่ `units` + `legacy` (proven `retrieval_executor.py:194-196`) — flag ห้ามเปิดจนกว่า Phase 4+ phases ถัดไปอนุมัติ
+- **scope รอบนี้**: correction ของ design เดิม (identity 2 domains, control-flow จริง, stale anchor, KB safety, honest budget) + เพิ่ม Phase 4B atomic daily refresh — design/doc เท่านั้น
+- **ห้าม**: implement/เขียน test, semantic keyword table, helper/guard chain, policy ใน executor, second pool, model/provider call ใหม่, unbounded query, Phase 5/7 scope, botworker/admin UI, `.env`/Mongo/provider/port 8010/stage/commit/push, cron install
+- **corrections จากรายงานเดิม**: (a) identity `item_id→unit_id→name` ผิด — merge ได้ข้าม variant; แก้เป็น 2 domains (ด้านล่าง) (b) "ย้าย 2 callsites" ผิด — จริงคือ execution callsite เดียวที่ app.py:1831 (ก่อน branch split) + consumption 2 จุด (KB:2278, main:4459) → ลบจุดเดิมแล้วย้ายเข้า branch หลัง evidence พร้อม (c) "+0 queries" ผิด — มี bounded reads เพิ่มสูงสุด +5/turn (ดู budget) (d) O9 แก้ข้อเท็จจริง: truncation เงียบอยู่ที่ pool `pooled[:per_request_limit]` (`candidate_pool.py:242`) ไม่ใช่ executor
+
+#### Identity model (2 domains — corrected, final contract)
+- **Candidate identity** (1 key/card, finest granularity): `u:{unit_id}`/`v:{item_id}#{model_id}` (variant — unit_id ที่ parse `item:model` ได้ → v-key เดียวกัน) → `i:{item_id}` (listing-level เท่านั้น) → `n:{shop}:{normalized_name}` + `identity_quality="name_only"`
+- merge iff identity_key เดียวกันเท่านั้น · `m:{model_id}` เดี่ยว **ห้าม** merge (model_sku ข้าม item ชนกันได้ — bug เดิม `var_idx`/`_identity_keys`) · variant ต่างกันห้าม merge เพราะ share item_id
+- **Listing vs variant (A — corrected)**: ถ้า item มี ≥1 **non-rejected** variant candidate → listing `i:` ของ item นั้น **ห้าม** เป็น selectable candidate — evidence ของมันแปลงเป็น attachment domain `item` join ทุก variant (source provenance ยังติด candidate); ถ้า variant มีแต่ rejected (hidden) → listing ยังเป็น candidate ปกติ; ไม่มี variant เลย → listing เป็น candidate เสมอ
+- **Attachment identity**: domain `item` (`i:` → join ทุก variant ของ item) · domain `model`/`v` (`v:{iid}#{mid}`/`u:` → เฉพาะ variant ที่ตรง; ไม่มี variant candidate → fallback listing `i:` + trace) · domain `name` (`n:` เท่านั้น, low-confidence) · attachment join ไม่เคย collapse candidate
+- `EvidenceAttachment` +`identity_domain` + `payload: dict|None` (bounded: snapshot/listing evidence เท่านั้น) · `PooledCandidate` +`identity_quality` + `linked_item_id`
+
+#### Phase 4B design notes (B+C — design only, ห้าม implement รอบนี้)
+- **One generation snapshot per request**: แต่ละ request resolve `{generation_id, collection, npz}` ครั้งเดียวแล้วใช้ snapshot เดิมทั้ง Mongo unit lookup + embedding lookup — loaders ห้าม resolve pointer เอง · versioned NPZ immutable, `os.replace` เฉพาะ temp→final ใน generation path เดียวกันก่อน activation · pointer write เดียว activate pair ที่ validate แล้ว · mismatch ห้าม combine artifacts ข้าม generation
+- **Fail-closed pointer**: pointer หาย/invalid/อ่านไม่ได้ → ห้าม fallback เงียบไป base `sellable_units` — grouped semantic selection unavailable → keyword/non-generation path เดิม (หรือ fail closed) · เก็บ previous gen ไว้ rollback + in-flight requests · cleanup gen เก่าเฉพาะหลัง bounded grace period — ห้ามลบทันทีหลัง activation
+
+#### Control flow (corrected — 1 profile/1 union/1 pool/1 selection per eligible turn)
+- ลบ execution callsite ที่ `app.py:1831` (ก่อน branch split — computed ก่อน evidence พร้อม)
+- KB path (kb_docs ไม่ว่าง): `run_grouped_selection(...)` หลัง `_merge_kb_mongo`+`_device_spec_lookup`, ก่อน consumption 2278 — kwargs: `subject_cards`, `compat_cards=_kb_device_products`, `kb_cards` (pre-resolved), `supporting=`
+- Main path: `run_grouped_selection(...)` หลัง `_device_spec_lookup`+`qa_context`, ก่อน consumption 4459 — kwargs: `subject_cards`, `compat_cards=_device_additional`, `kb_fetcher=` (lazy owner), `supporting=`
+- KB/main mutually exclusive → runtime รัน callsite เดียวเสมอ; orchestration คงใน `retrieval_runtime`; app.py ส่งแค่ pre-resolved evidence (ไม่ duplicate source logic)
+- executor +`channels=((name, fn), ...)` → synthetic `RetrievalRequest(request_id="channel:{name}", source="channel", empty filters)` ต่อ channel (bucket = availability-only เพราะ `eff_types` ว่าง → ไม่ reject ที่ 113) → append เข้า `requests` ที่ส่ง selector → channel ได้ quota ตัวเอง (ไม่กิน quota ของ slot)
+
+#### Stale subject/anchor contract
+- snapshot = identity+history เท่านั้น ไม่ใช่ live truth · collect ids ทั้งหมด → **1 batched** `product_store.fetch_products_by_ids` (owner ใหม่ — verified ไม่มี owner เดิมรองรับ `$in` batch; `_rebuild_card`/`fetch_product_by_id` = find_one/entry = N+1) + ≤1 `sellable_units` batch สำหรับ model-level entries
+- live hit → live card (`_live=True`) · miss → stored snapshot `_snapshot_only=True` + strip `short_link`/`link` (purchase affordance)
+- `make_evidence_card` snapshot branch: `_snapshot_only` → publish=unknown, stock=unknown, `customer_visibility="historical_only"`, `availability_reason="snapshot_stale"` → sellable=False → unavailable bucket (`_VIS_ORDER` รองรับ historical_only อยู่แล้ว)
+- live+snapshot same identity → `_merge_group` live wins · snapshot evidence เก็บผ่าน attachment `kind="subject_snapshot"` (+payload) — ตอบ spec/history ได้, ห้ามขาย/ลิงก์ (promoted-subject note มีอยู่แล้ว runtime:90-95)
+
+#### KB-only safety contract
+- kb doc + item_id → `kb_product` attachment join candidate เดิม (item domain)
+- kb doc + model_code (ไม่มี item_id) → kb fetcher ยิง **1 bounded** shop-scoped model listing lookup (`fetch_products_by_models` owner ใหม่ — `$or` regex, limit 20) → matches = candidates (sources+="kb"); kb doc = attachment domain `model`; no match → `supporting_evidence` เท่านั้น
+- kb doc name-only → `supporting_evidence` record เท่านั้น — **ไม่ใช่ candidate เด็ดขาด** (กัน "ร้านมีแต่หมด" เท็จผ่าน unavailable note)
+- kb_qa/kb_raw/vision text → `supporting_evidence` เสมอ · KB text ไม่มีสิทธิ์บอก stock/publish
+
+#### Honest query budget (flag-ON union, per eligible turn)
+- always: units ≈5 Mongo reads/request (sellable-set+units `$in`+kb_products+image_texts+listing join) ×R(1-2) · legacy `fetch_products` ≈2-5/request ×R — เท่าเดิม
+- conditional: subjects ≤2/turn (`$in` batch — **แทน** `_rebuild_card`/`fetch_product_by_id` find_one×N เดิม → net ≤0 เมื่อ ≥2 subjects) · kb ≤3/turn (bounded light scan + full docs + model listing) เฉพาะเมื่อมี model/product identity
+- reused (+0): compat (`_device_additional`), supporting (qa/vision), OCR joins (นับใน units แล้ว)
+- **max additional vs today: +5 bounded reads worst-case, โดยทั่วไป +0-2** · LLM/provider +0 · local npz เท่าเดิม · ทุก cursor มี `.limit` · ไม่มี N+1 · source fail 1 ตัวไม่กระทบตัวอื่น (attempt.error เดิม)
+
+#### Phase 4A manifest + RED tests (ทำแล้ว — ผลลัพธ์ที่ท้ายไฟล์: "Phase 4A implementation record")
+- **files**: `retrieval_executor.py` (channels + `RetrievalExecutionResult.supporting_evidence`/`attachment_evidence`) · `retrieval_runtime.py` (kwargs + channel requests→selector + `_identity_keys` single-key) · `candidate_pool.py` (`identity_key`/`identity_quality`/`linked_item_id`/attachment domains/`supporting_evidence` populate/dropped-candidate trace) · `retrieval_policy.py` (`_snapshot_only` branch) · `product_store.py` (`include_unit_index` + `fetch_products_by_ids` + `fetch_products_by_models`) · `conversation_products.py` (`materialize_subject_cards` batch) · `knowledge_base.py` (kb channel owner + cap light scan) · `app.py` (del callsite 1831 + 2 branch callsites) · SRS + `docs/test/test_phase4_source_union.py` (new)
+- **RED tests 4A** (owner→expected RED): T1 channel attempts absent · T2 `include_unit_index`+partial-units listing visible · T3a/b/c kb identity tiers (model→bounded lookup+attach / no-match→supporting / name-only→supporting) · T4 supporting populated · T5 subject cards candidates · T6 compat channel · T7 anchor marks · T8 deleted anchor→unavailable `snapshot_stale` ไม่มี link · T9 order-linked item · T10 image_text attachment+trace · T11 image/video regression pin (GREEN) · T12 per-channel failure isolation · T13 bucket sweep pin · T14a cross-source same-identity merge · **T14b two variants one item_id stay 2 candidates (RED วันนี้: `var_idx`/`_identity_keys` collapse ผ่าน `i:`/`m:` shared)** · T15 item-level attach→ทุก variant, model-level→variant เดียว · T16 name-only no-merge+low-confidence · T17 dropped-candidate trace · T18 counts incl. supporting/attachment · T19 LLM calls +0 pin · **T20 call count==1 ทั้ง 2 branches (spy)** · T21 snapshot+live merge live-wins + `subject_snapshot` attachment · T22 stale published/stock → never sellable
+
+#### Phase 4B — Atomic Daily Evidence Refresh (design-only; no cron install)
+- **current-order facts (verified)**: `refresh_data.sh` ทำ unit embeddings **ก่อน** OCR → OCR ไม่เข้า search_text ของรอบเดียวกัน · unit `search_text` ไม่มี OCR (build_sellable_units.py:174-175) · npz tmp+`os.replace` แต่ verify **หลัง** replace (build_embeddings.py:154-172) · unit import upsert เข้า live collection ไม่มี generation boundary · stale units ไม่เคยถูกลบ
+- **order ใหม่**: lock → export snapshot → discover image identities (fingerprint) → OCR เฉพาะ new/changed/error-retry → import image_texts → build units จาก snapshot เดียวกัน + OCR (คราวนี้มีผล) → build embeddings (staging `exports/gen/<gid>/`) → validate ทุก artifact → publish (npz `os.replace` → pointer write) → runtime auto-reload → retain gen ก่อนหน้า 1 ชุด → drop ที่เก่ากว่า
+- **`generation_id`** เดียวทั้ง run — manifest บันทึก: gid, timestamps, doc/unit counts, embed rows/dims, OCR discovered/new/success/error/deferred, artifact hashes/sizes, validation, published/failed — ห้าม log secret/customer data
+- **Atomic publish — แนะนำ B′ (collection-per-generation + pointer doc)**: `sellable_units_meta {_id, active:{collection:"sellable_units_g<gid>", generation_id, npz:"unit_embeddings_g<gid>.npz"}}` · `_units_coll()` resolve ผ่าน pointer (TTL cache ~30-60s, fail→fallback ชื่อ base) · publish = `update_one` เดียว atomic · rollback = pointer กลับ · stale units เป็นไปไม่ได้ (แยก collection) · query sites ไม่ต้องแก้ · **A (rename)** ตัดเพราะ: ต้อง `renameCollection` privilege (ไม่ verified), rebuild indexes, และที่สำคัญ — **npz↔collection pairing ด้วย mtime+rename เป็น 2 atomic ops แยกกัน → มีหน้าต่าง generation ไม่ตรง (recall เงียบ)**; B′ ผูก pair ใน pointer เดียว + npz ฝัง `generation_id` → runtime assert `npz.gen == pointer.gen`, mismatch → degrade keyword path (bounded, ไม่ corrupt)
+- **Incremental OCR**: fingerprint = `image_id + normalized_url` (content hash เฉพาะตอน download อยู่แล้ว) · new→OCR · error→retry bounded (≤N/run) · same id+url เปลี่ยน→reprocess · unchanged ok→skip · removed→เก็บ record แต่ `item_ids` คำนวณจาก export ปัจจุบัน (ไม่ attach) · quota หมด→`deferred` (ไม่ใช่ error) · partial finish OK — success เข้า gen นี้ ที่เหลือรอบหน้า · counts ใน manifest
+- **OCR→embedding**: `kind=spec|variant_map|product` เข้า `search_text` ภายใต้ cap (spec ≤400/variant_map ≤200/product ≤200 ตัวอักษร, รวม ≤800) + dedupe + boilerplate filter (ข้อความที่โผล่ >K% ของ listings ตัด) · `kind=banner`/noise → supporting-only ห้ามเข้า embedding · full OCR คงเป็น attachment (`attach_image_texts` เดิม)
+- **ops safety**: dir lock กัน overlap (มีอยู่) · bounded OCR calls/run · แนะนำ dedicated `IMGTXT_*` quota — ถ้าไม่มี document ว่า 03:00 ปลอดภัยกว่า 09:00 (แย่ง quota ช่วงลูกค้าใช้งาน) · export fail→abort · OCR partial ไม่ corrupt gen · validation fail→ไม่ publish · gen เก่ายัง active · AI ไม่ install cron — operator ตั้งเองหลัง deploy
+- **Phase 4B files**: `scripts/refresh_data.sh` (reorder+staging+publish) · `scripts/build_image_texts.py` (fingerprint/retry/deferred) · `scripts/build_sellable_units.py` (gid+OCR-aware search_text) · `scripts/build_embeddings.py` (verify-before-replace+gid npz) · `scripts/import_sellable_units.py`→staging coll+pointer publish · `units.py` (pointer-aware `_units_coll`+npz gen pairing) · `docs/DEPLOY.md` (corrected order+ops doc เมื่อ implement — ตอนนี้ doc ปัจจุบันยังถูกต้อง) · `docs/test/test_phase4b_refresh.py` (new) · SRS
+- **RED tests 4B**: B1 fingerprint classify · B2 quota→deferred · B3 staging coll+pointer order · B4 verify-before-replace · B5 npz↔gen pairing · B6 manifest counts/hash · B7 publish fail→prev active · B8 OCR→search_text kinds/caps/banner-exclusion/dedupe · B9 missing OCR non-blocking · B10 lock pin
+
+#### Waythrough verdict
+`PHASE_4A_SOURCE_UNION_READY_FOR_INDEPENDENT_REVIEW_PHASE4B_NOT_STARTED` — Phase 4A implement+verify เสร็จ (record ท้ายไฟล์) · 4B ยัง design-only ห้ามรวม diff เดียว
+
+#### 🔧 Phase 4A review-fix round — 2 High + 2 Medium (กำลังทำ)
+- **baseline**: branch `feature-phase3-aswer-quality` · manifest เดิม · staging empty · defect ที่ 1 reproduce แล้ว: `v:i1#m1` จาก request+compat channel → **2 PooledCandidate rows** (request_ids/sources แยก — set-masked)
+- **F1 (High)**: `build_candidate_pool` dedupe per-`RetrievalExecutionResult` → แก้เป็น **global identity grouping** ต่อ turn — groups รวมข้าม results, request_ids สะสม, per-request score/role/quota คงผ่าน by_request + `req.slot_id`/`req.relation_id` ที่ selector
+- **F2 (High)**: `kb_product_evidence` attach ทุก model_doc กับทุก found product (cross-model contamination) → per-doc matching ด้วย `_doc_matches_model`/`_model_token_in_name` (boundary-aware, ไม่เพิ่ม regex table) — matched→attach (model row match→`v:` domain, item_name→`i:` domain), unmatched→supporting ราย doc
+- **F3 (Medium)**: KB callsite ส่ง `supporting` เป็น dict → `tuple(dict)` กลายเป็น keys "kind"/"text" → แก้ producer ส่ง list ของ dict (main path ถูกอยู่แล้ว)
+- **F4 (Medium)**: `fetch_product_docs_by_ids` unscoped fallback → cross-shop live card รั่ว → shop_filter มี → scoped query เดียว ไม่ fallback (missing→snapshot); ไม่มี shop_filter → 1 unscoped query (query budget: scoped=1 ลงจาก ≤2)
+- **ห้าม**: redesign 4A, 4B, เปิด flag, stage/commit, helper/guard chain, cleanup layer
+
 ### 🔧 Phase 2C.1 — Evolve TurnDecision In Place เป็น Multi-Need TurnPlan (2026-10-15) · RED→GREEN→verify เสร็จ · รอ independent review · ยังไม่ commit
 
 - **baseline**: branch `feature-legacy-shopee-evidence-retrieval` @ `4edd273` · working tree & staging clean · Phase 2B ปิดและ commit แล้ว
@@ -4430,3 +4950,2824 @@ config-failclosed 4/4 · boundary 20/20 · recovery-freshness 60/60 · error-pol
 **ผลลัพธ์**: `bot-worker` อยู่ใต้ profile `botworker`; default deploy services = `chatbot-shopee, chatadmin-web, caddy` และ explicit profile services เพิ่ม `bot-worker` · คู่มือระบุ one-time stop/remove container เดิมก่อน default deploy, local native command และ local Docker command · RED ก่อนแก้พบ worker ใน default; GREEN หลังแก้ default ไม่มี worker/profile มี worker · runtime/env/dependency/script เพิ่ม = 0
 
 **Commit closeout**: `285ab90` `chore: make botworker deployment opt-in` — `docker-compose.yml` + `docs/DEPLOY.md` เท่านั้น, +40/−9 · default worker ถูกถอดจาก deploy startup; local explicit profile/command คงอยู่ · ไม่มี container start/stop, DB, provider, `.env`, push หรือ deploy ในรอบ implementation
+
+---
+
+### ✅ ผ่านแล้ว — REVISED PHASE 3: CANONICAL PRODUCT/VARIANT/AVAILABILITY SCHEMA (branch `feature-phase3-aswer-quality` @ `49e6004` — **uncommitted, ready for independent review** — ห้าม stage/commit/push)
+
+**เป้าหมาย**: normalize product/listing/variant/publish/stock/requested-option facts ผ่าน `make_evidence_card()` เจ้าเดียว ก่อน pool/selection — เปลี่ยน schema semantics ไม่ใช่ answer architecture
+
+**PART 0 audit (raw-value inventory จาก `exports/sellable_units.jsonl` 27,807 recs + fixtures)**:
+
+| raw source + field | ค่าจริงใน data | canonical field/value | trace |
+|---|---|---|---|
+| unit `product_type` | `charger, cable, powerbank, camera, earphone, case, phone, memory_card, screen_protector, smartwatch, ...` (broad taxonomy) | `canonical_type` = ค่าเดิม (single-valued) หรือ `_detect_product_types(name)` สำหรับ listing card (multi → first-by-`PRODUCT_TYPES`-order + candidates) | `_evidence.facts.type` |
+| unit `charger_subtype` | `adapter, cable_only, set, car_charger, wireless, desktop, null` | `canonical_roles` ⊂ `{adapter,cable,set,car_charger,wireless,desktop,socket}`: `adapter→{adapter}`, `cable_only→{cable}`, `set→{set,adapter,cable}`, อื่นๆ→`{self}` | `_evidence.facts.roles` |
+| unit `cable_subtype` | `c-to-c, usb-c, type-a, c-to-l, lightning, micro, null` | `variant_facets.connector` = ค่าเดิม (canonical vocab อยู่แล้ว); **ไม่ใช่ role** | `_evidence.facts.connector` |
+| `product_type=cable` หรือ name `_detect_charger_subtype→cable` | — | role `{cable}` แม้ไม่มี charger_subtype (listing card) | facts.roles |
+| `item_status`/`status` | `NORMAL, UNLIST, SELLER_DELETE, BANNED, DELETED, SHOPEE_DELETE, REVIEWING` | ผ่าน `catalog_status` (resolver เจ้าเดิม) → `publish_state`: `active/active_unknown_stock/out_of_stock→published`, `unlisted→unpublished`, `discontinued→deleted`, `unknown→unknown` | facts.publish |
+| `catalog_status` (resolver output) | `active, active_unknown_stock, out_of_stock, unlisted, discontinued, unknown` | `stock_state`: `active→in_stock`, `out_of_stock→out_of_stock`, อื่นๆ→`unknown` | facts.stock |
+| `customer_visible` (resolver) | bool | `customer_visibility`: `False→hidden`, `discontinued→historical_only`, อื่น→`visible` (fail-closed: catalog unknown→hidden) | facts.visibility |
+| `total_stock`/`stock`/`stock_info_v2`/`seller_stock`/`shopee_stock` | int (0 มีจริง) | resolver เจ้าเดิมคิด → `stock_state` เท่านั้น — ไม่ re-derive | — |
+| `variants[].stock`, `variants[].model_status` | int, `MODEL_NORMAL/MODEL_UNLIST/MODEL_DELETE/""` | per-row `stock_state` (`>0 in_stock`, `0 out_of_stock`, ไม่ใช่ตัวเลข→`unknown`) + `publish_state` (`MODEL_NORMAL→published`, `MODEL_UNLIST→unpublished`, `MODEL_DELETE→deleted`, else `unknown`) — raw fields คงไว้ | — |
+| `model_name`/`name` + `cable_subtype` | ชื่อ variant ("AL803 สีแดง", "Black") | `variant_facets`: `connector`(cable_subtype), `color` (segment ผ่าน `_is_color_or_version`/`_COLOR_WORDS` — vocab เดิม), `length_m` (regex `เมตร/ม./m` — pattern เดิมใน `_relation_constraints`) | facts.facets |
+| request `variant_terms` (route_context มีอยู่ แต่ไม่เคยส่ง) | `สีX`, `GB/TB/mAh/นิ้ว`, `ไซส์X` | `requested_variant_state`: `not_requested/available/out_of_stock/not_offered/unknown` — per-term match `variants[]` name containment + `tier_variation` options + unit self-name → aggregate worst: `not_offered>out_of_stock>unknown>available` | facts.requested |
+| soft_hints facet pair `(length_m\|power_w, val)` | relation constraints เดิม | เข้า `requested` เป็น (k,v) → facet equality บน `variant_facets`/rows; facet หาย→`unknown` ไม่ใช่ not_offered | facts.requested |
+
+**Derived eligibility (owner = adapter เจ้าเดียว)**: `sellable = publish_state==published ∧ stock_state==in_stock ∧ customer_visibility==visible ∧ requested_variant_state ∈ {not_requested, available}` — requested `unknown` ไม่ผ่าน sellable (withhold ไม่ใช่ negative claim); ค่าเดิม `sellable==available_for_sale` เมื่อไม่มี requested
+
+**Owner counts (ก่อนแก้)**: product-type derive = 2+ (`_detect_product_types` lazy ใน `_bucket`, name heuristics กระจาย) · publish/stock = 1 (`resolve_availability`) แต่ raw consumers อ่าน `status`/`_available_for_sale`/`customer_visible`/`catalog_status` เอง (`_bucket`, `_dedupe_sell_score`, `guards._card_available` fallback, `_score`, `_merge_group`, `retrieval_runtime`, `retrieval_selection` coverage) · requested-variant = 0 (ไม่มีเลย — `variant_terms` ไม่ถึง request) · canonical adapter = `make_evidence_card` เจ้าเดียว (merge-only วันนี้)
+
+**Raw branches ที่จะลบ (diff เดียวกัน)**: `_bucket` raw `product_type`/`charger_subtype`/`cable_subtype`/`customer_visible`/`_available_for_sale`/`_detect_product_types` lazy-call → canonical fields · `candidate_pool._merge_group._rich` (`_available_for_sale`+richness → `customer_visibility`>`sellable`>richness — แก้ mixed UNLIST+visible ด้วย) · `candidate_pool._score` subtype/sellable raw reads → `canonical_roles`/`sellable` · `retrieval_selection` subtype-coverage raw `charger_subtype`/`cable_subtype` → `canonical_roles` (แก้ live bug `cable_only≠cable` coverage miss) · `retrieval_runtime` subject `_available_for_sale` → `sellable` (field ไม่ขึ้น `_` → รอด `strip_private_evidence`) · `guards._card_available` raw fallback `status=="NORMAL" and not sold_out` → `resolve_availability` call (owner เดิม — card ไม่ผ่าน adapter ได้) · `_dedupe_sell_score` raw `status==NORMAL`/`sold_out`/`total_stock` → resolver tuple
+
+**Propagation ที่จำเป็น (manifest expansion justified)**: `route_context.RetrievalSlot.variant_terms` (ใหม่ — `_variant_terms(span)` ต่อ slot) + `retrieval_planner.RetrievalRequest.variant_terms` (field ท้าย, default `()`) + planner copy + executor `_request_profile` — เพราะ requested-option ไม่มี channel ไปถึง adapter เลย (proven: slot ไม่มี field, request ไม่มี field)
+
+**Retained (ไม่แตะ)**: `resolve_availability` (owner), `to_product_card`/`to_unit_card`/`_kb_doc_to_card` (producers stamp raw+resolver fields — adapter copy-through), `app.py` availability recompute+notes (owner call, legacy path ไม่ผ่าน adapter), `_prepare_link_followup`, `handoffs` cert label (owner call), `chat_v2.py`/`chat_v3.py` (parallel engine นอก scope), `_prepare_context`/`_prepare_llm_prompt`/`_select_products` (answer-side Phase 5), `_filter_charger_subtype` (fetch-time filter — ไม่ใช่ decision owner; raw field ยังต้องใช้เพราะ unit docs), `sold_out`/`status`/`catalog_status`/`total_stock` passthrough บน card (provenance), `_code_match` (identity ไม่ใช่ availability)
+
+**Test-first**: `docs/test/test_canonical_evidence_card.py` ใหม่ — RED batch: A) type/role (`cable_only→{cable}`, `c-to-c→connector`, `set→{set,adapter,cable}`, unknown→traced) B) publish/visibility (NORMAL→published+visible, UNLIST→unpublished+hidden, SELL_DELETE→deleted+historical_only, REVIEWING→unknown+hidden fail-closed) C) stock/variant (per-row stock_state, requested color available/OOS/not_offered, no-request→not_requested, missing data→unknown, one-dead-one-live) D) retrieval behavior (hidden→rejected, `cable_only` unit ใน cable-subtype request ผ่าน+coverage, mixed UNLIST+visible merge ใช้ visible, requested dead→unavailable ไม่ใช่ rejected, WPB100L UNLIST, iss29 "กล้องอย่างเดียว" exact-variant semantics, image_text evidence-only)
+
+**ห้าม**: LLM/provider call, keyword/regex table เพิ่ม, model/shop-specific condition, helper/guard chain, second old/new path, flag, Phase 4/5, `.env`/mongo/botworker/port 8010/stage/commit/push
+
+**ผลการทำจริง (implementation + verification — 2026-10-16)**:
+
+- **error → cause → fix → impact**:
+  1. `KeyError canonical_type`/30 fails ใน RED batch → `make_evidence_card` merge-only ไม่ produce canonical semantics → เพิ่ม `_canonicalize` ใน adapter (resolver delegation + vocab maps + per-row states + requested-variant resolution + sellable gate) → ทุก source card ได้ canonical fields ที่ boundary เดียว
+  2. `TypeError requested=` + `variant_terms` ไม่ถึง request → channel หายทั้ง chain → `RetrievalSlot.variant_terms` + `RetrievalRequest.variant_terms` + planner copy + `_request_profile`/`_run_attempt` ส่ง `requested` → requested-option ถึง adapter ครั้งแรก
+  3. `test_unknown_product_type` infer "bag" จากชื่อ fixture → fixture ไม่สะอาด (taxonomy detect ถูกต้อง) → แก้ fixture ไม่ใช่โค้ด
+  4. `test_multi_subtype_coverage` cable card ไม่นับ coverage → roles ว่างบน synthetic card + coverage อ่าน raw subtype เดิม → coverage ใช้ `canonical_roles` (cable_only→{cable} นับได้จริง)
+  5. `test_mixed_unlist_and_visible` IndexError → legacy card หลุดก่อน merge → `_merge_group._rich` = visibility→sellable→richness (visible ชนะ hidden แม้ OCR รวยกว่า)
+  6. 6 fails ใน `test_retrieval_selection` → fixture `_adapter`/`_cable` ไม่ stamp resolver fields ที่ `to_unit_card` จริงมีเสมอ → resolver ถูกต้อง mark unknown→hidden → แก้ fixtures stamp `status`/`catalog_status`/`customer_visible`/`availability_reason`
+  7. 4 fails ที่เหลือ (relation_target หาย) → soft_hints facet pairs ถูก feed เข้า `requested` ทำให้ preference กลายเป็น hard gate → scope เปลี่ยนเกิน Phase 3 → **revert**: `requested` = `req.variant_terms` เท่านั้น, soft_hints ยังเป็น ranking hint เดิม (ลบ `_REQUESTED_FACET_KEYS` + pair path)
+
+- **Root cause เดิม**: raw vocab กระจายตัดสินหลายที่ (`_bucket` อ่าน `customer_visible`/`_available_for_sale`/detect lazy, `_merge_group`/`_score` อ่าน `_available_for_sale`+subtype raw, selection coverage อ่าน `charger_subtype` raw, `_card_available`/`_dedupe_sell_score` re-derive `status`+`sold_out`) + requested-option ไม่มี channel → canonical adapter = boundary เดียว, consumers อ่าน canonical เท่านั้น
+
+- **Owner counts (หลังแก้ — proven by grep)**: canonical writer=1 (`_canonicalize` ใน `make_evidence_card` — `card["canonical_*"]=…` อยู่ที่เดียว) · publish/stock/requested-variant decision=1 (adapter module เดียว) · availability semantics=1 (`resolve_availability` — adapter delegate, ไม่มี parallel resolver) · raw `status`/`sold_out`/`_available_for_sale` reads ใน executor/pool/selection = **0** · make_evidence_card call sites: executor `_run_attempt` + harness L2 + tests เท่านั้น (ไม่มี parallel path) · UNLIST duplication=0 (resolver owns listing status; `MODEL_*` เป็น variant-row vocab คนละ field) · LLM calls ใหม่=0, model/shop condition ใหม่=0, keyword table ใหม่=`_SUBTYPE_ROLES` (inventory-backed, ต่อยอด `_SUBTYPE_TO_TYPES`) + canonical vocab maps ของ resolver output — regex facet = length/power extraction ไม่ใช่ semantic decision
+
+- **Requested-variant vs whole-product**: `sellable` ต้อง published∧in_stock∧visible∧requested∈{not_requested,available} — requested `out_of_stock`/`not_offered`/`unknown` → unavailable bucket `requested_variant:<state>` (card ยังขายได้แต่ option ที่ขอไม่พร้อม — ไม่ใช่ของหมดทั้งชิ้น); per-row `stock_state`/`publish_state` ไม่ promote ขึ้น whole-product
+
+- **Publish semantics**: `customer_visibility==hidden`→rejected `customer_hidden` (UNLIST-only) · `historical_only`→unavailable-answerable (spec/history ได้ ขายไม่ได้) · merge เลือก visible card เสมอ · unknown catalog_status→hidden (fail closed)
+
+- **Changed files**: `retrieval_policy.py` (+306 adapter internals: `_SUBTYPE_ROLES`/`_PUBLISH_STATE`/`_STOCK_STATE`/`_VISIBILITY`/`_MODEL_PUBLISH`/`_SELLABLE_RVS` + 10 helpers ใน boundary เดียว) · `retrieval_executor.py` (canonicalize-before-bucket, `_bucket` canonical-only, `requested` จาก variant_terms) · `retrieval_planner.py`/`route_context.py` (variant_terms chain) · `candidate_pool.py` (`_VIS_ORDER`, `_score`/`_merge_group`/pooled fields canonical) · `retrieval_selection.py` (canonical_roles coverage) · `retrieval_runtime.py` (`sellable`) · `guards.py` (`_card_available` canonical→stamp→resolver) · `product_store.py` (`_dedupe_sell_score` resolver tuple) · `docs/test/test_canonical_evidence_card.py` ใหม่ 29 tests · `test_retrieval_selection.py`/`test_legacy_turn_incident_replay.py` (fixture/harness align)
+
+- **Verification (fresh output)**: canonical suite **29/29** · focused retrieval batch (evidence+pool×2+executor+selection+subjects+5f) **107/107** · incident replay **101 pass/19 skip/5 xfail** · offline-focused batch (availability+wiring+subject+turn×2+charger parity+unit card+route_context+cert+qa_guard+units) **269/269** · `py_compile` 9 runtime files OK · `git diff --check` clean · LOC delta +446/−59 (retrieval_policy +306 = adapter boundary; consumers net-deleted raw logic)
+
+- **Residual risks / ยังไม่ได้ทำ**: live multi-subtype re-verify ยังไม่ได้รัน (offline replay ผ่าน — ต้อง live harness) · `soft_hints` facet→requested-option wiring ยังไม่ทำ (Phase 4/5 scope — soft stays soft) · `sellable` ไม่ขึ้น `_` prefix → รอด `strip_private_evidence` เข้าถึง LLM context (ตั้งใจ — flag บอกขายได้/ไม่ได้ เหมือนที่ `_available_for_sale` รอด strip อยู่แล้วเพราะ private keys มีแค่ `_evidence`/`_selection_reason`) · `docs/schema.md` ไม่แตะ (canonical fields = transient card fields ไม่ใช่ persisted DB)
+
+- **Verdict**: `PHASE_3_CANONICAL_PRODUCT_SCHEMA_READY_FOR_INDEPENDENT_REVIEW` — uncommitted ตามสั่ง (ไม่ stage/commit/push)
+
+> **⚠️ claim ถูกแก้ไขโดย PHASE 3 CORRECTION (entry ถัดไป)**: (1) "no helper chain" — เดิมมี `_option_rows`/`_requested_term_state`/`_color_facet` + facet regexes ที่ถูกลบ (helpers 15→13) (2) "requested_variant" ผิด root cause — per-term aggregation ไม่ใช่ SKU intersection; `_opt_hit` direction กลับกัน (3) `hidden_mentions` ทั้ง path ลบ (identity leak — baseline เก่าผิดไม่ใช่ feature) (4) dedupe precedence ผิด — `customer_visible` ทับทั้ง current/deleted ต้อง `_PUBLISH_RANK` (5) `guards._card_available` fallback ยังอยู่ — blocker = app.py product path ไม่ canonical (6) runtime LOC delta เดิมรายงาน +446/−59 ทั้ง tree — runtime-only หลัง correction = policy +314 · selection −16 · runtime −13 · product_store +3 (vs HEAD)
+
+### ✅ ผ่านแล้ว — PHASE 3 CORRECTION (root-cause fix of uncommitted canonical schema — probe-verified, no stage/commit/push)
+
+**Frozen state**: branch `feature-phase3-aswer-quality` @ `49e6004` + uncommitted Phase 3 diff · staging empty · tree = Phase 3 files only
+
+**Probe results (4 findings + 1 bonus — ทำซ้ำได้ก่อนแก้)**:
+
+| # | Finding | Probe evidence | Root cause |
+|---|---|---|---|
+| A | real message→requested signal เสื่อม | `build_retrieval_profile("มีสายชาร์จสีแดงไหม").variant_terms=("สีแดงไหม",)` — regex กิน "ไหม"; `"สีแดงยาว 2 เมตร"`→`("สีแดงยาว",)`; term `_opt_norm`→"แดงไหม" ไม่ match option "แดง" (`tn in opt_norm` ผิดทิศ) → requested resolve = not_offered ทั้งที่ option มีจริง | match direction term→option ต้องเป็น option∈term (symmetric containment); `"ยาว 2 เมตร"` parser เดิมไม่จับ → `()` → `not_requested` (honest gap — ห้ามแก้ด้วย regex ใหม่) |
+| B | per-term aggregation ปลอม combination | tier dims [สี,ความยาว] rows แดง-1ม(5)/น้ำเงิน-2ม(3) + requested ("สีแดง","2 เมตร") → rvs=`available`+sellable=True — ไม่มี SKU red+2m! | `_requested_term_state` resolve ทีละ term แยก row → worst-first รวม — ไม่เคย intersect dim×row; `_option_rows` เช็ค `oi in tier_index` = index ชนกันข้าม dimension |
+| C | UNLIST-only identity รั่ว | `sel.hidden_mentions=({'name':'สายชาร์จ WPB100L เลิกขาย','item_id':'h1','reason':'not_published'},)` — name+item_id เข้า customer context | `hidden_mentions` field + `retrieval_runtime` note path ถูกออกแบบให้ตอบ "ยังไม่เปิดขาย" — contract เก่า (5C) ผิดแผนใหม่: identity ต้องรั่ว=0, เหลือ aggregate count เท่านั้น |
+| D | dedupe เลือก deleted stale ชนะ current | `_dedupe_sell_score`: deleted-100 `(True,False,100,False,-50)` > active-OOS `(True,False,0,False,-100)` | `customer_visible` resolver เป็น True ทั้ง active และ discontinued → tie-break ด้วย stock → stale 100 ชนะ; ไม่มี publication-current precedence |
+
+**Correction plan (minimal — ลบมากกว่าเพิ่ม)**:
+
+1. `retrieval_policy._requested_variant_state` → structured resolver เดียว: term→(dim,opt) ผ่าน `tier_variation[].options` (symmetric containment — แก้ทิศ A ด้วยไม่ต้องแตะ regex) → `constraints{dim:{opts}}` → row ผ่าน iff `∀dim: row.tier_index[dim]∈opts` → `_best_row_state(matched)`; vocab มีแต่ term ไม่อยู่→`not_offered`; rows ขาด `tier_index`→`unknown`; ไม่มี tier vocab→row-name contains ∀terms (1 row ต้องมีครบ) → ไม่ match→`unknown` (name พิสูจน์ absence ไม่ได้ — แก้ test not_offered→unknown บน name-only path)
+   - **ลบ**: `_option_rows`, `_requested_term_state` (per-term aggregation + index collision)
+   - **ลบ**: `_FACET_LENGTH_RE`, `_FACET_POWER_RE`, `_color_facet`, `_COLOR_WORDS` import — `variant_facets` = connector (structured field) เท่านั้น; length/color จากชื่อ = fabricated
+   - `_canonical_roles` fallback: ใช้ `_ps._detect_charger_subtype(name)` owner fn แทน loop `_CHARGER_SUBTYPES` เอง
+2. UNLIST invisibility: ลบ `SelectionResult.hidden_mentions` + production loop + `retrieval_runtime` note path + hidden-only guard → `not sel.selected → None`; rejected summary เหลือ reason+count (ไม่มี identity)
+3. Dedupe: `_dedupe_sell_score` → `(pub_rank, available_for_sale, stock, promo, price)` — pub_rank จาก `_PUBLISH_STATE`+rank map ใน retrieval_policy (contract owner เดียว, lazy import); `_VIS_ORDER` ย้ายไป retrieval_policy เป็น shared rank
+4. `guards._card_available` — **เก็บ fallback**: callers = `_claim_grounded` วน `resp.products` ซึ่ง app.py legacy path (to_product_card) ป้อน — ไม่ canonical → blocker = app.py product path ยังไม่ผ่าน adapter (Phase 4+ scope)
+
+**Tests ที่ต้องแก้ (old baseline ผิด)**: `test_requested_other_color_unit_not_offered`→unknown · `test_availability_subjects_5c`×3 hidden_mentions sites · `test_issue_5f_availability_anchor`×1 · comment `test_link_followup_5c` (app path นอก scope — ตรวจก่อน)
+
+**ผลการแก้จริง (2026-10-16 — RED 9/13 → GREEN 43/43 canonical · 496 focused pass/0 fail)**:
+
+- **A (real signal)**: แก้ match direction ใน adapter (`_opt_hit` symmetric containment + ASCII-boundary) — term "สีแดงไหม"/"สีแดงยาว" ที่ parser กินคำติดยัง map option "แดง" ได้ · "ยาว 2 เมตร" parser เดิมไม่จับ → `()` → `not_requested` (honest gap — ไม่เพิ่ม regex)
+- **B (SKU intersection)**: `_requested_variant_state` เป็น structured resolver เดียว — term→(dim,opt) ผ่าน `tier_variation[].options` → row satisfy iff ∀dim `tier_index[dim]∈opts` → `_best_row_state(matched)`; vocab มีแต่ term ไม่อยู่→`not_offered`; rows ขาด `tier_index`→`unknown`; ไม่มี vocab→row-name ต้องมีทุก term → ไม่ match→`unknown` (แก้ test เก่า not_offered→unknown บน name-only — name พิสูจน์ absence ไม่ได้)
+- **C (UNLIST)**: ลบ `hidden_mentions` field+loop+runtime note path ทั้งหมด — `not sel.selected → None`; rejected summary เหลือ reason+count เท่านั้น (identity รั่ว=0) · แก้ test เก่า 4 ตัว (5c×3, 5f×1) เป็น assert absence+count-only
+- **D (dedupe)**: `_dedupe_sell_score` = `(_PUBLISH_RANK[publish_state], available_for_sale, stock, promo, price)` — `_PUBLISH_RANK={published:2,deleted:1,unpublished:0,unknown:0}` อยู่ retrieval_policy (contract owner เดียว, lazy import) → active OOS ชนะ deleted-100, hidden ไม่ชนะ visible
+
+**ลบ**: `_option_rows`, `_requested_term_state`, `_color_facet`, `_FACET_LENGTH_RE`, `_FACET_POWER_RE`, `_COLOR_WORDS` import, `_option_rows` index-collision logic, `hidden_mentions` (~45 บรรทัดรวม), test old-baseline 4 ตัว
+**เพิ่ม**: `_opt_hit` (containment boundary — structural ไม่ใช่ semantic table), `_PUBLISH_RANK` (ordering constant), combination resolver ใน `_requested_variant_state` (เดิม per-term chain)
+
+**Owner counts (post-correction, grep-verified)**: canonical writer=1 (`_canonicalize` — grep `card["..."]=`) · requested-variant resolver=1 (`_requested_variant_state` เจ้าเดียว เรียกที่เดียว) · per-term aggregation=0 · hidden_mentions production=0 · raw status/`_available_for_sale` reads ใน executor/pool/selection=0 · `make_evidence_card` call sites=executor+harness+tests (ไม่มี parallel path) · LLM calls=0 · semantic keyword tables ใหม่=0 (`_ASCII_EDGE`=boundary rule, `_PUBLISH_RANK`=canonical enum ordering — ทั้งคู่ไม่ใช่ product/keyword vocab)
+
+**LOC/helpers (honest — vs pre-correction Phase 3 state)**: policy 383→395 (+12 — resolver ละเอียดกว่าเดิม) · selection 255→238 (−17) · runtime 188→184 (−4) · product_store +5 → **net runtime −4 LOC** (marginal แต่ลบจริง) · module functions 15→13 (−2: −3 deleted, +1 `_opt_hit`) · semantic facet regexes 3→1 (`_OPT_NORM_RE` เหลือ; `_ASCII_EDGE` เป็น boundary ไม่ใช่ semantic)
+
+**Retained compatibility (honest blocker)**: `guards._card_available` เก็บ chain `sellable`→`_available_for_sale`→resolver — caller `_claim_grounded` วน `resp.products` ซึ่ง app.py legacy product path (to_product_card, ไม่ผ่าน adapter) ป้อน → blocker = app.py product path ยังไม่ canonicalize (Phase 4+ scope) · `app.py` UNLIST note/link-followup เป็น legacy path นอก scope เดิม
+
+**Verification**: canonical suite **43/43** · retrieval+subjects+5f+evidence+pool+executor **121/121** · incident replay **101p/19s/5x** · affected batch (route_context+availability+wiring+turn+units+unit_card+charger parity+cert+qa_guard+subject+link_followup) **รวม 496 pass/20 skip/5 xfail/0 fail** · `py_compile` OK · `git diff --check` clean
+
+**Residual**: live re-verify ยังไม่รัน · soft_hints→requested wiring ยังเป็น Phase 4+ · `variant_terms` parser gap ("ยาว 2 เมตร"→()) documented-accepted · dedupe/merge ใช้ `_PUBLISH_RANK`/`_VIS_ORDER` — 2 rank constants คนละ enum (publish vs visibility — semantics เดียวกันรายการคนละ field)
+
+**Verdict**: `PHASE_3_CANONICAL_SCHEMA_CORRECTED_READY_FOR_FINAL_REVIEW` — uncommitted ตามสั่ง
+
+### ✅ ผ่านแล้ว — PHASE 3 CORRECTION ROUND 2 (3 High + 2 Medium — probe-verified, no stage/commit/push)
+
+**Probe results (reproduced ก่อนแก้ ทุกข้อ)**:
+
+- **F1 unit-card real message** — `make_evidence_card(unit_card, requested=("สีแดงไหม",))` → `unknown`, `sellable=False` (หน่วยแดงจริงต้อง `available`)
+  - root cause: `to_unit_card` ส่ง `tier_variation: []` + variant row ไม่มี `tier_index` ทั้งที่ `lst` (joined listing) มี `tier_variation`+`model[].tier_index` ครบ → structured path ตก → name-containment "แดงไหม"⊄"al803สีแดง" → unknown → ไม่ sellable
+  - fix: unit card preserve `lst.tier_variation` + tier_index ของ model ตัวเอง (shape เดียวกับ to_product_card:759-775 — ไม่ parse prose)
+- **F2 overlapping options** — options `["แดง","แดงอิฐ"]`, แดง in-stock / แดงอิฐ OOS, request `"สีแดงอิฐ"` → `available` (ผิด ต้อง `out_of_stock`)
+  - root cause: `_opt_hit` symmetric containment → term "แดงอิฐ" match option ทั้งคู่ → constraints union {0,1} → SKU ไหนก็ได้
+  - fix: exact → unique-longest contained → tie/ambig → unknown; ห้าม union; term 2 ค่าใน dim เดียวกันที่ resolve คนละ option → unknown
+- **F3 merge re-entry** — `merge_selected_products([canon],[UNLIST legacy])` → คืน 2 ตัว (UNLIST re-เข้า LLM context)
+  - root cause: flag-ON callsites (app.py:2275 KB, 4453 main) merge selected เข้า base — canonical ไม่เป็น owner
+  - fix: flag ON → `selected_cards` replace products ที่ boundary; `run_grouped_selection` คืน dict (selected อาจว่าง) เมื่อ pipeline รันได้ vs None เฉพาะ exception — hidden-only/empty → products=[] ไม่ fallback legacy; flag OFF → legacy เดิม
+- **F4 private import** — `product_store._dedupe_sell_score` lazy-import `_PUBLISH_RANK`/`_PUBLISH_STATE` (private) จาก retrieval_policy — ownership ผิดทิศ
+  - fix: ย้าย maps ไป product_store (public `PUBLISH_STATE`/`PUBLISH_RANK` ข้าง `resolve_availability`) — retrieval_policy consume `_ps.PUBLISH_STATE`; product_store import retrieval_policy = 0
+- **F5 (medium) docs/test honesty** — SRS/log ต้องอัปเดต: unit tier evidence, flag ON=replace/OFF=rollout, ไม่ claim production activation
+
+**RED plan**: tests ใหม่ใน test_canonical_evidence_card.py — (a) real message→unit card→available ผ่าน tier evidence; (b) overlap→out_of_stock, exact/contained/tie→unknown, same-dim conflict→unknown; (c) run_grouped_selection empty→dict w/ empty cards, app source pin replace-not-merge ทั้ง 2 callsites; (d) product_store ไม่ import retrieval_policy private
+
+**ผลการแก้จริง (2026-10-16 — RED 11 fails → GREEN 521 pass/0 fail ทุก focused suite)**:
+
+- **F1 (unit card)**: `to_unit_card` preserve `lst.tier_variation` (shape to_product_card: `{name, options[]}` จาก `option_list`) + `tier_index` ของ model ตัวเอง (lookup `lst.model` by `model_id`) — structured evidence ไม่ parse prose · "มีสายชาร์จสีแดงไหม"→"สีแดงไหม" resolve ผ่าน vocab → `available`, sellable=True
+- **F2 (overlap)**: `_opt_hit`(symmetric union) ลบ → `_opt_in`(ทางเดียว option⊂term + boundary) · ต่อ term/dim: exact → unique-longest contained → tie/multi-dim/same-dim-conflict → `unknown` — ห้าม union; "สีแดงอิฐ"→idx1 เดียว → `out_of_stock` ถูกต้อง
+- **F3 (re-entry)**: `merge_selected_products` ลบ; `run_grouped_selection` คืน dict เสมอเมื่อ pipeline รันได้ (selected ว่าง=[]) — None เฉพาะ exception; dedupe selected inline ด้วย `_identity_keys` เดิม; app callsites ทั้ง KB(~2278)+main(~4455) → `products = selected_cards[:limit]` แทน merge — hidden-only/ว่าง → products=[] ไม่ fallback legacy; flag OFF → `_grouped_sel=None` → legacy เดิม 100%
+- **F4 (ownership)**: `PUBLISH_STATE`/`PUBLISH_RANK` ย้ายเป็น module constants ใน product_store (ข้าง resolve_availability — public owner เดียว); `_dedupe_sell_score` ใช้ตรง; retrieval_policy consume `_ps.PUBLISH_STATE`; **product_store import retrieval_policy = 0** (grep-verified)
+- **F5 (docs)**: SRS/roadmap อัปเดต contract ใหม่ + rollout note (flag OFF = Phase 3 inactive ใน production)
+
+**ลบ**: `_opt_hit` symmetric, option-union set logic, `merge_selected_products`, `_item_id` (dead), `base_products` param ของ prepare, `_PUBLISH_STATE`/`_PUBLISH_RANK` ใน policy, lazy private import ใน dedupe, 2 merge tests + แก้ 4 ตัวให้ contract ใหม่
+**เพิ่ม**: `_opt_in` (ทางเดียว — reshape `_opt_hit`), 2 module constants (ย้ายจาก policy), tier evidence ใน to_unit_card (+15 LOC — structured fields ตาม spec), dedupe inline ใน run, tests ใหม่ 11+แก้ 6
+
+**Structural gate (grep-verified)**: tier evidence structured ✓ · option ≤1/dim (`constraints[di]=oi` scalar) ✓ · row satisfy ∀dim ✓ · merge_selected_products 0 production refs ✓ · product_store→policy imports 0 ✓ · PUBLISH owner=1 ✓ · new helpers/flags/regex/model calls=0 (`_opt_in` reshape, constants moved — ไม่เพิ่มใหม่)
+
+**LOC (vs Round-1 end)**: runtime 184→154 (−30: merge+dead deleted) · policy 395→401 (+6: resolver ละเอียดกว่า — อนุญาต: structured logic แทน union ผิด) · units 534→549 (+15: required tier evidence) · product_store +10 (public maps) · app +6
+
+**Verification**: canonical **55/55** · runtime suite **19/19** · affected batch **521 pass/20 skip/5 xfail/0 fail** · py_compile OK · git diff --check clean
+
+**Retained/blocker (honest)**: `guards._card_available` fallback ยังอยู่ — blocker คือ app.py legacy product path (to_product_card ไม่ผ่าน adapter) — เหมือนเดิม · executor attempt-level error ไม่ใช่ pipeline error → dict ไม่ใช่ None (isolate โดยออกแบบ) · `merge_selected_products` ลบแล้ว — dedupe ของ selected ย้ายเข้า run เดียวกัน
+
+**Verdict**: `PHASE_3_CORRECTION_ROUND_2_READY_FOR_FINAL_REVIEW` — uncommitted ตามสั่ง · flag OFF = production ยังไม่ active (rollout gate เจ้าของแยก)
+
+### ✅ ผ่านแล้ว — PHASE 3 CORRECTION ROUND 3 (fail-closed answer boundary + Phase 4 activation blocker — no stage/commit/push)
+
+**PART 0 source facts (verified)**:
+
+- `run_grouped_selection` → None เฉพาะ pipeline exception (Round 2 contract)
+- callsites: app.py ~2276 (KB path `merged_products`) + ~4454 (main `products`) — `if _grouped_sel:` truthy gate
+- **fail-open**: `_sel_flag=True` + run→None → `_grouped_sel=None` → `if _grouped_sel:` false → legacy `products`/`merged_products` ไหลเข้า llm.answer ครบ — UNLIST/hidden identity รั่วเมื่อ canonical พัง
+- executor sources = `("units", fetcher)` + `("legacy", legacy_fetcher)` เท่านั้น — KB identity / compat / order-history / image-OCR ยังไม่มี (Phase 4)
+- KB path trigger: `knowledge_base.lookup_kb` found+context → `_merge_kb_mongo(kb_docs, mongo_products)` → shop filter (p["shop"]==req.shop) → boundary → llm.answer — harness: replay `_install` (test_legacy_turn_incident_replay) + monkeypatch lookup_kb
+
+**Plan**: RED executable tests ผ่าน `app.chat` + replay harness (flag ON × run→None × catalog UNLIST → llm.answer ต้องได้ products=[]) · fix = เปลี่ยน condition เป็น `_sel_flag` ownership ทั้ง 2 blocks · flag OFF เหมือนเดิม · record `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION`
+
+**ผลการแก้จริง (2026-10-16 — RED 3 fails → GREEN 527 pass/0 fail)**:
+
+- **root cause**: callsites gate `if _grouped_sel:` (truthiness) — run→None (exception) → falsy → legacy `products`/`merged_products` ไหลเข้า llm.answer → UNLIST 3001 ("WPB100L") รั่วขึ้น LLM context (probe: llm saw UNLIST card เต็ม)
+- **fix**: condition เป็น `_sel_flag` ownership — `if _sel_flag: products = selected_cards[:limit] if _grouped_sel else []` ทั้ง KB(~2278) + main(~4456); extra_context/steps ย้ายไปใต้ `if _grouped_sel:` ของตัวเอง · flag OFF → legacy เดิม 100%
+- **truth table**: OFF→legacy เดิม/run ไม่ถูกเรียก · ON+cards→เฉพาะ canonical · ON+empty→products=[] · ON+None/error→products=[] (fail closed)
+- **blocker บันทึก**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — executor มีแค่ units+legacy; KB identity/compat/order-history/image-OCR เป็น Phase 4 — ห้ามเปิด flag จน Phase 4 ลง
+- **docs**: SRS + roadmap แก้ claim "error→legacy fallback" → fail closed; test เก่า `test_flag_on_callsites_replace_not_merge` แก้เป็น `_sel_flag` pin
+- **tests**: `test_answer_boundary_fail_closed.py` ใหม่ (6 executable tests ผ่าน app.chat + replay harness — main None/raise, KB None, flag-OFF pin, empty, replace) · แก้ 1 stale source pin
+
+**Verification**: boundary suite 6/6 · canonical ~~56/56~~ **55/55** (แก้ใน R4 — นับผิด) · runtime ~~19/19~~ **13/13** (แก้ใน R4 — นับผิด) · affected batch **527 pass/20 skip/5 xfail/0 fail** · py_compile OK · git diff --check clean · delta: app.py +13/−10 boundary refactor เท่านั้น (helper/flag/module/model call ใหม่ = 0)
+
+**Verdict**: `PHASE_3_FAIL_CLOSED_BOUNDARY_FIXED_PHASE4_ACTIVATION_BLOCKED_READY_FOR_FINAL_REVIEW` — uncommitted ตามสั่ง
+
+---
+
+## ✅ Phase 3 Correction Round 4 — test-matrix completion + evidence honesty (ผ่านแล้ว — 2026-10-16)
+
+**สั่งทำ**: production boundary ผ่าน review แล้ว — round นี้แก้แค่ test matrix + evidence honesty; ห้ามแตะ production เว้น executable test เจอ defect จริง
+
+**ผลทำจริง**:
+
+- **boundary matrix เต็ม**: `test_answer_boundary_fail_closed.py` เขียนใหม่ — 10 executable tests ผ่าน `app.chat` จริง + replay harness — main×5 + KB×5 (flag OFF / ON+selected / ON+empty / ON+None / ON+raise)
+- **flag-OFF pin แข็งขึ้น**: assert `run_grouped_selection` call count == 0 **และ** legacy payload มี WPB100L name + normalized item_id 3001 (ไม่ใช่แค่ non-empty)
+- **KB-path proof**: `resp.source.startswith("knowledge_base")` — observable เดิมของระบบ ไม่ได้เพิ่ม instrumentation (KB seed ผ่าน `client[ADMIN_DB]["kb_products"].insert_one` เหมือน phase2c3)
+- **WPB100L absence pin**: name/item_id 3001/short_link ต้องไม่โผล่ใน *ทุก* llm product payload
+- **bug ใน test ตัวเองที่แก้**: import `chatbot.shopeechat.app` ทำให้เป็น module instance คนละตัวกับ `shopeechat.app` ที่ harness patch → seam ไม่ติด → real Mongo/intent call รั่ว (10 fails) — แก้เป็น import pattern ของ phase2c3 + autouse `_offline_guard` ในไฟล์เอง
+- **ไม่มี production RED**: assertion ที่แข็งขึ้นไม่เปิดเผย defect — production bytes ใน round นี้ = **0**
+- **stale wording แก้**: `test_pipeline_exception_returns_none_fallback` → `..._fail_closed` + comment "caller fallback legacy" ลบ; canonical:766 "error/fallback" → "pipeline exception → fail closed"
+
+**Verification (fresh standalone)**: boundary **10/10** · canonical **55/55** · runtime **13/13** · รวม 3 ไฟล์ **78 pass** (10+55+13 ✓) · affected batch+phase2c3 **570 pass/20 skip/7 xfail/0 fail** · py_compile OK · git diff --check clean · 0 staged
+
+**Round-3 count correction**: รายงานก่อนหน้าเคลม "canonical 56/56 · runtime 19/19" — จริงคือ **55/55 · 13/13** (standalone counts re-run ใน PART 0)
+
+**Verdict**: `PHASE_3_FAIL_CLOSED_MATRIX_COMPLETE_EVIDENCE_CORRECTED_READY_FOR_PRECOMMIT_REVIEW` — uncommitted ตามสั่ง
+
+---
+
+## ✅ Phase 3 Correction Round 5 — non-vacuous flag-ON assertions (ผ่านแล้ว — 2026-10-16)
+
+**สั่งทำ**: review เจอ flag-ON tests 8/10 เสี่ยง vacuous — loop over `_payloads` โดยไม่ assert non-empty + ไม่ pin pipeline call count — test-honesty เท่านั้น ห้ามแตะ production
+
+**ผลทำจริง**:
+
+- **8 flag-ON cases (main×4 + KB×4) แก้เป็น**: capture spy → `assert calls["n"] == 1` (pipeline ถูกเรียกพอดีครั้งเดียว) + `payloads = _payloads(captured); assert payloads` (มี LLM payload ≥1 ก่อน inspect) + per-payload assert เหมือนเดิม (`[_CANON_CARD]` / `[]` + `_assert_no_wpb100l` บน selected/none/exception)
+- **mutation RED proof** (test-only, revert หมดแล้ว):
+  - `captured.calls.clear()` → RED `AssertionError: expected at least one captured LLM product payload`
+  - flag OFF mutation (`grouped_selection=False`) → RED `assert 0 == 1` บน `calls["n"] == 1` — pipeline ถูก bypass จริงไม่ใช่ counter โกง
+- **stale comment**: ไม่มีเหลือ (R4 แก้หมดแล้ว)
+
+**Verification (fresh)**: boundary **10/10** · canonical+runtime+boundary รวม **78/78** (10+55+13 ✓) · py_compile OK · `git diff --check` clean · 0 staged
+
+**Production delta**: **0 bytes** — app.py/retrieval_*/SRS/roadmap ไม่ถูกแตะ round นี้ (แก้เฉพาะ test + log) · affected batch 570 = **carried evidence จาก R4 ไม่ rerun**
+
+**Verdict**: `PHASE_3_FAIL_CLOSED_MATRIX_NONVACUOUS_READY_FOR_PRECOMMIT_REVIEW` — uncommitted ตามสั่ง
+
+---
+
+## ✅ Phase 3 — Commit Closeout (2026-10-16)
+
+**Commit 1**: `3e8308f` — `refactor: canonicalize product availability evidence`
+- 20 files staged+committed ตาม pre-commit gate: runtime 11 (app/candidate_pool/guards/product_store/retrieval_executor/retrieval_planner/retrieval_policy/retrieval_runtime/retrieval_selection/route_context/units) · docs 2 (SRS_SSD/roadmap) · tests 7 (canonical 55 + boundary matrix 10 + 5 rewritten suites)
+- log ไฟล์นี้ไม่ได้อยู่ใน Commit 1 — Commit 2 แยกตาม gate
+
+**Root contracts completed (frozen diff audited เทียบ HEAD 49e6004)**:
+- canonical product type/roles — adapter `make_evidence_card` เจ้าเดียวที่ boundary
+- publish_state / stock_state / customer_visibility (visible/historical_only/hidden)
+- requested_variant_state — structured resolver: exact → unique-longest-contained → ≤1 option/dim → SKU row satisfy ทุก dim (ไม่ union)
+- structured unit tier evidence — `tier_variation` + model `tier_index` จาก joined listing (ไม่ parse prose)
+- UNLIST identity ห้ามรั่วเข้า canonical LLM context — rejected reason+count เท่านั้น, `hidden_mentions`+`merge_selected_products` deleted
+- answer boundaries ทั้งสอง (KB ~2278 / main ~4459) owned by `_sel_flag` — ON: replace/empty=[]/fail closed; OFF: legacy unchanged pipeline ไม่ถูกเรียก
+
+**Verification (frozen evidence)**: boundary 10/10 · canonical 55/55 · runtime 13/13 · combined 78/78 · affected batch 570 pass/20 skip/7 xfail/0 fail · py_compile 18 files OK · fixture validator all rows pass · `git diff --check` + `--cached --check` clean
+
+**Complexity**: runtime +468/−142 net +326 · functions +10/−2 · availability owner=1 · publication-map owner=1 · answer-context contract owner=1 · model/provider calls +0 · circular imports 0
+
+**Residual blocker**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — executor unions units+legacy เท่านั้น; KB identity/compat/order-history/image-OCR = Phase 4 — **flag ยัง OFF**
+
+**Safety**: ไม่มี push/PR/deploy/botworker/provider/Mongo/.env/port-8010 — commit locally เท่านั้น
+
+---
+
+## ✅ Phase 4A — Source Union IMPLEMENTATION record (ผ่านแล้ว — uncommitted, flag OFF, รอ independent review)
+
+**สั่งทำ**: implement Phase 4A เท่านั้น — evidence-preserving source union หลัง grouped-selection flag, 1 canonical pool/turn, ลบ early execution · ห้าม 4B/Phase5/เปิด flag/stage/commit
+
+**baseline**: branch `feature-phase3-aswer-quality` @ `3b26920` · แก้เฉพาะไฟล์ใน manifest · staging empty · `git diff --check` clean
+
+### Root cause → Fix → Impact (per case)
+
+- **error**: 2 units ใต้ item เดียว merge เหลือ candidate เดียว + `m:{model_id}` เดี่ยว merge ข้าม item
+  - **cause**: `var_idx` merge ด้วย `m:` ล้วน + `item_owner` ยัด listing เข้ากลุ่ม variant แรก; `_identity_keys` คืน `i:`+`u:`+`m:` ทั้งหมด → unit 2 ตัว share `i:X` ถูก final dedupe ยุบ
+  - **fix**: `_identity_key` owner เดียว (`v:`/`u:`→`im:item#model`→`i:`→`n:` — 1 key/card, merge iff key เท่ากัน); `_identity_keys` (runtime) delegate ไป owner เดียว; `_join_attachment` owner เดียว (item/model/name domains); listing `i:` ที่มี non-rejected variant → แปลงเป็น item-domain attachment (ไม่ใช่ selectable); rejected variant ไม่ suppress listing
+  - **impact ต่อเคสอื่น**: `test_retrieval_selection`/`_runtime` ที่ pin identity เก่า migrate เป็น contract ใหม่; listing-merge เดิมที่เคยช่วย dedupe ผิดหายไปโดยตั้งใจ
+- **error**: subject materialize ทำ `find_one`×N ต่อ entry
+  - **cause**: `materialize_subject_cards` วน `_materialize_card`→`_rebuild_card`→`fetch_product_by_id` ทีละ id
+  - **fix**: collect ids → `fetch_product_docs_by_ids` (1 bounded `$in`, ≤2 attempts) + ≤1 `sellable_units` find — live doc เจ้าของ publish/stock/link
+  - **impact**: model-level entry → unit card จาก batch เดียวกัน; live miss → snapshot `_snapshot_only`
+- **error**: snapshot/stale subject เคยเลี้ยง truth จาก fields เก่า
+  - **fix**: `_canonicalize` snapshot branch — `_snapshot_only` → publish/stock=unknown, `customer_visibility=historical_only`, `availability_reason=snapshot_stale`, sellable=False, strip link; merge กับ live → live wins + emit `subject_snapshot` attachment
+  - **impact**: ตอบ spec/history ได้ ห้ามขาย/ลิงก์ — พฤติกรรมเดิมของ runtime note คงไว้
+- **error**: KB name-only/text เสี่ยงกลายเป็น candidate หรือบอก stock/publish
+  - **fix**: `kb_product_evidence` owner — item_id→attachment, model→1 bounded shop-scoped `fetch_products_by_models` ($or regex, limit) → live listing cards, no-match/name-only→supporting; `_canonicalize` เรียก resolver เฉพาะ card ที่มี availability primitives (กัน `model` string ของ KB doc ทำ `resolve_availability` ล้ม — latent crash)
+  - **impact**: KB ไม่เคยผลิต sellability/publish/stock
+- **error**: selection คำนวณก่อน branch evidence พร้อม (exec ที่ app.py:1831 ก่อน branch split)
+  - **fix**: ลบ early callsite; KB branch (หลัง `_merge_kb_mongo`+`_device_spec_lookup`, ก่อน consumption 2278) + main branch (หลัง qa_context, ก่อน consumption 4473) เรียก `run_grouped_selection` เจ้าเดียว — mutually exclusive → 1 exec/turn; app ส่งแค่ `subject_cards`/`compat_cards`/`kb_fetcher`/`supporting`
+  - **impact**: executor +`channels` (synthetic `channel_request` ต่อ channel — quota ตัวเอง ไม่กิน slot); `RetrievalExecutionResult` +supporting/attachment; source fail isolated ผ่าน `attempt.error` เดิม
+- **error (test-side, ระหว่างทาง)**: `sys` ไม่ได้ import ใน conversation_products → batch-fallback log crash; shadow fixture ขาด canonical stamps → resolver ตีเป็น unknown/hidden (pre-existing บน HEAD — ยืนยันแล้ว); FakeColl `_match` ขาด `$or`
+  - **fix**: import `sys`; fixture +canonical status fields (intent เดิม); `_match` +`$or` (additive harness)
+  - **impact**: ไม่มี production behavior change จาก 3 จุดนี้
+
+### Structural gate (source-verified)
+
+- **execution/turn = 1**: `run_grouped_selection` callsites = app.py:2272 (KB) + 4476 (main) — branches mutually exclusive, early exec ลบแล้ว (grep: ไม่มี callsite อื่นใน app.py)
+- **candidate identity owner = 1**: `candidate_pool._identity_key` (runtime `_identity_keys` delegate) · **attachment-join owner = 1**: `candidate_pool._join_attachment` (1 def / 1 callsite) · **subject batch owner = 1**: `materialize_subject_cards` (0 `find_one` ใน body; 1 units `find` + `fetch_product_docs_by_ids` ≤2 attempts)
+- **listing+variant ไม่ duplicate**: non-rejected variant ≥1 → listing เป็น attachment; **cross-item `m:` merge เป็นไปไม่ได้**: ไม่มี `m:`-alone key เหลือ
+- **legacy cards ห้ามกลับเข้ามา**: `if _sel_flag:` → `products = _grouped_sel["selected_cards"] if _grouped_sel else []` ทั้ง 2 boundaries (ไม่ merge กับ `_products`); flag-ON None/raise → `[]`
+- **flag OFF**: `grouped_retrieval_selection_enabled`/`USE_GROUPED_RETRIEVAL_SELECTION="0"` ไม่ถูกแตะ; admin default false
+- **4B production files changed = 0**: `units.py`, `refresh_data.sh`, `build_*.py`, `import_sellable_units.py`, `DEPLOY.md`, cron — ไม่อยู่ใน diff
+- **new model/provider calls = 0** (grep diff: 0) · **new keyword tables = 0** · **parallel old/new execution = 0**
+
+### Deltas (honest)
+
+- runtime **+548/−89** (app +44/−11 · candidate_pool +166/−40 · conversation_products +67/−7 · knowledge_base +97/0 · product_store +80/0 · executor +42/−6 · planner +17/0 · policy +23/−4 · runtime +36/−21)
+- top-level functions **+6** (`_identity_key`, `_join_attachment`, `kb_product_evidence`, `fetch_product_docs_by_ids`, `fetch_products_by_models`, `channel_request`) — ทุกตัว own boundary จริง; nested helpers +3 (`_payload`,`_sup`,`_norm`); ลบ nested `_key` −1
+- queries: subjects find_one×N → ≤3 bounded (`$in` ≤2 + units ≤1) · kb +≤1 model listing · compat/supporting/OCR +0 (reuse) · **worst-case +5 bounded reads/turn, ทั่วไป +0-2** — ตรง budget ที่ประกาศ
+- tests: `test_phase4_source_union.py` ใหม่ 648 บรรทัด (26 cases) · migrated tests 4 files (+26/−8) · harness additive `$or`
+
+### Verification (fresh, focused เท่านั้น — ไม่มี broad regression)
+
+- contract suite: **RED 23F/3P (honest missing-feature) → GREEN 26/26**
+- focused suite รวม (12 files — contract 26 + retrieval_selection 82 + selection_runtime 25 + shadow 7 + executor 30 + requests 21 + boundary 10 + subject_set + availability_subjects_5c + canonical_card + kb_import + incident_replay 101): **358 passed, 19 skipped, 5 xfailed, 0 failed** (fresh run เดียว)
+- standalone `test_compat_mode_filter.py`: self-checks PASS (script ไม่ใช่ pytest)
+- `py_compile` 9 touched files ✓ · `git diff --check` clean · fixture validator ไม่ต้องรัน (fixtures ไม่เปลี่ยน) · 0 staged
+
+**Residual blocker**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — source union เสร็จแล้วแต่ flag ยัง OFF จนกว่า evidence-policy + answer-boundary review phases อนุมัติ
+
+**Safety**: ไม่มี Mongo/provider/botworker/port-8010/deploy/cron/.env/stage/commit/push — working tree เท่านั้น
+
+---
+
+## ✅ Phase 4A REVIEW-FIX round — 2 High + 2 Medium findings (ผ่านแล้ว — uncommitted, flag OFF)
+
+**สั่งทำ**: fix 4 findings จาก independent source audit ที่ owners เดิมเท่านั้น — ห้าม redesign 4A / เริ่ม 4B / เปิด flag / stage / commit
+
+**baseline**: branch เดิม @ `3b26920`, tree = Phase 4A uncommitted; ก่อนแก้ reproduce defect จริง (`v:i1#m1` จาก request+compat → pool มี 2 rows identity เดียวกัน sources แยก)
+
+### Root cause → Fix → Impact (per finding)
+
+- **error (High-1)**: identity เดียวกันจาก 2 results → `PooledCandidate` 2 rows (request_ids/sources แตกเป็น 2 ส่วน; set(identity) ปิดบังได้)
+  - **cause**: `build_candidate_pool` dedupe ภายใน result เดียวแล้ว `all_pooled += pooled` — group ใหม่ต่อ result ไม่ merge ข้าม turn
+  - **fix**: global grouping — เก็บ cards ทุก result เข้า `groups[identity]` เดียวก่อนสร้าง candidate; merge sources+request_ids ข้าม turn; per-request score/role/slot/relation เก็บที่ `request_scores`/`by_request`; attachment join บน unique list; per-result dedupe path เดิมถูก restructure ออกใน diff เดียวกัน (ไม่มี cleanup ภายหลัง)
+  - **impact**: `select_for_llm_context` วน `c.request_ids` อยู่แล้ว → candidate เดียวเข้าร่วมทุก request ที่ match พร้อม request-specific role; final selected 1 row
+- **error (High-2)**: KB attachment `model=K9` ผูกเข้า product K10/K90 (cross-model contamination)
+  - **cause**: `kb_product_evidence` fetch products รวมครั้งเดียวแล้ว loop `for doc in found: for d in model_docs:` — ผูกทุก doc เข้าทุก product
+  - **fix**: match ต่อ doc — `_doc_matches_model`/`_model_token_in_name` เจ้าของเดิม (boundary-aware: K9≠K90) หา row ที่ตรง → attach เฉพาะ item/model นั้น; doc ที่ไม่ match → supporting อิสระ; query ยัง 1 bounded shop-scoped `$or`
+  - **impact**: ตาราง semantic/regex ใหม่ = 0; name-only ยัง supporting-only
+- **error (Med-3)**: pool ได้ supporting เป็น string `"kind"`/`"text"` แทน dict
+  - **cause**: KB callsite ส่ง `{"kind","text"}` bare dict → iterate dict = keys เป็นสตริง (tuple-key shape)
+  - **fix**: producer ส่ง `[{"kind","text"}]` เหมือน main branch (`_qa_ctx`/`_vision_context`); ไม่เพิ่ม coercion ใน runtime
+  - **impact**: records เป็น dict end-to-end; main path ไม่เปลี่ยน
+- **error (Med-4)**: subject ของร้านอื่นกลายเป็น live card ข้าม shop
+  - **cause**: `fetch_product_docs_by_ids` scoped miss → unscoped fallback query หยิบ doc ร้านอื่น id เดียวกัน
+  - **fix**: ลบ unscoped fallback เมื่อมี `shop_filter` — scoped miss = missing → `materialize_subject_cards` emit `_snapshot_only` (historical_only, sellable=False, ไม่มี link); unscoped 1 query อนุญาตเฉพาะไม่มี shop_filter; `fetch_product_by_id` ไม่แตะ (ไม่อยู่ path นี้)
+  - **impact**: query budget ลดเหลือ 1 product read (ไม่ใช่ ≤2) — บันทึก SRS แก้ตาม
+- **error (test-side)**: FakeColl `_get_path` เดินทาง `model.model_name` ลง list ไม่ได้ → bounded `$or` query ไม่ match docs ใน harness (Mongo จริง match array elements)
+  - **fix**: `_get_path` descend เข้า list fields (additive harness เหมือน `$or` รอบก่อน)
+  - **impact**: ไม่มี production behavior change
+
+### Structural gate (re-verified)
+
+- duplicate identity rows ใน pool = **0** (assert ด้วย list len ไม่ใช่ set) · 1 canonical candidate owner · no second pool · no cleanup chain
+- 2 variants/item = 2 candidates · same model_id ต่าง item = separate · item attachment join ต่อ unique candidate 1 ครั้ง
+- KB cross-model contamination = 0 · unmatched docs → supporting · supporting dict records end-to-end · cross-shop live card = 0 (snapshot เท่านั้น)
+- `run_grouped_selection` callsites ยัง 2 (mutually exclusive → 1 exec/turn) · flag OFF · 4B files = 0 · helper/flag/module/provider เพิ่ม = 0
+
+### Deltas (review-fix เท่านั้น)
+
+- runtime (vs pre-review-fix tree — diff vs HEAD รวม 4A+fix เป็นก้อนเดียว): candidate_pool restructure เป็น global grouping · knowledge_base per-doc match · app.py 1 จุด (`{"kind"…}` → `[{"kind"…}]`) · product_store ลบ unscoped fallback block (~9 บรรทัด, ฟังก์ชันยัง all-new vs HEAD) · retrieval_selection ใช้ request-scoped slot/relation/score จาก `req`/`request_scores`; top-level functions **+0**, helpers **+0**, obsolete per-result group logic ลบใน diff เดียวกัน
+- tests: contract +13 cases (648→893 บรรทัด; A-identity 6, B-KB 4, C-shape 2, D-scope 1)
+
+### Verification
+
+- **RED 10F/5P** (assert failures จริง: dup rows `['v:i1#m1','v:i1#m1']`, cross-model attach `{'7001':['K9','K10']}`, bare-dict supporting, cross-shop doc) → **GREEN 39/39**
+- focused suites รวม: **332 passed, 0 failed** (replay 101 + boundary + pool/selection/runtime + subject/materialize + KB)
+- **broad offline regression (ครั้งเดียว, implementation freeze แล้ว): 971 passed / 20 skipped / 7 xfailed / 0 failed, 22.1s** — docs/test/* ทุกไฟล์ที่ collect offline ได้; excluded: live-server files (test_flow/200/all_conditions/comprehensive/pingevox_mistore/unit_live_compare/compare_3way ชน :8010), test_car_charger_regression (Mongo จริง), script-style (compat_mode_filter — standalone PASS; handoff_transport — standalone 47/47 PASS; sellable_units — FAIL เดิม `27807≠26970` stale export count, pre-existing ไม่เกี่ยว diff), docs/test/test/ (live subdir)
+- `py_compile` 9 files ✓ · `git diff --check` clean · fixture validator ไม่ต้อง (fixtures ไม่เปลี่ยน)
+
+**Residual blocker เดิม**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — flag OFF จน evidence-policy + answer-boundary review อนุมัติ
+
+**Safety**: ไม่มี Mongo/provider/botworker/port-8010/deploy/cron/.env/stage/commit/push
+
+---
+
+## ✅ Narrow correction — test-collection root cause (ผ่านแล้ว — uncommitted)
+
+**สั่งทำ**: rename `docs/test/test_unit_hybrid_sweep.py` → `diag_unit_hybrid_sweep.py` เท่านั้น — ไม่แตะ runtime, ไม่เพิ่ม guard/mock/import-hook/pytest config
+
+**cause**: ไฟล์เป็น prototype/diagnostic script (ไม่มี `test_*` fn — เห็นเฉพาะ `mode_a_vector`/`mode_b_sweep`/`_w`/`_show`) แต่ชื่อ `test_*` → pytest collect แล้ว import module → CASES loop ที่ module level (L127, ไม่มี `__main__` guard) รัน `mode_a_vector` → `_emb_mod.embed_query` → `from shopeechat import embedding` load SentenceTransformer/PyTorch ตอน collection (CPU ~9 นาทีในรอบ broad ก่อนหน้า) — **classification ผิด ไม่ใช่ PyTorch defective**
+
+**fix**: `git mv` → `docs/test/diag_unit_hybrid_sweep.py` (ไม่ match `test_*.py` discovery — verified `fnmatch`=False) + docstring run command อัปเดตเป็น path ใหม่; benchmark behavior ไม่เปลี่ยน; stale `.pyc` ใน `__pycache__` ลบ; external refs = 0 (เหลือเฉพาะบรรทัด waythrough นี้ที่อ้างชื่อเก่าเพื่อบันทึก rename)
+
+**verify**: contract `test_phase4_source_union.py` **39/39** · `py_compile` renamed file ✓ · `git diff --check` clean · **runtime bytes changed = 0** (chatbot/ diff stat เหมือนก่อน correction เป๊ะ: 10 files +700/−141) · **ไม่ได้รัน script** (ตั้งใจให้ load model จริงเมื่อรันเอง) · ไม่ re-run 971 batch (runtime ไม่เปลี่ยน)
+
+**evidence correction**: รอบ broad 971 passed/20 skipped/7 xfailed ที่รายงานก่อนเป็น **curated offline-safe batch** (ignore list: live-server/mongo files + script-style `sys.exit` + sellable_units ที่ fail stale-count เดิม) — **ไม่ใช่ "ทุก .py ใต้ docs/test"**; ผล 971 ยัง valid สำหรับไฟล์ที่รัน แต่ `test_unit_hybrid_sweep` อยู่ใน batch นั้นและทำให้เสียเวลา model-load โดยไม่จำเป็น — rename นี้แก้ที่ root cause (ไฟล์ไม่ใช่ pytest suite แต่ชื่อหลอกว่าเป็น)
+
+---
+
+## ✅ Phase 4A — COMMIT CLOSEOUT (committed locally, flag OFF, ไม่ push)
+
+**Commit 1** `ec835af` — `refactor: unify retrieval evidence sources` — 18 files +1708/−181 (10 runtime + SRS + roadmap + 4 migrated tests + contract ใหม่ 893 บรรทัด + rename `test_unit_hybrid_sweep.py → diag_unit_hybrid_sweep.py` 99% similar) — **log นี้ไม่อยู่ใน commit**
+
+**Commit 2** — `docs: record phase 4a source union closeout` — ไฟล์นี้ไฟล์เดียว (append-only)
+
+### Canonical contract ที่ commit
+
+- **source union**: 1 profile/turn → executor `channels=` (subjects/compat/KB ผ่าน `channel_request` synthetic rows, quota แยก, failure isolated) → 1 pool → 1 selection; callsites 2 จุด (KB @2272 / main @4476) mutually exclusive (KB return @2448) → ≤1 exec/turn; domain owners เดิมคงเดิม
+- **global candidate identity**: `build_candidate_pool` group ด้วย `_identity_key` ข้ามทุก result ของ turn — 1 `PooledCandidate`/identity, sources+request_ids union; per-request score/slot/relation คงอยู่ผ่าน `request_scores`/`by_request` + `_request_score`; variants ต่างกันไม่ merge; model_id เดียวกันต่าง item ไม่ merge (ไม่มี `m:`-alone key); ไม่มี post-hoc cleanup
+- **KB evidence isolation**: `kb_product_evidence` per-doc match (`_doc_matches_model`/`_model_token_in_name` boundary — K9≠K90) → attach เฉพาะ doc↔product ที่ตรง; unmatched → supporting อิสระ; 1 bounded shop-scoped `$or`; KB ไม่เคยสร้าง sellable truth
+- **strict shop scope**: `fetch_product_docs_by_ids` scoped query เดียวไม่มี fallback — missing → `_snapshot_only` (historical_only, sellable=False, strip link); batch error → snapshot ทั้งหมด (fail-safe)
+- **supporting shape**: producer ส่ง `[{"kind","text"}]` ทั้ง KB/main — records เป็น dict end-to-end, runtime ไม่ coerce
+- **answer boundary**: flag OFF → ไม่ execute; flag ON → selected แทน products (ไม่ merge base, `merge_selected_products` ไม่มี); empty/None/exception → fail closed `[]`; hidden/UNLIST ไม่เข้า LLM payload
+- **diagnostic rename**: `test_unit_hybrid_sweep.py` เป็น prototype script (ไม่มี `test_*` fn, CASES loop ที่ module level → `embed_query` → PyTorch load ตอน collection ~9 นาที) → `diag_unit_hybrid_sweep.py` — root cause = classification ผิด ไม่ใช่ PyTorch defective; content เหมือนเดิมยกเว้น docstring run path
+
+### Frozen verification (bytes ไม่เปลี่ยนตั้งแต่ verify — carry เข้า commit)
+
+- contract `test_phase4_source_union.py` **39/39** · focused affected batch (16 files) **421 passed / 19 skipped / 5 xfailed / 0 failed** · curated broad offline batch **971 passed / 20 skipped / 7 xfailed / 0 failed** (ไม่ใช่ทุก .py — live/mongo/script files excluded) · `py_compile` 16 files ✓ · `git diff --check` + `--cached` clean · secret scan clean
+
+### Deltas (vs HEAD 3b26920)
+
+- runtime +700/−141 (10 files) · top-level +8 (`_identity_key`, `_join_attachment`, `_kb_model_row_match`, `kb_product_evidence`, `fetch_product_docs_by_ids`, `fetch_products_by_models`, `channel_request`, `_request_score`) + `KbEvidenceResult` dataclass + nested `_payload`/`_sup`/`_norm` · ลบ: nested `_key`, per-result `var_idx`/`item_owner` grouping, `m:`-alone merge, early exec callsite, unscoped cross-shop fallback · owners: pool/identity/join/context = 1 ตัวต่อ boundary · new flag/module/dep/provider call = 0 · Phase 4B runtime = 0
+
+### สถานะ
+
+- `grouped_retrieval_selection_enabled` **OFF** เดิม (env `"0"`, DB absent, fail-closed) · admin default false ไม่แตะ
+- **blocker ยืน**: `BLOCKED_BY_PHASE4_SOURCE_UNION_DO_NOT_ENABLE_GROUPED_SELECTION` — รอ evidence-policy + answer-boundary review phases
+- **งานถัดไป**: Phase 4B design/review เท่านั้น (atomic daily evidence refresh — generation/pointer contract ใน roadmap) — ยังไม่ implement
+- **safety**: ไม่มี push/PR/deploy/flag-enable/Mongo/provider/botworker/port-8010/.env/cron/embedding-build — commit local เท่านั้น
+
+## ✅ Phase 4B — Atomic Daily Evidence Refresh IMPLEMENTATION (ผ่านแล้ว — uncommitted, flag OFF, รอ independent review)
+
+**สั่งทำ**: implement corrected Phase 4B contract (roadmap §"Revised Phase 4B" — 4 High + 3 Medium applied) — RED tests → minimal impl → deletion gate → focused offline verify → docs · ห้าม stage/commit/deploy/cron/flag
+
+### Root cause → Fix → Impact (per case)
+
+- **OCR shared `image_texts` = runtime source + mutable processing state ก้อนเดียว** → runtime readers (`attach_image_texts`, `search_cert_products`, `conversation_products` attach chain) อ่าน evidence ที่ยังไม่ publish + build เขียนปนกับ read → แยก 2 roles: `image_texts` = processing cache (fingerprint/status/attempts — scripts-only); `image_texts_<gid>` = published evidence ต่อ gen (immutable, materialize จาก cache, pointer อ้างชื่อ) → runtime ทุก reader กิน `snap.image_texts_collection` — **mutable cache readers = 0**
+- **generated sources resolve อิสระ → turn ผสม gen** (`units` coll live-mutated, npz ×2 แยก mtime, OCR shared coll) → `generation_pointer.py` ใหม่ = resolver owner เดียว: `EvidenceSnapshot` frozen dataclass ครอบ units coll + OCR coll + npz ×2 + jsonl + manifest + activated_at; `resolve_snapshot` TTL 5s คืน object เดิม; entry fns resolve ครั้งเดียว thread `snap=`; npz cache key = path + assert `generation_id` ใน npz == snap → mismatch fail closed → 1 request = 1 generation เสมอ
+- **active+previous retention ไม่พอสำหรับ in-flight** (same-day republish ลบ gen ที่ request ใช้อยู่) → grace **24h fixed**: cleanup ไม่แตะ active/previous/อายุ<grace; failed staging ต้อง absent จาก pointer ก่อนลบ; cleanup post-CAS best-effort (fail ไม่ย้อน activation); injected clock ใน test
+- **pointer write ก่อน manifest finalize** → publish order แก้: validate ทั้งหมด → manifest finalize (tmp→os.replace)+verify hash → **CAS ครั้งเดียว** → post-CAS เหลือแค่ canonical copies (tmp+replace)/cleanup — correctness writes หลัง CAS = 0
+- **pointer write ไม่ fence** → CAS contract: publish `update_one({_id:"active",generation_id:expected})` matched 1=won/0=lost+reread ครั้งเดียวไม่ retry; bootstrap `generation_id:{$exists:false}` upsert → DuplicateKeyError=conflict; rollback CAS เดียวกัน swap previous↔active (stale→matched 0)
+- **`mkdir .refresh.lock.d` → SIGKILL ทิ้ง lock ถาวร** (พิสูจน์สดใน session นี้ — killed export test ทิ้ง lock จริง) → native `flock -n 9` บน `exports/.refresh.lock` — fd ปิดเองตอน exit/kill/restart; run ซ้อน exit ก่อน Mongo/OCR/artifact work ทั้งหมด
+- **OCR batch bypass quota → นับ call ไม่ได้/ไม่มี cap** → `--max-calls` + `MAX_ATTEMPTS=3` + `--max-runtime-min`; fingerprint classify (unchanged→reuse 0 call; new/changed→1 call; retryable→bounded); quota/เวลาหมด→`deferred` (ไม่ burn 130s retry; publish ต่อได้)
+- **unit npz build ก่อน OCR → OCR ไม่เข้า search_text** → order ใหม่ OCR→materialize→units(OCR-aware: spec≤400+product text, banner ออก, boilerplate df≥2 dedupe)→npz×2(verify ก่อน replace)→import→publish
+- **`_load_done` jsonl-as-state + URL change ไม่ re-OCR** → ลบ `_load_done`; fingerprint = image_id+normalized_url → changed URL จับได้
+- **base `sellable_units` upsert ไม่มี delete + live-mutated** → import เขียน `sellable_units_<gid>` เท่านั้น (drop+insert หลัง validate); base coll เลิก publish (writer=0)
+
+### Structural gate (source-verified)
+
+- resolver owner = 1 (`generation_pointer`) · pointer mutation owner = 1 (`publish_generation`) · orchestrator = 1 (`refresh_data.sh`) · mutable `image_texts` runtime readers = 0 · base `sellable_units` writers = 0 · mtime generated-source resolvers = 0 (kb `_QA_VEC_PATH` mtime อยู่นอก contract) · new deps/flags = 0 · provider calls in request runtime = 0 · circular import = 0 (both orders OK) · grouped flag OFF เดิม · cron ไม่ได้ install
+- pointer validation: allowlist gid regex + derived coll/path (`sellable_units_{gid}`/`image_texts_{gid}`/`gen/{gid}/` + reject `..`/foreign) → malformed pointer fail closed = None
+- pre-first-pointer: canonical `exports/product_embeddings.npz` bootstrap path ใช้ได้ (legacy เดิม); units/grouped path dark — ไม่ claim semantic พร้อม
+
+### Verification (focused เท่านั้น)
+
+- RED: `test_phase4b_refresh.py` **39/39 fail** ครบทุก contract area (missing modules/symbols + script/deletion gates — clean collection)
+- GREEN: **39/39** · affected Phase 4A batch (hints/wiring/subject_set/source_union + refresh suite) **208 passed** · `test_legacy_turn_incident_replay` **101 passed/19 skipped/5 xfailed**
+- `py_compile` 13 changed py files OK · `bash -n refresh_data.sh` OK · `git diff --check` clean · import-order smoke pointer-first/consumers-first OK
+- Phase 4A test seams updated ตาม contract ใหม่: `_units_coll_cached`→`_units_coll(snap)`/`resolve_snapshot` patch (subject_set ×2, source_union, legacy_replay); `lambda:`→`lambda snap=None:` (hints ×3, wiring); `test_cert_standards` → `EvidenceSnapshot` + `image_texts_<gid>` fake; `test_qa_kb` live script → resolve_snapshot
+
+### สถานะ
+
+- `grouped_retrieval_selection_enabled` **OFF** เดิม · `USE_UNIT_INDEX` OFF เดิม
+- **operator gates ค้าง**: real Mongo privileges (`*_g*` create/drop, `sellable_units_meta` write), `exports_data` volume บน deploy host, `IMGTXT_GEMINI_API_KEY_*` pool decision, first manual refresh, `0 9 * * *` cron install (หลัง timing evidence เท่านั้น)
+- **safety**: ไม่มี stage/commit/push/PR/deploy/flag-enable/.env/real-Mongo/provider/PyTorch/botworker/port-8010/cron — working tree เท่านั้น
+
+## 🔧 Phase 4B — Narrow Review Correction กำลังทำ (2 High + 1 Medium + evidence fix)
+
+**สั่งทำ**: แก้ root cause 3 findings เท่านั้น — ห้าม redesign/เพิ่ม abstraction/แตะ phase อื่น
+
+**แผน (verify แล้วตาม receiving-code-review):**
+- **H1** `_gen_path_ok` substring `gen/{gid}/` in path → รับ foreign absolute/wrong filename/alt prefix → แก้เป็น **exact canonical mapping** (`exports/gen/<gid>/{unit_embeddings.npz|product_embeddings.npz|sellable_units.jsonl|manifest.json}` — shared constant เดียวใช้ทั้ง resolver+publisher); pointer เก็บ repo-relative เท่านั้น; snapshot convert → ROOT-absolute หลัง validate
+- **H2** `publish()` ไม่เช็ค `gen_dir == exports_root/gen/gid` + ไม่ validate gid ก่อน manifest/CAS + `_pointer_set_doc` เขียน host-absolute paths → validate gid regex ก่อนทุก write; resolve+require identity; pointer เขียน relative canonical เสมอ; reject → CAS/manifest/cleanup = 0
+- **M1** lock test รัน script ตัวจริง → ROOT=repo จริง เขียน lock/log ใน repo → copy script ไป `tmp_path/chatbot/shopeechat/scripts/` + fake flock/python ผ่าน PATH/REFRESH_PY; assert exit 0 + python ไม่ถูกเรียก + artifacts อยู่ใต้ tmp_path เท่านั้น + repo exports ไม่เปลี่ยน
+- **evidence fix**: manifest = 26 entries (23 modified + 3 untracked — รายงานเดิมเขียน "22 M" ผิด) + แก้ wording "no real Mongo" ตามที่กำหนด (RED run เดิมเข้า export connection path ก่อนถูก kill — ไม่มี proof ว่า connect/operation สำเร็จ)
+- test fixtures ที่ inject absolute npz paths (2 tests) ต้องเปลี่ยนเป็น canonical-relative + `gp.ROOT` monkeypatch → tmp_path (hermetic)
+
+## ✅ Phase 4B — Narrow Review Correction (ผ่านแล้ว — uncommitted, flag OFF)
+
+**สั่งทำ**: แก้ root cause 3 findings + evidence correction — ห้าม redesign/เพิ่ม abstraction
+
+### Root cause → Fix → Impact
+
+- **H1 — `_gen_path_ok` substring match** (`f"gen/{gid}/" in p`): รับ `/tmp/foreign/gen/<gid>/x`, `/Users/.../exports/gen/<gid>/`, `other/exports/...`, wrong filename, `//`, `.bak`, absolute-in-repo → **แก้**: `POINTER_PATH_FILES` mapping เดียว (`units_npz→unit_embeddings.npz`, `product_npz→product_embeddings.npz`, `units_jsonl→sellable_units.jsonl`, `manifest_path→manifest.json`) + `canonical_gen_relpath()`; `snapshot_from_pointer` เปรียบ `==` ตรง ๆ แล้วค่อย convert→`ROOT/`-absolute — pointer เก็บ repo-relative เท่านั้น → ผล: foreign/absolute/malformed paths reject ครบ (12 case); existing valid doc ไม่เปลี่ยนพฤติกรรม
+- **H2 — `publish()` ไม่ผูก gid/gen_dir/pointer-path**: artifacts validate ใน dir หนึ่ง แต่ `_pointer_set_doc` เขียน `{exports_root}/gen/{gid}` จาก param อื่น + ไม่เช็ค gid format ก่อน write + เขียน host-absolute paths → **แก้**: `GEN_ID_RE.fullmatch(gid)` + `gen_dir.resolve() == exports_root.resolve()/"gen"/gid` เป็น identity gate ก่อน validate → manifest → CAS (reject → CAS/manifest/cleanup = 0); `_pointer_set_doc` ใช้ `canonical_gen_relpath` ชุดเดียวกับ resolver → เขียน `exports/gen/<gid>/...` relative เสมอ → ผล: pointer portable ข้าม host/container; decouple validation↔pointer ไม่ได้อีก
+- **M1 — lock test ไม่ hermetic**: script derive ROOT จาก location ตัวเอง → test เดิมเขียน `exports/.refresh.lock`+log ใน repo จริง → **แก้**: copy script → `tmp_path/chatbot/shopeechat/scripts/` → ROOT=tmp_path; fake flock+python3 ผ่าน PATH/REFRESH_PY; assert exit 0, python ไม่ถูกเรียก, artifacts ใต้ `tmp_path/exports` เท่านั้น, repo exports before==after (name+mtime+size)
+- fixtures ที่ inject absolute npz paths (2 tests) → canonical-relative + `monkeypatch gp.ROOT=tmp_path` (hermetic)
+
+### Evidence correction (append — ไม่แก้ text เดิม)
+
+- working-tree manifest ที่ถูก = **26 entries: 23 modified + 3 untracked** (รายงานก่อนหน้าเขียน "22 M" — นับตก 1)
+- แก้ wording "no real Mongo activity" เป็น: *"The earlier RED run entered the old export connection path before termination; no successful connection or Mongo operation was proven. The corrected test is fully isolated and cannot enter that path."*
+
+### Verification
+
+- RED (ก่อน impl): 5 failed / 2 passed — ทุก failure ตรง defect (substring accept คืน snapshot เต็ม; publish สำเร็จทั้ง bad gid/mismatched dir; pointer เก็บ `/private/var/...` absolute)
+- GREEN: correction tests 7/7 → **full suite 45/45** → affected batch **315 passed / 19 skipped / 5 xfailed / 0 failed**
+- `py_compile` ×3 OK · `bash -n` OK · `git diff --check` clean · structural: pointer absolute paths=0 · canonical producer=1 · substring acceptance=0 · staged=0
+- **safety**: ไม่มี stage/commit/push/PR/deploy/cron/.env/provider/PyTorch/Docker/real-Mongo — test ใหม่ isolated สมบูรณ์ (ไม่เข้า connection path ใด ๆ)
+
+## 🔄 Phase 4B — Correction: Request-Wide Snapshot + OCR Accepted State (กำลังทำ)
+
+**สั่งทำ**: แก้ 1 High + 1 Medium จากรีวิว staged candidate — root-cause only, ห้าม redesign/guard-chain/phase ใหม่; unstage 25-file candidate ก่อนแก้ (staging ต้องว่างตอนจบ)
+
+### Findings
+
+- **H1 — snapshot per call ไม่ใช่ per request**: `fetch_products` resolve ทุกครั้ง (product_store:3090), `search_cert_products` resolve เอง (:4137), `_rebuild_card`/`materialize_subject_cards` resolve เอง (conv_products:308/:1327), unit/OCR fetchers มี `_resolve_snap` — pointer flip/TTL-expiry กลาง request → ผสม gen A+B ในคำตอบเดียว; TTL เป็นแค่ cache ไม่ใช่ correctness fence
+- **M1 — refresh fail ทับ accepted OCR**: error/deferred upsert เขียน `status` ทับ record ที่เคย ok → evidence หายจาก gen ถัดไปทั้งที่ text ใช้ได้ (ข้อมูลอ้างอิงจาก audit report — reviewer จัด Medium)
+
+### resolve_snapshot callsites (enumeration + classification)
+
+| site | classify |
+|---|---|
+| `app._chat_impl` | **request owner** — capture ครั้งเดียวก่อน generated-source touch แรก (post_intent_handoffs :1458) |
+| `product_store.fetch_products` :3090 | request-path caller — เปลี่ยนเป็น entry-semantics (`snap=_UNSET` → resolve เฉพาะ standalone) |
+| `product_store.search_cert_products` :4137 | internal/entry — sentinel semantics; handoffs ส่ง captured |
+| `product_store._load_vector_store` :69 | internal consumer — sentinel |
+| `product_store._admin_image_texts_coll` :4003 | internal consumer — sentinel |
+| `units._resolve_snap` :41 | resolver helper — sentinel-aware |
+| `units._units_coll` :52 / `fetch_units` :133 / `attach_image_texts` :438 | internal consumers — sentinel |
+| `units.fetch_unit_cards` :512 / `fetch_unit_evidence` :559 | entry — resolve เมื่อ omitted เท่านั้น |
+| `conv_products._rebuild_card` :308 / `materialize_subject_cards` :1327 | entry — sentinel semantics; `_materialize_card`/`get_active_product`-family รับ snap param |
+| `retrieval_executor` fetcher seam | `_run_attempt` ส่ง `snap=` → executor + `run_grouped_retrieval_shadow`/`run_grouped_selection` รับ `snap` param |
+
+### Plan
+
+- sentinel เดียว `generation_pointer.SNAP_UNSET` — แยก "argument omitted" (resolve standalone) vs "captured value" (ใช้ตามที่ส่งมา แม้ None) — explicit-param only, ไม่มี ContextVar/global state
+- `_chat_impl` capture `_snap` ครั้งเดียว → thread: handoffs ctx `"snap"`, materialize `snap=`, lookup_kb `snap=`, grouped shadow/selection `snap=`, fetch_products ×N `snap=`
+- `post_intent_handoffs`/`lookup_kb`/`get_active_product`/`get_suggestion_latest`/`get_latest_suggestion_batch`/`get_anchor_and_suggestions`/`_materialize_card`/`_rebuild_card`/`_legacy_evidence_fetcher` รับ `snap` param
+- OCR: accepted fields (status/fingerprint/text/kind/truncated) authoritative; changed-fp + ok-doc fail/deferred → pending_* fields (pending_fingerprint/status/error_class/attempts_total/last_generation_id); success → promote accepted=B + clear pending; publish เฉพาะ accepted fp == discovered fp (guard ใน unchanged branch); pending attempts bounded by MAX_ATTEMPTS
+
+## Phase 4B correction round 2 (2026-10-21) — request-wide snapshot + OCR accepted-state
+
+**Classification correction:** รอบ pre-commit ก่อนหน้าบันทึก 2 observations เป็น "informational" — ผิด: H1 (per-call resolution) + M1 (failed refresh overwrites accepted OCR) เป็น **correctness findings จริง** แก้ที่ root cause ในรอบนี้
+
+### H1 — snapshot per function call ไม่ใช่ per request (High)
+- **อาการ:** ทุก `fetch_products`/`search_cert_products`/internal `_resolve_snap` resolve pointer เอง → pointer flip หรือ TTL expiry กลาง request → gen A+B ปนในคำตอบเดียว
+- **RED (proven):** cert path → **3 resolves/request**, `_units_coll` เห็น gen A แต่ `_admin_image_texts_coll` เห็น gen B ×2 — units กับ OCR คนละ generation; captured-None path resolve 2× (None กลายเป็น B ได้)
+- **Root cause:** `_resolve_snap(snap)` ใช้ `None` หมายถึงทั้ง "ไม่ได้ส่ง" และ "capture แล้ว" → captured-None แยกจาก omitted ไม่ได้ + ไม่มี request owner
+- **Fix:** `SNAP_UNSET` sentinel ใน `generation_pointer.py` (owner เดียว) — `snap omitted → resolve เองครั้งเดียว; ค่าที่ส่ง (รวม None) → คืนตามนั้น`; **request owner = `_chat_impl`** resolve 1× post-lock pre-dispatch → `_snap` ไหลผ่าน explicit params: `fetch_products`×8, `lookup_kb`, `qa_context`, `materialize_subject_cards`, `get_active_product`, `fuzzy_match_products`, `_device_spec_lookup`, `reanswer`, `run_grouped_selection`/`_shadow`, `chat_v2`/`chatbotv3` dispatch, handoffs/warranty ผ่าน ctx dict (`ctx["snap"]`); executor resolve 1× ที่ entry เมื่อ standalone
+- **GREEN:** `TestRequestSnapshotOwnership` 5/5 — calls==1/request, ทุก consumer เห็น object A เดียวกัน, captured-None fail-closed ตลอด flip, 2 requests อาจได้ gen ต่างกัน, standalone resolve 1× ที่ boundary ตัวเอง
+- **Cross-case:** products/brands/types/subtypes ทุกตัวผ่าน snap เดียวกัน (ไม่มี hardcode); standalone callers (warmup, tests, scripts, shadowbot) resolve ที่ boundary ตัวเองเท่านั้น; `ContextVar` ไม่จำเป็น — explicit params พอ; ไม่มี global mutable state, ไม่มี module/owner ที่ 2
+
+### M1 — failed refresh ทับ accepted OCR state (Medium)
+- **อาการ:** accepted `ok`+fingerprint A + discovered B + fail/deferred → `_cache_upsert` เขียน `status=error|deferred` + `fingerprint=B` ทับ → A หาย + doc ผสม (fp=B, text=A)
+- **Fix:** `build_image_texts.py` — changed+accepted fail/deferred เขียน `pending_fingerprint/pending_status/pending_error/pending_error_class/pending_attempts_total/pending_last_generation_id` บน doc เดียวกัน (accepted fields ไม่แตะ); success → promote pending→accepted + `$unset` pending_*; unchanged-publish gate เพิ่ม `doc.fingerprint == fp` (accepted fp ต้องตรง discovered ถึง publish); `pending_attempts_total ≥ MAX_ATTEMPTS` → classify "unchanged" (bounded retry, B ไม่ publish); new image ไม่มี accepted → error/deferred ปกติ; `_cache_upsert` รองรับ `unset=` (write owner เดิมตัวเดียว)
+- **RED (proven):** 4/6 fail — accepted ถูกทับ, pending ไม่มี, retry ไม่ bounded; 2 pass (new-image error + removed semantics pins)
+- **GREEN:** `TestOcrAcceptedPending` 6/6
+- **Cross-case:** image_id/URL/kind ทุกตัวผ่าน logic เดียวกัน; quota stop/run-level stop/budget คงเดิม; ไม่มี collection/module/retry loop เพิ่ม
+
+**Verification:** correction tests 11/11 → `test_phase4b_refresh.py` 61/61 → affected batch 331 passed / 19 skipped / 5 xfailed / 0 failed → `py_compile` 17 files OK → `git diff --check` clean → staging empty (26→38 working-tree entries — ทั้งหมด Phase 4B scope)
+
+## 🔄 Phase 4B — Correction round 3: Generation-Aware Caches + Pending Identity (กำลังทำ)
+
+**สั่งทำ**: แก้ 1 High + 2 Medium — root-cause only, ห้าม redesign/new module/invalidation manager/stage/commit
+
+### Findings
+
+- **H1 — `_LIVE_CARD_CACHE` gen-blind**: key = `(item_id, model_name)` เท่านั้น (conv_products:326-333, :1344-1363) — request A cache card จาก gen A → request B (snapB ถูกต้อง) ได้ card A คืน ≤30s → ผสม gen ใน request ใหม่ — ละเมิด snapshot contract
+- **M1 — `_brand_cache` gen-blind**: `_known_brands` อ่าน `sellable_units_<gid>` ตาม snap แต่ cache เป็น global ตัวเดียว TTL 5 นาที (kb:824-868) — B ได้ generated brands ของ A
+- **M2 — pending retry budget ไม่ผูก fingerprint**: `_classify_images` เช็ก `pending_attempts_total >= MAX` โดยไม่ดู `pending_fingerprint == discovered` → B exhausted → C ถูกบล็อกตลอด; pending writes สะสม count/error ของ B ให้ C
+
+### Plan
+
+- H1: cache key รวม generation identity — `(item_id, model_name, gid_or_None-marker)`; resolve SNAP_UNSET ที่ entry ก่อนสร้าง key; ทั้ง 2 sites (`_materialize_card`, `materialize_subject_cards`) — TTL 30s คงเดิม, ไม่ clear ทั้ง cache
+- M1: `_brand_cache` → entry เดียว `{gen, ts, brands}` — hit เฉพาะ `gen == captured gen`; read fail บน B ไม่ fallback ไป A (cache baseline ภายใต้ key ของ B)
+- M2: exhausted check เพิ่ม `pending_fingerprint == fp`; pending writes reset attempts=0 + เคลียร์ error/error_class เมื่อ fingerprint เปลี่ยน B→C; deferral ก่อน call ไม่นับ attempt
+- ทั้งหมดใน write owner เดิม — ไม่มี helper/module/collection/flag เพิ่ม
+
+## Phase 4B correction round 3 (2026-10-21) — generation-keyed caches + pending fingerprint scope
+
+### H1 — `_LIVE_CARD_CACHE` gen-blind (High)
+- **อาการ:** key = `(item_id, model_name)` — card ที่สร้างจาก units/OCR ของ gen A ถูก serve ให้ request ที่ capture gen B (≤30s) ทั้งที่ consumer อื่นใช้ B
+- **RED (proven):** `CARD-A` ถูกคืนให้ request snapB ทั้ง `_materialize_card` และ `materialize_subject_cards`; captured-None ได้ card A
+- **Fix:** key รวม `snap.generation_id` (captured None = identity ของตัวเอง); resolve SNAP_UNSET ที่ entry ครั้งเดียวก่อนสร้าง key — 2 sites เดิม, TTL 30s คงเดิม, ไม่ clear cache ทั้งก้อน
+
+### M1 — `_brand_cache` gen-blind (Medium)
+- **อาการ:** global entry เดียว TTL 5 นาที — request B ได้ brand set ที่ gen A สร้าง
+- **RED (proven):** `_known_brands(snapB)` คืน A's set (ไม่มี `brand-b-gen`); captured-None ได้ generated brands ทั้งที่ไม่มี snapshot
+- **Fix:** `_brand_cache` = `{gen, ts, brands}` entry เดียว — hit เฉพาะ gen ตรง; read fail บน gen X → baseline ของ X (ไม่เอา cache gen อื่น); `_brand_ts` ถูกพับเข้า entry (ตัวแปรลดลง 1)
+
+### M2 — pending retry budget ไม่ผูก fingerprint (Medium)
+- **อาการ:** `_classify_images` เช็ก `pending_attempts_total >= MAX` โดยไม่ดูว่า pending_fingerprint == discovered → B exhausted → C ถูกบล็อกตลอด + writes สะสม count/error ของ B ให้ C
+- **RED (proven):** C ถูก block (calls=0 ทั้งที่ fp ใหม่), deferred-C สะสม attempts=MAX ของ B
+- **Fix:** exhausted check เพิ่ม `pending_fingerprint == fp`; `same_pending_fp`/`prev_pending_attempts` reset=0 เมื่อ fp เปลี่ยน — ทั้ง 3 write sites; deferral ก่อน provider call เขียน attempts=0 + เคลียร์ error ของ fp เก่า
+
+**Verification:** focused 10/10 → `test_phase4b_refresh.py` 71/71 → affected batch **345 passed / 19 skipped / 5 xfailed / 0 failed** → `py_compile` ×4 OK → `bash -n` OK → `git diff --check` clean → **staging empty**, working tree 38 entries (manifest เดิม — ไฟล์ใหม่รอบนี้ 0)
+
+## 🔄 Phase 4B — Correction round 4: KB-brand independence + deferred error_class (กำลังทำ)
+
+**สั่งทำ**: แก้ 2 Medium — root-cause only, ไม่แตะ findings ที่ปิดแล้ว
+
+### Findings
+
+- **M1 — kb_products brands หายเมื่อ units read ล้ม**: `_known_brands` ใส่ kb_products.distinct + units.distinct ใน try เดียว → `_units_coll(snap)` raise (รวม captured-None) → kb brands ที่อ่านได้แล้วถูกทิ้ง → เหลือแค่ static
+- **M2 — provider-deferred ไม่เขียน `pending_error_class`**: deferred-after-call write (:335-343) ตั้ง pending_fingerprint=C + error=C แต่ไม่เขียน error_class → class ของ B เหลือบน doc ที่ fp=C (inconsistent)
+
+### Plan
+
+- `_known_brands`: แยก failure boundary — kb_products read ใน try ตัวเอง, units read ใน try ตัวเอง; **snap=None → ข้าม units read ทั้งหมด (0 generated reads)**; cache write ภายใต้ gen key เดิม; ล้มทั้งคู่ + same-gen stale → reuse stale ต่อ (TTL เดิม)
+- deferred write: เพิ่ม `pending_error_class=_error_class(entry.get("error") or "")` — บรรทัดเดียวใน write owner เดิม
+
+## Phase 4B correction round 4 (2026-10-21) — KB-brand independence + deferred error_class
+
+### M1 — kb_products brands หายเมื่อ units ล้ม (Medium)
+- **อาการ:** `_known_brands` รวม `kb_products.distinct` + `_units_coll(snap).distinct` ใน try เดียว → units raise (รวม captured-None) → kb brands ที่อ่านสำเร็จถูกทิ้ง เหลือแค่ static
+- **RED (proven):** snap=None → `kb-only-brand` ไม่อยู่ใน result; snapB + units raise → kb brand หาย + มีโอกาส reuse cache A
+- **Fix:** 2 independent failure boundaries + `snap is not None` gate → captured-None อ่าน units **0 ครั้ง**; ล้มทั้งคู่ + same-gen stale → reuse stale ต่อ; partial → cache union ของ gen นั้น
+
+### M2 — provider-deferred ไม่เขียน `pending_error_class` (Medium)
+- **อาการ:** deferred-after-call write ตั้ง fingerprint=C + error=C แต่ไม่ตั้ง error_class → class ของ B (`rate_limit`) เหลือบน doc fp=C → state ผิดเพี้ยน
+- **RED (proven):** `pending_error_class == 'rate_limit'` (B) แทนที่จะเป็น `'quota'` (C)
+- **Fix:** เพิ่ม `pending_error_class=_error_class(entry.get("error") or "")` — 1 บรรทัดใน write owner เดิม (deferred pre-call path ยังเขียน None สำหรับ fp ใหม่ตาม contract เดิม)
+
+**Verification:** focused 10/10 (2 pin ยังเขียว) → `test_phase4b_refresh.py` 74/74 → affected batch **348 passed / 19 skipped / 5 xfailed / 0 failed** → `py_compile` ×3 OK → `bash -n` OK → `git diff --check` clean → staging empty, worktree 38 entries เดิม
+
+## ✅ Phase 4B closeout — committed (2026-10-21)
+
+**Commit 1:** `6d47ad3` refactor: publish retrieval evidence atomically per generation — **37 files** (runtime 16, scripts 8, tests 8, docs/config 5)
+
+**Root contracts:** immutable `exports/gen/<gid>/` artifacts (units/OCR coll + npz×2 + jsonl + manifest) → pointer `sellable_units_meta.active` flip เดียว (CAS-fenced, previous เก็บไว้ rollback); `_chat_impl` = request-snapshot owner เดียว (resolve 1× → `SNAP_UNSET`-threaded ทุก consumer — captured None = fail-closed, ห้าม resolve ซ้ำ); caches gen-keyed (`_LIVE_CARD_CACHE`, `_brand_cache`); OCR accepted fields authoritative + `pending_*` ผูก `pending_fingerprint` (promote+`$unset`, bounded, publish เฉพาะ fp ตรง); `_brand_cache` 2-source independent + captured-None อ่าน units 0 ครั้ง
+
+**Correction rounds:** R1 = 4 High+3 Medium (pre-commit audit) · R2 = request-wide snapshot + OCR accepted-state · R3 = generation-keyed caches + pending fp-scope · R4 = KB-brand independence + deferred error_class
+
+**Frozen verification:** affected batch **348 passed / 19 skipped / 5 xfailed / 0 failed** · `py_compile` 25 ไฟล์ OK · `bash -n` OK · `git diff [--cached] --check` clean · pointer write owner=1, cache upsert owner=1, mutable-image_texts runtime readers=0
+
+**Safety/state:** grouped retrieval selection **OFF** · product DB read-only · ไม่มี provider/Mongo/Docker/Botworker/cron execution ในรอบนี้
+
+**Operator gates ที่เหลือ:** real Mongo privileges (`*_g*` create/drop + `sellable_units_meta` write) · `exports_data` volume บน deploy host · `IMGTXT_GEMINI_API_KEY_*` pool decision · first manual bootstrap refresh · timing evidence ก่อนเปิด cron `0 9 * * *`
+
+## 🔄 Botworker — SuperITMall shop_id canonicalization (2026-10-19) · production-data fix · dry-run ผ่าน · รอ approval token
+
+- **error**: `/botworker` แสดง conv `shp_98777118463033313` แต่ไม่มี claim/buffer/shadow reply ถูกสร้าง
+- **cause**: `shops` row มี `shop_id="SuperITMall"` (fallback เป็น shopname — sync-shops เขียน `shop_id = convShopIds.get(platform|shopname) || shopname`) ขณะที่ `messages_shp`/`conversations_shp` ใช้ canonical `shop_id="22997004"` → `resolveBotworkerScope` สร้าง pair `(shopee,"SuperITMall")` ไม่ match exact-pair admission filter `{platform,shop_id,created_timestamp>cutoff}` เลยไม่ admit อะไร
+- **census (read-only, DB `chatbot` 59 colls)**: shops row เดิม 1 ตัว (`_id` hash 701a…, conversation_count=0, product_count=1436, bot_worker_enabled=false/at=null) · `shop_id=22997004` ใน shops = 0 (ไม่ชน unique {platform,shop_id}) · conversations_shp: 131 docs @22997004 (str), shop_name เดียว "SuperITMall", 0 @old id · messages_shp: 960 @new (343 inbound), 0 @old · known conv: 7 msgs 07:09–07:19Z · claims/buffer/replies/events/messages ของ conv = 0 ทั้งหมด · leader lease expired · switches: global/platform/shop ทั้ง OFF (`bot_worker_enabled=false`, platforms.shopee=false, enabled_at=null, shop flag=false)
+- **identity sweep**: `shop_id="SuperITMall"` เหลือแค่ shops(1) + admin_logs(2 × `config.shop_toggle` = audit history ไม่ migrate) · collections ที่ผูก shop_id (triggers/quick_replies/workflows `shop_ids`, workflow_runs, shop_team_assignments, assignment_cursors pool_key, chat_processing, buffer_messages, shadow_replies, test_assignment, close_history, backlog) — ไม่มี old-id refs; new-id refs ที่มีอยู่ (shadow_replies 6, test_assignment 33, conversations 131, messages 960) เป็น canonical อยู่แล้ว · name-field collections (`shop_personas`/`shop_settings` keyed `shopname+platform`, `conversation_products.shop`, `sellable_units.shop`, `test_chat_logs.shop`) = shopname "SuperITMall" ถูกต้อง ไม่แตะ
+- **fix (pending)**: `update_one` เดียว CAS filter `{_id, platform=shopee, shopname=SuperITMall, shop_id=SuperITMall}` → `$set {shop_id:"22997004", conversation_count:131, updated_at:now}` — ไม่แตะ fields อื่น · script `/tmp/superitmall_shopid_migrate.py` (dry-run default, --apply, abort-on-drift, sanitized) — write callsite เดียว
+- **rollback**: `update_one({_id, platform=shopee, shopname=SuperITMall, shop_id:"22997004"})` → `$set {shop_id:"SuperITMall", conversation_count:0, updated_at}`
+- **residual (ไม่แก้ใน scope นี้)**: sync-shops `convCounts` นับเฉพาะ docs ที่มี `shop_name` (131 conv แต่มี shop_name แค่ 3) → re-run sync ในอนาคตจะเขียน conversation_count=3 ทับ (shop_id จะถูกเขียน 22997004 ถูกอยู่แล้วผ่าน convShopIds map)
+- **safety**: no code diff, no commit/push, botworker process=0, port 8010 ไม่แตะ, Mongo writes=0 จนกว่าได้ `APPROVE_SUPERITMALL_SHOP_ID_MIGRATION`
+
+## 🔍 Shop Identity Contract Audit (2026-10-19) · read-only · กำลังทำ
+
+- **context**: migration เดิม (update shops.shop_id → 22997004) **superseded** — script `/tmp/superitmall_shopid_migrate.py` ลบแล้ว, dry-run evidence เก็บใน entry ด้านบน, ไม่เคย --apply
+- **คำถาม**: business identity ของระบบคือ A `(platform, shopname)` (shop_id=transport) หรือ B `(platform, platform_shop_id)` (shopname=display)
+- **regression ที่ต้อง preserve**: ก่อน `29f2e9b` botworker poll inbound ทั้งหมดหลัง enable edge ไม่ filter shop; Phase 2D เพิ่ม exact `(platform, shops.shop_id)` admission vs `messages_shp.shop_id` → SuperITMall พังเพราะ shops.shop_id="SuperITMall" ≠ "22997004"
+- **audit plan (read-only only, no writes)**: (1) git diff botworker ก่อน/หลัง 29f2e9b (2) source contract map ทุก owner ของ shops/conversations/messages/products/persona/settings/workflows/triggers/quick_replies/assignments/analytics/botworker/routes (3) real-DB census: stability ของ platform shop_id vs uniqueness ของ shopname + classify shops rows ทุกตัว (4) workflow/trigger shop_ids[] census + UI/runtime trace (5) persona/settings key shape proof (6) decision matrix A vs B (7) recommended design + RED tests (ยังไม่ implement)
+- **Mongo ops อนุญาต**: ping/find/find_one/aggregate/distinct/listIndexes/listCollections เท่านั้น — writes ห้ามทั้งหมด
+- **safety**: botworker OFF (switches + no process), port 8010 ไม่แตะ, no commit/push/provider, เขียน log นี้ไฟล์เดียว
+
+### audit findings (read-only เสร็จ — evidence สรุป)
+
+- **PART 1 git proof**: pre-2D poll @9af48a0 `botWorkerService.ts:1418` = `{role:"user",direction:"in"}` + optional `created_timestamp>since` — ไม่ filter shop เลย → ทำงานได้ทุกร้าน; post-2D `botWorkerService.ts:1482` = `withScope(query,scope,"created_timestamp")` → `$and:[base,$or:[{platform,shop_id,ts>pair.cutoff}]]` (`botworkerRuntime.ts:46-60`); pair = `{platform, shop_id: shops.shop_id, cutoff}` (`botworkerRuntime.ts:91-101`) — **จุดที่ shops.shop_id ถูก assume = messages_shp.shop_id**; commit 29f2e9b ไม่มี migration/backfill (services+routes+UI+tests+docs เท่านั้น)
+- **writer chain**: `sync-shops.ts` (commit 4c5f822 — เพิ่มพร้อมกับ exact-pair consumers เลย incoherent ตั้งแต่แรก) = sole writer ของ shops (`upsertShop` dead code); `shop_id = convShopIds[platform|shopname] || shopname` — **fallback เขียนชื่อลงช่อง id**; convShopIds ต้องการ `shop_name != null` ซึ่ง 97% ของ conv docs ไม่มี → fallback ยิงบ่อย; convCounts key ด้วย shopname ล้วน → count รั่วข้าม platform (tiktok/lazada ThaiSuperPhone conv=22 ค่าเดียวกับ shopee)
+- **census (DB chatbot, อ่านอย่างเดียว)**: conversations_shp 33 (platform,shop_id) groups — id→name = 1:1 ทั้งหมด (0 multi-name, 0 missing shop_id); 30 names→1 id ภายใน platform (0 multi-id) แต่ **8 names ซ้ำข้าม platform** (Ztec/IMILab/Kieslect/ThaiSuperPhone/MiLi/Youpin/Yaber/Kospet — คนละ entity) → name unique เฉพาะเมื่อรวม platform; **134,697 conv docs ไม่มี shop_name** (SuperITMall มีแค่ 3/131 docs) → runtime ใช้ name เป็น key ไม่ได้; shops 65 rows: **50 = shop_id==shopname (fallback), 15 = platform id จริง (shopee เท่านั้น)**, 0 dup (platform,shopname), 0 dup (platform,shop_id); **14 raw shop_id ซ้ำข้าม platform** ('Ztec' บน tiktok+lazada ฯลฯ) → `getShop({shop_id})` ใน /api/shops/[id] ambiguous; unique index จริง = `platform_1_shop_id_1`, `shop_id_1` ไม่ unique
+- **blast radius (broken exact-pair shops)**: 15 rows ที่ name-fallback แต่มี conv mapping — SuperITMall(shopee)+KingGadgets+LeravanOfficialStore+LydstoThailand+ThaiSuperCam+XiaoVVThailand (shopee) + tiktok ทั้ง 11 rows (BlacksharkThailand/IMILab/Kieslect/Kospet/MiLi/ThaiSuperPhone/Yaber/Youpin/Ztec) → botworker scope, selectNextAgent/handoff (findOne shops by conv.shop_id → miss → no_eligible_agent), trigger/workflow/QR shop-scoped matching พังหมดแบบ silent; 35 rows product-only (no conv) = benign/latent; 3 conv pairs ไม่มี shops row เลย (shopee 258491064/530326507/80878682 — ไม่มีชื่อ+ไม่มี products)
+- **workflow/trigger/QR shop_ids[]**: UI ทุกหน้า (triggers:460, workflows, quick-replies, team:855) populate `value=s.shop_id` → เก็บค่าตาม shops row (mixed space); runtime match `msg.shop_id`/`conv.shop_id` = platform id → miss ทุกครั้งที่ shop เป็น name-fallback; data จริง: triggers 0 ค่า, workflows shop_ids=["GodungIT"] (name — dormant, GodungIT ไม่มี conv), quick_replies ["987863120"] (id ถูก — CukTech map แล้ว), shop_team_assignments 7 docs mixed (13127125,53897635 + names), workflow_runs shop_id=['GodungIT','test_e2e_shop']
+- **runtime writers เขียน transport id เสมอ**: shadow_replies/buffer_messages/chat_processing/test_assignment ทั้งหมดเป็น platform id (chat_processing มี tiktok ids ด้วย); messages_shp 33 pairs = conv pairs เดียวกัน, 0 missing shop_id
+- **config domain = (shopname,platform)**: shop_personas+shop_settings 1 doc แต่ละ (CukTechThailand), ไม่มี shop_id field; Python `persona.get_persona(shopname,platform)` อ่านตรง (app.py:817) + shop_settings ใน routing (app.py:1711); products/sellable_units/conversation_products/test_chat_logs keyed name; `body.shop = shopName || shopId` (liveAssignmentService:139-140 — name preferred, conv.shop_name หายบ่อย → ส่ง id แทน/ไม่ส่ง); knowledge_base ไม่มี shop field (keyed model/brand)
+- **rename**: ภายใต้ contract ปัจจุบัน name เปลี่ยน → persona/settings orphan (admin สร้างใหม่), transport ไม่กระทบ (id stable); ถ้าใช้ A = name เป็น identity → rename พังทั้งระบบ
+- **verdict evidence**: contract = **B** — `(platform, platform_shop_id)` business identity; shopname = display/catalog key ที่ถูกต้องของ config domain; defect เดียว = sync-shops fallback เขียน name ลงช่อง id + shops ไม่ถูก re-sync → fix ที่ writer + data migration 15 rows, ไม่ใช่ re-key runtime
+- **ไม่มี write ใดๆ**: migrate script ลบแล้ว, approval token ไม่ถูก consume, Mongo read-only ops เท่านั้น
+
+### design-correction round (read-only — 2026-10-19)
+
+- **P0 re-verify**: branch/HEAD เดิม (0bcd38a, staging clean, log-only diff) · switches ทั้ง OFF (`global=false`, `platforms.shopee=false`, `enabled_at=null`, shop=false/null) · migration ไม่เคย apply (`shop_id="SuperITMall"`, 0 rows @22997004) · ไม่มี bot-worker process
+- **P1 arithmetic (exact, non-overlapping)**: `65 = 15 canonical_platform_id + 15 name_fallback_resolvable + 35 unresolved_product_only + 0 ambiguous + 0 missing` — broken set แก้ไขจากรอบก่อน: **shopee 6 (SuperITMall, KingGadgets, LeravanOfficialStore, LydstoThailand, ThaiSuperCam, XiaoVVThailand) + tiktok 9 (BlacksharkThailand, IMILabThailand, KieslectThailand, KospetThailand, MiLiThailand, ThaiSuperPhone, Yaber, YoupinOfficialStore, Ztec) = 15** (tiktok name-fallback 11 rows แต่ LagenioThailand+ZMIThailand ไม่มี conv mapping → product-only); dup raw shop_id ข้าม platform = 14 ค่า × 2 = 28 rows (ทั้งหมดอยู่ใน name-fallback sets); conv pairs ไม่มี shops row = 18 = 15 resolvable-by-name + 3 unmapped (shopee 258491064/530326507/80878682 — ไม่มีชื่อไม่มี products)
+- **P2 mapping sources**: ไม่มี authoritative (platform,name)→id อื่นใน admin DB — tickets/pushevents/requestlogs/auth_tokens/chat_accept_sessions **empty**; sellable_units/Products* มีแต่ shop name; ReviewShoppeeData/ReviewTiktokData=offer-review; customers_shp=contact grouping; **แหล่งเดียวที่พิสูจน์ได้ = conversations_shp** (1:1 ภายใน platform เฉพาะ docs ที่มี shop_name); shopee=proven สำหรับ named convs / tiktok=proven 9 names / lazada=absent (0 convs) / nameless ids=unavailable without external API
+- **P5 dependent records**: triggers 0 values · workflows `["GodungIT"]`=name_fallback **platform-ambiguous** (GodungIT มีทั้ง lazada+shopee rows) แต่ dormant (0 convs) · quick_replies 2×`987863120`=canonical ✓ · shop_team_assignments 7: 2 canonical (53897635,13127125) + 5 name_fallback (Yaber,BlacksharkThailand,IMILabThailand,Ztec,ThaiSuperPhone) — **schema ไม่มี platform field → name values ambiguous by construction** · workflow_runs shop_id: GodungIT(name_fallback)+test_e2e_shop(synthetic)
+- **P4 python boundary**: `botCallService:210 shop: shopName||shopId` + `botWorkerService:809 shopName=conv?.shop_name` → SuperITMall known conv **มี** shop_name → `shop="SuperITMall"` ไปถึง Python ถูกต้อง (persona→default, products filter shopname ใช้ได้ 1436 items, settings→default, shadow_replies.shop_id="22997004") → **canary ไม่ blocked**; global: conv ไม่มี name → ส่ง `shop="<numeric id>"` → `shopname` regex match 0 products → degraded เกือบทุก conv (97% docs ไม่มี name) — **pre-existing blocker-class สำหรับ shops อื่น**, fix ได้โดย scope pair แบก shopname (resolver โหลด shops row อยู่แล้ว → projection เพิ่ม field เดียว → 0 extra query, single owner ไม่ใช่ fallback chain)
+- **P6 ordering + P7 RED tests**: ตาม plan ด้านล่าง; sync หลัง fix ไม่มี expression `|| shopname` เหลือ → เขียน name ลง shop_id ไม่ได้โดยโครงสร้าง
+
+## 🔄 Botworker — Shop Context + Single Dispatch (2026-10-21) · orchestration-only fix · กำลังทำ
+
+- **scope**: fix Phase 2D scope regression ใน Botworker orchestration เท่านั้น — ไม่ migrate data, ไม่แตะ product collections/Persona/Shop Settings, ไม่สร้าง mapping collection ใหม่, หยุดก่อน commit
+- **root cause**: `resolveBotworkerScope` (botworkerRuntime.ts:91-101) copy `shops.shop_id` ตรงๆ เข้า pair → `withScope` filter `messages_shp.shop_id` ด้วยค่า name-fallback ("SuperITMall") ที่ไม่ใช่ transport id ("22997004") → admission=0; pre-2D ไม่มี shop filter เลย bug นี้ซ่อนอยู่
+- **call graph (traced)**: `bot-worker.ts` cycle → `getSystemConfig` + `resolveBotworkerScope` (1×/cycle) → `pollNewMessagesInEra` (find+chatProcessing find) → per doc `claimMessage` (claim owner เดียว) → `bufferOrProcess` → `flushBuffer` (re-resolve scope ที่ delayed-execution gate ~:497, pair lookup in-memory) → `processMessage` → `processClaimedMessage` = **dispatch owner เดียว** (resume→matchAndRun→matchTrigger→callBot ตาม workflow_priority) → `storeBotReply` (shadow_replies, idempotent) → fenced finalize
+- **config reads**: ต่อ cycle = getSystemConfig×1 (bot-worker:83) + shops.find×1 (resolver); ต่อ claimed msg = getSystemConfig (864) + getActiveRun/listWorkflows/matchTrigger + callBot(config reads ~4, cache 5s TTL) + pickAgent→getActiveAssignmentConfig; flushBuffer = getSystemConfig(true)+resolve (ต่อ conv-batch ไม่ใช่ต่อ msg); `shouldUseChatV2/V3/getBotProductLimit` = wrapper บน getSystemConfig cache
+- **contract (PART 1)**: `BotworkerScopePair` += `config_shop_key` (shops.shop_id — config-record domain: workflows/triggers/assignments) + `shopname?` (catalog key → /chat `shop`); `pair.shop_id` = **transportShopId** เสมอ; resolver += aggregate เดียวบน conversations (`$match platform∈enabled → $group _id:{p,id,n}`) ต่อ resolve — canonical (row.shop_id∈conv ids) → name→id unique → else exclude (missing/ambiguous fail-closed); **+1 query/resolve, 0 per message**
+- **threading**: `shop_ctx` (Pick<BotworkerScopePair,"config_shop_key"|"shopname">) บน msg envelope: poll attach จาก pair → bufferOrProcess immediate path; flushBuffer attach จาก pair ที่ re-resolve อยู่แล้ว (delayed gate) → processClaimedMessage; ไม่มี ctx (test seam/direct call) → identity default (config_shop_key=msg.shop_id, shopname=conv) — production path มี ctx เสมอ
+- **identity domains**: poll/claim/buffer/shadow/workflow_runs/logs = transport `msg.shop_id`; `matchTrigger`+`listWorkflows`(via EngineMessage.config_shop_key)+`pickAgent`+engine handoff calls = `config_shop_key`; `/chat shop` = `shopname` (resolve จาก shops row — แก้ degradation conv.shop_name หาย 97% ด้วย); platform explicit ทุกจุด
+- **single dispatch (PART 2)**: owner = processClaimedMessage เดียวเดิม — precedence: ① resume active run → ② matchAndRun (workflow_first|both) → ③ matchTrigger (handoff_admin→pickAgent / bot_template→shadow / bot_answer→callBot) → ④ trigger_first matchAndRun → ⑤ callBot+storeBotReply→bot_answered / empty→handoff; **matched-path error → bot_failed terminal ทุกจุด** (ปัจจุบัน resume error + matchAndRun recoverable-undefined error fall through ไป LLM — engine error statuses ทุกตัวมี run_id = post-match failure เท่านั้น; thrown errors ไป classification catch → bot_failed อยู่แล้ว)
+- **files to change**: botworkerRuntime.ts (type+resolver+aggregate), botWorkerService.ts (poll attach, envelope ctx, configShopKey/shopName use, error→bot_failed ×2), bufferService.ts (ProcessMessageFn type + flush attach), workflowEngine.ts (EngineMessage fields + listWorkflows/handoff arg + let_ai_respond shopname), tests literals (4 ไฟล์ += config_shop_key), new RED test file
+- **safety**: ไม่แตะ .env/production Mongo/port 8010/provider; RED ก่อน implementation; verify ด้วย FakeMongo harness เดิม + disposable Docker Mongo ถ้าจำเป็น
+
+#### implementation + verification (2026-10-21) — ทำเสร็จ รอ review
+
+- **RED ก่อนแตะ production**: `test-botworker-shop-context.ts` ใหม่ 17 เคส — run ก่อน implement = 2/17 pass (resolver copy name ตรง, ไม่มี conv aggregate, matchTrigger/pickAgent ใช้ transport key, /chat shop=undefined, workflow error fall through→LLM, poll @22997004 admit 0)
+- **implement ตาม plan**: resolver +1 aggregate (`$match platform∈enabled → $group _id:{platform,shop_id,shop_name}`) → canonical→name-unique→exclude (ambiguous/missing fail-closed, sanitized audit `bot.scope_unresolved_shop`/`bot.scope_ambiguous_shop`); pair += config_shop_key(required)+shopname?; shop_ctx ไหลผ่าน envelope (poll attach / flushBuffer re-resolved pair); processClaimedMessage ใช้ configShopKey กับ matchTrigger/pickAgent/listWorkflows(engine config_shop_key) และ shopname กับ /chat; resume+match error status → bot_failed terminal (ไม่ fall ไป trigger/bot); handoffAdmin → pickAgent config key
+- **GREEN**: new suite 17/17 · scope-gate 107/107 (seed 6 เคสเพิ่ม conv evidence ตาม contract ใหม่ — assertions ไม่แตะ) · boundary 20/20 · error-policy 38/38 · production-races 37/37 · recovery-freshness 71/71 · enable-checkpoint 18/18 · config-failclosed 8/8 · runtime-mongo-safety 111/111 · disposable Docker mongo:7 loopback harness 55/55 (DB drop + container ลบแล้ว)
+- **blocked (pre-existing, ไม่ใช่ regression)**: `test-workflow-e2e.ts`/workflow suites ต้องการ `ADMIN_JWT_SECRET` ผ่าน `--env-file` — task ห้ามอ่าน .env → ไม่รัน; suites อื่นที่เกี่ยวทั้งหมด GREEN
+- **structural audit**: resolver=1 (callers: bot-worker cycle, bufferService flush gate :508, recovery defer :1867) · dispatch owner=1 (processClaimedMessage — matchAndRun/resumeFlow/matchTrigger/callBot เลือกที่นี่จุดเดียว) · claim owner=1 (claimMessage) · conv mapping query = 1/resolve, 0/message · provider calls ตอน workflow/trigger hit=0 (B1/B2 assert) · `shop_id: r.shop_id` direct-copy path ลบแล้ว (grep=0) · parallel route=0 · product/retrieval bytes=0 · production writes=0
+- **runtime code delta**: +80/−23 สุทธิ +57 (botworkerRuntime +46/-6, botWorkerService +22/-11, bufferService +4/0, workflowEngine +8/-6 — code เท่านั้น ไม่รวม comment; delta บวกเพราะ contract ใหม่ไม่มี owner เดิมให้ reuse — aggregate+maps+resolution rule ~40 บรรทัด + ctx threading)
+- **docs**: SRS_SSD อัปเดต botWorkerService/bufferService/workflowEngine rows (marker `**2D-correction**`) + schema.md §2.8 shops cell
+- **files**: runtime 4 + tests 5 (scope-gate/error-policy/idempotency/recovery-freshness seed+literal, verify-harness conv seed) + new test-botworker-shop-context.ts + docs 2 + log นี้ — **uncommitted ทั้งหมดตาม task**
+
+#### review correction round (2026-10-21) — findings H1/H2/M1/M2 · กำลังทำ
+
+- **caller census (source-verified)**: `resolveBotworkerScope` prod callers = bot-worker.ts:65 (boot recovery pass) + :102 (cycle pass — snapshot เดียวกิน poll+recovery+checkWaitTimeouts) + bufferService:508 (flush delayed-execution pass) + botWorkerService:1868 (deferred recovery rerun pass) — resolve ≤1/logical pass อยู่แล้ว structurally; `processMessage` prod callers = bufferOrProcess immediate :827 + flushBuffer batch :694 เท่านั้น (ไม่มี public caller อื่น — wrapper ไม่ต้องคงไว้); `processClaimedMessage` = internal เดียว :776; `matchAndRun`/`resumeFlow` prod = dispatcher เดียว (:905/:927/:1112) + test-chat route (non-worker domain)
+- **H1 VERIFIED — resolver aggregate = platform-wide**: `$match:{platform:{$in:enabled}}` scan ทั้ง platform (~135k conv docs) ทุก resolve — fix: query shops ก่อน serialize (0 enabled rows → 0 conv query), `$match` = `$or` ของ `{platform, shop_id:{$in:enabled-ids}}` + `{platform, shop_name:{$in:enabled-names}}`; index: `{platform,shop_id}` compound มีอยู่ (`mongoClient:97-98`) → canonical branch indexed; **`shop_name` ไม่มี index** → name branch = platform-prefix range + filter — bounded แต่ไม่ indexed: report blocker + propose `{platform:1,shop_name:1,shop_id:1}` แยก approval (ห้ามเพิ่มเอง)
+- **H2 VERIFIED — ctx optional → identity fallback เปิดทางเดิม**: `shop_ctx?` + `?? msg.shop_id`/`conv?.shop_name` ใน dispatcher — fix: `ShopMessageContext{config_shop_key,shopname}` required ทั้งคู่, `pair.shopname` required (row ไม่มี shopname → exclude fail-closed), envelope `shop_ctx` required ทุกชั้น (poll attach / bufferOrProcess msg / ProcessMessageFn / processClaimedMessage), ลบ `??` fallback ทั้งหมด; test callers ต้องส่ง ctx explicit; `EngineMessage.config_shop_key/shopname` คง optional เฉพาะ non-worker caller (test-chat domain ไม่มี scope — worker เติมเสมอ); `botCallService` `shopName||shopId` คงไว้ (shared boundary — worker เติม shopName เสมอ → fallback unreachable บน worker path; ลบจะเปลี่ยน test-chat/live-assignment behavior = out of scope)
+- **M2 VERIFIED — error ambiguity**: `EngineResult.recoverable` documented แล้ว ("false = op ตาย ห้าม fallback; absent = error ทั่วไป fallback ได้") แต่ producer เกือบทั้งหมดไม่ set → fix ที่ engine owner: matched-execution error ทุกจุด (failRun'd — :410,:553,:597,:665,:672,:684,:740,:756) `recoverable:false`; เว้น :724 (resume บน terminal run — engine comment เองบอก caller ควร fall through = next-turn dispatch ไม่ใช่ matched death) คง absent; caller: `error && recoverable===false → bot_failed`, absent → fall through; pre-match failure (listWorkflows/config throw — ไม่มี internal catch) → propagate → classification catch → bot_failed เดิม
+- **M1**: run workflow suites ด้วย literal env (`ADMIN_JWT_SECRET=verify-only-…` ไม่ใช่ secret จริง) + disposable mongo:7 loopback สำหรับ e2e
+- **RED ก่อนแตะ**: A7 bounded-$match shape, A8 zero-rows→zero conv query, A9 flush=1 resolve/pass, C-src source assertions (no `shop_ctx?`/no `??` fallback), C-nameless row exclude, B4c recoverable===false บน matched error, B4e pre-match throw→bot_failed
+
+#### review correction round — implementation + GREEN (2026-10-21)
+
+- **H1 fixed**: resolver query shops ก่อน sequential (0 enabled rows → return ไม่แตะ conv) → conv aggregate `$match:{$or:[{platform,shop_id:{$in:enabled-ids}},{platform,shop_name:{$in:enabled-names}}]}` platform-qualified ทุกก้อน — docs examined = candidate identities เท่านั้น (F1 fixture proof: 3 candidate conv docs scanned vs 135k platform-wide เดิม); canonical branch ใช้ `{platform,shop_id}` index; **name branch ไม่มี index** — bounded แต่ไม่ covered → blocker รายงาน + propose `{platform:1,shop_name:1,shop_id:1}` แยก approval
+- **H2 fixed**: `ShopMessageContext{config_shop_key,shopname}` required ทั้งคู่ + `BotworkerScopePair.shopname` required (row ไม่มี shopname → exclude ที่ resolver); `processMessage` envelope `shop_ctx` required + runtime guard throw เมื่อขาด (G3); ลบ `?? msg.shop_id`/`?? conv.shop_name` ทั้งหมดใน dispatcher; **`EngineMessage.config_shop_key` → required** (ลบ `?? msg.shop_id` 4 จุด; test-chat route ส่ง `shop` ตรง — semantics เดิม); `WorkflowRunDoc.config_shop_key` persist ตอน createRun (timeout dummy msg ใช้ — legacy absent→shop_id semantics เดิม); `shopname` คง optional บน EngineMessage เฉพาะ non-worker (engine derive `conv.shop_name` = catalog domain ไม่ใช่ transport identity)
+- **M2 fixed**: matched-death error returns 9/10 `recoverable:false` (failRun'd ทั้งหมด); :731 resume-on-terminal-run เจตนา absent → fall-through eligible (H3 proof); 3 dispatcher branches gate `error && recoverable===false → bot_failed`; pre-match lookup throw → propagate → catch → bot_failed (H2/H4); `in_flight` → return ไม่ terminalize — ไม่มี reason-string classification
+- **RED→GREEN**: RED 6/28 fail (F1 platform-wide match, F2 conv query on zero rows, F3 2 resolves/pass, G1 `shop_ctx?`+fallbacks, G3 ctxless→answered, H1 recoverable absent) → GREEN 28/28; regressions แก้: idempotency mocks resolver-mirror เพิ่ม pair fields + reset() seed shops+conv evidence; production-races seed conv evidence; test literals += `config_shop_key`/`shop_ctx` (error-policy/idempotency/boundary/scope-gate/verify/ownership-transport/workflow-e2e/phase1/phase6)
+- **all suites GREEN**: shop-context 28/28 · scope-gate 107/107 · error-policy 38/38 · idempotency 71/71 · production-races 37/37 · recovery-freshness 30/30 · boundary 20/20 · enable-checkpoint 18/18 · config-failclosed 8/8 · runtime-mongo-safety 111/111 · ownership-transport 244/244 · **workflow-e2e 16/16 (disposable mongo:7 + synthetic ADMIN_JWT_SECRET)** · phase1 69/69 · **phase6 69/69 (disposable)** · verify harness 55/55 (real Mongo, DB dropped, containers removed) · tsc clean · `npm run build` compiled · `git diff --check` clean
+- **safety**: `.env` ไม่เคยอ่าน (secrets ส่งผ่าน process env literals `verify-only-internal-nonsecret` ไม่ใช่ credential จริง) · Mongo = disposable loopback เท่านั้น (destroy แล้ว) · port 8010 ไม่แตะ · switches OFF · uncommitted
+
+#### final narrow round (2026-10-21) — H1 index + M1 exhaustive error · กำลังทำ
+
+- **PART 0 facts (source-verified)**:
+  - conv indexes ที่มี: `{shop_id:1}`, `{conversation_id:1}` unique-sparse, `{shop_id:1,conversation_id:1}`, `{platform:1,shop_id:1,pinned:-1,last_message_timestamp:-1}` ×2, `{shop_id:1,to_name:1}`, `{platform:1,status:1,unread_count:1}`, `{last_message_timestamp:-1}`, `{pinned:-1,last_message_timestamp:-1}`, `{pinned:-1,last_message_timestamp:-1,conversation_id:-1}` — canonical branch `{platform,shop_id∈}` covered ด้วย prefix; **name branch `{platform,shop_name∈}` ไม่มี index** → COLLSCAN บน disposable expected
+  - `safeCreateIndex` (mongoClient:31) tolerate code 85/86; repo ไม่ใช้ explicit name (auto-gen convention); comment ระบุ Mongo 5.0 ไม่รองรับ `$exists:false` partial — ใช้ `$gt:""` (non-empty string เท่านั้น = "usable shop_name") ซึ่งรองรับ
+  - `EngineResult.status`: `actioned|resumed|no_match|exit_to_bot|exit_drop|error|in_flight`; `recoverable?` optional — terminal-run resume (:731) = `error`+absent → แต่ dispatcher **ไม่ได้ fall through จริง** — settle เป็น `workflow_resumed` (delivered ว่าง) เพราะ resume branch settle ทุก non-guarded result; `no_match` = status ที่มีอยู่และถูกต้องเชิง semantic
+  - dispatcher: 3 error branches `recoverable===false`-gated; match branch fall through `no_match`/`exit_to_bot`/error-nonfalse; resume branch ขาด no_match handling
+- **plan**:
+  1. RED: (a) source-pin index declaration `{platform:1,shop_name:1,shop_id:1}` non-unique + partial `$gt:""` + stable name; (b) resume terminal-run → `no_match` (ไม่ใช่ error) + ทุก error result มี `recoverable:boolean`; (c) resume no_match → dispatcher fall through ถึง trigger/bot จริง
+  2. Index: declare ใน ensureIndexes ที่ conversations block — `partialFilterExpression:{shop_name:{$gt:""}}`, name `platform_1_shop_name_1_shop_id_1`; declaration-only (ไม่ invoke production ensureIndexes — index creation = operator approval gate)
+  3. Disposable mongo:7 + ~100k synthetic conv docs → explain before (COLLSCAN/non-prefix) / after (IXSCAN ทั้ง 2 branch) — report docsExamined/keysExamined
+  4. EngineResult → discriminated union: `{status:"error", recoverable:boolean} | {status:non-error, recoverable?:undefined}` — type บังคับ error ต้องมี field; :731 → `no_match`; dispatcher resume branch: `no_match`/error+recoverable:true → fall through, `recoverable:false` → bot_failed; test-chat route: resume `no_match` → ไป match stage (semantics เดิมของ fall-through)
+  5. verify battery เต็ม + docs + report
+- **implementation**: (1) index declared ใน `mongoClient.ts` conversations block — `{platform:1,shop_name:1,shop_id:1}` name `platform_1_shop_name_1_shop_id_1` non-unique `partialFilterExpression:{shop_name:{$gt:""}}` (declaration-only, production ยังไม่สร้าง); (2) resolver name clause → per-name eq `{platform,shop_name:<name>}` (ออกจาก `$in` — eq term เท่านั้นที่ planner prove partial filter ได้); (3) `EngineResult` → discriminated union — non-error `recoverable?:undefined` | `error` arm `recoverable:boolean` required (type บังคับ); resume terminal/non-active run → `no_match` (:736); dispatcher resume branch: `no_match`/recoverable-true → fall through ไป match stage; test-chat route resume `no_match` → continue match
+- **error→cause→fix→impact**: F1 test assert `$in` shape → resolver เปลี่ยนเป็น eq terms → อัปเดต F1 ให้ assert eq term + partial-index rationale; disposable explain ครั้งแรก COLLSCAN → DB ขาด production canonical index + `$in` name query prove partial filter ไม่ได้ → seed canonical index + eq terms → IXSCAN ทั้งสอง arm
+- **disposable explain evidence (mongo:7, 120,006 docs)**: BEFORE → name arms ใช้ `platform_1_shop_id_1_*` เป็น platform-prefix + filter, docsExamined=120,010, ~59ms; AFTER → IXSCAN `platform_1_shop_name_1_shop_id_1` per name term + canonical compound per id, docsExamined=5 keysExamined=5 rows=5 ~0ms, 0 COLLSCAN; rows content identical (amb/canonical/name/cross-platform isolation ครบ)
+- **RED→GREEN**: RED 4 fail (I1 no index decl, J1 terminal-run=error, J2 error literal ขาด recoverable, J3 settle workflow_resumed แทน fall-through) → GREEN 34/34; suites: scope-gate 107 · error-policy 38 · idempotency 71 · production-races 37 · recovery-freshness 30 · boundary 20 · enable-checkpoint 18 · config-failclosed 8 · runtime-mongo-safety 111 · ownership-transport 244 · workflow-e2e 16 · phase1 69 · phase6 69 · disposable harness 55 · tsc/build/diff-check clean
+- **safety/gate**: production index **ยังไม่ได้สร้าง** — declaration = code เท่านั้น, ต้อง operator approval + verify บนฐานจริงก่อน Botworker ON; disposable containers removed; `.env` ไม่เคยอ่าน; uncommitted — verdict `BOTWORKER_LOGIC_FINAL_GREEN_PRODUCTION_MAPPING_INDEX_PENDING`
+
+#### closeout (2026-10-21) — committed · production index pending
+
+- **Commit 1**: `09b9afad3775ebed4ef42639eca16a4fe7335ef0` — `fix: resolve botworker shop context before dispatch` (24 files, +1056/−88); Commit 2 = log นี้
+- **root cause**: `shops.shop_id` name-fallback ("SuperITMall") ≠ transport `messages_shp.shop_id` ("22997004") → admission `(platform, shops.shop_id)` match 0 เอกสารทั้งที่ /botworker โชว์แชท
+- **cycle-scope contract สุดท้าย**: pair `{platform, shop_id=transportId, config_shop_key=shops.shop_id, shopname, cutoff}` — resolver map ผ่าน conversations evidence (canonical id หรือ (platform,shopname)→id 1:1; missing/ambiguous/nameless → fail-closed); 1 shops find + ≤1 conv aggregate/resolve, 0 query/message, ≤1 resolve/logical pass
+- **single dispatch**: one claim → `processClaimedMessage` เดียว → Workflow(resume→match) OR Trigger OR Bot → one outcome; workflow matched death (error+recoverable:false) → `bot_failed` terminal, pre-match throw → catch `bot_failed`, terminal-run resume → `no_match` fall-through, `in_flight` ไม่ finalize
+- **mandatory context**: `shop_ctx{config_shop_key,shopname}` required ที่ `processMessage` boundary (throw เมื่อขาด); poll/flush attach จาก resolved pair เท่านั้น; `EngineMessage.config_shop_key` required; `/chat` ได้ shopname เท่านั้น — transport id ไม่เคยเป็น catalog key
+- **typed EngineResult**: discriminated union — non-error `recoverable?:undefined`, `error` arm `recoverable:boolean` required ที่ type level; error producers 9/9 มี recoverable:false; 0 `===undefined`/reason-string classification
+- **index**: `{platform:1,shop_name:1,shop_id:1}` name `platform_1_shop_name_1_shop_id_1` non-unique partial `{shop_name:{$gt:""}}` declare ใน mongoClient.ts — **declaration only; production index ยังไม่สร้าง/ไม่ verify**; disposable mongo:7 explain (120,006 docs): BEFORE docsExamined=120,010 → AFTER docsExamined=5 keysExamined=5, 0 COLLSCAN, rows identical
+- **frozen verification**: shop-context 34/34 · scope-gate 107/107 · error-policy 38/38 · idempotency 71/71 · production-races 37/37 · recovery-freshness 30/30 · boundary 20/20 · enable-checkpoint 18/18 · config-failclosed 8/8 · runtime-mongo-safety 111/111 · ownership-transport 244/244 · workflow-e2e 16/16 · phase1 69/69 · phase6 69/69 · disposable harness 55/55 · tsc/build/diff-check clean
+- **Low cleanups**: stale resolver comment (index declared แล้ว) แก้เป็น declaration-only + operator gate; FakeMongo shops fixture ลบ `config_shop_key` (ไม่ใช่ persisted field)
+- **safety ตอน commit**: Next.js OFF, Botworker OFF, Python chatbot ไม่แตะ, `.env` ไม่เคยอ่าน, ไม่มี DDL/deploy/push/PR/provider/production Mongo; disposable containers ถูกลบหมด
+- **next gate**: read-only production `listIndexes`/census → explicit DDL approval → create+verify `{platform,shop_name,shop_id}` บน `conversations_shp` จริง → restart Next.js → local SuperITMall canary (concurrency=1) → ค่อยพิจารณา enable switches
+
+## 🔍 Botworker Mapping Index — Read-Only Production Preflight (2026-10-19) · กำลังทำ
+
+- **error→cause→fix→impact**: ไม่มี error — เป็น gate ตาม closeout ด้านบน: index `{platform:1,shop_name:1,shop_id:1}` declare แล้วใน `mongoClient.ts` แต่ production `conversations_shp` ยังไม่สร้าง/ไม่ verify → รอบนี้ preflight read-only เพื่อตัดสินว่าสร้างได้ปลอดภัยไหม + resolver query shape รองรับจริงไหม; ผลกระทบเคสอื่น = 0 (ไม่มี write)
+- **repo state (verified)**: branch `feature-phase3-aswer-quality`, HEAD `20879cb`, working tree clean, staging empty; Next.js OFF, Botworker OFF (port 3000/8010 ว่าง — มี stale `test-workflow-e2e.ts` tsx processes หลับอยู่ 8-33 นาที = orphan test script ไม่ใช่ declared services, observe-only ไม่แตะ)
+- **PART 0 static proof (committed source)**: (a) `COLLECTIONS.conversations` ← env `ADMIN_MONGO_COLLECTION_CONVERSATIONS` (production = `conversations_shp`, schema.md §2.6); (b) index declaration 1 จุดเดียวใน `ensureIndexes` — `mongoClient.ts:121-124` `{platform:1,shop_name:1,shop_id:1}` name `platform_1_shop_name_1_shop_id_1` ไม่มี `unique` + `partialFilterExpression:{shop_name:{$gt:""}}`; (c) resolver `botworkerRuntime.ts:129-148` = aggregate เดียว `$match:{$or:[{platform,shop_id:{$in:ids}}, {platform,shop_name:<name>} ต่อ name]}` → `$group{_id:{platform,shop_id,shop_name}}` — canonical (platform,shop_id) + per-name eq terms, **ไม่มี `$in` บน shop_name**; (d) test I1/I2 ใน `test-botworker-shop-context.ts` pin contract เดียวกัน; (e) ไม่มี document migration/alternate identity owner
+- **plan**: /tmp script เดียว (ไม่เข้า repo) — `load_dotenv(override=False)` รอบเดียวตาม temporary authorization, env รายงานแค่ set/unset, MongoClient ตัวเดียว bounded timeouts, `client.close()` ใน finally, ops เฉพาะ `ping`/`list_indexes`/`aggregate`/`count_documents`/`find_one`/`explain`, sanitized errors (class+code เท่านั้น), ไม่พิมพ์ documents/literals/credentials
+- **checks**: census counts (total/bad platform|shop_name|shop_id/partial-filter-match/dup groups+extra+max ของ `(platform,shop_name,shop_id)`) → listIndexes contract compare → explain 3 shape (canonical / name / combined ตาม production aggregate)
+- **safety**: Mongo writes=0, createIndex=0, ไม่แตะ .env นอก load_dotenv, ไม่แตะ `มาแล้วจ้า.md`, ไม่ restart/stop process ใดๆ, ไม่ commit/push — verdict เดียว: `ALREADY_PRESENT_AND_VERIFIED` | `CREATION_APPROVAL_PENDING` | `BLOCKED_BY_CONFLICTING_INDEX_DEFINITION` | `PREFLIGHT_BLOCKED_*`
+
+#### interim result — PREFLIGHT_BLOCKED (2026-10-19)
+
+- **script**: `/tmp/bw_mapping_index_preflight.py` — op surface proven static: `ping`/`list_indexes`/`aggregate`/`count_documents`/`find_one`/`explain` เท่านั้น, ไม่มี write/createIndex/import app modules/retry; subprocess เดียวรันแล้ว exit — **dotenv authorization consumed**
+- **findings จาก run เดียว (authorized)**: connect OK (mode=uri); `ADMIN_MONGO_DB`→`chatbot` (ตรง census เก่า); **`ADMIN_MONGO_COLLECTION_CONVERSATIONS` unset ใน root `.env`** → resolve ได้ `conversations` = collection ว่าง/ไม่มี (0 docs, 0 indexes — census vacuous); production ตั้งค่าจริงผ่าน `.env.web` (`ADMIN_MONGO_COLLECTION_CONVERSATIONS=conversations_shp` — DEPLOY.md:209, schema.md §2.6 ยืนยัน)
+- **blocker**: "one isolated audit subprocess ... expires when the subprocess exits" — re-run เพื่อ census `conversations_shp` ต้องการ subprocess/dotenv รอบใหม่ → หยุดรอ authorization (ไม่ยิงรอบสองเอง)
+- **state**: ops counters {ping:1, list_indexes:1, aggregate:1, count_documents:5, find_one:1, explain:3}, writes=0, client_closed=true, /tmp script ลบแล้ว, `git diff --check` clean, staging empty — ไฟล์ที่แตะ = log นี้ไฟล์เดียว
+- **ต้องการเพื่อปิดงาน**: subprocess authorized รอบใหม่ที่ pin audit target = `conversations_shp` (ชื่อจาก committed docs ไม่ใช่ secret — creds/db เหมือนเดิมจาก root `.env`) + ยังคง report env presence `ADMIN_MONGO_COLLECTION_CONVERSATIONS`=unset เป็น finding
+- **verdict (รอบแรก)**: `PREFLIGHT_BLOCKED_COLLECTION_ENV_UNSET_SINGLE_SUBPROCESS_CONSUMED`
+
+#### completed round — APPROVE_PREFLIGHT_RERUN (2026-10-19) · read-only เสร็จ
+
+- **rerun scope**: subprocess เดียวเพิ่ม, pin `conversations_shp`, op surface เดิม proven (ping/list_indexes/aggregate/count_documents/find_one/explain); assertions ผ่าน (collection exists + total>0); writes=0, client closed, /tmp ลบแล้ว
+- **PART 2 census (DB `chatbot`, `conversations_shp` จริง)**: total=153,154 · platform bad=0 · shop_id bad=0 · shop_name missing/null/empty/non-str=134,696 (87.9%) · **docs matching partial `{shop_name:{$gt:""}}` = 18,458** → index จะเล็ก ~12% ของ collection (partial filter ทำงานตาม design) · dup groups `(platform,shop_name,shop_id)`=50, extra=153,100, largest=43,349 — **structural ไม่ใช่ anomaly**: triple เป็น shop-level key (conv นับพัน share triple เดียวกัน + null-name docs collapse เป็นกลุ่มใหญ่) → non-unique index ถูกต้องตาม spec, duplicates ไม่ block creation
+- **PART 3 listIndexes (10 indexes)**: `platform_1_shop_name_1_shop_id_1` **absent** · ไม่มี same-name conflict · ไม่มี same-contract-other-name · platform-prefixed ที่มีอยู่: `platform_1_shop_id_1_pinned_-1_last_message_timestamp_-1`, `platform_1_shop_id_1_unread_count_1_pinned_-1_last_message_timestamp_-1`, `platform_1_status_1_unread_count_1` (non-unique, no partial ทั้งหมด)
+- **PART 4 explain (BEFORE — index ยังไม่มี, literals จาก eligible doc จริง ไม่พิมพ์)**:
+  - canonical `{platform,shop_id∈}`: IXSCAN `platform_1_shop_id_1_pinned_-1_last_message_timestamp_-1` (platform+shop prefix) — docsExamined=12,174, keys=12,174, nReturned=12,174, ~20ms — bounded ด้วย shop selectivity แต่ scan ทั้ง shop history
+  - name `{platform,shop_name=}`: IXSCAN platform-prefix เดิม + in-memory filter — **docsExamined=149,738 (~98% collection), keys=149,738, nReturned=1,118, ~151ms** — pain point จริง: เกือบ full-platform scan ต่อ name term
+  - combined `$or` production shape: SUBPLAN→OR IXSCAN index เดิม — docsExamined=161,912 (=12,174+149,738), nReturned=12,174, ~159ms — 0 COLLSCAN แต่ examine เกิน total docs
+  - caveat: stage list รวม rejectedPlans (collector walk ทั้ง tree); executionStats สะท้อน winning plan เท่านั้น
+- **env finding**: `ADMIN_MONGO_COLLECTION_CONVERSATIONS` ยัง unset ใน root `.env` (local dev default `conversations`); production resolve `conversations_shp` ผ่าน `.env.web` — ไม่ใช่ blocker ของ DDL แต่เป็น config note
+- **verdict**: `BOTWORKER_MAPPING_INDEX_CREATION_APPROVAL_PENDING` — รอ token `APPROVE_BOTWORKER_MAPPING_INDEX_DDL` (สร้าง index เดียว + listIndexes/explain verify; ห้ามเปิด Next.js/Botworker ในรอบ DDL)
+
+#### DDL round — APPROVE_BOTWORKER_MAPPING_INDEX_DDL (2026-10-19) · ✅ CREATED+VERIFIED
+
+- **pre-gates**: collection exists (153,154 docs), same-name index absent → create 1 ครั้ง; repo state เดิม (branch/HEAD 20879cb, log-only diff), Next.js+Botworker OFF ต่อเนื่อง
+- **DDL**: `create_index({platform:1,shop_name:1,shop_id:1}, name=platform_1_shop_name_1_shop_id_1, unique=false, partialFilterExpression={shop_name:{$gt:""}})` บน `chatbot.conversations_shp` — counter create_index=1, doc_writes=0
+- **post-verify listIndexes**: contract ตรงทุกข้อ (name/key order/non-unique/partial `{shop_name:{$gt:""}}`)
+- **explain AFTER (literals จาก eligible doc จริง ไม่พิมพ์ — doc ต่างจาก preflight round → counts เปรียบเทียบเชิงทิศทาง)**:
+  - name `{platform,shop_name=}`: **PROJECTION_COVERED → IXSCAN `platform_1_shop_name_1_shop_id_1`** (covered query — 0 FETCH) · docsExamined=0, keys=1,804, nReturned=1,804, ~4ms — BEFORE 149,738 docs/~151ms → **ตัดทิ้งทั้งหมด**
+  - combined `$or`: SUBPLAN→OR — name arm ใช้ index ใหม่ (covered), id arm ใช้ `platform_1_shop_id_1_pinned_-1_last_message_timestamp_-1` · docsExamined=13,651, keys=15,455, nReturned=13,651, ~29ms — BEFORE 161,912 docs/~159ms
+  - 0 COLLSCAN · `uses_target_index=true` ทั้งสอง branch · resolver production shape (aggregate `$match:$or` + `$group`) hit index ตาม design
+- **safety**: doc writes=0 · ops {ping:1, count_documents:1, list_indexes:2, find_one:1, explain:2, create_index:1} · client closed · /tmp script ลบแล้ว · `git diff --check` clean · staging empty · ไฟล์แตะ = log นี้ไฟล์เดียว · ไม่ start service/deploy/push/commit
+- **verdict**: `BOTWORKER_MAPPING_INDEX_CREATED_AND_VERIFIED`
+- **next gate (ตาม closeout ด้านบน)**: restart Next.js → local SuperITMall canary (concurrency=1) → พิจารณา enable switches — ยังไม่เริ่มในรอบนี้
+
+## 🗺️ Logging/Analytics Roadmap Scheduling (2026-10-20) · plan-only
+
+- **decision**: Phase 5 มาก่อน เพราะแก้ evidence/policy/compatibility ซึ่งเป็น correctness ของคำตอบโดยตรง; Logging/Analytics เริ่มหลัง Phase 5 commit และก่อน Phase 6
+- **roadmap added**: 3 bounded tracks — A Analytics Truth (window/timezone/source/labels, ลบ fake/aliased metrics), B Audit Event Correctness (single event vocabulary + dedupe), C Provider/Cost Observability (actual provider/model, safe key ref, tokens/cost/correlation)
+- **parallel rule**: Track A แยก branch/worktree ได้หลัง Botworker soak ปิด; Track B/C ห้ามขนานกับ chatbot answer-flow เพราะแตะ shared runtime/event boundaries; shared docs มี integration owner เดียว
+- **safety**: เอกสารเท่านั้น — runtime/tests/config/Mongo/provider/Botworker process = 0 แตะ; ไม่ stage/commit/push
+
+## Phase 5 Review-Fix Round — RED (verified before implementation)
+
+- 21/27 correction unit tests RED; 6 pass (r1-ineligible via legacy ungrounded rewrite, r6-subject/kb_inherit grounding, r9-equal-rank/expired — already correct).
+- Replay: pos-policy-return-model-item + pos-policy-return-tagged-item FAIL — decision computed but dropped before product-flow boundary (H2 live). pos-complaint-seller-wrong-item-real PASS — complaint owner already wins (protection test).
+- Causes verified in source: resolve_policy conflicts across ALL matched rules (no tiering), required_evidence collected-not-gated, _DEFAULT_RESULT lacks policy_* fields, enforce() never reads routing_decision["policy_decision"], spec_claim grounds on pooled card+grounding text (cross-product leak), intent_connector fact has no provenance (can prove incompatible), `if not compat: return products` echoes proven-incompatible items.
+- Plan: one batch — resolver (evidence gate + precedence tier + provenance + enum clamps), classifier emits/validates policy_* fields, guards consumes typed decision for return_claim + subject-scoped field facts for spec_claim, device_compat passes source + no echo of all-incompatible, app.py carries typed decision on all 7 post-decision return sites. No new provider calls/collections/flags; active_policy_rules() stays () — production blocker unchanged.
+
+## Phase 5 Review-Fix Round — GREEN + closeout (same working tree, uncommitted)
+
+**error→cause→fix→impact per finding:**
+
+- **H1 — PolicyDecision เป็นแค่ prompt text**: `guards.enforce` ไม่อ่าน decision → typed dict ติด `routing_decision["policy_decision"]` ผ่าน `_rd_extra()` ที่ return site ทั้ง 7; `_enforce_policy_claim` (ก่อน skip gate) บังคับ eligibility phrasing — eligible→positive เท่านั้น, ineligible→negative เท่านั้น, unknown/admin_review→admin-review text เสมอ; generic `return_claim` ข้ามเมื่อ decision active. LLM พูดขัด → rewrite ไม่ให้พลิก outcome. impact: general/mixed/model-item paths ทุก answer family — FAQ/history ยังอธิบาย process ได้แต่ตัดสินไม่ได้
+- **H2 — decision หลุดใน product path**: `_pdec` คำนวณครั้งเดียวที่ general_qtype block → `_rd_extra()` closure อ่าน subject cards+anchor → `policy_decision` + `subject_ids` (canonical) ติด routing_decision; model-item + tagged-item fixtures prove ตัวเดียวกันถึง boundary
+- **H3 — required_evidence เก็บแต่ไม่ gate**: PolicyQuery += `evidence_ids`/`evidence_by_subject`/`conflicting_evidence`; winner rule ประกาศ evidence ที่ขาด/ขัด → `admin_review` + `missing_evidence` ระบุชื่อ — ไม่ infer จาก prose
+- **H4 — classifier ไม่มี policy fields**: prompt JSON contract + `_DEFAULT_RESULT` += `policy_reason`/`policy_item_condition`/`policy_order_state`; closed-enum validate → invalid → `unknown`; call เดิม 0 provider calls เพิ่ม
+- **H5 — field evidence test-only**: `enforce` spec_claim เปลี่ยนจาก pooled-text substring → `_spec_fact_grounded` เช็ค `claim_supported` บน `extract_field_facts` ของ card ที่ identity ∈ `routing_decision["subject_ids"]` เท่านั้น; ไม่มี subject_ids → pool เดิม; `kb_inherit` facts ไม่ ground; `_SPEC_CLAIM_RE` รองรับ comma-group numbers (`20,000mAh` = 1 token — fix claim-side vs fact-side split `000mah`). `attach_kb_specs` stamp `_specs_origin="kb_inherit"`; `claim_supported` ได้ production caller จริง (อยู่ต่อ), `_evidence_pool` เหลือ serve `_identity_pool` เท่านั้น
+- **H6 — intent hint กลายเป็น fact + all-incompatible echo กลับ**: `_filter_compat_products` ส่ง `source` ไปกับ device spec ("spec-db"/"web-parse"/"intent"); `device_field_facts`/`resolve_compat` gate device connector ด้วย `_DEVICE_STRUCTURED_SOURCES={spec-db,web-structured}` — intent → `hint_only_device_evidence`→unknown เสมอ; ลบ `if not compat: return products`; all-negative → protected เท่านั้น + incompatible protected ได้ `_context_note` "ห้ามแนะนำเป็นตัวเลือก" (explanation-only)
+- **M1 — conflict ทั้ง active set**: precedence tier (specificity→priority→version/effective) เลือก winner ก่อน → conflict เฉพาะใน tier เท่ากัน; general allow + specific deny = deny ชนะ (ไม่ใช่ conflict); equal-rank conflict → `admin_review` rule_conflict คงเดิม
+- **M2 — dead surface**: ลบ `lookup_device_spec` (test-only pass-through), `POLICY_OUTCOMES`, `COMPAT_OUTCOMES`; `claim_supported` keep — production caller = guards boundary
+
+**fixture honesty**: `pos-complaint-seller-wrong-item-real` (non-hypothetical — ไม่มี ถ้า/สมมติ) → `order_problem` owner answers (ask order_sn), `policy_decision` ไม่ปรากฏ — complaint ไม่ถูกแปลงเป็น policy answer; hypothetical `pos-policy-seller-wrong-item`/`tx-…` อยู่ policy route ตาม design. `pos-policy-return-tagged-item` message แก้เป็น `ผิดรุ่นเอง` wording — `ใช้ไม่ได้เลย` เดิมเป็น claim-symptom → warranty_claim handoff (correct owner — fixture draft bug ไม่ใช่ production defect)
+
+**test-fix notes**: `FieldEvidence` fixtures += `status="known"`; `PolicyQuery` field names (`canonical_product_types`/`item_condition`/`event_time`); rules += `source`; `resolve_compat` keyword-only; `device_field_facts` specs += `"source": "spec-db"` (structured-evidence contract); conflict test split — equal-priority → admin_review (rule_conflict คงอยู่), priority-5 deny → wins (M1 contract); `PolicyDecision` += `missing_evidence` field
+
+**results (all frozen green)**: contract suite 81/81 · spec-grounding 36/36 · compat script 144/144 · replay l3 105p+19skip+4xfail (5 policy/complaint fixtures pass) · general-qtype guards 27/27 · unit_classifier 10/10 · qa_context_guard 4/4 · claim_flow + troubleshoot_claim + phase2_claim_state + warranty_delivery scripts exit 0 · validator `integrity: all rows pass` · py_compile×7 + `git diff --check` clean · `test_guards.py` fail = pre-existing env blocker (needs evidence-generation pointer — identical at HEAD `f67c27b`)
+
+**impact on other cases**: spec comma-grouping ขยาย claim+facts symmetric — "1, 2 พอร์ต" ไม่ over-match (unit required); `_ref_regex_products` bound `[]` early — falsy เท่าเดิมทุก consumer; protected_ids = raw item_id str (tier-A hoisted); `_context_note` reuse = channel เดิมไม่ใช่ surface ใหม่
+
+**safety**: `active_policy_rules()` ยัง `()` — production blocker ตั้งใจ; 0 new collections/env/flags/deps/provider calls; product DB read-only; ไม่แตะ Botworker/workflow/Analytics/Phase6; test_guards env blocker unchanged; all files unstaged
+
+## Phase 5 R2 — Typed-Authority + Evidence-Boundary Correction (uncommitted)
+
+**frozen state (PART 0 verified)**: branch `feature-phase3-aswer-quality`, HEAD `f67c27b`, staging empty, `git diff --check` clean, ports 8010/3000 free, grouped-retrieval flags OFF (env unset), manifest = 12 modified + 2 untracked (`policy_resolver.py`, `test_phase5_field_policy_compat.py`).
+
+**findings verified against current source:**
+
+- **H1 phrase-scan misses contradictions**: `_RETURN_CLAIM_ANY = เปลี่ยน(สินค้า|ใหม่)?ได้|คืน(สินค้า|ของ|เงิน)ได้|รับเปลี่ยน|รับคืน` — `เปลี่ยนไม่ได้`, `คืนไม่ได้`, `ไม่เข้าเงื่อนไขการเปลี่ยน/คืน` never match (ไม่มี `ได้` adjacent) → decision=eligible + LLM denial ผ่าน untouched
+- **H2 multi-subject grounding leak**: `_spec_fact_grounded` returns True ถ้า subject ใดก็ตามมี token — claim เกี่ยวกับ A ถูก ground ด้วย facts ของ B; ไม่มี structured claim→subject relation ใน answer contract (answer_segments = plain strings) → fail closed
+- **M1 no production evidence source**: `build_policy_query` ไม่มี evidence params เลย; `req.order_sn`=customer text (unverified), `lookup_order` รันเฉพาะ claim path, `load_claim_state`=customer-collected fields ของ episode อื่น (ไม่ attributable ต่อ query นี้ — threading มันคือ inject unrelated evidence) → ไม่มี authoritative source → fail-closed `admin_review` คงไว้ + document blocker
+- **M2 opaque version lexicographic**: `best[r.rule_id]` เลือกด้วย `(_day(effective_from), version)` — `"9" > "10"` string compare → winner ผิด; effective_from ไม่ validate ที่ from_dict
+
+**plan (deletion over addition, 0 new vocab/helpers/owners):**
+
+1. enforce: typed decision → deterministic final answer text per outcome (replace regex clause scan); delete `_enforce_policy_claim`+`_RETURN_CLAIM_ANY` (caller เดียว); `_RETURN_CLAIM_CORE` คงไว้ (return_claim legacy rule ใช้); answer_segments regenerate; guard_rewritten="policy_decision"
+2. `_spec_fact_grounded`: len(subject_ids)>1 → fail closed (no attribution structure exists — state honestly); ==1 → that subject only; 0 → legacy card-facts+grounding pool
+3. production evidence: document activation blocker in SRS/roadmap — ไม่มี verified structured source ที่ decision point; resolver gating tests retained; `build_policy_query` ไม่เพิ่ม adapter
+4. version precedence: dedupe by rule_id via `effective_from` เท่านั้น (ไม่เทียบ version string); same-date same-outcome → converge deterministic (first-in-tier); same-date conflicting → rule_conflict/admin_review; malformed effective date → `date.fromisoformat` (stdlib) reject at from_dict; update resolve_policy docstring
+
+**RED targets**: deterministic-render tests (contradiction phrasings + mutation-proof equality), multi-subject fail-closed, unrelated-subject isolation, evidence-source-blocker test, same-date conflict / newer-effective-wins / malformed-date reject. 0 new helpers/vocab/owners.
+
+**R2 implementation + GREEN (all 4 findings closed):**
+
+1. **enforce deterministic render** (guards.py:299-321): handoff check ก่อนเสมอ → typed `policy_decision` (return_exchange) render `_POLICY_TEXT_*` เป็น final answer ทั้งก้อน + return ทันที — ไม่ผ่าน escalate/rewrite tier เพราะ deterministic text ไม่มี claim/escalate content; **cover empty LLM answer ด้วย** (early `not answer` return ย้ายลงไปอยู่หลัง decision block). `_enforce_policy_claim`+`_RETURN_CLAIM_ANY` ลบ (0 refs); `_RETURN_CLAIM_CORE` คงไว้เฉพาะ legacy `return_claim` rule ที่ไม่มี typed decision
+2. **`_spec_fact_grounded` fail-closed**: `len(_sids)>1 → False` เสมอ — free-form answer ไม่มี claim↔subject structure (ไม่ parse product name จาก prose); `==1` → FieldEvidence ของ subject นั้นเท่านั้น; `0` → legacy pool (model_claim path เดิมต้องใช้)
+3. **production evidence blocker documented**: `build_policy_query` ไม่มี adapter เพิ่ม — `evidence_*` ว่างใน production → `admin_review` fail-closed คงไว้ (SRS+roadmap state ตรง); resolver-level gate tests retained (r3 ครบ required+supplied→winner / missing→admin_review+missing_evidence)
+4. **version = opaque identity**: `best[r.rule_id]` เทียบ `_day(effective_from)` เท่านั้น; same-day same-outcome converge (first in tier); same-day conflict → `rule_conflict`→`admin_review`; malformed ISO date → `from_dict` reject via stdlib `datetime.fromisoformat`; `matched_rule_ids` dedup; docstring `resolve_policy` อัปเดต
+
+**RED→GREEN honest**: 8 RED เดิม (denial phrases survive / `"9">"10"` / malformed date pass / multi-subject leak) + 1 mutation-proof edge พบตอน fix (empty answer short-circuit → render ย้ายก่อน `not answer` return) → 96/96 contract GREEN; replay+spec-grounding 141p; compat 144/144; general-guards 27/27; classifier 10/10; qa_context 4/4; warranty_delivery + claim_flow exit 0; validator integrity pass; `git diff --check` clean; py_compile clean
+
+**complexity delta**: runtime helpers −1 (`_enforce_policy_claim`), regex tables −1 (`_RETURN_CLAIM_ANY`), phrase variants +0, policy owners =1, spec-grounding owners =1, new modules/deps/model calls =0 — net deletion
+
+**remaining blocker (activation)**: ไม่มี verified structured evidence source ที่ decision point — `req.order_sn`=customer text; `order_store.lookup_order` รันเฉพาะ claim path; `load_claim_state` = episode อื่น → production `evidence_*` คงว่าง → typed decision ทุก turn = `unknown`/`admin_review` จนกว่าจะมี authoritative record store (ตามที่ designed ไว้)
+
+## Phase 5 R3 — Composition + Policy-Record Correction (uncommitted)
+
+**frozen (PART 0)**: branch `feature-phase3-aswer-quality`, HEAD `f67c27b`, staging empty, diff clean, ports free, grouped OFF, manifest 12M+2U unchanged.
+
+**findings verified:**
+- **A HIGH mixed-answer destruction**: enforce:311-323 replaces WHOLE answer with `_POLICY_TEXT_*` when `_pdec_active` — product flow paths (model-item 1700-1707 / productish-need 1708-1724 / tagged-item) carry `_pdec` via `_rd_extra` → product info lost
+- **B error masking**: `LLM_ERROR_REPLY` check (:326) runs after policy render → provider failure masked by policy text
+- **C ISO not normalized**: `from_dict` validates via fromisoformat but stores raw → `_day()`=raw[:10] string compare — `"20240101"` beats `"2024-06-01"` lexicographically (June loses)
+- **D false convergence**: same rule_id max-day records ALL kept in winners → `required_evidence`/`source_versions` UNIONED into invented rule while outcomes set-collapse — semantically different records reported as one converged winner
+- **LOW**: `:347` dead `_pdec_active` (unreachable after :323 return)
+- **structure**: TurnNeed independent needs + `_policy_carry`→`extra_context` exists → composition mode decidable at branch (1700/1708) — NOT blocked
+
+**plan (0 new helpers/vocab/owners):**
+1. `_rd_extra` += `composition` (`policy_only`|`mixed` decided once at general_qtype branch — path a/b→mixed, else policy_only)
+2. `_policy_carry`: return_policy eligibility prose/decision-txt removed on mixed turns (product LLM never sees eligibility); `_policy_decision_txt` deleted (dead — enforce owns outcome)
+3. enforce order: handoff→LLM_ERROR→read decision+mode; policy_only→replace whole; mixed→ordinary tier on product answer then append ONE `|||` segment (idempotent `_final in answer`); rebuild segments once; delete dead `:347` condition
+4. resolver: `from_dict` normalize dates→canonical `YYYY-MM-DD` + reject until<from; same-id same-day → semantic-dup dedupe else rule_conflict; no union; docstring updated
+5. harness: `llm_reply` fixture key + `answer_contains`/`answer_must_not_contain` expected keys; marker-in-LLM-input check dropped (marker dead); fixtures assert final content
+
+**R3 implementation + GREEN (all 4 findings closed):**
+
+1. **composition mode**: `_pdec_mode` init `policy_only` → `"mixed"` ที่ 2 branch (model/item skip :1702, productish-need :1712) — ตัดสินจาก TurnPlan needs + general_qtype ตรงนั้นเท่านั้น; `_rd_extra` ใส่ `"composition"` ใน policy_decision dict
+2. **`_policy_carry` de-delegation**: return_policy eligibility prose + decision marker ถูกถอดออกจาก `_policy_carry` — product LLM เป็น owner เฉพาะ product need (`llm_must_not_contain:["policy_decision"]` pin); `_policy_decision_txt` deleted ทั้งตัว (dead — enforce owns outcome); qtype อื่น carry context ปกติ
+3. **enforce ordering**: handoff→LLM_ERROR escalate→policy compose →`policy_only`=replace whole→return; `mixed`=ordinary tier (escalate/rewrite/spec/model) บน product answer ก่อน แล้ว append deterministic segment เดียว `|||` (idempotent `_final in resp.answer`)→segments rebuild ครั้งเดียว; mixed+empty answer → policy segment alone; dead `:347` `_pdec_active` condition ลบ (return_claim tier ใช้ได้ใน mixed — spontaneous LLM eligibility claim ยังถูก ungrounded-rewrite ก่อน append)
+4. **resolver**: `from_dict` normalize effective_from/until→canonical `YYYY-MM-DD` (`_dt.fromisoformat().date().isoformat()`); until<from→reject; resolve_policy same-id same-day→semantic signature (outcome/reason/conditions/states/shops/subjects/types/required_evidence/priority/until — version/source=provenance excluded) — 1 sig→dedupe, >1 sig→rule_conflict/admin_review naming ambiguous ids, no union; docstring updated
+5. **harness**: `llm_reply` fixture key + expected `answer_contains`/`answer_contains_once`/`llm_must_not_contain`; marker-in-llm-input check ลบ (marker dead); 4 policy fixtures assert final content (model-item+tagged-item = mixed survive, 2 pure = deterministic whole)
+
+**RED→GREEN**: 12 honest RED (mixed destruction×4, error mask×2, ISO×3, false-convergence×2, dead cond) → 117/117 contract; replay 105p; spec-grounding 36/36; compat 144/144; action-switch+turn_decision 150p; guards 27/27; classifier 10/10; qa_context 4/4; validator clean; diff-check clean; py_compile clean
+
+**complexity delta R3**: helpers +0, regex/vocab +0, owners: policy=1 composition=1 (enforce), functions +0 this round, runtime `_policy_decision_txt` var deleted — net deletion; `test_guards.py` script = pre-existing Mongo env blocker unchanged
+
+**remaining blocker**: production required-evidence supply unchanged (activation blocked)
+
+## Phase 5 R4 — Composition-Authority + Event-Time Correction (uncommitted)
+
+**frozen**: HEAD f67c27b, 12M+2U, staging empty, diff clean, 8010 free.
+
+**defects verified:**
+- **M1**: `guards.py:455` `_final not in resp.answer` = prose-membership idempotency — incoming LLM text containing the exact deterministic sentence makes composition silently skipped (no marker/segments); `:324` `answer != _final` skips canonicalization+marker when prose equals final
+- **M2**: `_day(v)=v[:10]` raw slice — `event_time="20240101"` vs canonical rule date compares lexicographically (`"0">"-"` → not pending → wrongly active); `_effective_status:207-211` raw string compare
+
+**plan (0 helpers/vocab/owners):**
+1. enforce: idempotency authority = `guard_rewritten=="policy_decision"` (structural) — drop prose-membership; policy_only always canonicalizes answer+segments+marker; mixed composes at most once (skip when marker set)
+2. `_effective_status`: parse event_time via stdlib fromisoformat → canonical `YYYY-MM-DD` → compare directly against canonical rule dates; malformed/missing + dated rule → unverifiable; `_day` retained only where rule fields need (canonical → can compare directly)
+
+**R4 implementation + GREEN:**
+
+1. **M1 structural authority**: `_final not in resp.answer` ลบ — idempotency = `guard_rewritten=="policy_decision"` เท่านั้น; `policy_only` canonicalize เสมอ (answer+segments+marker แม้ prose ตรง final); `mixed` compose ≤1 ครั้ง → byte-stable re-run; `_day` ลบ (0 refs — canonical compare ตรงๆ)
+2. **M2 canonical event_time**: `_effective_status` parse `event_time` ด้วย `_dt.fromisoformat().date().isoformat()` → malformed/missing+dated rule → `unverifiable` fail-closed; rule dates canonical → compare ตรง; `resolve_policy` `_max_day`/`_tops` ใช้ `effective_from` canonical ตรง
+
+**RED→GREEN**: 4 honest RED (answer==final skips marker / prose-contains-final skips compose / basic event wrongly active / malformed activates dated rule) → 127/127 contract; policy fixtures 4/4; replay 105p; spec-grounding 36/36; general-guards 27/27; action-switch+turn_decision 150p; compat 144/144; classifier 10/10; validator clean; py_compile clean; diff-check clean
+
+**delta R4**: helpers −1 (`_day` deleted), regex/vocab +0, owners unchanged (decision=`resolve_policy`, composition=`enforce`), functions −1, model calls +0
+
+**remaining blocker**: production required-evidence supply unchanged (activation blocked)
+
+## Phase 5 R5 — Mixed-Policy Single-Owner Feasibility Audit (uncommitted — BLOCKED)
+
+**frozen**: HEAD f67c27b, 12M+2U, staging empty, diff clean.
+
+**defect reproduced (HIGH)**: mixed turn — typed eligible + LLM prose "WPB100L ราคา 990 บาทค่ะ เคสนี้เปลี่ยนไม่ได้นะคะ"
+→ final `...เคสนี้เปลี่ยนไม่ได้นะคะ ||| เปลี่ยน/คืนได้ตามเงื่อนไขของทางร้านนะคะ` — สอง policy conclusion ขัดกันตรงๆ
+(`return_claim` rewrite regex ไม่ match "เปลี่ยนไม่ได้" — negation หลุด tier ปกติ, typed segment ต่อท้าย → contradiction ค้าง)
+
+**feasibility audit — typed separation exists? NO:**
+- `ChatResponse.answer`/`answer_segments` = prose blob เดียว; `|||` split เป็น presentation เท่านั้น (app.py:202) — ไม่มี kind/ownership
+- `llm.answer` คืน string เดียว; input = `desc_message = req.message` (app.py:2555→4588) — คำถาม policy อยู่ใน message ที่ product LLM เห็นเสมอ
+- `TurnNeed` มี kind/operation/subject_refs/confidence/provenance/subject_scope/subject_count — ไม่มี per-need question_text → scope input ให้ product LLM ไม่ได้โดยไม่ parse message (forbidden)
+- `_policy_carry` (R3) ตัด eligibility context แล้ว แต่ตัดคำถามใน message ไม่ได้
+- ไม่มี product_answer field / deterministic product renderer
+
+**why every in-contract route fails:**
+1. clause/sentence strip in enforce → prose parsing (forbidden: keyword/regex/sanitizer)
+2. "don't answer policy" instruction / `|||` ordering trust → prompt compliance ไม่ใช่ correctness boundary (forbidden) + LLM เล่นเองได้อยู่ดี
+3. deterministic product render จาก card → เปลี่ยน product answer owner ทั้งระบบ = Phase 8 architecture
+4. per-need scoped input + typed segment → ต้องมี contract ใหม่ทั้งสองฝั่ง = Phase 8
+
+**minimum Phase 8 contract (BLOCKED_BY_TYPED_MIXED_ANSWER_SEGMENT_REQUIRED):**
+1. `TurnNeed` ได้ `scoped_question` (Pass-1 interpretation model emit ต่อ need — schema extension ของ model เดิม ไม่ใช่ extra call/regex split) หรือ product path รับ need-scoped input ที่มาจาก structured fields
+2. response contract มี typed ownership: `product_answer`/typed `answer_segments[{kind,text}]` → enforce compose product text + policy segment เดียวจาก PolicyDecision
+3. ด้วย (1) product LLM ไม่เห็น policy question → ไม่มี trigger ให้ emit conclusion; residual spontaneous-emission risk = baseline เดียวกับ pure product turn (positive claim มี rewrite tier อยู่แล้ว)
+4. ถ้าต้องการ zero-tolerance (mocked injection ต้องรอดไม่ได้เลย) → product text ต้อง deterministic render จาก card — decision ใหญ่กว่า ต้องตัดสินใน Phase 8; typed segment เพียงอย่างเดียวลบ arbitrary prose ใน product blob ไม่ได้โดยไม่ parse
+
+**decision**: หยุดตาม stop condition — ไม่ ship heuristic; runtime ไม่ถูกแตะในรอบนี้
+
+## Phase 5 R5 — Roadmap Correction And Work Transfer (2026-10-20)
+
+**decision:** แก้แผนหลัง feasibility audit ยืนยันว่า mixed product+return-policy ปิดให้ปลอดภัยใน Phase 5 ไม่ได้ด้วย `answer`/`answer_segments` แบบ prose ปัจจุบัน โดยไม่ใช้ keyword/regex sanitizer หรือเชื่อ prompt compliance. Historical R3/R4 evidence คงไว้ แต่ไม่ถือเป็น activation approval.
+
+**Phase 5 closeout scope:** เก็บ typed `PolicyResolver`, required-evidence gate, identity-scoped field evidence, compatibility proof, canonical rule/event dates, deterministic `policy_only`, error/handoff ordering. ถอนหรือ disable automatic mixed textual composition; mixed return-policy ต้อง fail closed เป็น admin review/handoff และคง product cards ได้เฉพาะที่ไม่ทำให้เกิด policy prose สองเจ้าของ.
+
+**moved work:**
+- **Phase 6:** ขยาย owner เดิม `classify_intent → decide_turn → TurnPlan` ให้ independent needs มี requested fields/ranking/relation/typed scope; ห้ามสร้าง planner/model call ใหม่; ลบ semantic keyword branch ที่ถูกแทนใน diff เดียวกัน.
+- **Phase 7:** สร้าง need-scoped product request/`AnswerContext`; product LLM ห้ามได้รับ return-policy question/context; prompt instruction อย่างเดียวไม่ใช่ correctness boundary.
+- **Phase 8:** typed answer ownership (`product`/`policy`/`claim`) + finalizer เดียว; `PolicyDecision` render policy segment เดียว; mutation test ต้องกัน typed eligible+LLM denial และ typed ineligible+LLM approval ก่อนเปิด mixed automatic answering.
+
+**next immediate task:** Phase 5 closeout correction — deactivation/fail-closed mixed path, focused RED→GREEN, regression, final pre-commit review. Logging/Analytics Truth เริ่มหลัง Phase 5 commit ตาม sequencing เดิม.
+
+## Phase 5 Final Closeout — Mixed Fail-Closed Deactivation Plan (uncommitted)
+
+**frozen**: HEAD f67c27b, 14-entry manifest, staging empty, diff clean. Roadmap transfer entries verified present (Phase 6 per-need interpretation / Phase 7 need-scoped context / Phase 8 typed segments).
+
+**earliest defer point**: `app.py:1689-1729` — `_pdec = resolve_policy(...)` สำเร็จแล้ว (return_policy), `_subject_cards`/`anchor_card` materialized (1564-1581), `llm.answer` ยังไม่ถูกเรียก (4587). เงื่อนไข defer = `_pdec is not None` และเข้าเงื่อนไขสอง branch เดิมที่เคย set `composition=mixed`:
+- `return_policy + (_current_has_model or _tagged_item_id)`
+- `return_policy + _productish_need + (_subject_cards | anchor_card | _hybrid_anchor_card)`
+
+**plan (0 helpers/regex/modules/model calls):**
+1. app.py: mixed return-policy turn → `_send_handoff(reason="policy_mixed_review")` ก่อน product LLM → success = `handoff_to_admin=True` + `_POLICY_TEXT_ADMIN_REVIEW`; failure = `handoff_to_admin=False` + `HANDOFF_FAILED_REPLY`; products = already-resolved cards เท่านั้น (ไม่ fetch เพิ่ม); `routing_decision` คง `policy_decision` diagnostic
+2. enforce: `HANDOFF_FAILED_REPLY` = terminal (identity check เหมือน `LLM_ERROR_REPLY`) ก่อน policy block — typed render ห้ามกลืน failed transport; ลบ `_pmode`/`_pdec_composed`/mixed append branch; `not answer`+`_pdec_active` sub-branch กลายเป็น dead (policy_only return ก่อนเสมอ) → ลบ
+3. app.py: ลบ `_pdec_mode` + serialized `composition` ใน `_rd_extra`; return_policy ที่ไม่ defer → pure general flow (policy_only)
+4. fixtures: `pos-policy-return-model-item`/`tagged-item` → action=handoff + admin-review answer + llm_calls=0; contract tests เขียนใหม่สำหรับ deferred contract
+
+**closeout implementation + GREEN:**
+
+1. `app._chat_impl`: defer block ที่ `general_qtype` block หลัง `resolve_policy` — `_pdec` + (`_current_has_model`/`_tagged_item_id`/productish+subjects) → `_send_handoff(reason="policy_mixed_review")` ก่อน product LLM → ok=admin-review text + `handoff_to_admin=True`; fail=`HANDOFF_FAILED_REPLY` + flag False; products=already-resolved cards (subject/ref_regex/anchor dedup by identity, cap req.limit — ไม่ fetch เพิ่ม); `routing_decision` คง `policy_decision`+`subject_ids` diagnostics
+2. `guards.enforce`: `HANDOFF_FAILED_REPLY` terminal (identity check) ก่อน policy block; mixed append branch + `_pmode`/`_pdec_composed` + dead empty-answer sub-branch ลบ; `policy_only` render เหลือเส้นเดียว
+3. `_rd_extra`: serialized `composition` + `_pdec_mode` ลบ
+4. fixtures: pos-policy-return-{model,tagged}-item → action=handoff + `llm_max_calls:0` + admin-review answer + `turn_decision_expect:execute_needs` (plan=execute_needs, response=handoff — ความจริงสองชั้น); `llm_reply` ตั้ง contradictory trap (ไม่ถูกเรียก)
+5. tests: ลบ mixed-activation tests (R3×6+R4×4) → closeout contract tests (terminal/stale-key/no-append) + 7 app.chat boundary tests (defer/cards/4-outcomes/failure/controls)
+
+**RED→GREEN**: 9 honest RED (terminal overwrite + 2 fixtures + 6 boundary) → contract 124/124; replay 114p/19s/4x; spec-grounding+general-guards+action-switch+turn_decision+shadow+qa_context+recent_qa 337p; compat 144/144; classifier 10/10; handoff_transport 47/47; warranty_delivery 11/11; claim/5f/phase2 scripts exit 0; validator clean; py_compile clean; diff-check clean; shadow fixture contract green
+
+**mutation proof**: defer bypass→llm_calls≥1 fail; fake-success→flag=True fail; eligible-on-mixed→admin-review assert fail; policy_only bypass→9 deterministic fails — all reverted, 0 residue
+
+**delta closeout**: helpers +0, regex/vocab +0, functions ±0 this round, model calls +0; deleted machinery: `_pdec_mode`, serialized `composition`, mixed append branch, `_pdec_composed`, 10 mixed tests; owners: decision=`resolve_policy`, render=`enforce`, transport=`_send_handoff`
+
+**remaining blocker**: production required-evidence supply unchanged (activation blocked — pure policy renders `unknown`/`admin_review` text never eligible); `test_guards.py` Mongo env blocker unchanged; mixed auto-answer stays OFF until Phase 6/7/8 gates
+
+## Phase 5 R6 — Pure return_policy unknown/admin_review → authoritative handoff (uncommitted)
+
+**defect (High) verified from source**: `active_policy_rules()` production → `()` → pure return_policy resolves `unknown` → defer block skips (no productish need) → `general_qtype` flow calls `llm.answer_general` (wasted model call) → `enforce` renders `_POLICY_TEXT_ADMIN_REVIEW` → **no `_send_handoff`** — customer told admin will review, nobody notified.
+
+**plan — restructure existing `_pdec` defer block into ONE decision/action owner:**
+- `_pd_mixed` = existing mixed condition (unchanged)
+- `_pd_mixed` OR outcome ∈ {unknown, admin_review} → `_send_handoff` ครั้งเดียว — reason `policy_mixed_review` / `policy_review_required`; success → `_POLICY_TEXT_ADMIN_REVIEW` + flags; failure/no conv_id → `HANDOFF_FAILED_REPLY`, flag False
+- pure eligible/ineligible → deterministic `_POLICY_TEXT_*` return ตรง (zero model, no handoff; enforce re-render same bytes + marker = byte-stable)
+- `_pd_cards` dedup เดียวแชร์ทั้งสอง branch; `image_desc=_image_desc_out` เพิ่มทั้ง returns (schema parity)
+- dead after restructure: pure return_policy → answer_general unreachable (shared block เหลือสำหรับ qtype อื่น)
+- fixtures: tx-policy-wrong-model-filter → `llm_max_calls:0` (แทน `llm_general_qtype`); pos-policy-seller-wrong-item → +`llm_max_calls:0`
+- `test_r5_pure_policy_still_deterministic` rewrite → llm_calls==[], no handoff
+
+**test-isolation defect found + fixed (handoff_transport stub bypass):**
+
+- error: combined `pytest` batch (5 files) hang >11min ~100% CPU — `pymongo_server_monitor_thread` churn `sock_connect`/`socket_getaddrinfo`, main thread park ใน `topology._select_servers_loop`/`threading.wait` — **unintended Mongo connection attempt** เกิดระหว่าง collection; **ไม่มี successful connection / Mongo write ที่สังเกตได้**
+- เพราะ: `test_handoff_transport.py` stub ด้วย `sys.modules["shopeechat.X"] = stub` เพียงทางเดียว — แต่ `warranty_flow:1110` ใช้ `from . import conversation_products` ซึ่ง resolve ผ่าน **package attribute** `shopeechat.conversation_products` ก่อน; เมื่อ `test_phase2c3_action_switch` (line 36→replay→`shopeechat.app`, line 46 `from shopeechat import conversation_products`) import module จริงมาก่อน → package attr ชี้ของจริง → stub bypass → `load_claim_state` → `_coll` → `_admin_db` → `_build_admin_client` → `MongoClient()` construct + `admin.command("ping")` attempt → park (host unreachable) — faulthandler dump พิสูจน์ chain ที่ `test_handoff_transport.py:416` (L2 legacy first-message claim)
+- แก้ด้วย: `_stub_module(name, mod)` inject ทั้ง `sys.modules` และ `setattr(package)` ทั้ง 6 stubs (conversation_products, llm, app, product_store, warranty, knowledge_base); `setdefault` → forced assignment (real module อาจถูก import มาก่อน) — test file เท่านั้น production ไม่แตะ — **fix กัน recurrence**
+- evidence wording ที่ถูกต้อง: combined `--collect-only` จบด้วย `SystemExit` INTERNALERROR = **ไม่ใช่ green suite** (script-style quirk เดิม ไม่แก้ใน round นี้); `test_handoff_transport.py` verified **เฉพาะ script mode** 47/47; ไฟล์ pytest ที่เหลือ verified แบบ individual เท่านั้น — manifest 14→15 (test file ใหม่เข้า diff)
+
+**R6 implementation + GREEN:**
+
+1. `app._chat_impl` `_pdec` block restructured เป็น decision/action owner เดียว: `_pd_mixed` OR outcome ∈ {unknown, admin_review} → `_send_handoff` 1 ครั้ง (`policy_mixed_review`/`policy_review_required`); success → `_POLICY_TEXT_ADMIN_REVIEW` + flags; fail → `HANDOFF_FAILED_REPLY`; pure eligible/ineligible → deterministic `_POLICY_TEXT_*` return ตรง zero-model; `_pd_cards` dedup แชร์; `image_desc` ทั้ง returns; `routing_decision` คง decision diagnostics
+2. fixtures: tx-policy-wrong-model-filter `llm_general_qtype`→`llm_max_calls:0`; pos-policy-seller-wrong-item +`llm_max_calls:0`
+3. tests: `test_r5_pure_policy_still_deterministic` rewrite; +6 R6 tests (unknown-production-empty, admin_review, failure, eligible, ineligible, param)
+
+**RED→GREEN**: 6 honest RED (`answer_general` ran on pure turns: context=`ยังไม่มีข้อมูลนโยบายรับคืน...` + llm_calls=[{fn:answer_general,qtype:return_policy}]) → 14/14 focused; contract+replay 243p/19s/4x
+
+**mutation proof (4/4, reverted, 0 residue)**: bypass handoff→`handoffs==0` fail; success-wording-on-failure→`answer==HANDOFF_FAILED_REPLY` fail; owner-block bypass→`answer_general` calls fail; eligible→handoff→`handoffs==[]` fail
+
+**owners**: decision=`resolve_policy`, render=`enforce` (policy_only+marker), transport=`_send_handoff`, action gate= `_pdec` block เดียว — no duplicate path; helpers/regex/keyword/model calls +0; `active_policy_rules()` ยัง `()` production
+
+## Phase 5 — pre-commit gate (staged 14, log unstaged)
+
+**full-diff audit (15 files ทุก hunk)**: findings = **0 Critical/High/Medium** — audit verified: resolve_policy sole eligibility owner (empty records→unknown); R6 owner block single handoff/deterministic; mixed fail-closed unchanged; FieldEvidence identity-scoped + intent≠proof; HANDOFF_FAILED_REPLY terminal; no new helpers/keywords/regex/model calls; `_send_handoff` ยัง transport owner เดียว; `active_policy_rules()` ยัง `()`
+- info note: `qtype != warranty_policy` → `== shipping_policy` ทำ desc-scrape หายจาก brands/categories/shops/tax_invoice ด้วย (prose ไม่เกี่ยว — noise reduction, ตั้งใจตอน R3); warranty-fallback ยังเรียก scrape ได้ (kb:459 เมื่อไม่มี FAQ) — SRS/roadmap ถูกอยู่แล้ว
+
+**verification (fresh, per-file เท่านั้น — no combined run)**: focused r5/r6 14p · contract 124p · replay 119p/19s/4x · spec_grounding 36p · action_switch 39p/1s/1x · turn_decision 111p · unit_classifier 10/10 (script) · handoff_transport 47/47 (script) · compat 144/144 (script) · warranty_delivery 11/11 (script) · validator clean · py_compile 11 files · diff-check clean — script-mode counts ≠ pytest results (รายงานแยก)
+
+**secret/artifact scan**: staged diff — env names เท่านั้น (MONGO_DB/COLL/HF_OFFLINE = names not values), `token` = code identifiers, URLs = fixture `s.shopee.co.th/fx*` synthetic; no absolute paths, no credentials, no debug prints, no pycache — clean
+
+**staged**: 14 entries (7 runtime + SRS + roadmap + fixtures + 4 test files) — `getoutofmywaybotkaikrook2.md` = sole unstaged file; `git diff --cached --check` clean; **no commit/push/PR**
+
+**remaining blockers**: production policy-record supply (activation gate — `active_policy_rules()→()`); `test_guards.py` Mongo env blocker (pre-existing); `test_handoff_transport` sys.exit-at-collection quirk (script-mode design, verified script only); mixed auto-answer → Phase 6/7/8 exit gates
+
+## ✅ Phase 5 — COMMITTED (closeout)
+
+**Commit 1**: `14c6998d4d8fbe0fee59a125a7d6d0d6ea5bfdfd` — `refactor: make policy decisions evidence authoritative` — 14 files (+3254/−118): runtime `app/device_compat/guards/intent_classifier/knowledge_base/units/policy_resolver(new)` + `SRS_SSD` + rebaseline plan + fixtures + `test_handoff_transport/test_legacy_turn_incident_replay/test_phase5_field_policy_compat(new)/validate_legacy_turn_fixtures`
+
+**contracts closed**: (1) `PolicyDecision`/`resolve_policy` = typed eligibility owner เดียว (empty records→unknown, conflict/missing-evidence→admin_review, deterministic precedence); (2) `FieldEvidence` identity-scoped per subject — missing = unknown ไม่ใช่ negative; (3) `resolve_compat` evidence-based compat (intent/kb_inherit hint ≠ proof); (4) pure eligible/ineligible = deterministic zero-model; (5) unknown/admin_review = `_send_handoff` authoritative handoff ครั้งเดียว (`policy_review_required`); (6) mixed product+policy = fail-closed `policy_mixed_review` ก่อน product LLM; (7) failed transport = `HANDOFF_FAILED_REPLY` terminal ที่ enforce
+
+**frozen verification counts**: pytest per-file — focused r5/r6 14p · contract 124p · replay 119p/19s/4x · spec_grounding 36p · action_switch 39p/1s/1x · turn_decision 111p; script-mode — unit_classifier 10/10 · `test_handoff_transport.py` 47/47 · compat 144/144 · warranty_delivery 11/11 (script counts ไม่ใช่ pytest); validator clean; py_compile×11; `git diff --check`/`--cached --check` clean — combined pytest `SystemExit INTERNALERROR` ไม่ claim เป็น green เด็ดขาด
+
+**Mongo evidence**: 1 unintended connection attempt ตอน combined collection (`test_handoff_transport:416`→`warranty_flow:1110`→`conversation_products` real module ผ่าน package attr) — ไม่มี successful connection/write; แก้ด้วย `_stub_module` inject ทั้ง sys.modules+package attr (test-only)
+
+**complexity delta**: helpers/guards/keywords/regex/model calls +0; owners: decision=`resolve_policy`, compat=`resolve_compat`, render=`enforce`, transport=`_send_handoff`, action=`_pdec` block — no parallel old/new path
+
+**work transferred**: Phase 6 structured per-need interpretation (`classify_intent→decide_turn→TurnPlan` เดิม) · Phase 7 need-scoped product request/context · Phase 8 typed answer segments + one finalizer — mixed auto-answer เปิดได้เฉพาะเมื่อ gates ครบ
+
+**remaining blocker**: `active_policy_rules()` ยัง `()` — production policy-record supply = activation gate; `test_guards.py` env blocker; `pos-fail-sku-bypass` xfail
+
+**no push/PR/deploy/.env/provider/services** — Phase 6 ยังไม่เริ่ม
+
+## Phase 6 — One Selector With Structured Per-Need Coverage (plan)
+
+**baseline (frozen @542a5ba, tree clean)**: turn_decision 111p · subject-set (conversation_products) ยังไม่รันเต็ม · selection/pool suites pass · incident replay 119p/19s/4x (xfail: inc-ad1404t-relation, tx-q10-cert-scope, tx-q22q25-*, iss30) · validator 72 fixtures clean · py_compile owner modules clean
+
+**owner map (source-audited)**: semantic=`intent_classifier.classify_intent`(1 call)+`turn_decision.decide_turn`(1 call) → `TurnPlan`; identity=`candidate_pool._identity_key`+`route_context` codes; subject-set=`conversation_products` (`get_subject_set`≤1, `resolve_subjects`≤1, `materialize_subject_cards`); need=`TurnPlan/TurnNeed`; pool=`build_candidate_pool`; selector=`retrieval_selection.select_for_llm_context` (1 owner); availability=`product_store.resolve_availability`→`retrieval_policy._canonicalize/_bucket`; compat=`device_compat`; policy=`policy_resolver.resolve_policy`; answer=`llm.answer`+`guards.enforce`+deterministic replies
+
+**structured fields existing**: TurnNeed{kind,operation,subject_refs,confidence,provenance,subject_scope,subject_count}; profile{types,subtype,codes,target_device,availability_mode,compat_mode,anchors,fact_sources}; slot/relation/request เต็ม scope+constraints; card canonical_{type,roles}+publish/stock/visibility/sellable; subject refs+set+persisted lifecycle
+
+**missing (proved by audit → add on TurnNeed เท่านั้น)**: `product_types`/`subtypes` (need-level scope สำหรับ per-need request attribution — req มีแต่ need ไม่มี), `target_device` (compat/device need bind — app.py:4627 ยังอ่าน intent ตรงหลัง plan), `ranking`=(field,"max"|"min") (superlative เป็น kw-table re-decision ใน app.py:3856+ ไม่มี structured owner)
+
+**semantic branches after TurnPlan (inventory)**:
+- superlative kw tables `_SUPERLATIVE_KW/_watt_kw/_cap_kw/_weight_kw` + nested extractors (app.py ~3856-3919) → REPLACE: `TurnNeed.ranking` (mapping ย้าย→route_context) + selector ordering; extractors mah/weight ย้ายไป device_compat เคียง `_extract_max_wattage`
+- `_compat_target_device=intent_result.get("target_device")` (app.py ~4627) → REPLACE: `_retrieval_profile.target_device` (facts owner เดียวกัน)
+- other-model filter (`is_other_model_question` kws + bot-prose regex ~2986-3006/3924+) → RETAINED-BLOCKED: flag-off legacy preselection + prose-parse; canonical replacement = subject-exclusion ใน selector (defer)
+- history subtype/type carry (3079+) + `_superlative_followup` gates (2926/3009/3019/3064/3213/3671/3692) → RETAINED-BLOCKED: flag-off path only (canary `_sel_flag` discards `products`)
+- `conversation_products` resolver kw tables (_SUBJECT_PAIR/LINK/SAME_PRODUCT) → RETAINED: resolver fallback path เมื่อไม่มี structured signal (existing contract)
+- ref-name mongo regex fallback (~3997-4038) → RETAINED-BLOCKED: flag-off legacy fetch path
+
+**call graph before**: classify(1)→decide_turn(1)→resolve_subjects(≤1)→profile/slots/relations/requests/executor/pool→select_for_llm_context(1 per turn)×2 sites(KB ~2443, main ~4658)→`products`→(flag-off ยัง sort/filter/append; flag-on discard)→llm.answer→enforce
+
+**call graph after**: เหมือนเดิม + `needs` เข้า `run_grouped_selection→select_for_llm_context`; selector ทำ per-need attribution+dedupe+roles(subject/relation_target/alternative/historical_evidence/slot; hidden_mention=rejected-only)+`by_need`/`uncovered_needs`; intent `product_type`∈charger-subtype domain normalize→subtype proposal (resolve_route+profile boundary เดิม); `build_retrieval_relations` เพิ่ม reversed-order `ที่ใช้กับ` (target ก่อน connector); `_compat_target_device`←profile; superlative sort อ่าน `plan.ranking` แทน kw tables (kw tables/extractors inline ลบ)
+
+**AD1404T root cause**: msg="อยากได้สายที่ใช้กับ AD1404T ..." — 'สาย' bare ไม่ใช่ subtype kw → subtype=None; relation parser forward-order เท่านั้น (target ต้องอยู่หลัง connector) → miss; intent product_type='cable' ไม่ normalize เข้า subtype (ไม่ใช่ type name) → profile types={charger} ไม่ cover cable
+**fix**: (a) intent product_type∈_CHARGER_SUBTYPES → subtype proposal (types ยัง pure); (b) relation parser: `ที่` นำหน้า connector → target ฝั่งก่อน (`สาย` shorthand→cable / kw mention), source=code/kw หลัง connector, constraints=tail หลัง source, ask-marker gate กัน claim sentence; (c) harness L1 coverage check union subtypes เข้า type domain (สอดคล้อง `_bucket` eff_types/`_request_covers`) → fixture flip GREEN (status incident→positive in same diff)
+
+**gates**: no 2nd planner/LLM/keyword-table owner; per-request quota เดิม; dedupe identity precedence subject>relation_target>historical_evidence>alternative>slot; promoted unavailable published→subject, discontinued/snapshot→historical_evidence; `customer_hidden`→rejected label `hidden_mention` เท่านั้น; mixed product+policy handoff คง (Phase 5); no stage/commit/push/services/.env/8010
+
+## Phase 6 — complexity-correction round (H1/M1/M2)
+
+**review findings (verified กับ source ก่อนแก้ — ทั้ง 3 จริง)**
+- H1: `_need_types/_need_subtypes/_need_ranking` เป็น turn-scoped vars → `_add_need` stamp เหมือนกันทุก productish need — probe "พาวเวอร์แบงค์แนะนำ + สายใช้กับ AD1404T" compat need ได้ {charger,powerbank}+wattage ranking (scope รั่วข้าม need)
+- M1: `SelectionResult.by_need/uncovered_needs` = test-only — production readers 0 (แค่ selection internals + 2 tests) → Phase 7 surface ดึงมาก่อนเวลา
+- M2: `_REL_ASK` marker table สร้างใหม่เพื่อกัน claim sentence ("สายที่ใช้กับ X เสีย") — semantic kw gate ใหม่ผิดกฎ; structured signal ที่มีอยู่ = `profile.intent` (resolved — warranty_claim→claim)
+
+**fixes**
+- H1 → per-producer scope ใน `_add_need`: product/compare = route∪intent scope (≥0.7); compat = intent scope ∪ kw mentions ใน connector window ±30 (`_REL_CONN_RE` — mention นอก window เป็นของ ask อื่น); non-productish = ว่าง; แยกตัวแปร `_compat_types/_compat_subtypes` ออกจาก product scope; merge same-kind need รวมเฉพาะ field ตัวเอง
+- M1 → ลบ `by_need`/`uncovered_needs`/`_need_key` + coverage-report block + 2 tests — เหลือ `_needs_for_request` (ranking attribution ที่ `need.ranking` sort ใช้จริง)
+- M2 → ลบ `_REL_ASK`; gate = `profile.intent ∈ {claim,warranty}` → `()` ที่หัว `build_retrieval_relations` (eligibility เดิม `_REL_QUESTION` forward เท่านั้นคงไว้); reversed branch ยัง structural parse (head-type ก่อน "ที่"+conn, source หลัง)
+- consolidation เพิ่มเติม: `_intent_charger_subtype`+`_intent_product_type` รวมเป็น `_intent_product_scope` เดียว; rank-extractor dispatch ย้ายไป `device_compat.spec_rank_key`/`_SPEC_RANK_EXTRACTORS` (owner เดียว — app.py map + selection name-map ลบทิ้ง); `_rank_key_fn` shim ลบ; `_needs_for_request` ปรับโครงสร้าง semantics เดิม
+
+**red→green**: mixed-scope test RED (compat need มี powerbank) → GREEN หลัง per-producer scope; AD1404T request/claim pair ยังผ่าน (request parse ครบ, claim blocked ผ่าน intent gate)
+
+**verified**: 465p/20s/3x focused batch (phase6+turn_decision+selection+runtime+profile+relations+replay+source_union+5f+profile_db+profile_hints) · 177p sweep หลัง consolidation · py_compile · diff --check clean — xfail/skip เป็น baseline เดิม (ไม่ claim green)
+
+**complexity**: runtime `+386/−81 = +305 net` (จาก +333 — ลบ speculative ~50, เพิ่ม honest per-need ~20) — floor = reversed parser ~75 + need-scope contract ~75 + selector needs/roles/dedupe ~105 + moved code ~45; tables: `_RANK_FIELD_KWS` ย้าย verbatim (bare "w" quirk เดิมคง), `_ROLE_RANK`/`_SPEC_RANK_EXTRACTORS`/`_PRODISH_NEED_KINDS`/`_SCOPE_NEED_KINDS` = precedence/dispatch/domain maps ไม่ใช่ semantic kw; **new semantic kw tables = 0**
+
+**residual**: compat-parity wattage sort ผูก relation_target/compat-source requests (slot reqs attribute product need) — ตรง old-behavior scope; bare-"w" quirk pre-existing ไม่แก้จนกว่า regression จริง
+
+## Phase 6 — final ownership correction (H1 bidirectional + H2 typed eligibility)
+
+**H1 root cause**: scope block ยัง union route scope (turn-wide) เข้า product need + connector-window reconstruction (±30) เป็น second parser ใน decide_turn — "พาวเวอร์แบงค์แนะนำ + สายใช้กับ AD1404T" product need ได้ {charger,powerbank} (charger รั่วจาก compat ask)
+**fix**: scope = per-producer structured evidence เท่านั้น — product/compare (`_SCOPE_NEED_KINDS`) รับ intent product scope (≥0.7); compat/อื่น ว่างเสมอ (relation scope = RetrievalRequest downstream); ลบ window block + `_compat_types/_compat_subtypes/_need_types/_need_subtypes/_route_subs` + cross-module `_kw_type_mentions/_mention_subtype` calls (`_REL_CONN_RE` เหลือเฉพาะ compat detection เดิม baseline); ranking_compat rebase: route∪intent ∩ {charger,powerbank} (parity เดิม — fix under-fire เมื่อ intent ไม่ใช่ compatibility_check เช่น AD1404T recommendation)
+**verify**: bidirectional test — product={powerbank} ไม่มี charger/cable; compat=∅ ไม่มี powerbank; compat ranking wattage เท่านั้น, product None
+
+**H2 root cause**: `profile.intent` gate ยังเป็น prose-derived boundary + "other" intent pass ผ่าน (AD1404T recommendation→other ต้องการ relation แต่ claim→other ก็ผ่านได้ถ้า pattern ตรง — ไม่มี typed boundary)
+**fix**: `build_retrieval_relations(profile, slots, *, allow_reversed=False)` — reversed branch เฉพาะเมื่อ flag; caller (`run_grouped_selection`) derive `any(n.kind in _PRODISH_NEED_KINDS for n in needs)` — TurnPlan productish need = typed eligibility; claim/warranty-only/absent/malformed → fail closed; ลบ profile.intent gate (forward unchanged)
+**verify**: matrix test — productish→rel, claim-only needs→(), needs=()→(), unknown intent→(), malformed intent→decide_turn raise (fail closed ที่ plan boundary), mixed product+claim→productish governs
+
+**delta**: runtime `+381/−84 = +297 net` (turn_decision 55/1 — window ลบ; route_context 124/11; runtime 8/2) · tests: 151+294 green (21s/4x baseline) · validator 72 rows pass · compile+diff-check clean
+**residual**: `retrieval_shadow` ไม่มี needs → allow_reversed=False (fail closed — shadow อาจขาด reversed relation ใน diagnostic, observe-only); `need.product_types/subtypes` consumer เดียว = `_needs_for_request` ranking attribution
+
+## Phase 6 — intent boundary + shadow parity correction
+
+**findings (verified)**: (1) `float(intent.get("confidence") or 0.0)` ใน decide_turn raise บน malformed confidence — มี raw float() 3 จุด (app:1286, route_context resolve_route, turn_decision) = ไม่มี normalization owner; (2) `_PRODISH_NEED_KINDS` เป็น private const ของ selector ถูก import โดย runtime — kind domain ไม่มี owner จริง; (3) `retrieval_shadow` ไม่รับ needs → allow_reversed=False เสมอ แตกต่าง production
+
+**fixes**
+- `route_context._intent_confidence` = normalize owner เดียว (malformed/missing → 0.0); consumers 3 จุด (turn_decision, resolve_route, app) ลบ raw float() ทิ้ง — consumer ห้าม convert ซ้ำ; `_intent_product_scope` harden non-str → None (boundary เดียวกัน)
+- `PRODUCTISH_NEED_KINDS` ย้ายเป็น public const ใน turn_decision (owner ของ TurnNeedKind); runtime+shadow import ตรง, selection import alias `_PRODISH_NEED_KINDS` — domain owner เดียว
+- `run_grouped_retrieval_shadow(needs=())` + derive `allow_reversed` เหมือน production พอดี (typed contract เดียวกัน); app.py shadow callsite ส่ง `_turn_plan.needs`; absent needs → fail closed เหมือนเดิม
+
+**verify**: malformed suite (garbage/object/list/dict → conf 0.0, plan+profile รอด, intent scope gated off); shadow/prod spy parity [True] vs [True, False]; 573 tests green (26+360+187); raw float(confidence) sites = 0; kind domain owner = 1; banned symbols = 0
+
+**delta**: runtime `+402/−88 = +314 net` (shadow +6/1, route_context +13 normalize owner, turn_decision +6); helpers ใหม่: `_intent_confidence` (replaces 3 raw conversions)
+
+## Phase 6 — bounded confidence + final pre-commit gate
+
+**finding**: `_intent_confidence` รับแต่ TypeError/ValueError — boundary รั่ว: `"NaN"→nan`, `"Infinity"/inf/-inf→ผ่าน`, `True→1.0` (bool เปิด gate ≥0.7 → intent scope ถูก apply!), `-0.1`/`1.1`→ผ่านนอก range
+
+**fix**: rename เป็น public `route_context.intent_confidence` (cross-module owner เดียว) — bool reject ก่อน, `float()` + `math.isfinite` + `0.0<=c<=1.0`, อื่นทั้งหมด → 0.0; `_intent_product_scope` → `intent_product_scope` (consistency เดียวกัน — cross-module consumers 4 จุด)
+
+**audit**: flags OFF (env default "0" ทั้ง selection+shadow); zero banned symbols; no parallel paths; selector dedupe/roles คงเดิม; media paths ผ่าน replay ทั้งหมด
+
+**verify**: boundary suite 13 cases + malformed suite; 555 tests green (phase6 27 + turn_decision + profile/db/hints + relations + selection + runtime + shadow + replay + union + subject_set + action_switch + 5f + grouped_executor + units); validator pass; compile clean; diff --check clean
+
+**delta**: runtime `+408/−88 = +320 net` (route_context +6 จาก bounded impl + import math)
+
+## Phase 6 — test isolation correction (parity test hang)
+
+**incident**: `test_shadow_and_production_same_reversed_eligibility` mock เฉพาะ `build_retrieval_relations` — shadow calls ยังใช้ `fetcher=None`/`legacy_fetcher="auto"` → executor เดินทางเข้า real retrieval (Mongo/unit/legacy) → suite ค้างที่ test นี้ (reproduce: 16 tests ผ่านแล้วหยุด, ต้อง interrupt)
+
+**fix (test-only, runtime frozen)**: monkeypatch ทั้ง 2 module bindings — `build_retrieval_relations` (spy เดิมเก็บ flag) + `execute_grouped_retrieval_requests` → `()`; ลบ manual save/restore + try/finally; executor = leaf boundary เดียวที่ตรง purpose (verify eligibility derivation)
+
+**verify**: parity test alone 0.96s; suite standalone 27 passed 0.40s (~1.7s wall) — no hang; batch 528 passed; compile/validator/diff --check clean; runtime numstat unchanged (+408/−88 = +320 net) — zero production bytes รอบนี้
+
+## Phase 6 — CLOSEOUT (committed)
+
+**commit**: `ee6cf63` `refactor: make retrieval selection need authoritative` (17 files, +1136/−121) — parent `542a5ba`
+
+**ownership contracts**
+- `TurnNeed` = per-need structured contract เดียว: `product_types`/`subtypes` เฉพาะ product/compare (intent scope ≥0.7, `intent_product_scope`); compat/อื่น = ว่าง — relation scope เป็น RetrievalRequest/relations owner เดิม; `ranking` = (canonical field, max|min) จาก `detect_ranking` ∪ compat parity
+- mixed scope isolation ทั้งสองทิศ: product/recommend = {powerbank} เท่านั้น, compat = ว่าง (ไม่ inherit กัน)
+- selector = 1 execution ต่อ turn บน canonical pool; request→need attribution + `need.ranking` sort + identity dedupe + role precedence (subject>relation_target>historical_evidence>alternative>slot; hidden_mention label-only)
+- reversed relation (`สายที่ใช้กับ AD1404T`) eligible เฉพาะ typed productish need — `PRODUCTISH_NEED_KINDS` owner = `turn_decision`; production + shadow derive `allow_reversed` เหมือนกัน (absent needs → fail closed)
+- `intent_confidence` (public, `route_context` owner เดียว) — bool/non-finite/out-of-range/malformed/missing → 0.0; consumer ห้าม raw `float()` ซ้ำ (3 raw sites ถูกแทนที่)
+
+**removed**: `SelectionResult.by_need`/`uncovered_needs`/`_need_key` (Phase 7 surface — deferred to AnswerContext เมื่อมี consumer จริง), `_REL_ASK` (semantic kw gate), app.py ranking kw tables + nested extractors + `_rank_extractors` map + `_RANK_EXTRACTOR_NAMES` + `_rank_key_fn` shim, ±30 connector-window scope reconstruction, `profile.intent` eligibility gate, raw `float(confidence)` ×3
+
+**new semantic kw tables**: 0 (`_RANK_FIELD_KWS` ย้าย verbatim)
+
+**flags**: `USE_GROUPED_RETRIEVAL_SELECTION` + `USE_GROUPED_RETRIEVAL_SHADOW` = OFF (env default "0") — pipeline เดิมยังเป็น production path
+
+**verification**: Phase 6 suite 27/27 (~0.4s, parity test isolated ด้วย monkeypatch executor — ก่อนหน้าเคย hang ที่ legacy_fetcher="auto"); affected batch 528 passed/21 skipped/4 xfailed (baseline-identical); fixture validator 72 rows; py_compile clean; diff --check clean; runtime delta +408/−88 = +320 net
+
+**deferred**: Phase 7 = need-scoped AnswerContext (unanswered_needs/card-cap/web-gate/token measure — ยังไม่ implement); Phase 8 = typed answer composition
+
+**safety**: ไม่มี push/PR/deploy/.env/Mongo/provider/botworker/8010; staging empty หลัง commit
+
+## Phase 7 — Bounded AnswerContext + Pre-Answer Web Gate (PART 0-2 · รออนุญาต implement)
+
+**baseline**: branch `feature-phase3-aswer-quality` @ `ef70e83` (Phase 6 closeout `ee6cf63`+`ef70e83` verified) · clean tree · staging empty · focused baseline GREEN (offline): phase6+selection_runtime+shadow = 47p · policy/guards/qa_ctx batch = 124p · flags `USE_GROUPED_RETRIEVAL_SELECTION`+`USE_GROUPED_RETRIEVAL_SHADOW` = OFF
+
+**สั่งทำ**: one `AnswerContext` compiler — typed Phase 6 output → sole product-answer LLM input ใต้ grouped-selection flag + pre-answer web gate · phase นี้ own context construction + web admission เท่านั้น (final answer composition = Phase 8) · ห้าม enable flags/mixed product+policy auto-answer/botworker/rollout · ห้าม stage/commit
+
+**PART 0 — owner map (verified from source)**
+- `llm.answer` callsites: `app.py:2482` (KB path — `products=merged_products`, msg=`req.message`, extra=`_vision_context+_hybrid_extra_ctx+_kb_device_extra`) · `app.py:4655` (main — `products=products`, msg=`desc_message`, extra=`_combined_extra`) · `web_search.py:972` (LLM2 ใน `reanswer` — `products=_final_products` (merged ใหม่+เก่า), extra=search_info+kb_context) · `chat_v2.py:1390` = engine แยก (USE_LEGACY_CHAT≠1) — out of scope
+- fixed limits: `_LLM_CONTEXT_LIMIT=30` (app:378, override `req.llm_context_limit`) · `per_request_limit=3`/`unavailable_limit=5` (retrieval_runtime) · `_merge_limit=max(30*4,80)` compat (4291) · slices: 2544/3879/4645/2469 · `exact[:3]` (4204) · `unlist[:2]` (4276) · alt `limit=5` (4061/4268) · `raw_description[:3000]` (llm:1077) · history model-text `[:200]` (llm:1456)
+- post-selection assembly (main path 3856→4646): dedupe → superlative sort+cap → other-model exclude (bot-prose parse) → REF-NAME/shop/charger-subtype fallbacks (+`_context_note`) → NO-PRODUCT-GUARD → `exact[:3]` follow-up → compare unique+KB fill → unlist alt-merge → `_available_for_sale` stamp+`_pending_context_note` → rejection-memory extra → `_combined_extra` (vision+reject+superlative+policy_carry) → hybrid anchor prepend → anchor-compare/partial insert → `_device_additional` extend+`_device_spec_extra` → `qa_ctx` → `_filter_compat_products` → `_apply_product_tiers(30)` → context_note → **[flag ON: `products=selected_cards[:30]` + extra_context append]** → `llm.answer`
+- web flow (POST-answer วันนี้): `should_use_web_search(answer,intent,products,msg)` — trigger จาก answer uncertainty markers / pass1 conf<0.5 (no products) / compat negative|no_products|device_specific|short / spec-kw negative|no_products / generic negative answer → `reanswer()` → `search_and_extract` (OpenRouter `:online`) → DB re-query (kw+model-code regex+KB) → merge → `llm.answer` LLM2 (products ทั้งก้อน resend) — KB path เดียวกัน (2560-2614)
+- token/cost utils ที่มี: `llm._gemini_cost` (USD), `usage_metadata`→`usage_info{prompt,output,total}`, `_sum_usage`, `steps[].tokens_in/out`+cost×36 THB · **ไม่มี pre-call token estimator** → `estimated_tokens` ต้องมี estimator เล็ก (chars/4, no dep)
+- flag-ON ปัจจุบัน: legacy fetch/merge chain ทั้งหมดยังรันแล้วถูก discard ที่ 4644/2467 (waste) — Phase 7 compile ต้องให้ typed path เป็น owner จริง + ลบ flatten เก่าใน diff เดียว
+
+**baseline measurement (offline, `legacy_turn_incidents.jsonl`)**: 72 incidents · 45 มี catalog (≤6 cards/fixture, 187 cards รวม) · `llm._build_context` serialized: incl_desc mean=5089 / p95=7119 chars (~1.8K tok est) · slim p95=5192 (~1.3K) · marginal ~1091 chars/card → **30-card projection ~33K chars (~8K tok)** — fixture ไม่ถึง production regime (30 cards×full desc ≈53-56K tok ตาม report) → p95 gate จะ report exact sample size + projection labeled (ห้าม fabricate)
+
+**PART 1 — feasibility verdict: PASS**
+- product-only task ประกอบได้โดยไม่แตะ customer prose: `TurnNeed(kind/operation/subject_refs/scope/types/subtypes/ranking)` + `RetrievalRequest` + `SelectionResult.by_request` + `_needs_for_request` + `pool.supporting_evidence` + `PolicyDecision` = typed ทั้งหมด
+- mixed product+policy: policy need ไม่มี product-request attribution (slots=product scope) → products/evidence ไม่มี policy content โดยโครงสร้าง; production mixed turn ยัง fail-closed ที่ `_pdec` gate ก่อน answer call → "complete mixed message ไม่ถึง product call" = structural guarantee
+- ไม่ต้องการ per-need question text — นั่นคือ Phase 8 blocker (scoped question/typed segments) ที่ defer อยู่แล้ว; Phase 7 compile context เท่านั้น
+- contract fields ทุกตัวมี typed source; `estimated_tokens` = estimator ใหม่เล็กเพียงอย่างเดียวที่ต้องเพิ่ม (ไม่มี util เดิม — justified)
+
+**PART 2 — contract + after call graph (proposed)**
+`answer_context.py` (module ใหม่ = compiler owner เดียว):
+- `@dataclass(frozen=True) AnswerContext`: `products` (identity-deduped, field-scoped per need op, per-need quota, hard cap) · `evidence` (typed supporting: qa/vision/kb + web-derived หลัง admission) · `availability_notes` (typed `unavailable_evidence` — ไม่ใช่ recommendation) · `policy_decisions` (PolicyDecision objects — channel แยก ไม่ผสม products) · `unanswered_needs` (needs ไร้ coverage — typed) · `estimated_tokens` (chars/4 บน product+evidence payload; system prompt วัดแยกใน llm) · `trace`
+- `compile_answer_context(needs, selection, pool, policy_decisions=(), per_need, cap)`
+- `decide_web_admission(ctx) → (bool, reason)`: admit iff ∃ unanswered `compat` need (external device evidence เท่านั้น); deny = local-existence/price/stock/link ops, unresolved `subject_refs` (local identity), ทุกอย่าง covered → deny
+- `augment_with_web(ctx, ws_result) → ctx'` (products += new deduped เท่านั้น, evidence += web record)
+- `render_extra(ctx) → str` (evidence+availability+policy notes — typed→text boundary เดียว, owner = compiler)
+- `llm.answer` += optional `answer_context` param: products=ctx.products verbatim (pre-scoped), extra=render_extra, include_desc bypassed (scoping ทำแล้ว)
+- **after (flag ON, implemented)**: `TurnPlan.needs → profile → slots/relations/requests → executor/pool → select_for_llm_context → _typed_answer_boundary[decide_web_admission → admit?search_and_extract] → compile_answer_context → llm.answer_typed(context=ctx)` — answer-model calls = **0 หรือ 1; ไม่เกิน 1 เสมอ** (compile fail / ctx ว่าง → deterministic reply, 0 calls — legacy llm.answer ไม่ re-enter); flag OFF = เดิมทั้งหมด
+- **deleted branches (same diff)**: `run_grouped_selection` flatten (`selected_cards` stamping+`extra_context` prose) → typed `sel` expose; app `_grouped_sel["selected_cards"][:30]`+extra_context append ทั้ง 2 sites (2467-2475, 4644-4650); flag-OFF legacy chain ไม่แตะ (production path)
+
+**ห้าม**: clause split / prose strip / prompt "ignore policy" / 2nd intent call / bot-answer parse / helper-guard-fallback chain · re-run retrieval · legacy append หลัง compile · flag ON · Phase 8 segments/finalizer · new deps · new model/provider calls · new semantic kw/regex tables
+
+**รออนุญาต**: RED suite `docs/test/test_phase7_answer_context.py` (20 items) → implement minimal → focused verify → docs → report (no stage/commit)
+
+## Phase 7 — PART 2 DESIGN CORRECTION (H1/H2/M1/M2/M3) · รออนุญาต RED
+
+### corrected contracts — `answer_context.py` (module ใหม่ = compiler owner เดียว)
+
+```python
+@dataclass(frozen=True)
+class NeedTask:
+    """per-need typed task — compiled จาก structured data เท่านั้น
+    (ไม่มี customer prose; render เป็น deterministic generation ไม่ใช่ extraction)"""
+    kind: str                          # "product"|"compare"|"compat" (productish เท่านั้น)
+    operation: str                     # TurnNeedOp verbatim
+    subject_names: tuple[str, ...]     # resolved card names (DB data — ไม่ใช่ prose ลูกค้า)
+    subject_refs: tuple[str, ...]      # structured refs (model codes/item ids — token ตรงๆ)
+    scope: tuple[str, ...]             # product_types ∪ subtypes (need ∪ attributed requests)
+    constraints: tuple[tuple[str, str], ...]  # typed pairs เท่านั้น: req.soft_hints (non-meta)
+                                       #   + hard_filters + variant_terms
+    target: str | None                 # external target — req/profile.target_device หรือ
+                                       #   relation source identity
+    ranking: tuple[str, str] | None
+
+@dataclass(frozen=True)
+class AnswerTask:
+    tasks: tuple[NeedTask, ...]
+    trace: tuple[str, ...]
+    # render() → closed-template task text per kind/op (generation จาก typed fields — ห้ามเอา message มาแปะ)
+
+@dataclass(frozen=True)
+class AnswerContext:
+    task: AnswerTask                   # ← H1: sole typed task — req.message/desc_message ห้ามข้าม boundary
+    products: tuple[dict, ...]         # field-scoped per need op, identity-deduped, per-need quota, hard cap
+    evidence: tuple[dict, ...]         # typed {kind: qa|vision|kb|web|device_spec, scope key, payload}
+    availability_notes: tuple[dict, ...]  # sel.unavailable_evidence verbatim (typed — ไม่ใช่ recommendation)
+    policy_decisions: tuple            # PolicyDecision objects — channel แยก ไม่ผสม products
+    unanswered_needs: tuple            # typed view: (need_index, kind, operation, subject_refs, scope, target, reason)
+    estimated_tokens: int              # ceil(utf8_bytes/3) — conservative, labeled estimated
+    trace: tuple[str, ...]
+```
+
+### compiler inputs/outputs
+
+- **in**: `needs` (TurnPlan.needs) · `selection: SelectionResult` (typed — `run_grouped_selection` ต้อง expose) · `pool: CandidatePool` (supporting_evidence + identities incl. rejected → resolved-identity check) · `requests: tuple[RetrievalRequest]` · `profile: RetrievalProfile` (target_device/variant facts) · `policy_decisions: tuple` · quotas (`per_need`, `hard_cap`)
+- **out**: `AnswerContext` (มี `.task` ข้างใน) — `AnswerTask`+`AnswerContext` compile พร้อมกันรอบเดียว
+- **ลูกค้า**: `llm.answer_typed(context=ctx, shop_hint, history, model, persona_extra, intent_result)` — signature ไม่มี `message`/`products`/`extra_context` prose params → ส่ง req.message เข้าไม่ได้ทางโครงสร้าง
+
+### M1 — attribution owner
+
+`retrieval_selection._needs_for_request` → promote เป็น **public `needs_for_request`** (owner = selector module — มันเข้าใจ request source semantics: subjects/slot/relation_target/compat/channel); selector ใช้เองต่อสำหรับ `need.ranking` sort; compiler consume เหมือนกัน — implementation เดียว ไม่มีสำเนา 2 ชุด
+
+### H2 — web admission (typed, conservative default deny)
+
+```python
+@dataclass(frozen=True)
+class WebAdmission:
+    allowed: bool
+    reason: Literal[  # closed enum — ไม่ใช่ arbitrary strings
+        "admitted_external_evidence_need",
+        "no_unanswered_need", "not_productish",
+        "local_fact_operation",            # price|stock|link ops
+        "local_catalog_existence",         # browse/recommend zero-coverage = local question
+        "unresolved_local_identity",       # subject_refs ไม่ resolve เป็น local identity
+        "no_external_target",              # ไม่มี typed target_device/relation target
+        "local_evidence_sufficient",       # ctx.evidence มี device_spec ครอบ target แล้ว
+        "web_already_supplied",            # evidence kind=="web" scope key ตรงแล้ว
+        "not_configured", "compiler_unavailable"]
+    need_index: int | None
+```
+
+**truth table (allow ต้องผ่านทุกเงื่อนไข):**
+1. `n` ∈ unanswered_needs และ n.kind ∈ PRODUCTISH → else deny
+2. n.subject_refs ทุกตัว resolve เป็น pool identity (eligible∪unavailable∪rejected) → else `unresolved_local_identity`
+3. n.operation ∉ {price, stock, link} → else `local_fact_operation`
+4. n มี typed external target (request/profile `target_device` ที่ไม่ใช่ local identity) → else `no_external_target` หรือ `local_catalog_existence` (recommend/browse ไม่มี target)
+5. ctx.evidence ไม่มี local device_spec ครอบ target → else `local_evidence_sufficient`
+6. ctx.evidence ไม่มี kind=="web" scope key เดียวกัน → else `web_already_supplied`
+7. `web_search.is_configured()` → else `not_configured`
+
+→ spec/product need ที่มี external device target อาจ admit ได้; compat need ไร้ target → deny; `kind=="compat"` ไม่ใช่เงื่อนไขเพียงพอ
+
+### M2 — flag/LLM truth table
+
+| state | behavior |
+|---|---|
+| flag OFF | legacy `llm.answer(message=req.message/desc_message, products=..., extra_context=...)` — unchanged |
+| flag ON + compile OK | `llm.answer_typed(context=ctx)` เท่านั้น — typed task+context เท่านั้นถึง product LLM |
+| flag ON + compile fail (`run_grouped_selection`→None หรือ compile raise) | fail closed: deterministic no-data reply, **0 model call**, ไม่มี legacy re-entry |
+| products ว่าง + typed evidence/notes/policy มี | `answer_typed` 1 ครั้ง (products=[]+typed evidence rendered — "typed handling") |
+| ctx ว่างหมด (no products/evidence/notes/policy) | deterministic no-data reply — 0 model call |
+| external unanswered need + admission allowed | `search_and_extract` ก่อน (search query = compiled need render — ไม่ใช่ req.message) → `augment_with_web` → `answer_typed` 1 ครั้ง |
+| web adds no new evidence | ctx เดิม → `answer_typed` 1 ครั้ง (no LLM2 เลย — single-call design) |
+| web adds evidence | compile ctx' ครั้งเดียว (products += deduped new, evidence += web record) → `answer_typed` 1 ครั้ง |
+| mixed product+policy | `_pdec` fail-closed handoff เดิม — ไม่ถึง answer call (Phase 8) |
+
+→ answer-model calls = **0 หรือ 1; ไม่เกิน 1** ใต้ flag ON (compile fail / ctx ว่างหมด → deterministic 0 calls); LLM2 double-send concept ถูกแทนด้วย single post-merge call
+
+### M3 — token estimate
+
+`est_tokens = ceil(len(text.encode("utf-8")) / 3)` — conservative bound (Thai ~3B/char → ≈1 tok/char worst case; ASCII overestimate ~33%) · document เป็น `estimated` ไม่ใช่ provider truth · system prompt (`SYSTEM_INSTRUCTION+persona+lang_inst`) วัดแยกใน `llm.answer_typed` ด้วย formula เดียวกัน · cost = `_gemini_cost(est_prompt, est_output)` labeled estimated — gate `<1 THB` report เป็น measurement-pending/conservative-estimate (ไม่ claim proven)
+
+### deleted branches (same diff)
+
+- `retrieval_runtime.run_grouped_selection` tail: `selected_cards` flatten+`_ROLE_NOTE` stamping+unavailable→`extra_context` prose → replace ด้วย typed `{selection, pool, requests, summary}` (role notes/field-scoping ย้ายเข้า compiler); `prepare_grouped_selection` → thin wrapper compile
+- `app.py:2467-2475` (KB) + `4644-4650` (main): `_grouped_sel["selected_cards"][:_llm_ctx_limit]` + `extra_context` append → แทนด้วย compile→gate→`answer_typed` wiring
+- flag-OFF chain ทั้งหมดคง (production path); flag-ON legacy assembly (fetch/merge/dedupe/tiers ~3697-4646) กลายเป็น dead-output — residual: ยังรันเพื่อ feed channels (`_device_additional`→compat_cards, `_qa_ctx`/`_vision_context`→supporting) — deactivation เป็น follow-up ไม่ใช่ phase นี้
+
+### feasibility verdict — **PASS + 1 residual (named, ไม่ใช่ contract blocker)**
+
+- typed fields ครอบทุก contract field: task (kind/op/subject names+refs/scope/typed constraints/target/ranking), products (by_request+quota), evidence (pool.supporting+unavailable), policy (PolicyDecision), unanswered (need−coverage), trace
+- **residual — `value_constraints` producer ไม่มี upstream**: budget/price-range ("งบ 500") ถูก extract เฉพาะใน `product_store._extract_price_range` (prose→Mongo filter, ไม่ใช่ typed fact); intent schema ไม่มี price field → `NeedTask.constraints` แบกเฉพาะ typed pairs ที่มีอยู่ (task ไม่ fabricate แต่จะ lose qualifier ของ turn ที่มี prose-only constraint — context ยัง enforce ที่ retrieval เดิม) → owner ที่ถูก = structured extraction boundary (`turn_decision`/`route_context` slot scope หรือ intent schema extension) — **Phase 8/upstream blocker สำหรับ task fidelity, ไม่ใช่ compile blocker**
+- ตามนี้ `NeedTask.constraints` ต้อง render เฉพาะ typed pairs เท่านั้น — absent ⇒ ไม่พูดถึง (fail-silent บน qualifier, ไม่ใช่ fabrication)
+
+### รออนุญาต
+
+RED suite `docs/test/test_phase7_answer_context.py` (20 items) → implement → focused verify → docs → report · no stage/commit/provider/Mongo/flag-on
+
+## Phase 7 — IMPLEMENTATION PLAN (authorized)
+
+### value-constraint owner (1 parser, single typed result)
+- `route_context.build_retrieval_profile`: `value_constraints=profile` field ใหม่ — extract ครั้งเดียวผ่าน `product_store._extract_price_range(msg)` (parser เดิม) → `(("price_min",N),("price_max",M))`; fact_sources += ("value_constraints","message") เมื่อ non-empty
+- `retrieval_planner`: `RetrievalRequest.value_constraints` — planner stamp จาก profile ลง slot/relation requests (channels=())
+- `retrieval_executor._request_profile`: pass `value_constraints=req.value_constraints` ลง synthetic profile
+- `product_store.fetch_products`: `vc = getattr(profile,"value_constraints",None)` — typed ชนะ; fallback `_extract_price_range(message)` เฉพาะเมื่อ profile ไม่มี field (compat สำหรับ profile-less caller); ลบ parse ซ้ำที่ relax block (3483) reuse price_min/max ที่คำนวณแล้ว
+- `NeedTask.value_constraints` = profile.value_constraints (turn-level typed result — parse-once/no clause splitting)
+
+### answer_context.py (module ใหม่ — compiler owner เดียว)
+NeedTask/AnswerTask(closed-template render)/UnansweredNeed/AnswerContext(task/products/evidence/availability_notes/policy_decisions/unanswered_needs/estimated_tokens/trace)/WebAdmission — compile_answer_context(needs, selection, pool, requests, profile, policy_decisions, web_evidence) + decide_web_admission(needs, selection, requests, pool, profile, web_configured) + estimate_tokens(text)=ceil(utf8/3) + context_text(shop_hint)
+- products: per-need quota(4) ผ่าน needs_for_request(public)→by_request, sort ROLE_RANK desc→score desc, global identity dedupe, hard cap 15; field-scope per op (closed map); _context_note จาก role (ย้าย _ROLE_NOTE semantics เข้า compiler)
+- evidence: pool.supporting_evidence + pool.evidence_pool attachments + web_evidence records
+- unanswered_needs: productish need ไร้ selected coverage; policy need ไร้ matching decision
+- admission (pre-compile, deny-first): ตาม truth table — unresolved identity/local op/catalog browse/no target/local spec-db hit/web already supplied/not_configured → deny
+
+### retrieval_selection.py
+- `_needs_for_request` → public `needs_for_request` (owner เดียว — selector+compiler ใช้ร่วม); `_ROLE_RANK` → `ROLE_RANK`
+
+### retrieval_runtime.py
+- run_grouped_selection คืน {"selection","pool","requests","summary"} — ลบ selected_cards/extra_context flatten + _ROLE_NOTE/_identity_keys; prepare_grouped_selection → thin compile wrapper
+
+### llm.py
+- `answer_typed(context, *, shop_hint, history, model, persona_extra)` — ไม่มี message/products/extra_context params; system=SYSTEM_INSTRUCTION+persona+_lang_instruction(task_text); user_prompt=context.context_text(shop_hint)+task render+trailer เดิม; usage_info += estimated_prompt_tokens/estimated_system_tokens (labeled); share `_history_contents` helper กับ answer()
+
+### app.py (flag-ON boundary เท่านั้น — flag OFF untouched)
+- ทั้ง 2 sites (KB ~2440 / main ~4623): selection→decide_web_admission→(allowed→search_and_extract(message=typed query render))→compile_answer_context(web_evidence)→answer_typed ≤1 call; compile fail/empty ctx → deterministic canned reply 0 calls; response.products=ctx.products
+- post-answer `should_use_web_search/reanswer` block: + `not _sel_flag` guard
+- supporting เพิ่ม device_spec record เมื่อ _device_specs/_kb_device_specs มี (typed coverage ให้ gate)
+
+## Phase 7 — combined-batch Mongo hang fix (test-isolation, verify แล้ว)
+
+**อาการ**: affected 8-file batch ค้าง >10 นาที — pytest CPU~0%, stack มี `pymongo_server_monitor_thread`; faulthandler dump: `test_fetcher_error_isolated` → `prepare_grouped_selection` → `execute_grouped_retrieval_requests` → `generation_pointer.resolve_snapshot` → `find_one` → `MongoClient(127.0.0.1:27017)` connection refused, server-selection ~30s/ครั้ง × หลาย test → hang.
+
+**root cause (class D — collection-order contamination, test-only)**: ไฟล์ test ที่ import `shopeechat.app` ผ่าน replay harness ทำให้ `knowledge_base._load_env()` ถูก stub (load_dotenv no-op) ระหว่าง import → `ADMIN_MONGO_URI` ไม่มีใน env → `_build_admin_client` fallback host default `127.0.0.1:27017` → MongoClient จริง → `find_one` block รอ server selection 30s. standalone (env โหลดจริงจาก .env → ADMIN_MONGO_URI → reachable) เลยผ่าน — ปัญหาโผล่เฉพาะ combined process ที่ .env ถูก stub
+
+**fix (ที่ owner — test callsites)**: ทุก test callsite ที่เรียก `execute_grouped_retrieval_requests`/`run_grouped_selection`/`run_grouped_retrieval_shadow`/`prepare_grouped_selection` ต้องส่ง `snap=None` (captured value = no snapshot — documented seam เดียวกับ test_phase4_source_union:138) → executor ไม่ resolve pointer เลย เพิ่ม `snap` param ให้ `prepare_grouped_selection` (forward ไป run_grouped_selection — เดิมลืมส่งต่อ seam). ไฟล์ที่แก้: test_retrieval_selection_runtime, test_canonical_evidence_card, test_availability_subjects_5c, test_phase6_need_selection, test_phase4_source_union, test_grouped_retrieval_executor, test_candidate_pool_sources_5d, test_candidate_pool_union, test_retrieval_selection, test_issue_5f_availability_anchor, test_retrieval_shadow + `test_live_units_fetch_smoke` (integration by design — ไม่แตะ)
+
+**regression pin**: `test_snap_unset_still_resolves_pointer` (probe ว่า omit snap → resolve จริง — เห็น seam) + `test_snap_none_skips_pointer_resolution` (snap=None → resolve ไม่ถูกเรียก)
+
+**ผล**: batch เดิมที่ hang >10min → **1.26s / 230 passed**; legacy-shape failures 22 ตัว (selected_cards/extra_context/_ROLE_NOTE/_identity_keys/legacy-llm payload) ถูก migrate เป็น typed contract ทั้งหมด — no production guard added (test-only fix)
+
+**note**: ระหว่าง diagnose มี `resolve_snapshot`/`_admin_db` probe 1 ครั้งที่ hit real admin Mongo (`.env` ADMIN_MONGO_URI → find_one sellable_units_meta → None, read-only) — พฤติกรรมเดียวกับที่ test เจอ ไม่ใช่ของใหม่
+
+## Phase 7 — REVIEW CORRECTION ROUND (authorized, stop before commit)
+
+**findings (verified in code):**
+- H1 raw prose crosses: `_typed_answer_boundary(history=_qa10)` → `answer_typed(history)` → `_history_contents` → `_generate`; producer `supporting` blobs `{"qa":_qa_ctx}`/`{"vision":_vision_context}`/`{"kb":kb_context}` → `context_text` renders arbitrary text
+- H2 evidence not need-scoped: `compile_answer_context` copies all `pool.supporting_evidence`+attachments, caps by position, no need attribution
+- H3 admission: `subject_refs==()` bypasses identity check; selected card = coverage แม้ external evidence ยังขาด; `_local_evidence_answers` re-calls private `device_compat._resolve_device_spec` (duplicate lookup); `_admission_query` ต่อท้าย hardcoded "charging spec port watt"; `saw_uncovered` dead var
+- M1 `policy_decisions` ทำ `is_empty` False แต่ `context_text`/`answer_typed` ไม่ render → policy-only ctx ยิง product LLM ได้โดยไม่มี policy evidence
+- M2 ไม่มี cost gate evidence (p95 / sample / THB)
+- P1 offline safety: diagnostic ก่อนหน้า load `.env` ทางอ้อม + read real admin Mongo 1 ครั้ง (disclosed แล้วใน entry ก่อนหน้า)
+
+**correction design:**
+1. boundary/answer_typed ลบ `history` param — `_history_contents` เหลือเฉพาะ legacy `answer` (flag OFF); web_search_fn ไม่รับ history; follow-up identity มาจาก typed needs/subject_refs/requests เดิม
+2. evidence closed schema: supporting kinds = {device_spec,kb,kb_product,vision,image_text,video,web}; attachment kinds = {anchor,kb_product,image_text,listing,subject_snapshot}; ทุก record ต้องมี typed attribution: need_index/need_indices | request_id→req_needs | target→_need_target | subject_refs/identity→need identity set; ไม่มี → omit + trace `evidence_dropped:*`; qa/raw blobs ไม่เข้า; attachments attribute ผ่าน linked_candidate→pooled cand→request_ids→req_needs (owner เดียว)
+3. `candidate_pool.build_candidate_pool`: channel supporting records ได้ `"request_id": res.request_id` ตอน merge (attribution เดิมที่หายไป)
+4. producer tags: kb blob → `request_id="ch:kb"`; vision → `subject_refs` จาก `_subject_cards` identities; device_spec → `target` (มีอยู่); web record → `need_index=adm.need_index`; qa record ลบออกจาก callsite
+5. admission rewrite: coverage = target? external evidence (pool records เท่านั้น, normalized-exact target match) : selected cards; identity = resolved subject_refs OR attributed selected; deny order = local_fact_op → recommend(catalog) → unresolved identity → no target → not configured → admit (one need, first admissible); `_resolve_device_spec` call ลบ; query = typed target+op+scope+subject identity เท่านั้น
+6. policy: `policy_decisions` field ออกจาก AnswerContext/compile/boundary/callsites (no Phase-7 consumer); `is_empty` = products|evidence|notes; needs ที่มี deferred kinds → boundary deterministic 0 calls (mixed ยัง fail-closed ที่ _pdec gate ก่อน)
+7. cost evidence: offline replay fixture measurement (legacy _build_context tokens vs ctx.estimated_tokens, system prompt แยก, median/p95, THB จาก llm pricing util)
+
+**files**: answer_context.py, llm.py, app.py (boundary+2 callsites), candidate_pool.py (request_id tag), tests + docs/test/test_phase7_boundary_review.py (new RED), SRS, rebaseline plan, log
+
+**results (verify แล้ว — post-cleanup re-run อยู่ด้านล่าง):**
+- RED 20 failures ตรง findings (history param present, need_indices missing, unattributed copied, scopeless-no-identity admitted, covered-by-selected, _resolve_device_spec re-called, suffix ใน query, mixed→1 call); 5 pins ผ่านตั้งแต่แรก (ops-table, policy-only-empty, offline probe, unresolved-refs, single-turn)
+- implementation: boundary+answer_typed ไม่มี history; evidence closed schema + attribution (`_ref_needs_map`/`_attribute`/`_compile_evidence`); admission rewrite per design; `policy_decisions` ลบออกทั้ง AnswerContext/compile/boundary/callsites; deferred-kind gate 0 calls; web record มี need_index; query typed-only
+- migrated tests: `test_phase7_answer_context.py` — 4 cases ที่เข้ารหัส old contract (web_deny_local_evidence_sufficient → device_spec record ใน pool; covered case → no-target; media paths → attributed records); `supporting=` producers ได้ request_id/subject_refs
+- GREEN: review suite 25/25; phase7 suite 41/41; affected batch 225; replay 120; py_compile/diff --check/validator green
+- cost evidence (n=40 fixture turns): legacy ctx est. 1,954 p95 → Phase7 ctx est. 1,043 p95 (−46.6% ≥30% gate); system prompt est. 27,209; est. p95 cost 0.336 THB <1 THB gate; web calls=0 local turns; answer calls ≤1
+- safety counters รอบนี้: `.env` read = **1 line โดยไม่ตั้งใจ** (flag check grep ไปโดนบรรทัดเดียว `USE_GROUPED_RETRIEVAL_SHADOW=1` — disclosed, จะไม่ทำซ้ำ); indirect `.env` load รอบก่อน = 1 (probe); Mongo real read รวม = 1 (รอบก่อน — diagnostic `resolve_snapshot` find_one→None); รอบนี้ subprocess purity test: dotenv calls=0, Mongo connections=0
+- cleanup: `_ref_needs_map` hoist `dict(selection.by_request)` ออกจาก loop
+- Phase 8 blockers ยังอยู่: typed answer composition/finalizer, mixed product+policy auto-answer, `BLOCKED_BY_PHASE4_SOURCE_UNION` activation blocker
+
+## Phase 7 — REVIEW ROUND 2: need-scoped products + evidence bounds + cost proof + deferred owner (authorized)
+
+**findings (verified in source):**
+- A: `compile_answer_context` emits flat `products` — `seen_ids` dedupe silently drops 2nd-need ownership; `context_text` json.dumps cards ไม่มี task link → combined payload ไม่รู้ product ของ need ไหน
+- B: `_compile_evidence._take` = `{**dict(e)}` whole-dict copy → unknown fields/diagnostics ข้าม boundary; `EVIDENCE_LIMIT=8` bound count ไม่ bound size; `context_text` มี 5-key payload fallback chain
+- C: cost test เทียบ `_build_context` vs `ctx.estimated_tokens` = product-context เท่านั้น — 46.6% ไม่ใช่ total prompt reduction
+- D: `_typed_answer_boundary` อ่าน private `_acx._POLICY_NEED_KINDS` + `compile_answer_context` classify set เดียวกันอีก = 2 owners; `[LLM DEBUG]` prints ใหม่ใน `answer_typed`
+
+**correction design:**
+1. products: emit `card["need_indices"]` per product (typed need indices — field เดียวกับ evidence); dedupe hit → union indices ลง emitted card เดิม (ไม่เพิ่ม payload); quota/hard_cap ยังกัน intake ใหม่ แต่ยัง union ได้; serialize ผ่าน json.dumps เดิม → ownership ใน payload จริง
+2. evidence: closed emit schema `{kind,need_indices,target?,identity?,linked_candidate?,item_id?,payload?}` — `_take` รับเฉพาะ fields นี้; payload = first non-empty(payload|data|text|search_info|results) normalize→str (dict/list→json.dumps) bound ≤ `_EVIDENCE_TEXT_BYTES`(1200B utf-8, cut ที่ byte boundary) + trace `evidence_truncated:*`; total rendered ≤ EVIDENCE_LIMIT×cap; `context_text` render `e["payload"]` ตัวเดียว (ลบ fallback chain)
+3. deferred single owner = `compile_answer_context` (mark `UnansweredNeed.reason="deferred"` อยู่แล้ว): boundary compile ก่อน → `any(u.reason=="deferred")` → defer ก่อน admission/web (0 calls, 0 web); web_used → recompile ด้วย web_evidence; app.py ไม่แตะ `_POLICY_NEED_KINDS` อีก
+4. cost test: capture `_generate` payload จริงทั้งสองฝั่ง (legacy `llm.answer` vs `llm.answer_typed`) offline บน fixture turns เดียวกัน → report product-ctx p95 (gate≥30% เดิม) + complete-prompt median/p95/reduction แยก + cost ทั้งสองฝั่ง; phase7 p95 cost <1 THB เดิม; ไม่มี total-reduction threshold ใหม่
+5. cleanup: ลบ `[LLM DEBUG]` prints ใน `answer_typed` (3 บรรทัด); usage accounting คงไว้
+
+**files**: answer_context.py, app.py (boundary), llm.py (prints), test_phase7_boundary_review.py (RED+rewrite cost), SRS, plan, log
+
+**results (verify แล้ว):**
+- RED 6 failures ตรง findings: A ×2 (`need_indices` KeyError ใน serialized payload — ownership ไม่มีจริง); B ×3 (sentinel fields รอดเข้า `ctx.evidence` / cap ไม่มี / `_EVIDENCE_TEXT_BYTES` missing); D ×1 (`_POLICY_NEED_KINDS` ใน boundary source). pins ที่ pass ตั้งแต่แรก: `deferred_never_invokes_web` (gate เดิม defer ก่อน admission อยู่แล้ว) + cost-rewrite measurement
+- implementation: products emit `need_indices` + union on dedupe (outer hard_cap break ลบ — loop ยัง scan ต่อเพื่อ union/shared ได้ แต่ intake ใหม่ถูก `continue` กั้น); `_take` emit closed `_EVIDENCE_OUT_FIELDS` + payload normalize (dict `{"text"}`→text / dict|list อื่น→json.dumps) bound ≤`_EVIDENCE_TEXT_BYTES`(1200B) + `evidence_truncated:*` trace; context_text อ่าน `e["payload"]` ตัวเดียว; boundary compile-first → consume `UnansweredNeed.reason=="deferred"` → defer ก่อน admission/web; web_used → recompile; `[LLM DEBUG]` 3 บรรทัดใน answer_typed ลบ
+- mutation proofs: ลบ ownership stamp → 2 tests fail (KeyError) → revert; restore `{**dict(e)}` → 2 tests fail (sentinel+unbounded) → revert — tree สะอาด ไม่มี mutation ค้าง
+- GREEN: review 32/32, phase7 31/31, fail_closed+media+attribution batch 216p/1s, replay 120p, py_compile/diff --check/validator integrity pass
+- cost (fixture n=40, complete-`_generate`-payload capture ทั้งสองฝั่ง): product-ctx p95 1,954→1,071 (−45.2% ≥30% gate); **complete prompt p95 29,746→29,103 (−2.2% — ตรงไปตรงมา: system prompt est. 27,209 share กันทั้งสองฝั่ง เลยกินส่วนต่าง); est. cost p95 0.3483→0.3413 THB (gate <1 ผ่าน)** — 46.6% ของรอบก่อน = product-context only, ไม่ใช่ total
+- structural checks: `dict(e)` ใน compile = 0; app.py `_POLICY_NEED_KINDS` refs = 0 (owner เดียวใน answer_context); `[LLM DEBUG]` ใน answer_typed = 0; keyword/regex tables ใหม่ = 0 (`_EVIDENCE_OUT_FIELDS`/`_EVIDENCE_TEXT_KEYS` = field-name contracts); provider calls ใหม่ = 0; flags ไม่แตะ
+- safety รอบนี้: `.env` reads = 0; Mongo = 0; providers = 0 (capture patch `_generate`/`get_model`/`_client` leaf)
+
+## Phase 7 — REVIEW ROUND 3: web specs + single compile + visible numbering + render bounds (authorized)
+
+**findings (verified in source):**
+- F1 web `device_specs` ถูกทิ้ง: `_EVIDENCE_TEXT_KEYS`/OUT_FIELDS ไม่มีช่อง — result ที่มีแต่ specs → evidence ว่างเปล่า
+- F2 boundary compile AnswerContext 2 ครั้ง (pre + post-web) — ผิด one-final-context contract + deferred check ทำหลัง compile (เสียงาน)
+- F3 internal `need_indices` 0-based แต่ render `งานที่ N` 1-based — product JSON `[0]` ขัด evidence `(งานที่ 1)`
+- F4 bound เฉพาะ payload — target/identity/linked_candidate/item_id ไม่ bounded → record/block รวมเกิน cap ได้
+
+**correction design:**
+1. web record normalize ที่ boundary producer: `payload` = sanitized search_info + `json.dumps(device_specs)` (รวม field เดียวก่อนเข้า compile — web_used เหลือ {kind,target,need_index,payload}); unknown provider fields/URL ไม่ข้าม (URL strip เดิม)
+2. AnswerTask เพิ่ม `deferred: tuple[UnansweredNeed,...]` — `compile_answer_task` classify deferred (owner เดียว — `_POLICY_NEED_KINDS` อยู่ในนั้นที่เดียว); `compile_answer_context` consume `task.deferred` เข้า unanswered_needs ไม่ classify ซ้ำ; boundary = task compile 1 → `task.deferred` → defer (ctx compile 0, web 0, answer 0) → admission → web → `compile_answer_context(task=task)` **call site เดียว** → answer ≤1
+3. serialization: `context_text` render product `need_indices` +1 (1-based — internal 0-based คงเดิม, card canonical ไม่ mutate — copy ตอน render); evidence ords 1-based อยู่แล้ว → visible numbering ตรงกัน
+4. record-level bound: `_EVIDENCE_RECORD_BYTES` (แทน `_EVIDENCE_TEXT_BYTES`) — วัด json-serialized record ทั้งก้อน; structural fields เกิน budget → omit + `evidence_dropped:record_too_large` trace (identity ห้ามตัด); payload ตัดให้พอดี remaining budget ที่ byte boundary + `evidence_truncated:*`; declared block bound = `EVIDENCE_LIMIT × RECORD + overhead` วัดจาก context_text จริง
+
+**files**: answer_context.py, app.py (boundary), test_phase7_boundary_review.py (RED+update round-2 assertions), SRS, plan, log
+
+## Phase 8 backlog — System Prompt Distillation (planned, not started)
+
+- **why**: Phase 7 exact-payload fixture measurement showed product context p95 `1,954→1,071` (−45.2%) but complete prompt p95 only `29,746→29,103` (−2.2%) because the shared system prompt is estimated at ~27,209 tokens. Context bounding alone therefore does not materially reduce total input cost.
+- **when**: execute only after Phase 8 typed segments + single finalizer are authoritative. Do not mix this work into the active Phase 7 correction, because the finalizer must own deterministic safety behavior before matching prose clauses can be removed.
+- **scope**: build a clause-to-owner ledger for `SYSTEM_INSTRUCTION`; delete exact duplicates, legacy-only clauses, and rules already enforced by canonical availability/evidence, `PolicyDecision`, compatibility proof, typed segments, or the finalizer. Keep one compact core for persona/language, evidence-only answering, typed-task execution, and no fabrication. Task-specific instructions reuse `AnswerTask`/typed segments — no keyword tables, second intent/planner call, sanitizer chain, or per-case prompt branches.
+- **proof**: capture exact `_generate` system+contents before/after on identical replay turns; report median/p95 total input tokens, provider usage when available, labeled offline estimates, THB cost, and answer-call count. Run protected replay + mutation tests for availability/link/compat/policy/claim/language/formatting/unsupported claims. Prompt caching is optional and never counted as guaranteed savings.
+- **exit**: zero unowned safety-clause deletion, zero protected behavior regression, one answer boundary, and honest total-prompt/cost reduction evidence. No target percentage is invented before the baseline experiment.
+- **status**: roadmap entry added only; runtime/tests/config unchanged; implementation pending Phase 8.
+
+**results (verify แล้ว):**
+- RED 14 failures ตรง findings: F1 ×2 (`device_specs` ไม่ถึง payload/ctx); F2 ×4 (web-success ctx compile ×2, policy/mixed ctx compile 1, call sites=2); F3 ×3 (serialized `need_indices=[0]`/`[0,1]` 0-based หลุดเข้า LLM payload); F4 ×5 (`_EVIDENCE_RECORD_BYTES`/`_EVIDENCE_BLOCK_BYTES` ไม่มี, oversized target emit ทั้งก้อน)
+- implementation: web_used normalize ที่ producer → `{kind,target,need_index,payload}` (info URL-strip + specs json.dumps รวม field เดียว); `AnswerTask.deferred` field ใหม่ + `compile_answer_task` classify deferred (owner เดียว — `_POLICY_NEED_KINDS` ref เหลือใน task compiler จุดเดียว); `compile_answer_context` seed `unanswered` จาก `task.deferred` (ลบ classification block); boundary = task→deferred→admission→web→compile 1 call site→answer; `_take` record-bound (struct overflow→omit+`record_too_large`; payload converging byte-prefix cut วัด json จริง + trace); context_text serialize `need_indices`+1 (render-copy, canonical card ไม่แตะ)
+- GREEN: review 44/44, phase7 31/31, focused media/attribution batch รวม 260p/1s, replay 120p/19s/3x, validator integrity pass, py_compile/diff --check clean
+- cost re-measure หลัง serialization change: **ค่าเดิมทุกตัว** — product-ctx p95 1,954→1,071 (−45.2%), complete p95 29,746→29,103 (−2.2%), est cost 0.3483→0.3413 THB (fixture n=40)
+- structural gates: `compile_answer_context(` ใน boundary = 1 site; `compile_answer_task(` = 1; `_POLICY_NEED_KINDS` ใน app.py = 0 (ใน answer_context เหลือ owner เดียว compile_answer_task); `dict(e)`/`{**dict` whole-copy = 0; `งานที่ 0`/visible task 0 = 0 (tests assert); `[LLM DEBUG]` ใหม่ = 0 (เหลือเฉพาะ legacy `answer` pre-existing ที่ HEAD — ไม่แตะ, unrelated); helpers/flags/modules/provider calls ใหม่ = 0
+- safety รอบนี้: `.env`=0, Mongo=0, providers=0, flags ไม่แตะ, staging=0
+
+## Phase 7 — DOC-CONSISTENCY FIX + PRE-COMMIT AUDIT (authorized, docs-only)
+
+- stale `_EVIDENCE_TEXT_BYTES` ใน module docstring ของ answer_context.py → แก้เป็น contract จริง: record ≤ `_EVIDENCE_RECORD_BYTES` / structural overflow → omit / payload cut + trace / block ≤ `_EVIDENCE_BLOCK_BYTES`
+- `_typed_answer_boundary` docstring (app.py): ลบ claim "ทุก branch พัง → 0-call" — เขียน exact behavior: invalid/deferred → 0-call deterministic; web failure → local typed evidence answer ≤1; legacy llm.answer ไม่ re-enter
+- SRS row `_typed_answer_boundary`: เพิ่ม `compile_answer_task` ใน Calls + แก้ error column ตาม behavior จริง
+- verify: review 44/44 · phase7 31/31 · py_compile OK · diff --check clean · `_EVIDENCE_TEXT_BYTES` ใน source .py = 0 refs (เหลือเฉพาะ historical log entries)
+- audit 28 paths: boundary call sites task=1/ctx=1/web=1/answer=1; deferred owner เดียว (`compile_answer_task`); runtime diff ไม่มี env/Mongo/network/subprocess; grouped flags ไม่แตะ; staging 0
+
+## Phase 7 — CLOSEOUT (committed)
+
+**Commit 1**: `c00d82e` — refactor: introduce need-scoped answer context (27 paths: 9 runtime + answer_context.py ใหม่ + SRS + roadmap + 14 test files รวม 2 suite ใหม่)
+
+**final call graph (flag-ON เท่านั้น):**
+`run_grouped_selection` → `_typed_answer_boundary`: sel extract → `compile_answer_task` ×1 (deferred-kind classification owner เดียว → `task.deferred`) → deferred? `EMPTY_CONTEXT_REPLY` ก่อน compile (ctx 0 / web 0 / answer 0) → `decide_web_admission` (deny-first, pool evidence เท่านั้น ไม่ re-run spec resolver) →[admit]→ `search_and_extract` ×1 (typed query; result normalize: URL-stripped `search_info` + `json.dumps(device_specs)` → closed `payload` เดียว — specs ไม่ถูกทิ้งอีกต่อไป) → `compile_answer_context` **call site เดียวต่อ turn** → `llm.answer_typed` ≤1 (single user turn — history/prose/policy_decisions ไม่มีช่องรับ)
+
+**multi-need / need_indices contract:** ทุก product card carry `need_indices` (structural ownership — selector/needs_for_request attribution เดิม ไม่มี selector เพิ่ม); identity เดียวข้ามหลาย need → union ลง card เดิม (quota ไม่กั้น union); serialized payload ใช้ **1-based visible task numbers** ตรงกับ `งานที่ N` ของ task render + evidence `(งานที่ N)` — internal 0-based คงเดิม; per-need quota 4 / identity dedupe / role precedence / hard cap 15 คงเดิม
+
+**evidence contract:** closed field schema `{kind,need_indices,target?,identity?,linked_candidate?,item_id?,payload?}`; kinds = device_spec/kb/kb_product/vision/image_text/video/web + attachments (anchor/kb_product/image_text/listing/subject_snapshot); unattributed → omit + `evidence_dropped:*`; record ≤ `_EVIDENCE_RECORD_BYTES`(1500B — structural overflow → omit + `record_too_large`, identity ห้ามตัด); payload byte-prefix cut + `evidence_truncated:*`; rendered block ≤ `_EVIDENCE_BLOCK_BYTES`; count ≤ 8
+
+**deferred behavior (fail-closed จนถึง Phase 8):** policy-only และ mixed product+policy → 0 product answer calls + 0 web calls — owner เดียว = `compile_answer_task` (`_POLICY_NEED_KINDS` ref เดียวใน module; app.py = 0); upstream `_pdec` gate ยัง fail-close เหมือนเดิม
+
+**token/cost (fixture n=40, labeled estimates — complete `_generate` payload capture ทั้งสองฝั่ง):** product-ctx p95 1,954→1,071 (−45.2%); complete-prompt p95 29,746→29,103 (−2.2% — system prompt ~27,209 share กัน); est. cost p95 0.3483→0.3413 THB
+
+**verification (frozen):** boundary review 44/44 · answer_context suite 31/31 · affected batch 260p/1s · replay 120p/19s/3x · py_compile/diff --check/validator integrity green · mutation proofs (ownership stamp / whole-dict copy) revert ครบ
+
+**flags:** `USE_GROUPED_RETRIEVAL_SELECTION`/`_SHADOW` OFF เหมือนเดิม — activation blocker `BLOCKED_BY_PHASE4_SOURCE_UNION` ยังอยู่
+
+**Phase 8 blockers:** typed answer composition + single finalizer (per-need segments, หนึ่ง PolicyDecision-rendered segment, byte-stable); mixed product+policy auto-answer ยัง OFF; **system-prompt-distillation backlog** (ดู backlog entry ด้านบน — clause→owner ledger ของ SYSTEM_INSTRUCTION หลัง finalizer authoritative)
+
+**safety:** `.env`/Mongo/provider/botworker/8010/deploy ไม่แตะรอบ closeout; log entries เก่าครบทุกอัน
+
+## Phase 8 — IMPLEMENTATION + VERIFICATION (uncommitted · รอ independent review)
+
+**root causes ที่แก้:** RC-B `task.deferred` kill ทั้ง turn (deferred need ลาก product answer ตกไปด้วย) · RC-C `_pd_mixed` handoff แม้ typed outcome พร้อม · RC-D `enforce` wholesale overwrite ลบ composed segments · RC-E policy render ซ้ำ 2 ที่ · RC-A composition ซ้ำ 2 callsite
+
+**build (ตาม PART 1 design เป๊ะ):**
+- `answer_context.py`: `DomainResult` + `AnswerComposition` + `compose_answer` (pure typed, zero I/O) + `_DOMAIN_ORDER` claim→product→policy; task need ที่มี coverage แต่ answer ว่าง → `UnansweredNeed("no_answer")` (กัน need หาย)
+- `app.py`: `_typed_answer_boundary` return `AnswerComposition` (รับ `policy_decision`/`claim_guidance` typed inputs — policy evidence ไม่เข้า product prompt); `_sel_flag` hoist ก่อน `_pdec` gate; `_pd_compose` = flag+productish+eligible/ineligible → ตก product flow พร้อม `_pdec`; unknown/admin_review/flag-OFF precedence เดิม; `_render_composition` + `_finalize_answer` (production finalizer เดียว — render/dedupe/warranty-append/segments/composition marker จุดเดียว, byte-stable); callsite 2 จุด (`_append_base_warranty` gated `not _sel_flag` — claim guidance เป็น segment แล้ว)
+- `guards.py`: `policy_outcome_text` render owner เดียว (pure render + finalizer + enforce) · composition branch ใน `_pdec_active`: canonical segment คงอยู่ + `_strip_foreign_return_claims` ลบ foreign claim ทั้ง 2 polarity (กิน trailing boundary กัน particle ค้าง, restore `\n\n` separator) · ไม่มี marker → wholesale render เดิม byte-identical
+- **deletions**: `task.deferred→EMPTY_CONTEXT_REPLY` early-return · flag-ON `answer=_tb["answer"]`+claim-prepend ทั้ง 2 site · render ternary ซ้ำ
+
+**errors→fixes (ระหว่าง implement):**
+- strip bug: `_replace_clause` เหลือ particle `นะคะ` ค้าง + dedupe merge `บาทค่ะ`→`บาทนะคะ` → fix กิน trailing boundary + restore paragraph sep
+- 3 Phase-7 stale tests หลัง migrate (`out[...]` → attribute + `ctx:0`→`ctx:1` compile-once semantics + mixed ตอบ product ได้แล้ว) — contract เปลี่ยนตั้งใจ ไม่ใช่ production failure
+- `test_handoff_transport.py`/`test_guards.py` = script-style (Mongo/self-exec) — รันแบบ script 47/47 pass; ไม่ใช่ pytest suite
+- **pre-existing flake (ไม่เกี่ยว Phase 8 — verify บน HEAD แล้ว)**: `test_phase4b_refresh` `_install_script_stubs` patch `dotenv.load_dotenv` module-level → `test_load_dotenv_aliases_restored_after_import` fail เมื่อรันต่อกันใน session เดียว; standalone ผ่าน; stash-verify บน HEAD fail เหมือนกัน
+
+**PART 4 — prompt distillation (honest, bounded):**
+- baseline: `SYSTEM_INSTRUCTION` 81,625 B / ~27,209 est tokens (sha256 `9b209fe7…` pin)
+- clause→owner audit: เจอ **1 stale block พิสูจน์ได้** = "state machine ส่งคำตอบ → LLM จะไม่ถูกเรียกเลย" (243 B — false ภายใต้ composition: LLM ยังถูกเรียกเพื่อ product tasks); history-conditioned bullet ครึ่ง-alive (fallback clause ยัง fire ได้ — retain); kind-gated blocks (compare table/compat dual-tier/ranking) ตัดไม่ได้เพราะ classifier mislabel → ตัดแล้ว rule หายตอน fire จริง (not provably neutral — retain); ห้ามบอกราคา/status≠NORMAL/sold_out restatement ×3-4 = differently-worded emphasis (retain — unproven-safe to remove)
+- split: `_SYS_CORE_A` + `_SYS_LEGACY_CLAIM_NOTE` + `_SYS_CORE_B` → `SYSTEM_INSTRUCTION` byte-identical (sha256 match) · `TYPED_SYSTEM_INSTRUCTION` = core A+B (81,382 B / ~27,128 tok, −243 B) · `answer_typed` ใช้ TYPED · equivalence tests pin hash + concat + anchors + spy `_generate` config
+
+**verification (actual):**
+- Phase 8 suite **43/43** (RED 33f/5p → GREEN) — composition contracts, boundary, finalizer, enforce branch, E2E flag-ON mixed (`chat()` จริงผ่าน `_install` harness: compose×1/finalize×1/model≤1/web≤1/dedupe/marker), prompt distillation
+- migrated: `test_phase7_answer_context` 30/30 · `test_phase7_boundary_review` (ผ่านหลัง migrate dict→attribute + 3 stale-semantic rewrites + 2 compile-count pins) · fail_closed รวม **128/128**
+- focused batch: policy/guards/claim/handoff/order-adjacent/replay/validators/candidate/evidence/cert/warranty **567p/20s/4x** + phase4b 74/74 + handoff script 47/47 + fixtures integrity pass
+- py_compile ×4 files OK · `git diff --check` clean
+- **flags OFF**: `USE_GROUPED_RETRIEVAL_SELECTION`/`_SHADOW` ไม่แตะ (`_sel_flag` read 1×/turn เดิม); `.env`/Mongo/provider/botworker/8010/staging/commit/push/PR = 0
+
+**call counts (flag-ON turn):** decide_turn 1 · resolve_subjects 1 · grouped_selection ≤1 (XOR KB/main) · web admission 1 · web ≤1 · answer_typed ≤1 · **compose_answer 1 · _finalize_answer 1** · enforce 1 · merge LLM call = 0 (composer pure code)
+
+**changed files (7)**: `chatbot/shopeechat/{answer_context,app,guards,llm}.py` + `docs/test/test_phase7_{answer_context,boundary_review}.py` (migration) + `docs/test/test_phase8_composition.py` (new 868 บรรทัด) + ไฟล์นี้ — diff: +557/−120
+
+**remaining blockers (unchanged)**: `BLOCKED_BY_PHASE4_SOURCE_UNION` activation blocker ยังอยู่ — flag-ON path นี้ deploy ไม่ได้จนกว่าจะ unblock; human_wait/no_reply/clarify/handoff/order-terminal precedence คงเดิมทุกอย่าง
+
+**verdict**: PHASE_8_TYPED_COMPOSITION_READY_FOR_INDEPENDENT_REVIEW (working tree เท่านั้น — ห้าม commit จนกว่าผู้ใช้อนุญาต)
+
+## Phase 8 — STRUCTURAL CORRECTION ROUND (uncommitted · HEAD 931d41f · ห้าม stage/commit)
+
+**review findings ที่แก้ (bot-prose parsing / double render / order contract / type):**
+
+- **H1 — bot-prose regex parsing ลบทิ้งทั้งหมด**: `_FOREIGN_RETURN_CLAIM_RE` + `_strip_foreign_return_claims` + composition strip branch ใน `guards.enforce` — error คือ enforce ไป parse generated prose เพื่อหา/ลบ foreign return-claim ซึ่งขัด "no generated-answer parser" contract · แก้โดยลบ parser ทั้งชุด (ไม่มี regex/keyword/sanitizer แทน) → composition branch เหลือ structural presence guarantee เท่านั้น: `policy_text` marker + canonical segment หาย → เติมท้ายครั้งเดียว (idempotent) · **impact/residual ที่ต้องซื่อสัตย์**: model ที่เขียน policy prose ใน product segment จะไม่ถูก strip แล้ว — prevention เดิมทำได้เพียง structural: policy need ไม่ถูกส่งเข้า product task render เลย (task scoping — hallucination vector หลักถูกตัด) · residual spontaneous-prose กันไม่ได้โดยไม่ parse prose → **activation blocker เพิ่ม**: `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` — flag ต้อง OFF ต่อ
+- **M1 — finalizer เดียวจริง**: ลบ `answer = _render_composition(_tb)` ที่ KB/main callsites — error คือ callsite render prose เองก่อน finalize (render 2 จุด) · แก้: `usage_info = _tb.usage` + `answer=""` (flag-OFF path เดิม), `_render_composition` เหลือ production caller เดียว = `_finalize_answer` · LLM2 step เดิมอ่าน `answer` → แก้เป็น observe finalized answer: `_llm2_step_idx` จำตำแหน่ง step → หลัง `_resp = _finalize_answer(...)` patch `_resp.steps[_llm2_step_idx]["output"]` = `resp.answer[:500]`/len (resp.steps = dict copies ของ _steps — patch บน resp ตรง) → zero second-render, ordering/fields เดิม · spy test pin: compose=1/render=1/finalize=1/split_segments=1 + `finalized == [resp.answer]` (ไม่มี post-finalizer prose mutation)
+- **M2 — order = upstream-terminal (trace + E2E proof)**: `early_order_flow` intercept ก่อน `decide_turn` เสมอ — return dict ครบทุก intercept (order_lookup/tracking/return-refund/handoff/not-found) → composition ไม่มีโอกาส execute order; order need ที่ไม่ถูก intercept (ไม่มี order_sn) → unanswered `deferred` (composer ไม่ fabricate) · E2E `test_product_plus_order_message_terminal_order_flow`: message product+order_sn → `source=order_lookup`, `run_grouped_selection`=0, compose/finalize=0, answer_typed=0, lookup×1 · **blocker ที่ซื่อสัตย์**: composition ตอบ product-side ของ turn ที่ order flow intercept ไม่ได้ — order flow กินทั้ง message ก่อน plan exists; การเปลี่ยน = ย้าย intercept ลงหลัง plan (architecture ใหญ่กว่า Phase 8 scope)
+- **L1 — type contract**: `UnansweredNeed.reason` Literal += `"no_answer"` (code ตรง SRS ที่เขียนไว้แล้ว)
+
+**verification (actual, focused เท่านั้น):**
+- Phase 8 suite **45/45** (H1 strip tests → structural ownership tests; M1 spy counts; M2 terminal E2E)
+- Phase 7 + boundary + guards + fail-closed: **85/85**
+- replay suite (order/claim/policy turns จริง): **120p/19s/3x**
+- claim/handoff/warranty/phase4/6 batch: **311p** + pre-existing dotenv flake 1 (verified เหมือนกันบน HEAD; standalone 30/30)
+- validators: gold_retrieval 5/5 + legacy fixtures integrity pass · py_compile ×3 · `git diff --check` clean
+- **flags**: `USE_GROUPED_RETRIEVAL_SELECTION` OFF (env fallback); `grouped_retrieval_shadow_enabled` = DB `true` บน local Mongo (pre-existing ambient state — Phase 8 ไม่แตะ; tests pin off ผ่าน `_install` seam เสมอ)
+- structural: prose parsers=0 · semantic tables +0 · `_render_composition` callers = `_finalize_answer` เท่านั้น · staging empty · ไม่มี commit
+
+**verdict**: PHASE_8_STRUCTURAL_COMPOSITION_CORRECTED_READY_FOR_FINAL_REVIEW
+
+## Phase 8 — STRUCTURAL MARKER CORRECTION (uncommitted · HEAD 931d41f · ห้าม stage/commit)
+
+**finding:** enforce composition branch ยังใช้ `_final in answer` (prose membership) ตัดสิน + append canonical prose หลัง finalizer — prose ยัง control behavior (canonical sentence ใน product prose หลอก presence check ได้) + finalizer ไม่ใช่ prose owner เดียว
+
+**fix (marker-only validation, zero prose inspection):**
+- `guards.enforce` `_pdec_active` + `composition` marker present → validate structured metadata เท่านั้น: marker is dict + `"policy" ∈ marker.domains` + `marker.policy_text == policy_outcome_text(pdec.outcome)`
+- marker valid → `return resp` byte-identical (answer/answer_segments ไม่แตะ — ไม่มี scan/split/replace/append/rewrite)
+- marker invalid/mismatch → **fail closed = wholesale deterministic render `_final`** (existing pure-policy behavior เดิม) + `guard_rewritten="policy_decision"` + `composition_marker_invalid=True` — ไม่ recover จาก prose
+- ไม่มี marker → wholesale render เดิม (flag-OFF/pure-policy byte-identical)
+- `_finalize_answer` = prose owner เดียวยืนยัน (canonical policy segment insert ที่นี่เท่านั้น — test pin count==1 แม้ product text เท่า canonical ก็ dedupe)
+- deleted: `_final in answer` membership + append path + `split_segments` re-call บน compose path
+
+**tests (structural, ไม่ใช่ prose assertions):**
+- valid marker + injected clause / prose ไร้ canonical → byte-identical ทั้งคู่ (prose ไม่ถูก consult)
+- canonical sentence ใน prose + marker ขาด "policy" domain → fail closed (prose ≠ proof)
+- policy_text mismatch → wholesale `_final` + marker-invalid flag
+- finalizer exactly-one canonical segment (รวมเคส product text = canonical → dedupe)
+- spy: compose/render/finalize/split = 1 each; post-finalizer prose mutation = 0 (E2E pin เดิม)
+
+**verification (actual):** Phase 8 **47/47** · Phase7+boundary+guards+failclosed+replay+gold **210p/19s/3x** · policy/claim/warranty batch **210p** · fixture integrity pass · py_compile ×3 · `git diff --check` clean
+
+**flags (honest):** `USE_GROUPED_RETRIEVAL_SELECTION` OFF (env fallback); `grouped_retrieval_shadow_enabled` ambient local DB `true` (observed previously — operator state, ไม่แตะ/ไม่ connect Mongo รอบนี้); activation blocked เหมือนเดิม (`BLOCKED_BY_PHASE4_SOURCE_UNION` + `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE`)
+
+**verdict**: PHASE_8_STRUCTURAL_MARKER_CLOSED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+## Phase 8 — MARKER TYPE VALIDATION CORRECTION (uncommitted · HEAD 931d41f · ห้าม stage/commit)
+
+**finding:** `"policy" in (_comp.get("domains") or ())` รับ malformed type ผ่าน Python membership — `domains="not-policy-domain"` (substring), `{"policy":True}` (dict keys), `("policy",)` (tuple) ทั้งผ่าน → enforce return unchecked prose โดยไม่ set `composition_marker_invalid` (fail-open บน corrupt marker)
+
+**root cause:** membership expression บน untyped value — producer `_finalize_answer` stamp `domains` เป็น `list` เสมอ (app.py:766) แต่ consumer ไม่ได้บังคับ type
+
+**fix (minimal — enforce producer contract เดิม):** capture `_domains = _comp.get("domains")` → `_marker_ok` = `isinstance(_comp, dict) and isinstance(_domains, list) and "policy" in _domains and policy_text == _final` — ไม่มี coercion/iterable generic; valid → byte-identical เดิม, malformed/mismatch → wholesale deterministic render `_final` + `guard_rewritten` + `composition_marker_invalid=True` เดิม, absent → pure-policy render เดิม
+
+**docs accuracy fix:** `_finalize_answer` docstring + SRS row — "ไม่มี branch แตะ prose หลังจุดนี้" → "sole normal-path composition renderer; enforce อาจ wholesale-replace ทั้ง answer เฉพาะเมื่อ marker invalid (fail-closed guard, ไม่ใช่ composition)"
+
+**RED→GREEN (actual):** parametrize 4 malformed cases — RED 3 (`"not-policy-domain"`, `{"policy":True}`, `("policy",)`) / `None` pass เดิม → GREEN 51/51 หลัง fix; valid-list case byte-identical คงเดิม
+
+**verification:** Phase 8 suite 51/51 · Phase7+boundary+guards+qa+failclosed **136p** · policy/claim/warranty **152p** · py_compile ×2 · `git diff --check` clean · structural: ไม่มี `in answer`/`re.`/scan ใน composition branch (window-grep verified)
+
+**delta:** runtime helpers +0 · regex/keyword tables +0 · model calls +0 · production code +7/−6 lines (guards) + docstring fix (app)
+
+**flags:** `USE_GROUPED_RETRIEVAL_SELECTION` OFF; ambient `grouped_retrieval_shadow_enabled` = local DB `true` (operator state — ไม่แตะ/ไม่ connect); activation blockers เดิม: `BLOCKED_BY_PHASE4_SOURCE_UNION` + `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` + marker-validation fail-closed = ยังต้อง OFF
+
+**verdict**: PHASE_8_MARKER_TYPE_VALIDATION_CORRECTED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+## ✅ Phase 8 — TYPED ANSWER COMPOSITION CLOSEOUT (committed · branch feature-phase3-aswer-quality)
+
+**commit 1**: `968eae9` `refactor: compose typed answers by need` — 9 files (+1571/−137): `answer_context.py` `app.py` `guards.py` `llm.py` `SRS_SSD.md` `test_phase7_answer_context.py` `test_phase7_boundary_review.py` `test_phase8_composition.py` (new) `rebaseline-plan.md` (status correction)
+
+**root contracts implemented:**
+- `DomainResult`/`AnswerComposition`/`compose_answer` (pure typed combine, single call/turn — `answer_context.py`)
+- `_typed_answer_boundary` → `AnswerComposition` (policy_decision/claim_guidance typed inputs — ไม่เข้า product prompt)
+- `_finalize_answer` = sole normal-path finalizer (render/order/dedupe/warranty-append/segments/marker เดียวต่อ turn); `_render_composition` internal helper (caller เดียว = finalizer); callsites ไม่ render prose — LLM2 step observe `resp.answer` post-finalize
+- `guards.enforce` composition branch = structured-marker validator เท่านั้น (`isinstance(domains,list)` + exact `"policy"` member + `policy_text`==`policy_outcome_text(outcome)`); valid → byte-identical; malformed/mismatch → deterministic wholesale fail-closed; absent → pure-policy render เดิม; **zero prose inspection — canonical sentence ใน product prose ไม่ใช่ structural proof**
+- `UnansweredNeed.reason` += `"no_answer"` · `TYPED_SYSTEM_INSTRUCTION` (−243 B stale block; legacy prompt byte-identical sha256-pinned)
+- `early_order_flow` upstream-terminal คงเดิม (intercept ก่อน TurnPlan — E2E pin `source=order_lookup`, compose/finalize/answer_typed = 0); order need ที่ไม่ intercept → unanswered `deferred` (composer ไม่ fabricate)
+
+**corrections ผ่านมาแล้วในรอบนี้:** H1 prose-parser ลบทั้งชุด → marker-only validation → malformed `domains` type (str/dict/tuple/None) fail-closed (`isinstance(list)` + exact member) — RED 3 → GREEN
+
+**final verification (actual, offline-safe เท่านั้น):** Phase 8 **51/51** · combined focused batch **576p/20s/4x** (phase7+boundary+guards+failclosed+replay+claim+warranty+policy+validators) · fixture integrity pass · `py_compile` ×4 · `git diff --check` clean · `_render_composition` production caller = `_finalize_answer` เดียว · prose-parser references = 0
+
+**runtime delta:** production +419/−87 LOC · +6 fns (`compose_answer`, `_render_composition`, `_finalize_answer`, `policy_outcome_text`, `DomainResult`, `AnswerComposition`) · −1 fn (`_strip_foreign_return_claims` + `_FOREIGN_RETURN_CLAIM_RE` regex deleted) · regex/keyword tables net −1 · modules/deps/flags +0 · model ≤1 · web ≤1/turn
+
+**flags/activation:** `USE_GROUPED_RETRIEVAL_SELECTION` OFF เดิม (ไม่มี diff เปิด flag) · ambient `grouped_retrieval_shadow_enabled` = local DB `true` (operator state — ไม่แตะ) · **activation blockers ยืนยันเหลือ: `BLOCKED_BY_PHASE4_SOURCE_UNION` + `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE`** — mixed auto-answer ปิดอยู่; no deployment/activation approval ใน commit นี้
+
+**ไม่ทำ:** item-tag/spec+web-enriched+flag-OFF callsite migration · finalizer normalization consolidation · evidence-scoped numeric/cert validation ใหม่ · full clause→owner distillation ledger — backlog ไว้ใน roadmap closeout note
+
+## Phase 10 Backlog Decision — Global Web Search Toggle (planned, not implemented)
+
+**User decision (2026-10-21):** ระบบต้องใช้ข้อมูลที่ร้านมีเท่านั้นเป็นค่าเริ่มต้น แต่เก็บความสามารถ web search ไว้หลัง global toggle สำหรับ operator; ยังไม่ลบโมดูล/คีย์ OpenRouter และยังไม่เปิด search ในรอบนี้.
+
+- config owner: `system_configs.main_config.web_search_enabled` (boolean); missing/invalid = **OFF**, ไม่มี env fallback ที่เปิดเอง
+- OFF contract: ทุก runtime path (legacy/typed/v2/KB/product/compat) ต้องถูกบังคับที่ shared execution boundary ให้ provider/network web-search calls = 0 แม้มี OpenRouter keys; `web_search_used=false`
+- ON contract: เพียงอนุญาต existing typed admission เท่านั้น ไม่ใช่ค้นทุกคำถาม; search ยังคง bounded ตาม evidence reason เดิม
+- no-evidence contract: local product/KB/units/OCR/policy พิสูจน์ไม่ได้ → deterministic unknown/typed unanswered; ห้ามให้ LLM อนุมานจากสินค้ารุ่นใกล้เคียง, brand/category, history หรือ bot prose
+- regression แรก: IMILAB W01 → ถาม GPS/pace → ถามต่อ Strava; ไม่มี local structured proof ต้องไม่ claim ว่า Glory Fit sync Strava และ web calls ต้องเป็น 0 เมื่อ OFF
+- admin: global toggle จุดเดียวใน System Config, persisted value เป็น authority, update ผ่าน config/audit owner เดิมแล้ว reload authoritative state; ไม่เพิ่ม per-shop/per-platform toggle
+- scope/safety: งานนี้เป็น Phase 10; ตอนบันทึกนี้ runtime/tests/config/schema ยังไม่เปลี่ยน, ไม่มี provider/Mongo/`.env`/service/flag activity และยังไม่ถือว่า implemented
+
+## Phase 10A — IMPLEMENTATION PLAN: Web Search Toggle + Compat Evidence Gate + npf Gate (uncommitted · ห้าม stage/commit)
+
+**baseline:** HEAD `e4a6202` · authorized planning diffs เหลือ: roadmap +2 lines (`web_search_enabled` + no-evidence contract) + ไฟล์นี้ backlog decision · grouped flags OFF · services ไม่แตะ
+
+**user-approved scope (2026-10-21):**
+
+A. `main_config.web_search_enabled` (bool strict — missing/invalid/OFF; ไม่มี env fallback)
+   - Python: `runtime_config.web_search_enabled()` + `web_search.is_configured()` AND-key — shared boundary เดียวปิดทุก path (legacy reanswer · typed admission · v2 · KB · device_compat · npf guard · `search_and_extract`/`reanswer` early-return)
+   - Next.js: `systemConfigService` interface+merge+FAIL_CLOSED+defaultDoc+allowedKeys · `/api/config` PUT boolean validation · `/config` page safeSwitches toggle · audit = `logAdminEvent` เดิม
+B. W01/Strava RED fixtures ×2 (OFF incident + ON contract) + mutation variants — prior bot prose / generic smartwatch cards / brand-category ไม่ใช่ evidence; web OFF → calls=0; fabricated prose ไม่ถึงลูกค้า
+C. npf guard `app.py:4341` += `and not _sel_flag` — ไม่ preempt canonical pipeline
+D. dead symbols เท่านั้น (zero production callers — ไม่ inline, ไม่แตะ flag-OFF stack)
+E. ~1,500-line ON-dead legacy compute → `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED`
+
+**compat gate (typed-boundary contract — user approved):** compat need ที่มี external target ต้องมี typed evidence (device_spec/web record ของ target — reuse `_external_targets` + post-admission web_evidence); ไม่มี → `UnansweredNeed(no_evidence)` + drop NeedTask จาก ctx.task — model ไม่เคยเห็น target จึงเคลมไม่ได้; no-target compat คงเดิม; ห้าม keyword/regex/prose parsing
+
+**files (expected net runtime ≈ +60/−15):** `runtime_config.py` +8 · `web_search.py` +5 · `answer_context.py` +35 (no_evidence rule + task filter + Literal) · `app.py` +1 (npf gate) · `systemConfigService.ts` ~+12 · `api/config/route.ts` +6 · `config/page.tsx` +2 · tests: `test_runtime_config.py` +cases · `test_legacy_turn_incident_replay.py` (`answer_must_not_contain` + web_on seam ~+15) · fixtures +2 rows · `validate_legacy_turn_fixtures.py` +1 key · dead symbols −TBD
+
+**blockers:** `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` stays OPEN (task-filter closes instruction surface เท่านั้น — arbitrary model prose ไม่มี prose parser); ON-dead legacy compute → `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED`
+
+## Phase 10A — WEB SEARCH CONTROL + EVIDENCE GATE + npf GATE + DEAD SYMBOLS (uncommitted · ห้าม stage/commit)
+
+**case record (W01→Strava):**
+- **error:** flag-ON turn ยังแต่ง "Glory Fit ซิงค์กับ Strava" — model instruction ได้รับ task `ใช้กับ strava` ทั้งที่ target ไร้ evidence
+- **root cause:** `compile_answer_task` สร้าง NeedTask ให้ productish need ทุก need โดยไม่เช็ค target coverage; `subjects`-channel card (W01 identity) cover scope → task ผ่าน; `target_device` propagate เข้า describe-need ด้วย → 2 tasks ร้องขอ target ลอยๆ; `decide_web_admission` คำนวณ coverage แล้วแต่ task ยังถูกสร้าง
+- **fix (typed-boundary contract):** `compile_answer_context` — productish need ที่ normalized target ∉ `spec_targets ∪ web_targets ∪ web_evidence targets` → `UnansweredNeed(no_evidence)` + drop task + ไม่ emit products → model ไม่เห็น unsupported target (ไม่มี keyword/regex/prose parsing); `reason` Literal += `no_evidence`
+- **ผลกระทบเคสอื่น:** no-target compat (ใช้ได้กับรุ่นไหน / ตอบด้วย catalog identity) คงเดิม — suite phase6/7/8 + selection + compat script 144/144 ผ่าน; `inc-w01-strava-off` = xfail โดยตั้งใจ (flag-OFF legacy limitation — typed fix อยู่ใน canonical pipeline เท่านั้น ตาม scope ที่อนุมัติ)
+
+**implemented:**
+- `runtime_config.web_search_enabled()` — strict bool, fail-closed, ไม่มี env fallback (+`is_configured()` = toggle AND key → ปิดทุก path ผ่าน boundary เดียว)
+- npf guard `app.py:4341` += `not _sel_flag` — grouped ON ได้ canonical deterministic answer แทน legacy handoff
+- Next.js: `systemConfigService` (interface/merge/FAIL_CLOSED/defaultDoc/allowedKeys) + `/api/config` boolean validation + `/config` page safeSwitches — toggle เดียว persisted owner เดียว audit เดิม
+- harness: `answer_must_not_contain` key + web-on seam · fixtures +3 rows (w01-off incident / w01-on positive / w01-web-on positive / npf-preempt positive) · validator +1 key
+- dead symbols −26 (zero production callers, grep-proved): `RateMessageRequest` `TestChatMessage` `SearchData` `AnswerData` `WarrantyClaimContext`+`to_dict` `parse_purchase_date` `detect_purchase_date_and_order` `compat_proof_from_dict` `npz_generation_id` `_day_used` `_has_tisi` `_extract_tisi_context` `get_suggestion_latest` `get_latest_suggestion_batch` `get_anchor_and_suggestions` `get_order_anchors` `_extract_item_id` `_extract_order_sn` `_extract_tracking` `_has_image_placeholder` `_is_image_only` `_extract_product_subtype` `_extract_product_types` + orphans `_TISI_PATTERN` `_TRACKING_RE` `_ITEM_TAG_RE` `_ORDER_TAG_RE` `_IMAGE_PLACEHOLDER_RE` `_PHONE_PATTERN` `_mask_digits`
+
+**verification (offline-safe):** replay 123p/4x (2 xfail ใหม่ = w01-off + pre-existing) · runtime_config 17p · phase6/7/8+selection+guards 91p · phase5+qa+general 166p · claim/conversation/availability 184p · availability 21p · phase4b 74p · compat script 144/144 · cert script 66/66 · validator 76 rows pass · py_compile+tsc clean · `git diff --check` clean · stale pin `test_app_callsite_flag_gated_lazy` fixed (pre-existing fail บน base)
+
+**delta:** runtime net ≈ **−260 LOC** · fns −26 · regex tables −5 · helpers/flags/model calls +0 (เว้น toggle owner ใหม่ 1 ตัวตามแผน)
+
+**flags:** `USE_GROUPED_RETRIEVAL_SELECTION` OFF · `web_search_enabled` DB field = operator state (default OFF — ไม่แตะ) · activation blockers เดิม + `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED` (~1,500-line ON-dead compute — ยังใช้เป็น OFF path จึงลบไม่ได้)
+
+**verdict**: PHASE_10A_WEB_SEARCH_CONTROL_AND_EVIDENCE_GATE_READY_FOR_INDEPENDENT_REVIEW
+
+## Phase 10A — INDEPENDENT REVIEW CORRECTION ROUND (uncommitted · ห้าม stage/commit)
+
+**case record (review findings H1–H4):**
+- **H1 error:** `test_products_carry_need_ownership_in_serialized_context` — `Cable B` หายจาก serialized products (91p/1f)
+- **H1 root cause:** `_need_target` propagate `request.target_device` ให้ทุก need kind + gate ใหม่ drop ทุก productish need ที่ target ไร้ evidence → compat need ผ่าน `relation_target` request (products-for-device channel — selection คือคำตอบ ไม่ใช่ verdict claim) โดน drop; W01 describe need ก็รับ strava target เหมือนกัน → claim surface กระจาย
+- **H1 fix (typed ownership):** external target = semantic property ของ compat/relation need เท่านั้น — (a) `_need_target` scope เหลือ compat need (non-compat task ไม่ render `ใช้กับ` อีก); (b) compat need ที่ target มาจาก `relation_target`/`compat` source = products-for-device → ไม่ gate; (c) compat need ที่ target มาจาก slot/profile (verdict target) แต่ไร้ subject-target coverage → `UnansweredNeed(no_evidence)` + drop task + drop products ที่เลือกผ่าน request อันนั้น; (d) selected products ที่เลือกผ่าน verdict-target request ที่ uncovered = relation context → drop จากทุก need (W01 describe เสีย products → ctx empty → model 0 calls)
+- **H2 root cause:** `chatbotv3/or_client.py` `MODEL_LLM2` default `:online` + `call_or` ส่ง model ตรงเข้า payload — bypass `web_search.is_configured()` ทั้งหมดผ่าน `/chat` `use_v3`
+- **H2 fix:** sanitize ที่ `call_or` boundary เดียว — `web_search_enabled()!==true` → strip `:online` suffix ก่อนสร้าง payload (OFF ยังตอบ offline ได้ปกติ 1 call); ON → model เดิม; lazy-import runtime_config, exception → fail-closed OFF
+- **H3 root cause:** `_external_targets` ลด evidence เหลือ target-string set → record `target==strava` ของ subject อื่น/ไม่มี subject link cover ได้หมด
+- **H3 fix:** coverage = per-(need,subject,target) ผ่าน `resolve_compat` owner เดิม — declared `CompatProof` dict (subject_id+target+relation+verdict) attributed เข้า need นั้น หรือ derived `device_field_facts(target data)` + `extract_field_facts(subject card)` → outcome compatible|incompatible เท่านั้นที่ cover; target-only record ไม่มี subject/relation proof = ไม่ cover
+- **H4:** `inc-w01-strava-off` คง intentional xfail — flag-OFF legacy path ยัง leak (activation blocker ไม่ใช่ production green)
+
+**files:** `answer_context.py` (target ownership + subject-target coverage + tainted-product drop) · `chatbotv3/or_client.py` (+sanitize) · tests: ใหม่ `docs/test/test_phase10_target_ownership.py` + v3 boundary tests · docs: SRS/roadmap/schema.md/log
+
+**correction implemented + verified (RED→GREEN):**
+- **RED (9 fail เจาะ finding):** `test_describe_need_unowned_target_is_not_its_claim` · `test_relation_channel_compat_target_is_products_for_device` · `test_shared_tainted_request_products_drop_everywhere` · `test_describe_clean_products_survive_mixed_taint` (H1) · `test_same_target_other_subject_proof_does_not_cover` · `test_target_only_web_record_does_not_authorize_claim` (H3) · v3 `:online` ×3 (H2) — contract pins (compat no_evidence / mixed product / different-target / exact-proof / structured-connector / ON-model) ผ่านตั้งแต่แรก
+- **fix (typed owners เดิม ไม่มี keyword/prose/parser เพิ่ม):**
+  - `answer_context._need_target` → compat-only (non-compat task ไม่ render `ใช้กับ` — claim surface ตัดที่ typed field)
+  - `compile_answer_context`: compat need verdict target (slot/profile source — `relation_target`/`compat` = products-for-device ไม่ gate) → `_verdict_target_covered` (declared `CompatProof` subject_id ตรง card canonical sid หรือ `resolve_compat` verdict จาก subject/target facts); uncovered → `UnansweredNeed(no_evidence)` + task หาย + taint request (subject-owner-scoped: model_codes ∩ subject_refs — request ของ subject อื่นไม่ taint) → products ของ request นั้น drop จากทุก need; evidence records ที่ attribute เฉพาะ dropped needs drop ด้วย
+  - `target_of`/`decide_web_admission`: `_need_target` (compat) ∪ first request-carried target — evidence attribution/admission คง semantics เดิม
+  - `app._typed_answer_boundary`: web_used record += `data` (structured specs ของ target ตัวเดียว + source=web-structured) — payload text คงเดิม
+  - `chatbotv3/or_client.call_or`: `web_search_enabled()!==true` → strip `:online` ก่อน payload (lazy import, exception → fail-closed OFF) — offline model ปกติ, ON → `:online` เดิม
+- **contract correction (1 จุด):** `test_web_runs_before_only_answer_call` — เพิ่ม selected subject card (connector usb-c) เพราะ coverage ใหม่ต้องการ subject facts ที่ resolver prove ได้ — intent เดิม (web→answer ordering + 1 call) คงไว้
+- **GREEN:** regression cmd `test_runtime_config + phase7_answer_context + phase7_boundary_review` + ใหม่ 2 files = **108p/0f** (เดิม 91p/1f) · replay+phase8+selection_runtime **189p/19s/4x** (inc-w01-strava-off xfail เดิม — flag-OFF leak ยังแสดง fabricated claim จริง) · offline batch **694p/1s/1x** + **151p/1s** · compat script **144/144** · cert script pass · validator **76 rows pass** · chat_api+units **11p** · `py_compile`/`tsc`/`git diff --check` clean · dead-symbol deletions re-verified caller-free (hits ที่เหลือ = symbols ชื่อซ้ำคนละตัวใน module อื่น)
+- **ผลกระทบเคสอื่น:** describe need ที่มีแต่ tainted products → no_evidence (W01 describe); non-compat task ไม่ render `ใช้กับ` อีก (เลิก target claim surface); v3 OFF → model เป็น non-online equivalent (ตอบปกติ 1 call)
+- **ยังไม่แก้ (ตาม scope):** `inc-w01-strava-off` flag-OFF path ยัง leak (intentional xfail — activation blocker ไม่ใช่ green claim); `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` (model อาจ fabricate จาก context อื่น — ไม่มี prose guard); `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED`
+- **delta (รอบนี้):** answer_context ~+100 (ฟังก์ชันใหม่ `_verdict_target_covered` 1 ตัว + restructure gate) · or_client +12 · app.py +10 · tests ใหม่ 2 files · SRS/roadmap/schema/log
+
+**verdict**: PHASE_10A_REVIEW_FINDINGS_CORRECTED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+**final verification (correction round ปิดท้าย):**
+- reviewer regression cmd (runtime_config + phase7_answer_context + phase7_boundary_review): **92p/0f**
+- รวมทั้ง suite เดียว (38 files ยกเว้น phase4b): **1068p/21s/5x** · phase4b แยก invocation: **74p** (ตาม batch เดิมของรายงาน)
+- `py_compile` answer_context/or_client/ไฟล์ test ใหม่ OK · `git diff --check` clean · staging ว่าง · 2 ไฟล์ใหม่ยัง untracked
+
+**pre-existing test-infra finding (ไม่ใช่ของรอบนี้):** `test_phase4b_refresh._install_script_stubs` แทน `dotenv.load_dotenv` ด้วย lambda ตอน collection แล้วไม่ restore → ถ้ารัน claim_flow กับ phase4b ใน pytest process เดียวกัน `test_load_dotenv_aliases_restored_after_import` fail — reproduce ได้ด้วย pair 2 ไฟล์เดียว ไม่เกี่ยวกับ diff นี้ (ไฟล์ทั้งคู่มาจาก commit 6d47ad3 ก่อนหน้า) — รายงานไว้ให้ final review ตัดสิน ไม่แตะตาม scope
+
+## Phase 10A — CORRECTION ROUND 2: typed compat decision (uncommitted · ห้าม stage/commit)
+
+**case record (review findings H1/H2/M1 — relation/validation/composition):**
+- **H1 error (proof captured):** `_verdict_target_covered` loop `("connects","charges","works_with","fits")` → declared proof `W01 charges Strava` เปิดคำถาม `works_with` ได้ — relation ถูกเดาไม่ใช่ typed identity (subject,target,relation)
+- **H2 error (proof captured):** emitted evidence record drop `subject_id`/`relation`/`verdict`/`source` (closed `_EVIDENCE_OUT_FIELDS`) → model เห็น "มี spec ของ strava" แต่ไม่เห็น verdict → ยังต้องเดา; accepted proof ใช้เปิด task เฉยๆ ไม่ถึง composition
+- **M1 error:** `CompatProof` สร้างตรงจาก dict ใน answer_context — `source=""` ผ่าน; validator `compat_proof_from_dict` เคยถูกลบเพราะไร้ caller → restore ตอนมี caller จริง
+
+**แผนแก้ (root cause, typed owners เดิม — ไม่มี keyword/prose parser/helper chain):**
+1. `RetrievalRequest` += `relation_type` (default None) — `_relation_request` stamp `rel.relation_type` (propagation เดียว ไม่เพิ่ม owner)
+2. `policy_resolver`: restore `compat_proof_from_dict` + validation (non-empty subject/target/relation/verdict/source · relation ∈ COMPAT_RELATIONS · verdict ∈ {compatible,incompatible} · source ∈ COMPAT_PROOF_SOURCES={spec-db,web-structured,customer} — customer ผ่าน shape แต่ resolver downgrade → admin_review เสมอ)
+3. `answer_context._need_relation(need, reqs_n, tn)`: relation candidates = carriers' `relation_type` ∪ `_COMPAT_MODE_RELATION[compat_mode]` (unambiguous map เท่านั้น — connector_required/power_required/charging→charges · model_fit→fits · self_compat→connects · bluetooth_general→works_with; none/skip/""/unknown → ไม่มี) — distinct set ต้อง == 1 ไม่งั้น fail closed
+4. `_verdict_target_covered` → `_verdict_target_decision`: declared proofs ผ่าน `compat_proof_from_dict` เท่านั้น (malformed → drop fail-closed) + `resolve_compat` **ครั้งเดียวต่อ subject** ด้วย relation เดียว — ไม่มี loop
+5. H2 — `AnswerContext` += `compat_verdicts: tuple[CompatVerdict]` (need_index, subject_id, subject_name, target, relation, decision typed); covered compat need = ไม่มี task + products คง (subject card) + verdict record; `compose_answer` อ่านจาก ctx → `DomainResult("compat")` deterministic segment (compatible/incompatible); unknown/admin_review → `UnansweredNeed(no_evidence)` เดิม (deterministic ยังไม่พบข้อมูล path); boundary: `ctx.is_empty or not ctx.task.tasks` → skip model (compat-only covered → 0 calls, mixed → ≤1)
+6. `_DOMAIN_ORDER` += compat (claim→compat→product→policy)
+
+**mechanical test updates:** `_req` += `cm`/`rel_type` params; phase10 tests ใส่ compat_mode; `test_exact_subject_target_proof_covers_own_need`/`test_structured_connector_facts_cover_via_resolver`/`test_same_target_other_subject_proof_does_not_cover` → covered compat = verdict record ไม่ใช่ task; `test_web_runs_before_only_answer_call` → compat-only covered → 0 calls + deterministic segment (web ordering คง)
+
+**expected impact/เคสอื่น:** compat covered = deterministic segment (ไม่ใช่ model prose); compat uncovered = no_evidence เดิม; relation channel/products-for-device ไม่เปลี่ยน; w01-web-on: works_with ต้องการ declares_device — bluetooth/connector facts ไม่ prove integration → อาจ no_evidence (verify)
+
+**correction implemented + verified (RED→GREEN + 3 mutation proofs):**
+- **RED (12 fail เจาะ finding):** `test_charges_proof_does_not_cover_works_with_need` · `test_works_with_proof_does_not_cover_charges` · `test_missing_relation_fails_closed` · `test_ambiguous_relation_fails_closed` · `test_connector_facts_cover_exact_relation_only` (H1) · `test_covered_compat_produces_verdict_not_task` · `test_final_answer_contains_verdict_exactly_once` · `test_compat_only_turn_zero_answer_calls` · `test_mixed_product_compat_one_answer_call` (H2) · `test_proof_empty_source_rejected` · `test_proof_unknown_source_rejected` · `test_invalid_verdict_rejected` (M1) — contract pins 4 (different-subject/target isolation, customer→admin, invalid-relation) ผ่านตั้งแต่แรก
+- **fix ตามแผน — typed owners เดิม:** `RetrievalRequest.relation_type` + `_relation_request` stamp (1 owner เดียว); `compat_proof_from_dict` restored (raise ValueError → caller catch → reject record); `_need_relation` exact-relation resolver (distinct set==1 else fail closed — carrier requests เท่านั้น, profile-only target = residual producer gap → no_evidence); `_verdict_target_decision` → `CompatVerdict` record (resolve_compat 1×/subject ด้วย rel เดียว); `AnswerContext.compat_verdicts`; `compose_answer` compat DomainResult + `_compat_segment` + `_DOMAIN_ORDER`; `app._typed_answer_boundary` gate `not ctx.task.tasks` → 0 calls
+- **files:** `answer_context.py` (+~200: CompatVerdict/_need_relation/_COMPAT_MODE_RELATION/_verdict_target_decision/compat_verdicts/compose compat) · `retrieval_planner.py` (+relation_type field+stamp) · `policy_resolver.py` (+compat_proof_from_dict+COMPAT_PROOF_SOURCES restored) · `app.py` (model gate comment+condition) · test ใหม่ `test_phase10_compat_decision.py` (16 tests) · phase10/phase7 tests mechanical updates · SRS/roadmap/log
+- **GREEN:** focused suite (target_ownership+compat_decision+phase7_ac+phase7_boundary+phase8+runtime_config+v3_boundary) **175p/0f** · replay **123p/19s/4x** (xfail count เดิม — flag-OFF xfail คง honest) · compat script **144/144** · cert standards **66/66** · validator **76 rows** · offline-safe batch ยกเว้น phase4b **1084p/21s/5x** + phase4b แยก **74p** · `py_compile`/`tsc`/`git diff --check` clean
+- **mutation proofs (apply→fail→revert ทีละตัว):** (1) bluetooth_general→charges = 3 tests fail (relation identity enforced) ✓ revert; (2) ลบ compat results จาก compose = 2 tests fail (decision ถึง final answer) ✓ revert; (3) ลบ source validation = `test_proof_unknown_source_rejected` fail (rumor source accepted) ✓ revert — หลัง revert ทั้งหมด compat tests **27p/0f**
+- **ผลกระทบเคสอื่น:** compat covered = deterministic segment need ละครั้ง (claim→compat→product→policy); compat-only → 0 model calls; mixed → product model ≤1 + compat segment จาก decision; works_with ต้องการ declares_device เท่านั้น (bluetooth connector = hint-only ไม่ prove integration — W01→Strava ยัง unknown); customer-only proof → admin_review → no_evidence; relation_channel/products-for-device ไม่เปลี่ยน
+- **ยังไม่แก้ (ตาม scope):** `inc-w01-strava-off` flag-OFF xfail เดิม (activation blocker); `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE`; `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED`; phase4b dotenv stub pollution (pre-existing ไม่แตะ); profile-only verdict target ไร้ carrier request = residual producer gap → fail closed (documented — ไม่มี typed relation source)
+
+**verdict**: PHASE_10A_TYPED_COMPAT_DECISION_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+## Phase 10A — CORRECTION ROUND 3: compat_mode→relation owner consolidation (uncommitted · ห้าม stage/commit)
+
+**case record (duplicate-owner finding — verified valid):**
+- **audit (PART 0):** producers — `route_context._compat_mode` → {connector_required, power_required, bluetooth_general, none} (typed path → Profile/Slot/Request); `device_compat._compat_mode` → {charging, model_fit, self_compat, skip, unknown} (legacy path → `_filter_compat_products`)
+- **duplicate decision sites:** (1) `answer_context._COMPAT_MODE_RELATION` (r2 — 6-entry map ครอบ 2 vocabularies); (2) `device_compat.py:712` `_relation = "connects" if compat_mode == "self_compat" else "charges"` (broad else→charges)
+- **drift proof (reachable วันนี้):** `_compat_mode` คืน `"unknown"` ผ่าน 677 early-return (เฉพาะ skip/model_fit) → ถึง 712 → `charges` — unknown mode charge-filters จริง (drop incompatible products); map ACX ให้ `unknown→None` (fail closed) — semantics ต่างกัน; `model_fit`: ACX→fits vs DC-ternary→charges (รอดเพราะ 677 accident); `bluetooth_general`: ACX→works_with vs DC→charges
+- **non-relation consumers (ไม่แตะ):** `product_store:3119` (is_compat_check bool) · `retrieval_executor:82` (passthrough) · `device_compat:677/764` (filter structure)
+
+**แผนแก้ (canonical owner เดียว):**
+1. `policy_resolver` += `_MODE_RELATION` (private table) + public `compat_relation_for_mode(mode) -> str|None` — contract: connector_required/power_required/charging→charges · model_fit→fits · self_compat→connects · bluetooth_general→works_with · อื่นทั้งหมด→None
+2. `answer_context`: ลบ `_COMPAT_MODE_RELATION`; `_need_relation` เรียก owner เดิม (distinct-set==1 คง — explicit rel_type + mapped mode ขัดกัน → ambiguous fail closed)
+3. `device_compat`: ลบ ternary; `_relation = _pr.compat_relation_for_mode(compat_mode)` + `None → return products` (unknown mode เลิก charge-filter — ตรง "safe ไม่ over-filter" ของตัวกรองเอง)
+
+**expected impact:** `unknown` mode → คืน products ทั้งหมดแทน charge-filter (ปลอดภัยกว่า); self_compat/charging/model_fit/skip ไม่เปลี่ยน; typed path ทุก mode เดิม
+
+**correction implemented + verified (RED→GREEN):**
+- **RED (4 fail เจาะ finding):** `test_canonical_owner_mode_truth_table`/`test_canonical_owner_unknown_modes_fail_closed` (AttributeError — owner ไม่มี) · `test_device_compat_unknown_mode_no_charges_fallback` (unknown mode → DROP 'สายชาร์จ C to Lightning' ผ่าน charges — duplicate-owner drift พิสูจน์ได้) · `test_device_compat_none_mode_no_filtering` (none → charge-filtered เช่นกัน) — contract pins 4 (known-modes regression, explicit-without-mode, matching accepted, conflict fail-closed) ผ่านตั้งแต่แรก
+- **fix:** `policy_resolver` += `_MODE_RELATION`(private)+`compat_relation_for_mode` (mode ไม่ใช่ str → "" → None); `answer_context` ลบ `_COMPAT_MODE_RELATION` + `_need_relation` เรียก owner; `device_compat` ลบ ternary → `_relation = _pr.compat_relation_for_mode(compat_mode)` ก่อน spec resolution + `None → return products`
+- **GREEN:** `test_phase10_compat_decision` **24p** · compat-mode script **144/144** · typed suite (target_ownership+phase5_compat+phase7×2+phase8) **261p** · replay+runtime_config+v3 **145p/19s/4x** (W01-off xfail เดิม) · cert **66/66** · validator all rows · py_compile/diff-check clean
+- **structural gates:** canonical owners=1 · `_COMPAT_MODE_RELATION`=0 · `else→charges`=0 · relation loops=0 · keyword/regex ใหม่=0 · provider/model calls ใหม่=0 · flags OFF เดิม
+- **behavior delta จริง 1 จุด:** `_filter_compat_products` mode=unknown/none/malformed → คืน products ทั้งหมด (เดิม charge-filter) — self_compat/charging/model_fit/skip semantics เดิม (144/144 pin)
+
+**verdict**: PHASE_10A_COMPAT_RELATION_OWNER_CONSOLIDATED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+---
+
+## Phase 10A — Correction Round 4 (audit H1/H2/H3) — กำลังทำ
+
+**final audit พบ 3 High (flag-ON path เท่านั้น — flag-OFF production ไม่กระทบ) + Medium pre-existing chat_v2 (ไม่แก้รอบนี้) + safety incidents 2 รายการ**
+
+**safety incidents (record — ไม่ investigate ผ่าน production data):**
+1. `test_comprehensive.py` — pytest เผลอรัน suite ที่ POST จริงไป `127.0.0.1:8010` (service กำลัง listen) ก่อน interrupt — provider usage อาจเกิด; results files ไม่ถูกเขียน (Aug 14 เดิม)
+2. `test_anchor_compare.py` — `cp.add_product`/`_coll().delete_many` + `time.sleep` = real Mongo writes (timestamped test prefix) ก่อน interrupt — ถูก kill ก่อนครบ chunk
+→ ทั้งสองถูกแบนจาก offline batch ถาวร; batch ใหม่ = 51 files + executor (-k deselect live smoke) = 1385p/21s/5x + phase4b 74p แยก process
+
+**แผนแก้ (3 fixes, minimal):**
+- **H1** `app.py:4905` grouped supporting record ส่ง `data: list[dict]` แต่ consumer อ่านเฉพาะ dict → verdict path ตาย + spec_targets ปิด web admission ผิด → **extract `answer_context.device_spec_for_target(specs,target)` selector เดียว (first-match normalized, contract เดียวกับ web path)** → emit `{**sp,"source":...}` dict เดียวหรือไม่ emit record เลย (no record → no spec coverage → admission eligible); web path :715 ใช้ selector เดียวกัน (dedupe)
+- **H2** `llm._openrouter_generate` ไม่ strip `:online` → **shared owner เดียว `runtime_config.openrouter_model_for_web`... (ชื่อจริง: `sanitize_or_model`)** — `web_search_enabled() is True` เท่านั้นที่คง `:online`; llm+or_client เรียก owner เดียวกัน
+- **H3** `context_text` serialize `need_indices` = original index+1 แต่ task render = positional → หลัง drop เลขขัดกัน → **serialization-only map `ordinal={need_index→position}` จาก task.tasks**; products/evidence ที่ไม่เหลือ surviving owner → ไม่เข้า model context; internal index ไม่แตะ; composition/verdict เดิม
+
+**out of scope:** chat_v2 `snap` NameError (pre-existing @HEAD), LOW findings, W01 flag-OFF xfail, phase4b pollution
+
+**correction implemented + verified (RED→GREEN):**
+- **RED (16 fail เจาะ finding):** H1 — 4×AttributeError (`device_spec_for_target` ไม่มี) + `test_unusable_spec_data_does_not_mark_coverage` (list data → `local_evidence_sufficient` — admission poison พิสูจน์ได้); H2 — 7 fail (`llm._openrouter_generate` ส่ง `:online` ดิบ + owner ไม่มี + route-through pins); H3 — 4 fail (serialized `งานที่ 2` ชี้ผิดหลัง drop + decided-owner card เข้า context) — pins 2 (`list_shaped_spec_data_cannot_cover_verdict`, `no_drop_baseline`) ผ่านตั้งแต่แรก; test-bug fixes ระหว่างทาง: `no_selection` need ไม่ drop (ต้องใช้ uncovered verdict), urlopen context-manager, selector test entry ไม่ normalize ตรง
+- **fix:** H1 — `answer_context.device_spec_for_target` (first-match normalized, dict-only) + `_external_targets` require `isinstance(data,dict)` สำหรับ device_spec coverage + `app.py` grouped producer emit dict เดียว+`source` เดิมหรือ `web-structured` ไม่ก็ไม่ emit + web path :715 dedupe ใช้ selector เดียวกัน · H2 — `runtime_config.sanitize_or_model` (`web_search_enabled() is True` เท่านั้นที่คง `:online`) + `call_or`/`_openrouter_generate` เรียก owner เดียวกัน (ลบ inline strip) · H3 — `context_text` ordinal map `{need_index→surviving position}` เดียวสำหรับ products+evidence; owner ถูก drop หมด → record ออกจาก model context
+- **GREEN:** focused (compat30+boundary12+phase7-36+ownership11+runtime17) **106p** · typed suite (phase5+phase8+runtime+replay) **313p/19s/4x** · corrected batch A=302p B=150p/1deselect C=577p/20s/5x D=300p + phase4b 74p = **1403p/20s/5x** · compat 144/144 · cert 66/66 · validator all rows · py_compile/tsc/diff-check clean
+- **structural gates:** `data: list` producer=0 · selector owners=1 · `endswith(":online")` นอก runtime_config=0 · sanitize owners=1 · ordinal map=1 · compat relation owner=1 (ไม่แตะ) · answer calls compat-only=0/mixed≤1 (pin เดิม) · keyword/regex/provider-call ใหม่=0 · `_sel_flag` อ่าน `grouped_retrieval_selection_enabled` เดิม OFF
+- **behavior delta จริง:** flag-ON path เท่านั้น — ① grouped device-spec ที่ match target ได้ verdict จริง (เดิม list→dict ตาย) + ไม่ match ไม่ poison admission ② `llm` OR role config ไม่ส่ง `:online` เมื่อ toggle OFF ③ serialized `งานที่ N` ตรง task เสมอ + decided/dropped-owner records ไม่เข้า model context; flag-OFF production ไม่เปลี่ยน
+
+**verdict**: PHASE_10A_HIGH1_HIGH2_HIGH3_CORRECTED_READY_FOR_FINAL_PRECOMMIT_REVIEW
+
+---
+
+## Zaapi workflow + KB/pool program — approved design backlog (2026-10-21, plan-only)
+
+- แผนหลักใหม่: `docs/plans/2026-10-21-zaapi-workflow-kb-pool-master-plan.md`
+- start gate: ปิดและ commit Phase 10 ก่อน ห้ามเริ่ม runtime/UI/schema implementation หรือปน commit กับ Phase 10 working tree ปัจจุบัน
+- workflow scope: node ที่เกี่ยวข้องกับ Facebook, LINE, TikTok, Shopee, Lazada ทั้ง Trigger/Condition/Action/Utility ต้องมี behavior จริง; platform/node ที่ยังไม่มี connector ต้อง unavailable + publish ไม่ผ่าน ห้าม fake success
+- import contract: นำชื่อ flow/graph/node positions/edges/portable config เข้าเป็น local draft; regenerate local IDs; Zaapi account/shop/user/team/version IDs เป็น audit metadata หรือ unresolved bindings เท่านั้น แล้วค่อย map ภายหลัง
+- central pool switches: `kb`, `mongo_catalog`, `units`, `image_text` คุม admission ก่อน source fetch; ทุก source ที่เปิดยังรวมเข้า canonical pool/selection/answer path เดิม
+- KB contract: `pool_sources.kb` เป็น on/off คนละชั้นกับ `kb_source`; `kb_source` มีแค่ `legacy | zaapi`, ไม่มี `both`, ไม่มี silent fallback; legacy pipeline/collections คงเดิม, Zaapi ใช้ collection ใหม่หนึ่งชุด, สลับแบบ atomic หลัง readiness ผ่าน, rollback ด้วย switch โดยไม่ลบข้อมูล
+- estimate: first useful delivery 2-3 สัปดาห์; full real-node coverage 5 platforms แบบ sequential ราว 10-16 working weeks หรือ 6-9 weeks เมื่อแยก 3 isolated tracks หลัง freeze contracts; API/event/send permission เป็น uncertainty หลัก
+- ordered backlog locked in master plan §12: Phase10A review/commit → grouped canary → Phase8 residual/fallback retirement → system-prompt distillation → Phase4B refresh + Phase5 policy data → Logging/Analytics Truth (analytics, audit events, provider cost) → Botworker production canary → DB/writer maintenance → pool switches/strict legacy|zaapi KB → node registry/editor/import → real five-platform adapters/canaries. Parallel work allowed only after shared contracts freeze and only in isolated worktrees with one integration owner for shared docs/schema/config.
+- safety: รอบนี้ plan/docs only; ไม่แก้ runtime/test/config/schema, ไม่ stage/commit, ไม่อ่าน `.env`/secret, ไม่แตะ Mongo/provider/services
+
+---
+
+## Phase 10A — Correction Round 5 (final correctness gaps) — กำลังทำ
+
+**verified findings (read-only proof ก่อนแก้):**
+- **A. chat_v2 snap free-variable** — `chat_v2` resolve `snap` ครั้งเดียว (:1403) แต่ `_retrieve_products` (931) + `_search_if_needed` (1112) ไม่มี param `snap` — ใช้ `snap` เป็น free var ที่ :1016,1040,1060,1172 → NameError เมื่อถึงบรรทัดนั้น; callers :1419/1422 ไม่ส่ง snap · `_cp.add_item_anchor`(726)/`_cp.get_timeline`(806) ไม่มีใน `conversation_products` (จริง: `add_product`/`load_timeline`) → AttributeError ถูก try/except กลืน — anchor timeline v2 ไม่เคยถูกเขียน/อ่าน (reachable เมื่อ conversation_id มี)
+- **B. multi-subject compat** — `_verdict_target_decision` return ทันทีที่ subject แรก decided (:578 ใน loop) → subject ถัดไปไม่เคยถึง resolve_compat; subject ที่ resolve ไม่ได้หายเงียบ
+- **C. malformed typed fields** — `_need_relation`: `rt and rt in COMPAT_RELATIONS` → invalid non-empty relation_type ถูกข้าม → compat_mode ช่วยได้ (ผิด contract) · `_compat_segment`: non-"compatible" → render "ไม่ได้ค่ะ" hard negative (unknown outcome กลายเป็น false negative)
+- **D. stale docs** — `function and process.md`:660 + `schema.md`:1471 ยังอ้าง `get_suggestion_latest`/`get_order_anchors` ที่ถูกลบใน Phase 10
+
+**แผน:** A — เพิ่ม `snap` param ให้ 2 helpers + ส่งจาก callsite เดียว; `_cp` calls → `add_product`/`load_timeline` · B — `_verdict_target_decisions` คืน (verdicts, unresolved-subject-names) ทุก subject; partial → CompatVerdict + UnansweredNeed(subject_refs=unresolved) + taint เฉพาะ carrier ของ unresolved · C — invalid non-empty relation_type → fail closed ทันที; `_compat_segment` whitelist compatible+incompatible อย่างเดียว (compose ข้าม empty segment ไม่ cover need) · D — แก้ stale refs ใน active docs
+**out of scope:** Zaapi plan (touch ไม่ได้), W01 flag-OFF xfail, phase4b pollution, grouped activation
+
+**correction round 5 implemented + verified (RED→GREEN):**
+- **RED (8 fail เจาะ finding):** A — `_retrieve_products/_search_if_needed` TypeError (`snap` kwarg ไม่มี) + chat_v2 resolve ครั้งแต่ไม่ propagate; B — two-subject ได้ verdict เดียว (order-sensitive: reversed → i:2 เท่านั้น), unresolved subject หายเงียบ; C — malformed `relation_type` ถูก compat_mode repair, outcome="unknown" render hard negative
+- **fix:** A — `snap` param ทั้งสอง helpers + ส่งจาก `chat_v2` callsite เดียว (resolve 1×/request คงเดิม); `_cp.add_item_anchor`→`_cp.add_product(source="user_item_card",is_anchor=True)`; `_cp.get_timeline`→`_cp.load_timeline(...).products` · B — `_verdict_target_decisions` คืน `(verdicts, unresolved_names)` ทุก subject + partial_refs → `UnansweredNeed(subject_refs=unresolved)` + taint scope=unresolved refs ∩ need refs (∅→taint ทุก carrier เดิม) · C — non-empty `relation_type` ∉ COMPAT_RELATIONS → `_need_relation` None ทันที; `_compat_segment` whitelist compatible|incompatible เท่านั้น (compose skip empty → ไม่ cover) + compose keep subject-scoped no_evidence unanswered
+- **GREEN:** focused 195p · typed/replay suite 175p/19s/4x (W01 xfail คงเดิม) · corrected batch A=302 B=319/19s/4x/1deselect C=472/1s/1x D=244 + phase4b 74p = **1411p/20s/5x** · compat 144/144 · cert 66/66 · py_compile/tsc/diff-check clean
+- **structural:** snap free-var=0 · resolve_snapshot=1 ต่อ request · `_cp` dead calls=0 · verdict fn callers ผ่าน `_verdict_target_decisions` เดียว · deleted-symbol refs ใน active docs=0 (SRS refs ที่เหลือชี้ symbol ที่ยังมีชีวิตใน app/turn_decision/message_detectors; plan docs เป็น historical) · keyword/regex/provider-call ใหม่=0 · Zaapi plan + backlog block ไม่แตะ
+- **behavior delta จริง:** v2 engine ใช้ได้จริงแล้ว (เดิม NameError ทุก turn เมื่อถึง retrieve/search) + anchor timeline persist/follow-up ทำงาน · compat need หลาย subject ครบ + partial ไม่หายเงียบ · malformed typed fields fail closed
+
+**verdict**: PHASE_10A_FINAL_CORRECTIONS_READY_FOR_INDEPENDENT_PRECOMMIT_REVIEW
+
+---
+
+## Phase 10A Correction Round 6 — final v2 boundary closure (uncommitted)
+
+**Scope (อนุญาตสุดท้ายที่แตะ v2/v3):** ปิด `chat_v2._check_general_question` ที่เรียก
+`knowledge_base.get_general_context` (ไม่มีจริง → AttributeError→500 ทุก general
+question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacements.
+
+- **Root cause:** v2 เรียก callee ที่ไม่มีอยู่จริง; owner ของจริง =
+  `knowledge_base.build_general_context` (คืน dict {qtype, context, meta} ไม่ใช่
+  raw string).
+- **Fix (minimal):** เขียน call ให้ตรง legacy contract (`app.py:2041-2050`):
+  `shop_filter = req.shop if qtype in ("categories","brands") else None` →
+  `build_general_context(qtype, mongo_db=db, shop_filter=…)` → scoped ว่าง retry
+  unscoped ครั้งเดียว → ไม่มี result/context → None → `_kb_ctx =
+  result["context"]`. `answer_general`/response/routing/error คงเดิมทุกอย่าง.
+- **RED→GREEN:** 6 RED honest (4 general-boundary + structural refs + followup
+  data shape) → `test_chat_v2_snapshot.py` 10/10; focused suite **202p**;
+  py_compile + `git diff --check` clean; executable `get_general_context`
+  refs = **0**.
+- **Owner tests ใหม่:** `add_product` (conversation_id/platform/shop/item_id/
+  name/`source=user_item_card`/card/`is_anchor=True`) + `load_timeline` →
+  `entry["card"]` + dedupe item_id + ≤5 ใบ.
+- **กฎแช่แข็ง:** Phase 10 is the final authorized v2/v3 modification phase.
+  Later phases target legacy and must not modify v2/v3 without explicit
+  authorization.
+- SRS §6 row + §10#1 + §9 roadmap อัปเดต; plan file เพิ่ม r6 status line;
+  Zaapi plan/backlog ไม่แตะ.
+
+---
+
+## Phase 10A — pre-canary closeout (committed)
+
+- **Commit 1** `e5e64177f90041396722afb051a310cc7567aa7e` —
+  `refactor: close phase 10a evidence boundaries` — 34 files approved
+  by final independent review: 16 bot runtime (answer_context, app,
+  chat_models, chat_v2, chatbotv3/or_client, conversation_products,
+  device_compat, generation_pointer, llm, policy_resolver,
+  product_store, retrieval_planner, runtime_config, test_chat_api,
+  warranty, web_search) + 3 ChatAdminWeb (config page/route/service)
+  + 7 modified tests/fixtures + 4 new test files
+  (test_chat_v2_snapshot, test_chatbotv3_web_boundary,
+  test_phase10_compat_decision, test_phase10_target_ownership)
+  + SRS + schema + function-and-process + rebaseline plan.
+- **verification (frozen, unchanged since review):** focused **202p** ·
+  curated batch 52 files **1418p/20s/5x/1 deselected** · phase4b **74p**
+  isolated · compat script **144/144** · cert **66/66** · validator all
+  rows · py_compile 16 files · tsc · `git diff --check` clean.
+- **web-search contract:** `main_config.web_search_enabled is True`
+  เท่านั้นที่เปิด — missing/malformed/DB-error → OFF, ไม่มี env
+  fallback; OFF = zero provider/web calls ทุก path +
+  `:online` stripped ที่ `runtime_config.sanitize_or_model` owner
+  เดียว (or_client.call_or + llm._openrouter_generate).
+- **multi-subject compat contract:** ทุก subject ใน compat need resolve
+  อิสระผ่าน `resolve_compat` + `_need_relation` exact typed relation;
+  declared proof scoped ต่อ subject (evidence ของ subject หนึ่งไม่
+  cover อีก subject); unresolved → typed `no_evidence` ไม่หายเงียบ;
+  outcome compatible/incompatible เท่านั้นที่ render claim.
+- **v2 boundary closure:** `resolve_snapshot` 1 ครั้ง/request +
+  param threading (free-var snap=0) · `_check_general_question` →
+  `build_general_context` legacy contract (mongo_db=db, shop scope
+  เฉพาะ categories/brands + unscoped retry 1 ครั้ง) · anchor →
+  `add_product` · follow-up → `load_timeline` — SRS §10#1 ปิดครบ 3.
+- **grouped flags remain OFF** (`grouped_retrieval_shadow_enabled`,
+  `grouped_retrieval_selection_enabled`) — ไม่มี activation ในงานนี้.
+- **accepted Low (informational doc debt):** `chatbotv3/rich_parse.py`
+  docstring provenance ยังชี้ chat_v2 regex constants ที่ถูกลบ —
+  historical copy-note ไม่ใช่ live-reference claim; ไม่แก้ใน closeout
+  นี้ตาม review (post-review freeze).
+- **freeze:** Phase 10 is the final authorized v2/v3 modification
+  phase — later phases must not modify v2/v3 without explicit
+  authorization.
+- **remaining Phase 10 gates:** grouped one-shop canary acceptance →
+  `BLOCKED_BY_PHASE8_H1_RESIDUAL_PROSE` →
+  `BLOCKED_UNTIL_GROUPED_CANARY_ACCEPTED_AND_FALLBACK_RETIRED` →
+  rollback/deploy notes → final 21-requirement acceptance.
+- **no push/PR/deploy/canary** — commit เท่านั้น.
+
+#### Phase 10B r9 — typed relation contract เต็มรูปแบบ + real-data canary (same tree · uncommitted)
+
+- **holes ที่ปิด**: (1) `สายชาร์จใช้กับ AD1404T` — post-connector code เป็น subject ผิด → ต้องเป็น compat target ของ cable need; (2) `W01 รองรับ Strava` — Strava (non-device counterpart) หายเพราะไม่ใช่ device → ต้องอยู่ใน target_refs แต่ไม่ใช่ target_device
+- **architectural gate**: existing authorities = `route.target_codes` (post-connector code split — structural เดียวกับ target_devices) + `intent.relation_target` (field ใหม่ใน intent call เดิม — grounded-in-message + `_spec_tokens` filtered ที่ classifier, re-verify ground+conf≥0.7 ที่ owner — fail closed) — ไม่มี keyword table/mapper/prose parse ใหม่
+- **implement**: `RouteContext`+`target_codes` · `intent_classifier`+`relation_target` (prompt+default+grounding) · `decide_turn` partition codes by target_codes + merge rel_tgt → `_tgt_refs` · slots: `target_device` = tref ที่ validate เป็น device เท่านั้น (strava/ad1404t อยู่ target_refs ไม่ใช่ td) · `_has_target_dev` += rel_tgt
+- **truth table verify**: `สายชาร์จใช้กับ ad1404t`→()/('AD1404T') ทั้ง compat+product · `w01 รองรับ strava`+intent→(W01)/('strava') · `ขอ ad1404t`→('AD1404T')/() (non-connector ยังเป็น subject) · spec tokens/pd3.1 ยัง ()/() · i14pro/ip68/usb ไม่ regression
+- **mutations (reverted)**: drop target_codes partition → AD1404T กลับเป็น subject (2 fail) · drop relation_target → strava หาย (2 fail) · revert device-only td → AD1404T เข้า target_device (1 fail)
+- **regression**: focused 61+344 green · canonical matrix 59 files: **1466p/0f/21sk/5xf** = baseline+4 r9 tests · scripts 5/5 PASS · fixtures pass · py_compile+diff-check clean
+- **real Mongo census (read-only, .env ผ่าน normal load — ไม่ print creds)**: ShpProducts 11,783 docs · W01=14 docs (IMILabThailand ฯลฯ, strava=0, compatibility_info ว่าง → no evidence) · strava docs=76 แต่ไม่มีใน W01 · AD1404T=13 docs ทั้งหมด = CUKTECH GaN3 หัวชาร์จ 140W (CukTechThailand/KingGadgets/...) · S25 case=0 docs · IMILAB control=412 docs · KB strava → Unauthorized code 13 (admin coll ไม่ authorized — report ตามจริง)
+- **Gemini canary 4 ข้อ (sequential, ≤1 intent+1 answer/question, providers=gemini ทั้งหมด)**:
+  - Q1 IMILabThailand: rel_tgt=Strava → compat (W01)/(IMILAB W01,Strava), verdicts unknown×2 → Gemini ตอบ "ไม่มีระบุว่าเชื่อมต่อ Strava ได้" — **ไม่ infer จาก GloryFit prose** ✓
+  - Q2 CukTechThailand: ()/(AD1404T) ทั้ง needs, req types={charger,cable} tgt=(AD1404T) td=AD1404T (validated device จริง) → fetch สายชาร์จ CUKTECH จริง 50 ใบ (CTC615/620 ฯลฯ) — **ไม่มี AD1404T ตัวเองเป็น cable** ✓
+  - Q3 KingGadgets: product ()/('Samsung S25','s25') types={case} → fetch case items → ตอบ "ยังไม่มีเคส S25" fail-closed ✓
+  - Q4 control IMILabThailand: (W01)/() types={smartwatch} → fetch W01 card จริงเป็นอันดับแรก → ตอบถูก ✓
+  - calls: 8 Gemini (4 intent gemini-3.1-flash-lite ~3.7k tok + 4 answer gemini-3.5-flash-lite 12k-100k tok) · **Web Search=0 · OpenRouter=0** (spy fail-fast armed ทั้งคู่) · Mongo read-only · ไม่มี botworker/platform delivery
+- **complexity gate**: exec LOC vs r8-end +40 net (route +11 target_codes · turn_decision +14 partition+rel_tgt · intent_classifier +15 field+grounding · slots td-check ~+10 vs removed len==1) — increase คือ typed contract machinery เท่านั้น ไม่มี heuristic/keyword/soft-identity เพิ่ม; accounting ใน final report
+- **safety**: r8 (0 prohibited contact) → r9 authorized reads only: product db read ✓ admin KB attempt → code13 (safe fail) · zero writes · ไม่แตะ user uvicorn/other-session mongo processes
+- **staging: empty · no commit/push/PR/deploy**
+
+#### Phase 10B r10 — exact-item attribution + typed subject gate + selected live regression (same tree · uncommitted)
+
+- **gate correction (single typed owner)**: persisted-subject resolver gate เปลี่ยนจาก loose `extract_model_keywords` (false-positive "Speed"/"data" → veto ผิด) → ผ่าน private `unit_classifier._extract_codes` ชั่วคราว → **สุดท้าย = `TurnNeed.subject_refs` typed surface** (app.py ไม่ parse message เองอีก; subject_refs ไม่ว่าง = explicit subject owns turn → resolver veto; post-connector target codes เช่น "ใช้กับ AD1404T" ไม่ veto — แก้กว่า raw-code gate เดิม) — owner count = 1 ✓
+- **canary write-surface census**: write-capable owners ทั้งหมดอยู่ใน `conversation_products.py` เท่านั้น (save_timeline / transition_claim_state / merge_claim_fields / record_subject_set / add_order_anchor) — โมดูลอื่นใน chat() path ไม่มี write op → harness แทนที่ด้วย in-memory impl ที่ owner level + `_coll` read-through/write-deny barrier เป็น leak detector → **mongo_write_attempts = 0** (รอบก่อนเคย =1 เพราะ deny-ที่-barrier แทน owner)
+- **RED→GREEN**: `test_noncode_product_question_resolves_persisted_subject` (new — "Speed data เท่าไหร่?ครับ" ต้องถึง resolver + resolve เป็น item เดิมเท่านั้น) · subject suite **102p** หลังสลับ gate ครบทุกเคส (compare pair / deictic / clarify / iPhone pair / plan-signal / import-purity)
+- **offline dry-run (zero provider)**: healthy + intent-down variants — Q1/Q2 selected `("27639651334",str,subject)` · ctx 1 card str · subject set preserved · mongo_write=0 web=0 OR=0 · intent-down → fail-closed ไม่ fabricate
+- **live canary Q1→Q2 (real Mongo+Gemini, process-local grouped)**: Q1 intent 503→other แต่ tag path ไม่พึ่ง intent → plan product/stock subj_refs=(27639651334) → selected+ctx exact str → persisted; Q2 intent=product_spec 0.98 → plan product/price → `subject_res resolved→[27639651334]` → selected/ctx 1 card str เท่านั้น → answer = price-deflection+spec-defer **ไม่มี speed claim ที่ไม่มีหลักฐาน** (op=price ไม่ admit description → fail-closed ตาม spec — ไม่แตะ keyword ให้เป็น spec op)
+- **pingevox 5 + mistore 37 turns (in-process, fresh conv, history สะสม)**: เสร็จครบ 42 turns · **mongo_write=0 · web=0 · OpenRouter=0** · provider: 82 logical calls / 96 attempts / 15×503 / 43×429 (retry+key-rotation ดูดซับ) · ทุก answer claim มาจาก selected cards (ctx ≤4 ตลอด, GUARD-ENFORCE rewrite ungrounded อัตโนมัติ)
+- **findings (pre-existing, ไม่ใช่ regression ของรอบนี้ — รายงานไว้ไม่แก้)**: (a) `decide_subject_set` ยุบ compare pair → `single['28053691336']` (Q6 AC65B/AC65B2) ทำให้ Q7 resolve phantom→no_selection; (b) AC65B2 card ไม่ materialize → model เทียบ AC45B แทน (compare-pair materialization gap); (c) intent=other fallback จาก provider saturation → ~17 turns deterministic "หาข้อมูลไม่ได้" บน greeting/punctuation — fail-closed safe แต่คุณภาพต่ำ; (d) punctuation "," → retrieval แทน no_reply (Q3/Q24 ได้ no_reply — ไม่ consistent); (e) "ไม่มีสินค้าประเภทหัวชาร์จสำหรับ iPhone" — wording borderline (มี "ไม่พบในระบบ" ตามหลัง)
+- **premise correction (empirical)**: op `product/price` เกิดจาก `_PRICE_ASK_KWS` "เท่าไหร" เสมอ — healthy intent (product_spec 0.98, needs_description, current_single) ก็ยัง price → evidence-availability gate ตาม op คือ deterministic no-confirmation; การเปลี่ยนเป็น spec op ต้องงานอื่น (spec ห้าม keyword patch)
+- **verification**: focused 359p+1sk · subject 102p · canonical per-file (รอบก่อน) 1509p/22sk/5xf/0f · py_compile+diff-check clean
+- **safety**: no stage/commit/push/deploy · port-8010 user process ไม่ถูกแตะ · in-process replay เท่านั้น (test_pingevox_mistore.py เดิมเป็น HTTP driver ชี้ 8010 → ใช้ case data ผ่าน appmod.chat แทน)
+
+#### Phase 10B r11 — Pingevox transition/exact-evidence correction (กำลังจะทำ — same tree · uncommitted)
+
+- **เป้า**: แก้ root cause ของ pingevox 5 turns: (a) exact-item Q1 เลือก 3 items ทั้งที่ tag เดียว; (b) greeting Q2/Q5 → intent=other → no plan / phantom describe; (c) Q3/Q4 new recommendation (subject_scope=none, target=xiaomi 17 ultra) ยัง inherit CTL301 subject เก่า
+- **แผน**: (0) upgrade harness save full artifacts → baseline before.json/md; (1) harness retry → 5/5/5 สำหรับ 503 เท่านั้น; (2) boundary trace + Mongo evidence audit; (3) RED tests ต่อ owner; (4) fix ที่ owner เดียว (intent greeting typed value / decide_turn subject precedence / selection exact-item / composition); (5) live rerun → after.json/md
+- **ข้อจำกัด**: ไม่มี keyword/phrase/hardcode เพิ่ม · owner count คงเดิม · retry อยู่ใน harness เท่านั้น · web=0 OR=0 mongo_write=0
+
+**baseline (before, 5 turns)**: `docs/test/results/phase10b/pingevox_*_before.{json,md}` · intent=other บน Q2/Q5 (0.99) · `has_item_tag`+`subj=[49267582152]` ติดอยู่ Q3/Q4/Q5 ทั้งที่ไม่มี tag → plan Q5=product/describe phantom · Q1 selected 3 items (tag + bundle sibling `42234302494` "CTC615W+CTL301" + alt) ผ่าน code-bearing request + anchor-name codes `CTL301` → `model_codes` hard filter; Q3 request `model_codes=[CTL301]` + `target_device=xiaomi 17 ultra` พร้อมกัน; defer sentence ซ้ำ 3 ครั้งในคำตอบเดียว · 9 calls/12 attempts/3×503 · mongo_write=0 web=0 OR=0
+
+**root causes (boundary trace → owner เดียวต่อ defect)**:
+
+- **A. history-anchor re-injection (Q3/Q4/Q5 + Q1 codes)** — error: turn ใหม่ไม่มี tag แต่ `has_item_tag`/`tag_item_ids`/`_tagged_item_id`/`subj` ยังเป็น anchor เก่า → cause: item-tag block scan history tags ทุกครั้งก่อน `decide_turn` (gate keyword-parallel เดิม) + `build_retrieval_profile` รับ anchor_cards → anchor-name codes ไหลเข้า `model_codes` → fix: grouped flag ON → ข้าม history-anchor scan ทั้ง block (legacy เดิมรักษาไว้) — continuity อยู่ที่ persisted subject set + resolver (typed owner เดียว) → impact: ทุก turn ที่ไม่มี explicit tag ใน grouped mode ได้ subject continuity จาก resolver เท่านั้น; legacy path ไม่เปลี่ยน
+- **B. exact-item selection ไม่มี authority (Q1 bundle sibling)** — error: `42234302494` (CTC615W+CTL301 bundle listing — confirmed Mongo) promoted เป็น subject เพราะชื่อมี CTL301 match `model_codes` → cause: `_select_one`/`select_for_llm_context` ไม่เคารพ typed `subject_refs` — name/code match ชนะ typed identity → fix: digit `subject_refs` = exact-item authority; card ที่ `item_id` normalized (`_norm_id` เดียวกับ `_card_ids`) ไม่เท่า ref → reject `subject_item_mismatch` ทั้ง selected/by_request/unavailable; non-digit refs ไม่เปลี่ยน → impact: ทุก exact-id turn (ทุกร้าน/ทุก type) selection จำกัดที่ id ที่ถาม; compat/recommend turns (subject_refs ว่าง หรือ non-digit) ไม่กระทบ
+- **C. greeting ไม่มี typed representation (Q2/Q5)** — error: greeting/social → intent=`other` → no plan (Q2) / phantom product/describe (Q5) → cause: intent enum ไม่มี greeting → `decide_turn` ไม่มี action ให้ → fix (1 owner chain): `classify_intent` enum+prompt+few-shot += `greeting` (call เดิม) → `TurnPrimaryAction` += `"greeting"` → `decide_turn`: greeting+conf≥0.7+needs ว่าง → greeting action → `app.py` action switch: greeting → `GREETING_REPLY` return ตรงก่อน retrieval (subject set ไม่แตะ) → impact: greeting ทุกภาษา/surface ทำงานผ่าน model call เดิม; intent=`other` non-greeting ยัง flow เดิม
+- **D. spec-db evidence ไม่ถึง typed boundary (recommend turn)** — error: compat recommend scope=none → candidates จริงถูก drop หมด `missing_connector_evidence` → cause: `_device_spec_lookup` emit `device_specs` เฉพาะ web-derived; spec-db hit ไม่เข้า boundary → `t_facts` ว่าง → fix: spec-db record emit เป็น device_spec เสมอ (typed record เดิม, ไม่มี web call เพิ่ม) → impact: compat verdict บน spec-db-grounded devices ตัดสินได้จริงแทน fail-closed เสมอ
+- **E. unresolved anonymous candidate taint ทั้ง request (recommend)** — error: candidate ที่ decide ไม่ได้ (ไม่มี connector token) ลาก decided-compatible ร่วม request ตกหมด → cause: `compile_answer_context` taint carrier เมื่อ unresolved names ครอบ — ออกแบบมาสำหรับ declared subject_refs (all-or-nothing attribution) แต่ใช้ผิดบน refs-ว่าง recommend → fix: `subject_refs` ว่าง → unresolved names ไม่ taint; drop เฉพาะ candidates ที่ decide ไม่ได้ → impact: all-or-nothing attribution บน explicit refs เดิมรักษา; anonymous recommend coverage เพิ่ม
+- **F. defer sentence ซ้ำ N ครั้ง (composition)** — error: "แอดมินจะรีบตรวจสอบ…" ซ้ำ 3 ครั้ง → cause: `guards` spec_claim rewrite loop ไม่มี dedupe ที่ `_REWRITE_RULES` มี (replacement exists → drop clause) → fix: เพิ่ม replacement-present check + `_ridx`/`_rend` skip-match ใน replacement + particle normalize ที่ owner เดิม → impact: ทุก multi-clause spec rewrite ผลิต defer sentence เดียว
+
+**RED→GREEN**: `test_phase10b_pingevox_transition.py` ใหม่ (replay-harness e2e บน owner จริง: tag turn → greeting → recommend subtype pivot → greeting + exact-item selection unit tests) — RED 7 ล้ม/2 ผ่าน → GREEN 9/9 (แก้ fixture float-item_id normalize + spec-db evidence + taint ตามลำดับ)
+
+**regression (per-file, ไม่มี combined run)**: pingevox 9p · exact_item 15p · typed_subject_target 23p · named_product 38p · subject_set 102p · slots/evidence/relations 14/14/17p · selection 9p+runtime 15p · grouped req/executor 10p+11p1sk · phase7 36p+boundary 44p · phase8 51p · compat 35p · retry-policy 4p · turn_decision 111p+shadow 17p · incident replay 123p/19sk/4xf · รวม ~1511p/22sk/5xf/0f (baseline+9) — `test_flow.py` collection error เดิม (import-time script, pre-existing); live-script files "no tests" ตามสเป็กเดิม
+
+- **G. model_claim guard single-shot (live Q3 residual — found by after-run)** — error: live answer มี "CUKTECH AD1003T + CMC615P ... ใช้งานร่วมกับ xiaomi 17 ultra ได้ค่ะ" — ชื่อสินค้าแต่งเอง (ไม่มีใน ctx/task/selected) + compat claim ไม่มีหลักฐาน → cause: model_claim rewrite เป็น single-shot — break ที่ ungrounded token แรก แทนเฉพาะ clause เดียว (defer ขึ้นบน แต่ clause ชื่อสินค้ารอด) → fix: loop ≤4 + defer dedupe pattern เดียวกับ _REWRITE_RULES/spec_claim (owner เดิม guards.enforce) → impact: ทุก multi-clause fabrication ถูกเคลียร์ทั้งคำตอบ ไม่ใช่ clause เดียว; grounded tokens (cards/message/history pool) ไม่แตะ
+
+**live after-run #1 (pingevox_1792658902_after)**: Q1 exact-only ✓ (sel=[49267582152], ctx 1 card, claims+link+image ตรง item) · Q2 intent=greeting 1.0 → greeting action, zero retrieval ✓ · Q3 fresh recommend scope=none target=xiaomi 17 ultra — plan ไม่มี CTL301 ✓ แต่ model fabricate ชื่อ AD1003T (ungrounded token clause 2 รอด single-shot guard) → **BLOCKED ตาม spec** → fix G แล้ว retest green · Q4 subtype pivot adapter + target preserved + CTL301 เป็น prior-context ที่ถูกบอก "ไม่รองรับ Xiaomi" ตามหลักฐาน ✓ defer ครั้งเดียว ✓ · Q5 intent call 503×4 (provider saturation) → fail-closed generic — provider-limited ไม่ใช่ code defect · mongo_write=0 web=0 OR=0 · 8 calls/16 attempts/9×503
+
+**live after-run #2 (pingevox_1792659423_after2, post fix-G) — PASS ทุก gate**: Q1 sel=[49267582152] เดียว ctx 1 card claims+link+image ตรง item (480Mbps grounded ใน card name; "2 ปี" rewrite ครั้งเดียว) · Q2/Q5 intent=greeting 1.0 → greeting action zero retrieval subject ไม่แตะ ✓ · Q3 fresh recommend (compat+product needs, tgt=xiaomi 17 ultra, ไม่มี CTL301) — verdict undecided → products dropped fail-closed; model fabricate "AD1003T" อีกครั้ง แต่ loop ใหม่ rewrite ทั้ง 2 clauses ('AD1003'→defer, 'AD1003T'→drop) → answer สะอาด fail-closed ✓ · Q4 adapter pivot: sel = 3 adapters (ไม่มี CTL301 เลย) + subject set อัปเดตผ่าน decide_subject_set → alternatives[3 adapters] persisted; card name ที่ quote มาจาก selected card จริง (CC903P/PB1055/S26 grounded ใน ctx) · defer ≤1 ทุก turn · ไม่มี broken markdown · mongo_write=0 web=0 OR=0 · 8 calls/11 attempts/3×503
+
+**verdict: PHASE_10B_PINGEVOX_CONTEXT_AND_EVIDENCE_CORRECTED_READY_FOR_INDEPENDENT_REVIEW** — ทุก acceptance gate ผ่านบน after2 (จดไว้: Q3 "ยังไม่มีสินค้าที่ตรงสเปค" = fail-closed เมื่อ verdict undecided — framing system-not-found นิดหน่อยแต่ตาม spec; Q5 run1 provider-limited แต่ run2 ผ่าน = code path เดียวกัน)
+
+**staging: empty · no commit/push/PR/deploy**
+
+#### Phase 10B r12 — semantic op authority + typed spec constraints + evidence truth (กำลังจะทำ — same tree · uncommitted)
+
+- **r11 verdict ถูกปรับเป็น BLOCKED โดย spec**: Q3 "ร้านไม่มีหัวชาร์จ" (แต่ Q4 เจอ) · Q4 เสนอ Samsung-S26 listing ไม่มี Xiaomi evidence · `_PRICE_ASK_KWS` แปลงทุก "เท่าไหร่" → price · `value_constraints` รับแต่ price · answer-model counter = 0 ทั้งที่ answer_typed ทำงาน
+- **conversations**: pingevox 5 turns (KingGadgets, item 49267582152) + wattaka 3 turns (CukTechThailand, item 27639651334 = CMC615P สายแม่เหล็ก 480Mbps — verified ใน Mongo read-only)
+- **แผน**: (1) harness += `answer_typed` counter + WATTAKA_CASES + combined artifact → baseline before.{json,md}; (2) owner audit A–F; (3) typed contract: intent เพิ่ม `requested_facts`/`spec_constraints`(field,op,value)/`required_features` (call เดิม) → TurnNeed → RetrievalProfile/Request; (4) decide_turn: requested_facts ชนะ `_PRICE_ASK_KWS` (typed surface > kw); (5) retrieval: types จาก need.product_types เข้า req + constraint filter ผ่าน `extract_field_facts` (canonical owner เดียว — เพิ่ม data_transfer_mbps + feature facts); honest wording: unverified-compat ≠ "ร้านไม่มี"; (6) RED → GREEN → live after-run
+- **ข้อจำกัด**: ไม่มี keyword/phrase branch/regex ใหม่ใน semantic path · owner count เดิม · mongo_write=0 web=0 OR=0
+
+**r12 owner map (boundary trace → owner เดียว)**:
+
+- **A. Q3 `req-0.types=[]` ทั้งที่ need types=[charger]** — cause: `build_grouped_retrieval_requests` named-terms merge demote `product_type` ทุกตัวที่ไม่ใช่ kw noun ใน message — intent-declared `charger` (conf .98 → need.product_types) ถูกนับเป็น "inferred" เหมือน regex guess → fix: demote เฉพาะ type ที่ไม่มี typed backing (kw noun ∪ need.product_types ∪ subtype-derived) — owner: retrieval_planner (+run_grouped_selection ส่ง needs เข้า)
+- **B. Q4 S26-listing presented ไม่มี limitation** — cause: verdict gate ใน compile_answer_context ข้าม needs ที่ `kind != "compat"` — product need ที่มี target_refs ไม่เคย evaluate → relation_target cards เข้า ctx สะอาด → fix: gate เดียวกันครอบ productish needs ที่มี typed target — decided-compatible→ปกติ · incompatible→drop · undecided→เก็บเป็น candidate + per-card `_context_note` limitation (spec: candidate+limitation ได้, confirmed-compat โดยไม่มีหลักฐานไม่ได้) — owner: answer_context (resolve_compat เดิม)
+- **C. Wattaka Q1 stock-op ไม่ admit spec evidence** — cause: `_scope_card` admit `_DESC_FIELDS` เฉพาะ desc-ops; tag-turn op=stock → description/480Mbps ไม่เข้า ctx → model echo spec จากชื่อแล้วถูก rewrite → fix: typed `requested_facts` (intent field ใหม่) → admit `_DESC_FIELDS`+raw_description ของ item นั้นเท่านั้น — owner: answer_context._scope_card + intent/decide_turn ผลิต facts
+- **D. "Speed data เท่าไหร่" → op=price** — cause: `_PRICE_ASK_KWS` lexical ชนะทุก typed intent → fix: `requested_facts` (conf≥0.7) เป็น authority ของ fact-op — price เฉพาะเมื่อ "price" ∈ facts; ไม่มี facts → kw fallback เดิม — owner: turn_decision
+- **E. "magnetic + ≥10Gbps" ไม่มี typed representation** — fix: intent `spec_constraints`/`required_features` (closed enums, normalize ที่ classifier) → TurnNeed → RetrievalProfile/Slot/RetrievalRequest → canonical facts `data_transfer_mbps`/`features` ใน extract_field_facts (owner: policy_resolver+device_compat extractors) → compile ประเมิน per-candidate: proven-fail→drop+near-miss note · unknown→keep+limitation · satisfy→clean — "ไม่มีตัวที่พิสูจน์ได้" ≠ "ร้านไม่มี" (notes kind ใหม่ใน context_text)
+- **history reference (Wattaka Q3 ต้องอ้าง CMC615P)** — persisted subject บน fresh-recommend (scope=none, no subject_refs) materialize เป็น card → channel "history" → role `historical_evidence` (ไม่ใช่ subject — identity ไม่ติดมา) + profile รับ types/subtype carry จากมันเท่านั้น (ไม่ใช่ codes) — owners: app.py callsite + retrieval_runtime channel + retrieval_selection role + route_context profile
+- **F. counter** — `answer_typed` spy นับ call จริงแล้ว (baseline: 6)
+
+**r12 continuation — live after-run defects (after1/2) + owner fixes**:
+
+- **G. requested facts ไม่ถึง answer task (Wattaka Q2 ไม่ตอบ 480Mbps)** — error: ctx มี `spec_facts:{data_transfer_mbps:480}` แต่ model ไม่พูดถึง → cause: `NeedTask` ไม่มี `requested_facts` field → task render ไม่บอก model ว่าถาม fact อะไร → fix: `NeedTask.requested_facts` + `compile_answer_task` propagate + render (owner เดิม) + `_scope_card` emit `spec_facts` เมื่อ requested_facts ⊂ card evidence + `llm.answer_typed` prompt: narrate typed limitations (`constraint_notes` ∪ card `_context_note`) — ไม่สรุปเกิน → impact: typed fact ops ทุกชนิดได้ fact-visibility เดียวกัน
+- **H. compat-need cards emit affirmative note ทุกใบ (Pingevox Q3)** — error: decided-incompatible CTL301 ได้ note "ใช้ร่วมกันได้ตามความสัมพันธ์" (คำสั่ง model ผิด) → cause: `_ROLE_NOTE` fixed per role, emission ไม่ consult `decided[i]` verdicts → fix: `note_replace` — decided-incompatible card ได้ "หลักฐานยืนยันว่าไม่เข้ากัน…ห้ามเสนอว่าใช้ได้" แทน affirmative; product-need verdict gate (B) annotate เหมือนกัน → impact: verdict-decided cards บน compat needs ทุกตัวได้ note ตรงกับ decision
+- **I. grouped `subject_ids` pollution → spec claims fail-closed ทั้งคำตอบ (Wattaka Q3 '6A'/'480Mbps' ถูก rewrite ทั้งที่ card มี)** — cause: `app._routing` merge `_subject_cards` + `_ref_regex_products` + anchors เข้า `subject_ids` → len>1 → `_spec_fact_grounded` fail-closed (by design — claim↔subject ไม่ได้ผูกใน free text) → fix: grouped path (`_sel_flag`) ใช้ resolved `_subject_cards` เท่านั้น; legacy candidates ไม่ใช่ typed subject authority → impact: 0 sids → pool grounding, 1 sid → identity-scoped; `_pd_cards` merge (policy scope) แยก consumer ไม่แตะ; flag-OFF path เดิม
+- **J. eval-measured values invisible ต่อ model+guard** — error: '480Mbps' ของ CMC615P เป็น typed fact แล้วแต่ ground ไม่ได้บน scoped card (raw_description ถูกตัด) → fix chain (owners เดิม): (1) `extract_field_facts` fold `card["spec_facts"]` dict → fact rows (source=spec_facts); (2) `claim_supported` += `_tok_field_value`/`_FIELD_UNITS` — numeric token↔canonical value match ผ่าน unit normalize เดียวกับ spec_constraints (gbps→mbps, field aliases ร่วมหน่วยคืนครบ); (3) compile gate emit `sf_extra` → `card["spec_facts"]` = measured values บน evaluated cards; (4) `AnswerContext.measured_spec_tokens` → `routing_decision["spec_measured_tokens"]` → `_spec_fact_grounded` pool path (sids ว่างเท่านั้น — measured = product evidence; ask values ไม่รวม ห้าม ground affirmative) → impact: ทุก constraint-evaluated product ทุก type ได้ measurable grounding; '10gbps' (ask) ยัง ungrounded เสมอ
+- **K. "ไม่มีสินค้าผ่านเงื่อนไข" ไม่มี deterministic render** — error: model ล่มเป็น defer-only ทั้งที่ ctx มี verdict ครบ (Wattaka Q3) → fix: all-candidates-fail → `constraint_segments` typed artifact → `_constraint_segment` + `DomainResult("constraint")` (owner class เดียวกับ `_compat_segment`) + `_DOMAIN_ORDER` constraint:2; `_OP_NEG_LABEL` rephrase `_constraint_fail_label` ("ไม่ถึง X ที่ต้องการ" — threshold ใต้ negation → segment รอด spec grounding; measured 480Mbps ground ผ่าน J) ; segment name เฉพาะ kept subject/historical cards (dropped items ไม่อยู่ใน products → token ไม่ ground) → impact: no-match conclusion เป็น deterministic output ไม่พึ่ง model compliance; แยก "none satisfy" จาก "catalog empty"/"unverified" ชัดเจน
+
+**RED→GREEN**: `test_phase10b_r12_semantic_contract.py` — RED 17f/3p → GREEN 23p → +spec_facts/compat-annotation RED → 23p → +requested_facts NeedTask → +grounding surface tests (numeric claim/spec_facts fold/evaluated-card spec_facts/none-passed note) → +deterministic segment tests → **GREEN 32/32**
+
+**regression (per-file)**: guards/boundary/compat/composition/selection/turn_decision/subject_set/incident replay/pool/phase5/6/7/8 ทั้งหมด green (~1900 asserts รวม); `test_compat_mode_filter` = script-style `sys.exit(0)` — all internal checks PASS; live-script files skip ตามเดิม
+
+**live after5 (pingevox_wattaka_1792665415_after5) — PASS ทุก gate**: P-Q1 exact CTL301+480Mbps+MFi/PD+link/image ตรง item · Q2/Q5 greeting 1.0 zero-retrieval · Q3 typed verdict segments (ATC615/ATC310N ใช้ได้=connector_match, CTL301 ไม่ได้=connector_disjoint — deterministic) + adapter-of-candidates จริง · Q4 adapter pivot + 'AD652S' fabrication ถูก model_claim loop rewrite · **W-Q2 ตอบ 480Mbps ชัดเจน (ไม่ใช่ price)** · **W-Q3: "ยังไม่มีสินค้าที่ผ่านเงื่อนไขครบทุกข้อค่ะ — CMC615P: ผ่าน สาย/หัวแม่เหล็ก แต่ 480Mbps ไม่ถึง 10Gbps" (deterministic verdict segment — zero rewrites turn นี้)** · answer_typed=6 truthful · mongo_write=0 web=0 OR=0
+
+**staging: empty · no commit/push/PR/deploy**
+
+## Zaapi workflow + KB/pool master-plan rebaseline from complete export (ผ่านแล้วด้านแผน — plan-only)
+
+**วันที่:** 2026-10-22
+
+- ผู้ใช้อนุมัติ design ที่ได้จาก read-only audit ของ `/Users/itdev4/Downloads/zaapi` แล้ว และอนุญาตให้อัปเดต master plan เดิม
+- ขอบเขตรอบนี้เป็นเอกสารเท่านั้น: แก้ `docs/plans/2026-10-21-zaapi-workflow-kb-pool-master-plan.md` ให้ตรงกับ package จริง 21 active flows / 218 nodes / 225 edges, 31 node types ที่ใช้งานจริง, 118 KB sources, scenario handling, personalities, Basic Automations และ lookup bindings
+- ต้องแทนสมมติฐานเก่าเรื่อง supplied six-node flow ด้วย import-all-as-disabled-drafts, local ID regeneration, unresolved bindings, conflict report และ publish gates; ห้ามนำ Zaapi active state มาเปิดใช้งาน local โดยอัตโนมัติ
+- ต้องแยก owner ของข้อมูล: workflows, one active Basic Automation, Zaapi KB backend ใหม่, scenario instruction drafts, persona mappings และ lookup bindings; ห้ามเทข้อมูลทั้งหมดเข้า KB/system prompt
+- ลำดับ implementation ต้องคง Phase 10B เป็น start gate และไม่แตะ runtime/schema/UI ในรอบนี้; Logging/Analytics ยังอยู่หลัง operational readiness ตามลำดับ backlog ที่ผู้ใช้กำหนด
+- สถานะก่อนแก้: branch `feature-phase3-aswer-quality` @ `20f9e69`; Phase 10B r12 working tree คงเดิมและห้าม stage/commit ปนกับ plan-only diff นี้
+- **ผล:** master plan เดิม rebaseline แล้ว: package baseline + data ownership + multi-shape KB importer + import-all-disabled-drafts + scenario/persona migration + acceptance 18 ข้อ + schedule ใหม่ + execution order 29 ขั้น
+- **verification:** อ่าน export ซ้ำแบบ read-only ได้ `flows=21`, `nodes=218`, `edges=225`, `node_types=31`, `knowledge_sources=118`, `xlsx=113`, `txt=5`; stale six-node wording ใน master plan = 0; `git diff --check` ต้องผ่านก่อนรายงาน
+- **safety:** ไม่มี runtime/test/schema/UI edit, ไม่มี Mongo/provider/API/service/`.env`/web-search activity, staging ว่าง, ไม่มี commit/push/PR
+
+#### Phase 10B r12-correction — 3 independent-review blockers (กำลังจะทำ — same tree · uncommitted)
+
+- **blockers (approved)**: (A) current_single fan-out — resolve ได้ 1 canonical ID แต่ request/selection/context = 3 products (Wattaka Q2); (B) `spec_measured_tokens` flat/global → cross-identity grounding; (C) constraint-failed CMC615P ยังอยู่ products + ได้ image/link/CTA
+- **แผน**: (0) frozen audit + plan entry นี้; (1) RED tests A/B/C ที่ owner จริง; (2) A: resolved single ID stamp → `TurnNeed.subject_refs` (typed boundary ก่อน profile/requests — reuse r11 exact-item authority); (3) B: measured → identity-scoped evidence {identity,name,fact_key,value} + clause-bound grounding ที่ `_spec_fact_grounded` (owner เดิม); (4) C: failed subject/historical ออกจาก products + near-miss อยู่ใน typed constraint segment เท่านั้น + need ที่ candidates หมดออกจาก task (deterministic verdict เหมือน decided compat); (5) focused GREEN per-file + live rerun 8 turns
+- **ข้อจำกัด**: owner เดิมเท่านั้น · ไม่มี keyword/regex/branch ใหม่ · mongo_write=0 web=0 OR=0 · ไม่แตะ 8010 · ไม่แตะ Zaapi plan · staged=0
+
+#### r12c RESOLVED — 3 blockers (RED 12f → GREEN, live after6/after7 verified)
+
+- **defect A (current_single fan-out)** — error: `subject_scope=current_single` resolve ได้ `('27639651334',)` แต่ `req-0.subject_refs=()` → slot fetch 30 cables → ctx/resp มี 3 products + คำตอบพูดถึง AD1003T/CTC615U. cause: resolved id ไม่เคยเข้า typed need contract (resolver output ไป `_subject_cards` อย่างเดียว). fix: `turn_decision.apply_resolved_subject_refs` (owner เดียว — pure, stamp เฉพาะ current_single+refs ว่าง+resolved=1) + `app._chat_impl` `_dc_replace(_turn_plan, needs=…)` หลัง resolution → `req-0.subj=('27639651334',)` → r11 exact-item authority จำกัด selection เหลือ 1. impact: ทุก current_single turn (describe/spec/stock/price/link) — fresh recommend/explicit/multi-set ไม่แตะ.
+- **defect B (cross-identity measured grounding)** — error: `spec_measured_tokens` flat → ค่าของ card ที่ drop แล้ว ground claim สินค้าอื่นได้. fix: `AnswerContext.spec_measured_facts` = `{identity,name,fact_key,value}` ต่อ eval card; `guards._spec_fact_grounded(resp,tok,clause)` — clause-bound identity check (item-id digits หรือ model-token ≥4 ในชื่อ) ก่อนรับ (a) measured-value match (b) name-verbatim token; ไม่ระบุ identity → fail closed.
+- **defect C (failed candidate promoted)** — error: CMC615P proven-fail แต่ยังใน products → ได้ image/link/CTA. fix: constraint gate ที่ `answer_context` — fail ทุก role ออกจาก products; subject/historical → `failed_refs` metadata → `constraint_segments` items; `no_match` merge เข้า task-drop set (deterministic verdict covers need เหมือน decided compat); products ว่าง → `not ctx.task.tasks` → 0 answer-model call → deterministic render เท่านั้น.
+- **RED**: 12 fail/2 pass (A: AttributeError+fan-out; B: ไม่มี spec_measured_facts; C: card ยังอยู่ products). **GREEN**: r12 contract 46/46; guard name-verbatim fix หลัง after6 (ชื่อสินค้ามี '6A/240W' เป็น spec token → name-verbatim path ผูก identity เดียวกัน).
+- **live after7**: `pingevox_wattaka_1792667250_after7.{json,md}` — W-Q2 sel/ctx/resp = 27639651334 ตัวเดียว, ตอบ 480Mbps; W-Q3 ctx=[] resp_products=[], deterministic verdict + near-miss "ผ่าน สาย/หัวแม่เหล็ก แต่ 480Mbps ไม่ถึง 10Gbps" ไม่มี link/image/CTA, `gemini=1` (intent only); Pingevox Q1-Q5 เหมือน after5 (verdicts grounded, AD652S rewrite). counters: answer_typed=5, e503=2, web=0, OR=0, mongo_write=0.
+- **residuals**: `'1.5 เมตร'`/`'2 ปี'`/`'24 เดือน'` rewrites บน turn อื่น (Thai-token↔spec-fact gap เดิม — safe under-claim); compat-decided-incompatible card ยังได้ link ใน resp.products (r11 reviewed behavior — ไม่ใช่ blocker รอบนี้).
+
+#### Phase 10B Final Acceptance — 3 approved findings (กำลังจะทำ — same tree · uncommitted)
+
+- **findings**: (A) adapter subtype isolation — Pingevox Q4 need subs={adapter} แต่ historical cables ATC615/ATC310N/CTL301 เข้า products+links; (B) decided-incompatible cards (ทุก role incl. CTL301 บน Q3) ยังอยู่ products+CTA; (C) `_spec_fact_grounded` re-infer identity จาก generated prose (clause/model-token/digits/name) — ต้องเปลี่ยนเป็น structured composition provenance
+- **แผน**: (0) frozen audit + plan; (1) RED tests A/B/C; (2) A: current-need scope gate ที่ `answer_context` per-need eligibility (canonical_roles/canonical_type ∩ need subs/types; identity-pinned subject_refs exempt; compare/compat needs ไม่ gate — verdicts จำกัดเฉพาะ in-scope candidates); (3) B: decided-incompatible ออกจาก products ทุก role — mirror fix C (verdict segment render จาก typed verdict เหมือนเดิม); (4) C: `DomainResult` + provenance {origin,subject_ids,evidence} → finalizer stamp `composition.segments` marker → enforce exempt deterministic segments (exact-text match; malformed → fail closed) + ลบ measured prose-inference ทั้งก้อนใน `_spec_fact_grounded`
+- **ข้อจำกัด**: owner เดิม · ไม่มี keyword/regex/hardcode/prose-parser/helper chain/second finalizer/เพิ่ม model call · web=0 OR=0 mongo_write=0 · ไม่แตะ 8010/Zaapi · staged=0
+
+#### Final Acceptance RESOLVED — 3 findings (RED 9f → GREEN 64/64, live after8/after9 verified)
+
+- **finding A (adapter subtype isolation)** — error: Pingevox Q4 need subs={adapter} แต่ historical cables ATC615/ATC310N/CTL301 เข้า products+links (channels ที่ bypass retrieval filters ไม่ผ่าน current-need scope). fix: `answer_context` per-need scope eligibility gate — product needs ที่ declare subtypes/product_types → card ต้องมี canonical_roles ∩ need.subtypes หรือ canonical_type ∈ need.product_types; subject_refs-pinned exempt (identity authority); unknown-subtype → ออก fail-closed; compare/compat needs ไม่ gate. **ordering สำคัญ**: อยู่หลัง constraint gate (CMC615P canonical_roles=['wireless'] misclassification — scope-drop ก่อน eval ทำ near-miss หาย บน after8; eval ก่อน → verdict/near-miss รอด) แต่ก่อน verdict gate (out-of-scope ไม่ได้ verdict — `test_scoped_out_card_gets_no_verdict_or_segment`) + `verdicts_t` จำกัดเฉพาะ in-scope cand ids.
+- **finding B (incompatible products)** — error: decided-incompatible card ทุก role อยู่ใน products+CTA (CTL301 บน Q3 ได้ image/link). fix: pattern เดียวกับ constraint-failed — compat need: drop ก่อน note stage (cnote diagnostic แทน note_replace); product-need verdict gate: oc=="incompatible" → drop ทุก role; verdict segment render conclusion เหมือนเดิม (typed CompatVerdict เป็น narrative เดียว).
+- **finding C (prose identity parser)** — error: `_spec_fact_grounded` re-infer identity จาก generated prose (clause + _MODEL_TOKEN_RE + item digits + display name). fix: structured composition provenance — `DomainResult` +{origin,subject_ids}; compose stamp deterministic origin ให้ claim/compat/constraint/policy; `_finalize_answer` stamp `composition.segments` marker; `enforce` validate marker (origin∈{deterministic,model}+text str) → deterministic text match verbatim → claim exemption ทุก tier (REWRITE_RULES/model_claim/spec_claim); malformed/mismatch → `composition_marker_invalid` fail closed; `_spec_fact_grounded(resp,tok)` revert FieldEvidence-only — spec_measured/clause/name/digit path ถูกลบทั้งหมด (rd["spec_measured"] เหลือเป็น artifact/audit เท่านั้น).
+- **RED**: 9 fail/9 pass (A: cable leak+unknown+symmetric; B: 3 role-drop failures; C: no origin field + CMC615P model_claim rewrite + no exemption). **GREEN**: r12 contract 64/64 + focused regressions ~950 tests ทั้งหมดผ่าน + script 144/144.
+- **live after9**: `pingevox_wattaka_1792808504_after9.{json,md}` — P-Q3 resp=[42284305844,29045765731] (CTL301 ออก + verdict narrate "ใช้ไม่ได้" deterministic, ไม่มี link); P-Q4 ctx/resp = 3 adapters เท่านั้น (47067569286/57617557265/40434299538 — zero cable); W-Q2 exact single + 480Mbps; W-Q3 ctx=[] resp=[], deterministic verdict + CMC615P near-miss "ผ่าน สาย/หัวแม่เหล็ก แต่ 480Mbps ไม่ถึง 10Gbps" — zero guard rewrite บน provenance-exempt segment, gem=1 (0 answer call). counters: answer_typed=5, e503=0, web=0, OR=0, mongo_write=0.
+- **residuals**: '1.5 เมตร'/'2 ปี'/'24 เดือน'/'90W' spec_claim rewrites บน model prose (Thai-token↔fact gap เดิม — safe under-claim); canonical_roles 'wireless' misclassification บน CMC615P (upstream detection quirk — gate ordering ทำให้ verdict/near-miss ไม่หาย); defer text ขั้นกลาง product pitch (pre-existing rewrite placement, ไม่เกี่ยว provenance path).
+
+#### Phase 10B Final Acceptance round 2 — 3 verified findings (กำลังจะทำ — same tree · uncommitted)
+
+- **findings**: (A) marker validation รับ segment แค่ {origin,text} — ไม่ validate domain/need_indices/subject_ids/correspondence กับ composition.domains → malformed marker ยังได้ exemption; (B) scope gate อยู่หลัง constraint eval → historical cable ที่ out-of-scope ยังสร้าง deterministic near-miss ใน adapter answer; CMC615P upstream `canonical_roles=['wireless']` เป็น canonicalization defect จริงที่ต้องแก้ที่ owner; (C) guard rewrite แตะ joined answer หลัง product-card/image/link rendering → broken `**`, defer text ขั้นกลาง card, orphan `ค่ะ ![...]` segment, contradictory defer หลัง grounded 480Mbps
+- **แผน**: (0) frozen audit ✓ + batch_aa-ad proven disposable (split artifacts, 0 refs) → removed; (1) RED tests A (10 mutation cases)/B (8 cases incl. real canonicalization owner)/C (8 cases); (2) A: closed-schema segment validation ที่ existing marker-validation owner ใน enforce; (3) B: reorder — current-need eligibility ก่อน constraint/verdict emission + แก้ canonical subtype owner ให้ magnetic cable ไม่กลายเป็น wireless (generic, ใช้ structured evidence ที่มีอยู่); (4) C: trace DomainResult→render→card/link→enforce — validate model prose ก่อน deterministic rendering join, deterministic/cards/links อยู่นอก free-form mutation
+- **ข้อจำกัด**: owner เดิม · ไม่มี keyword/regex/hardcode/CMC-specific/prose-parser/second finalizer/helper chain · web=0 OR=0 mongo_write=0 · ไม่แตะ 8010/Zaapi · staged=0
+
+#### Final Acceptance r2 RESOLVED — 3 findings (+2 live residuals) (RED 31f → GREEN 94/94 + all suites, live after10/after11 verified)
+
+- **finding A (marker รับเฉพาะ origin+text)** — error: `enforce` ให้ deterministic exemption แม้ segment ขาด domain/need_indices/subject_ids หรือ type ผิด (`"0"`, `[True]`, `"i:1"`, unknown domain) — reprobe: malformed ทุกแบบรักษา `480Mbps` รอด. cause: marker validation เช็คแค่ 2 keys. fix: closed-schema ที่ marker-validation owner เดิมใน `enforce` — segments/domains list ยาวเท่ากัน, domain∈{claim,compat,constraint,product,policy}==domains[i], origin∈{deterministic,model}, text str, need_indices list[int≥0] (`type(x) is int` กัน bool), subject_ids list[str ไม่ว่าง], det compat/constraint ต้องมี identities; ไม่มี "segments" key หรือ field ผิด → `composition_marker_invalid` + zero exemption. impact: marker ทุก malformed shape fail closed; valid composer marker ไม่เปลี่ยน.
+- **finding B (scope gate อยู่หลัง constraint eval)** — error: historical cable ที่ out-of-scope (adapter need) ยังได้ `constraint_notes`/`constraint_segments` (near-miss text รั่วเข้า adapter answer). cause: eligibility gate อยู่หลัง eval/emission. fix: ย้าย current-need scope gate ขึ้นก่อน constraint eval/verdict emission ทั้งหมดที่ `compile_answer_context` — card ตก scope = ไม่ใช่ candidate → ไม่มี product/note/verdict/segment/evidence (subject_refs-pinned exempt เหมือนเดิม; compare/compat needs ไม่ gate เหมือนเดิม).
+- **finding B upstream (canonical subtype defect จริง)** — error: `สายชาร์จแม่เหล็ก`(CMC615P)→wireless, `สายชาร์จในรถ`→car_charger. cause: subtype kw เป็น substring — "ชาร์จแม่เหล็ก" match ในวลีสายชาร์จ. fix: `_kw_outside_cable_phrase` ใน `product_store` (detector+filter owner เดียว) — kw ที่ preceded by "สาย"/cable kw = modifier ของสาย ไม่ใช่ subtype evidence; apply กับ wireless/car/desktop/socket kw ทั้ง detector+filter. verify 13 cases: magnetic/in-car/magsafe cables→cable; แท่นชาร์จไร้สาย/wireless จริง→wireless; หัวชาร์จในรถจริง→car_charger. CMC615P จึง canonicalize เป็น cable → ผ่าน cable eligibility บน W-Q3 อย่างถูกต้อง → near-miss verdict รอด legitimately (ไม่ใช่ข้าม gate).
+- **finding C (guard splice กิน card markup + infer identity จาก prose)** — error: model emit card markup (`**name** ![img] [link]`) ใน product_text → `_replace_clause` ผ่าน `_CLAUSE_BOUNDARY` split กลาง card → orphan `ค่ะ`, unmatched `**`, defer ขั้นกลาง title+image. cause: card markup อยู่ใน free-form mutation surface. fix ที่ typed composition owner: (1) `compose_answer` render deterministic product-card `DomainResult` ต่อ `ctx.products` card (`**name**`+`![img]`+`[สั่งซื้อ]` จาก typed fields เท่านั้น, origin=deterministic, subject_ids=identity, need_indices=card's own) — single renderer เดิม `_render_composition` รวม text เหมือนเดิม ไม่มี second finalizer; (2) model `product_text` normalize ก่อน emit — strip `![]()`/`[]()`/`**` ทั้งหมด (markup ไม่ใช่ช่องทางของ model — mutation surface ไม่มี markup ให้ splice); (3) `_SYS_TYPED_CARD_NOTE` (typed-path-only, legacy prompt byte-identical) สั่ง plain prose. impact: card markup อยู่ใน deterministic spans (exempt) เสมอ; claim loops เหลือแต่ prose จริง — `**` imbalance เป็นไปไม่ได้ทางโครงสร้าง.
+- **residual fix 1 (W-Q2 — SELLER_DELETE sibling เข้า ctx/resp)** — live after10 เจอ: `28312539696` (deleted duplicate listing ของ CMC615P) promote เป็น subject ผ่าน unavailable-subject path (`_code_match` เท่านั้น) ทั้งที่ request pin item `27639651334` — `_id_refs` bound มีใน eligible selection + `_select_one` แต่ promotion ข้าม. fix: apply `_id_refs` filter เดียวกันใน promotion loop (owner เดิม `select_for_llm_context`) — sibling/delisted listings ไม่ promote เมื่อ exact id ถูกระบุ (variants ผ่าน linked_item_id). GREEN: W-Q1/Q2 กลับ exact single.
+- **residual fix 2 (defer template กว้างเกิน)** — `เรื่องสเปก/ตัวเลขที่กล่าวถึง` อ่านเหมือนครอบทุก spec ที่พูดถึง → ขัดกับ grounded 480Mbps. fix: scope เป็น `บางส่วนที่กล่าวถึง` (defer ยัง fail-closed สำหรับ ungrounded claim เช่น 90W/1.5เมตร/2ปี hallucination — ไม่ขัดคำตอบที่ ground).
+- **RED**: 30 contract tests fail (A 13, B 5, C 3, ก่อนแก้) + bold-splice + promotion-pin tests. **GREEN**: r12 contract **94/94** · selection runtime/relations/requests/executor 63 · subject_set+turn_decision+shadow 231 · pingevox/exact-item/typed-subject/named/compat-decision 121 · phase7+7boundary+phase8+answer-boundary 141+44+51+10 · guards+claim-state+qa-context+troubleshoot 57 · 5f suites 99+63 · incident replay+import 124+19sk+4xf · fixture validator all-rows · py_compile+diff-check clean.
+- **live after11** (`pingevox_wattaka_1792811885_after11.{json,md}` — after10 เปิด residuals 2 จุดที่แก้ข้างบน): ทุก turn `**` balanced + `![]()`/`[]()` complete + zero bare-particle segments; P-Q3 CTL301 incompatible narrate เท่านั้น (ctx/resp=2 cables, ไม่มี CTL301 CTA); P-Q4 ctx/resp=3 adapters เท่านั้น (historical cables scope-excluded — ไม่มี cable ใน text/products/links/notes/verdicts); W-Q1/Q2 sel=ctx=resp=`['27639651334']` exact single + grounded 480Mbps + defer=0; W-Q3 ctx=[] resp=[] gem=1 deterministic no-match + CMC615P cable near-miss "ผ่าน สาย/หัวแม่เหล็ก แต่ 480Mbps ไม่ถึง 10Gbps" ผ่าน cable eligibility ชอบด้วยตัวเอง (ไม่ใช่ wireless เทียบ); counters: answer_typed=5, answer(legacy)=0, gemini=13, e503=1, web=0, OR=0, mongo_write=0.
+- **residuals เหลือ**: spec_claim under-claim rewrites บน model prose ('1.5 เมตร','2 ปี','90W' — Thai-token↔FieldEvidence gap เดิม — safe direction, defer อยู่ต้น bubble ไม่ใช่ใน card); ตำแหน่ง defer = ตำแหน่ง claim เดิม (pre-existing placement semantics).
+- **staging: empty · no commit/push/PR/deploy**
+
+#### Phase 10B Complexity Containment + Final Acceptance r3 — 5 findings (กำลังจะทำ — same tree · uncommitted)
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `20f9e69` · 30 modified + 8 untracked · staged=0 · batch_a* gone · diff-check clean · Zaapi plan diff pre-existing (preserve) · frozen log 0-diff
+- **mechanism inventory (cumulative diff)**: +18 funcs (apply_resolved_subject_refs/build_retrieval_slots/eval_spec_constraints/format_constraint_value/intent_fact_scope/norm_spec_constraints/_constraint_fail_label/_constraint_segment/_constraint_unknown_label/_device_candidates/_extract_data_transfer_mbps/_extract_product_features/_kw_outside_cable_phrase/_local_target_device/_spec_label/_tok_field_value + DomainResult/AnswerContext/TurnNeed/RetrievalRequest/Profile field adds) · +0 classes · +21 constants/maps · +4 regexes (_DATA_SPEED_RE/_TOK_NUM_RE/magnetic/+1 context) · +1 guard validation block +3 exemption consumption sites · _id_refs filter ×3 · provider calls unchanged
+- **classify**: `_kw_outside_cable_phrase`=DELETE (semantic position helper → replaceด้วย structured `product_type`/`components`/`cable_subtype` authority + cable-head-noun precedence ใน owner เดิม) · marker validation=KEEP+MOVE (hoist ก่อน _pdec_active — validator เดียวกิน 2 path) · model-markup normalize=KEEP+SIMPLIFY (strip→drop markup bubble + title-echo drop + leading-particle strip ที่ boundary เดียว) · det card render=KEEP · _id_refs ×3=MOVE (ไป elig/unav grouping — earliest owner) · _SYS_TYPED_CARD_NOTE=KEEP
+- **findings**: (A) `_pdec_active` early-return ก่อน closed-schema validator → malformed mixed-policy marker ผ่าน exemption ได้; (B) helper ใหม่ → ลบ, structured unit fields (product_type=cable/components=[cable]/cable_subtype=usb-c — CMC615P ถูกต้องอยู่แล้ว, charger_subtype=wireless คือ stale name-derived) เป็น authority; (C) _id_refs ซ้ำ 3 จุด; (D) strip markup เหลือ name debris + length instruction ซ้ำ 2 รอบใน answer_typed; (E) `ค่ะ`-leading bubble (model style + clause-remnant) → particle strip ที่ compose boundary ด้วย _CLAUSE_PARTICLES ที่ extract จาก literal ซ้ำ 4 จุด
+- **ข้อจำกัด**: owner เดิม · helpers ≤0 · kw tables ≤0 · regexes ≤0 · guard/finalizer owner คงเดิม · ไม่มี item/shop hardcode · web=0 OR=0 mongo_write=0 · ไม่แตะ 8010/Zaapi · staged=0
+
+#### Complexity Containment r3 RESOLVED — 5 findings (RED 13f → GREEN 117/117 contract + ทุก suite, live after12 verified)
+
+- **finding A (mixed-policy marker bypass)** — error: `_pdec_active` branch ใน `enforce` เช็คเฉพาะ domains-list+policy_text แล้ว return ก่อน closed-schema validator → `segments="malformed"` ยังคง answer + `999W` รอด. fix: hoisted closed-schema validation เป็น shared block ก่อนทั้ง 2 branches (validator เดียว — policy path consume `_m_ok`/`_doms`/`_cm` เดียวกัน, non-policy ใช้ `_det_texts` เดิม); dict-ที่ขาด "segments" key → `composition_marker_invalid` → policy fail closed ด้วย canonical outcome; ลบ shallow-check ซ้ำ+duplicate validator block (−52 บรรทัด net). impact: mixed-policy malformed → deterministic render; valid mixed/pure-policy byte-identical (pinned).
+- **finding B (`_kw_outside_cable_phrase` = position-semantic helper)** — error: text-position helper ตีความ "สาย" ใหม่ — ขัดทิศ architecture. fix ที่ owner เดิมด้วย structured contract ที่มีอยู่: (1) `_canonical_roles` — `charger_subtype` apply เฉพาะเมื่อ `"cable" not in types` (product_type/components = authority เหนือ stale name-derived field — CMC615P unit `['cable','wireless']`→`['cable']`); (2) `_detect_charger_subtype` — ย้าย cable/adapter kw+shorthand ขึ้นก่อน form loop, form-subtype skip เมื่อมี cable head-noun (`สายชาร์จแม่เหล็ก`=cable — form kw = modifier); (3) `_filter_charger_subtype` — `has_cable_kw` suppress desktop/car/wireless/socket + classification order socket→car→wireless→desktop (ตรง detector — `แท่นชาร์จไร้สาย`→wireless ไม่ใช่ desktop). ลบ helper ทั้งตัว (−18 บรรทัด, −1 func); probe 13 cases + unit-card roles + doc filter ผ่านหมด; real wireless/car/set/adapter preserved.
+- **finding C (`_id_refs` ซ้ำ 3 จุด)** — error: narrowing เดียวกันใน `_select_one` (role), eligible filter, unav promotion. fix: `req_refs` computed once → narrowing ที่ `elig_by_req`/`unav_by_req` grouping loop (earliest candidate-scoping owner — eligible+promotion inherit bound เดียว); ลบ 2 filter blocks; `_select_one` เหลือ `if subject_refs → role="subject"` (narrowing รับประกัน ref-match แล้ว — ลบ dead branches −11 บรรทัด). 1 owner สำหรับ exact-item narrowing; pin tests (eligible sibling/unav sibling/linked variant/no-pin model-code) ผ่าน.
+- **finding D (strip→debris + dup instruction)** — error: `re.sub(markup)` บน model text เหลือ name-echo bubbles ซ้ำกับ deterministic cards + "ความยาวคำตอบ" ซ้ำ 2 รอบใน `answer_typed` trailer. fix: single protocol-boundary normalization ใน `compose_answer` — bubble ที่มี `](` = card-attempt → drop ทั้ง bubble (fail closed ไม่ parse), bubble = typed product name เป๊ะ → drop, detached particle ที่หัว bubble → strip ผ่าน `guards._LEADING_PARTICLE`, `**` residual → strip; ลบ markup-strip regex (−1 regex def). ลบ duplicate f-string trailer (typed prompt เหลือ 1; legacy `answer()` คง byte-identical).
+- **finding E (`ค่ะ`-leading bubble = detached particle)** — cause จริง: `_replace_clause` คง `text[ce:]` ที่เริ่มด้วย particle-boundary ของ clause ที่ถูกแทน (`ค่ะ` เป็นส่วนของ clause ที่ลบ ไม่ใช่ประโยคใหม่) + model อาจ emit `ค่ะ`-leading bubble. fix ที่ owner เดิม: extract `_CLAUSE_PARTICLES` จาก `_CLAUSE_BOUNDARY` alternation เดิม (vocabulary เดียว ไม่ใช่ตารางใหม่) + `_LEADING_PARTICLE` regex ที่ strip particle ที่หัว tail (คง `|||` delimiter ผ่าน group-1 preserve); `_replace_clause` ตัด particle ของ clause ที่ถูกแทนออกพร้อม clause — ครอบทั้ง guard-splice residual และ model-emitted (compose-side strip ใช้ pattern เดียวกัน). mechanism: +1 regex def / −1 markup regex def → net regex 0.
+- **test fixture fix (ไม่ใช่ production)**: `test_phase8_composition` 2 pins hand-built marker ขาด `segments` (shape ที่ producer ไม่เคย emit — `_finalize_answer` stamp เสมอ) → เพิ่ม composer-shaped segments; semantic pin เดิมครบ (byte-identical + prose-irrelevant).
+- **RED**: 13 fail/22 pass ตอนเริ่ม (A: marker bypass 5, B: helper+roles+filter 4, D/E: debris+echo+particle+dup+replace_clause-owner test 5). **GREEN**: r12 contract **117/117** · pingevox/exact-item/typed-subject/named/compat-decision **121** · selection runtime/relations/requests/executor+selection **66** · phase7+7boundary+phase8+answer-boundary **141** · claim-flow+spec-grounding+claim-state+troubleshoot **123** · subject_set+turn_decision+turn_shadow+retrieval_shadow **237** · incident replay **123+19sk+4xf** · py_compile+diff-check clean · `grep -rn _kw_outside_cable_phrase chatbot/` = absent.
+- **live after12** (`pingevox_wattaka_1792814458_after12.{json,md}`): P-Q3 resp=[42284305844,29045765731] cables เท่านั้น + CTL301 incompatible narrate (ไม่มี CTL301 CTA); P-Q4 ctx/resp=3 adapters (historical cables ออก — ไม่มี cable ใน answer/products); W-Q1/Q2 sel=ctx=resp=`['27639651334']` exact single + 480Mbps grounded + defer=0; W-Q3 ctx=[] resp=[] gem=1 deterministic no-match + CMC615P cable near-miss เดิม; **ทุก turn: `**` balanced, image/link complete, zero `ค่ะ`-leading bubbles, zero name-echo bubbles, cards rendered exactly once**. counters: gemini=13, answer_typed=5, answer(legacy)=0, e503=0, web=0, OR=0, mongo_write=0.
+- **mechanism delta r3**: helpers −1 (`_kw_outside_cable_phrase` deleted) · semantic kw tables +0 · regexes net 0 (+1 `_LEADING_PARTICLE` def, −1 markup-strip regex def — vocabulary แชร์ `_CLAUSE_PARTICLES` ที่ extract จาก `_CLAUSE_BOUNDARY` เดิม) · marker-validation owners 2→1 · `_id_refs` narrowing sites 3→1 · prompt dup −1 · guard/finalizer/provider calls unchanged · ไม่มี item/shop/product special case · staged=0.
+- **residuals เหลือ**: spec_claim under-claim rewrites บน model prose ('1.5 เมตร','2 ปี','90W' — Thai-token↔FieldEvidence gap เดิม — safe direction); defer placement = claim position เดิม.
+- **staging: empty · no commit/push/PR/deploy**
+
+#### Phase 10B Correction r4 — 3 review findings (กำลังจะทำ — same tree · uncommitted)
+
+- **baseline**: state เดิมจาก r3 (HEAD `20f9e69`, staged=0) · review หลัง r3 เจอ 3 findings
+- **findings**: (1) compose-side semantic cleanup — `_LEADING_PARTICLE` regex ใหม่ + cross-module private import ใน `compose_answer` = post-processing interpreter (ห้ามนับ net-zero); (2) `_FEATURE_SEARCH_RES`+`_extract_product_features` = semantic keyword map บน product prose — audit: sellable_units ไม่มี `features`/`attributes`/`specifications` field สัก doc (0 docs), `components` closed-set ไม่มี magnetic token → MISSING_STRUCTURED_PRODUCT_FEATURE_EVIDENCE → feature = `unknown` fail-closed; (3) Q4 `หัวชาร์จละ` — request subtype=adapter แต่เลือก bundle/set (req-0 ไม่มี form-exact preference — ranking ใช้ canonical_roles∩subtypes ซึ่ง set/cable/powerbank ก็ match adapter)
+- **ข้อจำกัด**: owner เดิม · ห้าม regex/keyword/helper/guard/owner ใหม่ · ห้าม prose inference ทดแทน structured · staged=0 · web/OR/mongo_write=0
+
+#### Correction r4 RESOLVED — 3 findings (RED 8f → GREEN 129/129 contract + regression ทั้งหมด, live after13 verified)
+
+- **finding 1 (compose semantic cleanup)** — fix: `_LEADING_PARTICLE`+`_CLAUSE_PARTICLES` ถูกลบทั้งคู่; `_CLAUSE_BOUNDARY` revert inline alternation เดิม; `_replace_clause` ตัด particle ของ clause ที่ถูกแทนผ่าน structural check บน match เดิม (`_bm.group(0)` ไม่ใช่ `\n`/`|||`/space-only → particle+space = ของ clause ที่ลบ → drop particle คง space); `answer_context` ไม่มี guards import/private regex — compose เหลือ `](`-bubble drop + name-echo drop + `**` strip เท่านั้น; model-emitted leading particle = documented model-output residual (ไม่มี interpreter).
+- **finding 2 (feature keyword inference)** — fix: ลบ `_FEATURE_SEARCH_RES` dict + `_extract_product_features` + `features` fact emission ใน `extract_field_facts`; `eval_spec_constraints` owner เดิมทำ absent→`unknown` (fail-closed ไม่ใช่ fail); required_features propagation (intent→need→request) ไม่แตะ. ผล: magnetic constraint = unknown ทุก candidate → ไม่มี "ผ่านแม่เหล็ก" จากคำในชื่อ/desc อีก.
+- **finding 3 (adapter-vs-set selection)** — fix ที่ `select_for_llm_context` per-request pick loop เดิม: scope = `req.subtypes` ∩ `_SUBTYPE_ROLES` (role map เดิมของ `retrieval_policy` — ไม่ใช่ตารางใหม่); ถ้า scope = form subtype เดียว → stable-partition picks: tier-0 `canonical_roles ⊆ scope` (standalone) ก่อน, tier-1 composite roles (set/kit) เติม quota ที่เหลือ — ไม่ ban composite, ไม่มี name parsing.
+- **RED**: 8 fail ตอนเริ่ม (F1: `_replace_clause` tail ownership + no-compose-dependency pins; F2: features-fact emission + magnetic keyword infer + unknown-vs-pass; F3: standalone-before-set/set-fallback/samsung-no-evidence); อีก 4 = pins ที่ต้อง update ให้ซื่อตรง (particle-after-`|||` semantics + features-contract tests เดิมคาด prose-derived magnetic).
+- **GREEN**: r12 contract **129/129** · pingevox/exact-item/typed-subject/named/compat-decision **121** · selection+runtime+relations+requests+executor **66** · phase7+7boundary+phase8+answer-boundary **141** · claim-flow+spec-grounding+claim-state+troubleshoot **123** · subject_set+turn_decision+shadow+retrieval_shadow **237** · incident replay **123+19sk+4xf** · fixture validator all-rows · py_compile+diff-check clean.
+- **live after13** (`pingevox_wattaka_1792816012_after13.{json,md}`): P-Q4 ctx/resp=[49917568534, 47067569286, **40434299538**] — standalone adapter (CUKTECH GaN3 AD652S 65W หัวชาร์จ, score 1.5 ผ่าน req-0 slot) เข้า answer แทน Samsung-S26 set `57617557265` ที่ตกจาก ctx (compat verdicts ทุกตัว connector_match); W-Q1/Q2 exact single 27639651334 + 480Mbps grounded + defer=0; W-Q3 ctx=[] resp=[] gem=1 deterministic no-match — near-miss เหลือเฉพาะ "480Mbps ไม่ถึง 10Gbps" **ไม่มี "ผ่านสายแม่เหล็ก" อีก** (feature=unknown ไม่ render pass-label); ทุก turn `**` balanced + card/link complete + zero leading-particle bubbles (ไม่มี compose strip แล้ว — `_replace_clause` ครอบ particle เอง + model ไม่ emit รอบนี้). counters: gemini=13, answer_typed=5, answer=0, attempts=13, e503=0, web=0, OR=0, mongo_write=0.
+- **missing-data contract ที่รายงาน**: (a) sellable_units ไม่มี structured feature field → `required_features` ทุก feature = unknown (fail-closed, ห้ามเสนอว่าผ่าน); (b) listing-level cards (i: identity) ไม่มี `product_type`/`components` บน card — roles มาจาก name-detect → bundle listing ที่ชื่อมี หัวชาร์จ/Adapter ยัง type เป็น {adapter} (49917568534 powerbank-unit, 47067569286 cable-unit ยังอยู่ใน Q4 ctx ภายใต้ typed evidence นั้น) — ไม่แก้ด้วย name-parsing (ห้าม); ต้องการ unit-field join บน listing card ในอนาคต.
+- **mechanism delta r4 (added/removed แยก)**: functions **+0/−1** (`_extract_product_features`) · regex defs **+0/−2** (`_LEADING_PARTICLE`, `_FEATURE_SEARCH_RES` map) · keyword/feature tables **+0/−1** (`_FEATURE_SEARCH_RES` mapping) · string consts **+0/−1** (`_CLAUSE_PARTICLES` — revert inline) · guards/owners **+0/−0** (validation sites/owners เดิม; tiering อยู่ใน existing pick loop) · imports **+0/−1** (compose→guards private regex) + reuse `_SUBTYPE_ROLES` ใน selection · provider calls unchanged · item/shop special-case = 0.
+- **residuals เหลือ**: spec_claim under-claim rewrites ('90W','1.5 เมตร' — Thai-token↔FieldEvidence gap เดิม); defer placement = claim position เดิม; model-emitted leading particle อาจปรากฏใน run อื่น (accepted model-output residual, ไม่มี interpreter ตาม contract); listing-card type ambiguity (ข้อ b ข้างบน).
+- **staging: empty · no commit/push/PR/deploy**
+
+#### Phase 10B Correction r5 — structured unit form หายที่ source union (กำลังจะทำ — same tree · uncommitted)
+
+- **baseline**: state เดิมจาก r4 (HEAD `20f9e69`, staged=0, `git diff --check` clean, Zaapi diff preserved, frozen log untouched); manifest = Phase 10B candidate set เดิม
+- **defect (live after13 Q4 `หัวชาร์จละ`)**: answer เรียง bundle listings (`49917568534` unit-truth=powerbank, `47067569286` unit-truth=cable) ก่อน standalone adapter `40434299538` — ทุก card มี `canonical_roles={adapter}` แต่มาจาก name-detect ล้วน
+- **PART 0 boundary trace (read-only Mongo + after13 artifact)**:
+  - unit card: `v:` identity พร้อม structured form ครบ (`product_type`/`components`/`charger_subtype`/`cable_subtype`) — **แต่เข้า union 0 ตัว**: `sellable_units_meta` collection ไม่มี → `resolve_snapshot()=None` → `fetch_units` fail-closed (`[UNITS] no active generation` ใน live log ด้วย)
+  - listing/compat card: `i:` identity — `ShpProducts` docs **ไม่มี form field สักตัว corpus-wide** (product_type/components/subtypes = 0 docs) → `to_product_card` ไม่มีอะไรให้ stamp → ทุก form signal = `_detect_charger_subtype` name-inference
+  - pool merge: `_merge_group` same-key only — `i:`/`v:` ไม่เคยอยู่ group เดียวกัน; **suppression join มีอยู่แล้ว** (item ที่มี non-rejected variant → listing merge เข้า variant card: listing ได้ short_link/image/variants + variant คง structured truth — direction ถูกต้อง) — ใช้งานไม่ได้เพราะ v: ไม่มี
+  - เพิ่มเติม: `fetch_units` filter `product_type ∈ request types` — ถึง units จะมีชีวิต powerbank/cable units ของ bundle items ก็ยังถูกกรองออกภายใต้ charger-scope ask → i: ของ bundle คง detect
+  - per-request ranking: F3 tier ถือ `roles ⊆ _ok` จาก name-detect = standalone proof → bundles + standalone อยู่ tier เดียวกัน → score ตัดสิน (bundles 0.7 แพ้ 1.5 แต่ req-0 ranked bundles ก่อน — evidence score เดิมของมันสูงกว่า)
+  - selected dedupe order = first-appearance → req-0 pick order (bundles ก่อน) → selected[0]=bundle
+  - ctx sort `(ROLE_RANK, score)`: relation_target(4) > slot(1) → bundles นำหน้า standalone ใน answer เสมอ
+- **PART 0 verdict — first failing boundary**: `sellable_units_meta` หาย → **source union ไม่มี unit candidate สำหรับ identity ใดเลย** (ไม่ใช่แค่ bundles) → structured form truth ไม่เคยเข้าระบบ; listing docs ก็ไม่มี form fields ให้ join → ทุก card = detect-only → contract gap 2 จุดที่แก้ code ได้: (a) `roles_source` provenance ไม่มี — detect-role ไม่แยกจาก field-role; (b) tier-0 นับ detect {adapter} = standalone proof
+- **ข้อจำกัด**: ห้าม helper/guard/regex/keyword table/phrase mapper ใหม่ · ห้าม Mongo query ต่อ candidate · ห้าม name-based semantics · owner เดิม · staged=0 · web/OR/mongo_write=0 · รักษา F1/F2 (ไม่มี `_LEADING_PARTICLE`/`_FEATURE_SEARCH_RES`/`_extract_product_features` กลับมา)
+
+#### Correction r5 RESOLVED-PARTIAL — structured form provenance contract (RED 10f → GREEN 143/143 + regression ทั้งหมด; live after14 = BLOCKED verdict)
+
+- **implementation (existing owners เท่านั้น)**:
+  - `retrieval_policy._canonical_roles` → คืน `(roles, detected)`; `_canonicalize` stamp `card["roles_source"]` ("field"=structured product_type/components/*_subtype | "detect"=name inference | "none") ทั้ง top-level (รอด strip_private_evidence เหมือน canonical_roles) + canon facts (ตาม pattern `type_source` เดิม)
+  - `retrieval_selection.form_tier(card, subtypes)` — module-level **tier metadata owner เดียว** (closure เดิมใน pick loop ย้ายมาเป็น shared contract ห้าม duplicate): 0 proven-standalone → 1 proven-composite → 2 unproven-shape → 3 unproven-composite → 4 unproven non-match → 5 proven non-match; scope ไม่ใช่ form subtype เดียว → 0 uniform; pick loop เรียกผ่าน `form_tier` + trace `missing_structured_form` เมื่อ form-scoped request ไม่มี field-form candidate
+  - `answer_context` presentation sort → `(subject-first, form_tier asc ภายใต้ need.subtypes, score desc, ROLE_RANK desc)` — channel provenance (relation_target role) ไม่ชนะ form-fit/score อีก
+  - `guards.py` stale comment ที่อ้าง compose normalization → แก้ตาม contract จริง (r4 residual)
+  - merge contract ไม่ต้องแก้: `listing_cards` suppression join ใน `build_candidate_pool` ทำ unit→listing merge ถูกทิศอยู่แล้ว (variant คง structured truth + listing ส่ง link/image/sources เข้า) — pin test ผ่าน
+- **RED**: 10 fail (roles_source stamp ×3, detect-not-tier0, proven-composite>unproven-shape, missing_form trace, cross-request order, ctx order ×2, listing-alone-unproven); 4 pins ผ่านตั้งแต่ต้น (merge preservation, detect-fallback ordering, quota semantics, compat gate)
+- **GREEN**: r12 contract **143/143** · selection 13 · pingevox/typed-subject/named 33+23 · compat-decision 35 · target-ownership 11 · phase7 36 · phase8 51 · executor 11+1sk · canonical card 55 · incident replay 123+19sk+4xf · claim-flow 30 · spec-grounding 36 · claim-state 52 · relations 17 · runtime 15 · requests 10 · subject_set 102 · troubleshoot 5 · turn_decision 111 · shadow 7 · fixture validator all-rows · py_compile + diff-check clean
+- **live after14** (`pingevox_1792818465_after14.{json,md}` — bounded Q1+Q3+Q4): counters `gemini=6, answer_typed=3, answer=0, web=0, OR=0, mongo_write=0`; Q4 ctx/resp=`[49917568534, 47067569286, 40434299538]` — **ลำดับเดิมกับ after13**: ทุก card `roles_source=detect` → tier-2 เท่ากันหมด → score ตัดสินตาม contract (bundles evidence score สูงกว่า standalone จริง — ไม่มี mechanism ที่ contract-legal จะพลิกได้โดยไม่มี structured truth); `missing_structured_form` marker ยิงครบทุก form-scoped request; cards `**` balanced, zero leading particles, history cables ไม่ย้อนเข้า Q4 ctx
+- **verdict: `PHASE_10B_BLOCKED_BY_MISSING_STRUCTURED_LISTING_FORM_EVIDENCE`** — ตาม decision rule: source union ไม่มี unit candidate สำหรับ identity ใดเลย
+  - **boundary ที่ต้องแก้ (ไม่อยู่ใน code scope รอบนี้)**: (a) `sellable_units_meta` collection ไม่มีใน env นี้ → `resolve_snapshot()=None` → units channel dead — ต้อง activate generation pointer (ops/build); (b) ถึง pointer จะมี `fetch_units` filter `product_type ∈ req.types` → powerbank/cable units ของ bundle items ไม่เคยเข้า union ใต้ charger ask → ต้องมี item-scoped units join (batched ตาม surfaced item_ids — ไม่ใช่ per-candidate query) หรือ ShpProducts form-field backfill; (c) `ShpProducts` ไม่มี `product_type`/`components`/subtype field สัก doc corpus-wide → `to_product_card` ไม่มีอะไรให้ stamp
+  - **contract ที่พร้อมใช้เมื่อข้อมูลมา**: field-roles → tier-0 standalone นำหน้า composites/detect ทุกชนิด (synthetic tests พิสูจน์แล้ว); detect-{adapter} ไม่เคยเป็น standalone proof อีกต่อไป; ordering ใน unproven tier = score (ไม่ใช่ role)
+- **mechanism delta r5 (added/removed แยก)**: functions **+1/−0** (`form_tier` — shared contract แทน closure เดิม; justified: tier logic ต้องใช้ 2 sites ที่ scope ต่างกัน, ไม่ share = second owner ซึ่งเลวกว่า) · regex **+0/−0** · keyword tables **+0/−0** · guards **+0/−0** · DB queries **+0** · decision owners **+0** (tier ยัง owner เดียว; ctx consume metadata ไม่สร้าง owner ใหม่) · card fields **+1** (`roles_source` — provenance stamp) · trace markers **+1** (`missing_structured_form`) · imports **+1** (answer_context ← form_tier, public contract) · stale comment −1 (guards) · item/shop/model special cases = 0
+- **residuals เหลือ**: Q4 presentation order = bundles-first ตราบใดที่ units channel dead (score-major ใน detect tier — honest แต่แก้ไม่ได้ด้วย code); spec_claim under-claim rewrites เดิม; defer placement เดิม
+- **staging: empty · no commit/push/PR/deploy**
+
+#### Phase 10B Correction r6 — blocker-resolution: units channel ตาย + ordering owner เดียว + card boundary (กำลังจะทำ — same tree · uncommitted)
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `20f9e69` · staged=0 · `git diff --check` clean · 38 working files (Phase 10B candidate set เดิม + r5 adds) · Zaapi master-plan 154/−69 preserved · frozen log 0 diff · user synced r5 SRS/test/waythrough entries แล้ว
+- **เป้าหมาย r6**: (1) root cause `sellable_units_meta` หาย → units channel dead, (2) structured unit truth เข้า union จริง, (3) `form_tier` ลดเหลือ ordering owner เดียวไม่เพิ่ม helper, (4) card boundary ติด prose (`...นะคะ **CUKTECH...**`), (5) live after15 standalone ก่อน bundle, (6) ไม่มี mechanism ใหม่
+- **Mongo gate**: write authorization แยกจาก code — PART 1 audit read-only เท่านั้น → verdict A/B/C → หยุดรอ `APPROVE_SELLABLE_UNITS_*` phrase ก่อน publish/build เสมอ
+
+- **PART 1 read-only generation audit — verdict B: `NO_VALID_COMPLETE_GENERATION`**
+  - `sellable_units_meta` collection = exists แต่ **EMPTY** (`_id:"active"` absent ทั้ง collection) → `snapshot_from_pointer(None)`→None → `resolve_snapshot()`→None → `fetch_units`/`_units_coll` fail-closed ที่ `snap is None` (units.py:55)
+  - generation collections: **0** (`sellable_units_g*`/`image_texts_g*` ไม่มีเลย) · `exports/gen/` = ว่าง
+  - base `sellable_units` (admin DB, 27,843 docs) = legacy pre-generation table — unit truth ครบทุก Q4 item (`40434299538`=charger/adapter×4, `49917568534`=powerbank×3, `47067569286`=cable×5, `57617557265`=charger×17) แต่ runtime อ่านเฉพาะ `sellable_units_{gid}` ผ่าน pointer เท่านั้น
+  - shared `image_texts` cache (14,005 docs, field `item_ids` list) = 0 docs สำหรับ Q4 items — OCR bounded skip ได้ (validate ผ่าน 0==0; `import_image_texts` รับ missing jsonl → coll ว่าง)
+  - product DB (`dbWallet`): user ไม่มีสิทธิ์ `listCollections`/`find` บน `sellable_units` เลย — writes ทั้งหมดอยู่บน admin DB เท่านั้น; `ShpProducts` อ่านได้ตาม live path
+  - **build plan (existing `refresh_data.sh` sequence — bounded, ไม่สร้าง script ใหม่)**: mint gid → `export_mongo.py` (product read) → **skip OCR** (non-blocking by design, Q4 items ไม่มี cache coverage อยู่แล้ว) → `import_image_texts.py` (coll ว่าง + indexes) → `build_sellable_units.py` (local regex classifier, gate ≥90%) → `import_sellable_units.py` → `build_embeddings.py` product+units (local SentenceTransformer — **zero provider calls**) → `publish_generation.py --expected auto` (bootstrap CAS)
+  - **provider usage**: 0 external calls (embeddings=local ST, classifier=regex, OCR skipped) · **runtime**: export+unit-build+2×npz ≈ local compute หลักสิบนาที · **Mongo writes** (admin DB only): `image_texts_{gid}` (0 docs + 2 indexes), `sellable_units_{gid}` (~27.8k docs + 6 indexes), `sellable_units_meta` CAS 1 doc · product DB = read-only ตลอด
+  - **rollback**: bootstrap publish ไม่มี previous → script rollback คืน `conflict:no-previous` → rollback = fenced `delete_one({_id:"active", generation_id:<gid>})` (pointer removal → runtime fail-closed เหมือนเดิม)
+  - **gate**: หยุดรอ `APPROVE_SELLABLE_UNITS_GENERATION_BUILD_AND_PUBLISH` — PART 2-4 (code-only) ดำเนินการต่อได้ระหว่างรอ
+
+- **PART 2 code audit — findings A/B/C (ก่อนแก้)**:
+  - **A — duplicated ordering owner**: `form_tier` (r5 shared API) ถูกเรียก 2 sites: `retrieval_selection` pick loop (301) + `answer_context` `cands.sort` (1243-1246 tuple `(subject-first, 1+form_tier, -score, -ROLE_RANK)`) = 2 ordering decisions. `cands` inherit `by_req` order อยู่แล้ว (pick order = tier,hits,score ต่อ request); ctx sort = second owner. Design: `requests` tuple order เป็น selection-owned precedence — subjects-channel request ต้อง iterate ก่อน planner reqs (`channels` concat ใน `run_grouped_selection` — วันนี้ channels อยู่ท้ายทั้งหมด → subject role ตกท้ายเสมอ) → by_req/selected/reqs_n order ทำ subject-first เองตามสัญญาเดิม → ctx consume `cands` order ตรงๆ → ลบ re-sort + form_tier เหลือ callsite เดียว → inline เข้า pick loop → ลบฟังก์ชัน
+  - **B — roles_source provenance = CLEAN (pin เท่านั้น)**: `_canonical_roles` structured-first/detect-fallback ถูก; `to_unit_card` copy เฉพาะ unit fields จริง (ไม่ infer); `to_product_card` ไม่ stamp form field เลย; `attach_listing_fields` merge เฉพาะ short_link/image_url/tier_variation/variants — canonical form fields ไม่ถูกแตะ; ไม่มี upstream name→field write ตรงไหนเลย → charger_subtype name-derived ไม่มีทางกลายเป็น "field" proof
+  - **C — card boundary root cause (empirically proven)**: `_append_base_warranty` (app.py:5372) รัน `llm._strip_kb_markup` บน composed answer ทั้งก้อน — model-prose normalizer แตะ deterministic segment bytes. `|||` ต้นบรรทัด (card prefix `|||\n`) match `^\s*\|.*\|\s*$` = markdown table row → parse เป็น all-empty cells → classify separator row (`_sep_idx==0`) → **ถูกลบทั้งบรรทัด** (`ได้ค่ะ\n\n**C1**` — repro ยืนยัน). ผลกระทบ 2 ชั้น: (1) `|||` หาย → card เข้าไปติด prose `\n\n`; (2) `_det` protection `resp.answer.find("|||\n**C1**...")` = **-1 เสมอ** → card spans เสีย deterministic exemption → spec tokens ใน `**title**`/`![alt]`/`[link]` scannable → `65W` ungrounded → `_replace_clause` ลบ title ทั้งบรรทัด (repro: 4 iterations กิน title/alt/link) — live รอดเพราะ spec facts ของ card ground อยู่ แต่ `_PTEXT` defer clause ลงเอย `tail=" "+**C1**` (`ค่ะ\n\n` boundary consumption) = byte pattern `นะคะ **C1**` ใน after14. **Fix owner**: `_append_base_warranty` normalize scope — typed composition ไม่ผ่าน prose normalizer (model prose normalize แล้วที่ `answer_typed` boundary; deterministic segments ไม่ต้องการ normalization เลย)
+
+- **PART 2-4 code round RESOLVED (r6) — RED 11 → GREEN; 3 findings แก้ที่ owner เดิม**
+  - **A — duplicated ordering owner**: ลบ `form_tier` module API → inline ที่ `select_for_llm_context` pick loop จุดเดียว (`_tier` closure + `_fs_set`; `missing_structured_form` trace คงเดิม); ลบ `answer_context` `cands.sort` + `form_tier`/`ROLE_RANK` import → ctx consume `by_req` order verbatim; `run_grouped_selection` `_sel_requests` = subjects-channel + planner + channels อื่น (request-iteration order = precedence contract — subject = identity authority ของ need ที่มัน serve); pick loop + subject-first stable partition (หลัง quota/rank — membership คงเดิม); promoted unavailable subjects prepend ใน `by_req` row
+  - **B — structured form provenance = CLEAN**: pin tests ผ่านตั้งแต่ต้น (2/2) — merge ไม่ upgrade roles_source; listing name ไม่เขียน structured subtype field; `_canonical_roles`/`to_unit_card`/`to_product_card`/`attach_listing_fields` ไม่มี name→field leak ตรงไหนเลย
+  - **C — card boundary**: `_strip_kb_markup` (llm.py owner เดียว) — (1) table converter ข้ามบรรทัด pipe-run ล้วน (`\|{2,}` = bubble delimiter ไม่ใช่ table row — เดิมกลืน `|||` ทั้งบรรทัดเพราะ parse เป็น all-empty cells → `_sep_idx==0`); (2) `\|{2,}` normalize คง whitespace รอบ (`|||\n` ต้นบรรทัดไม่กลายเป็น ` ||| `) → deterministic card prefix รอด byte-exact → `_det_texts` find() ทำงาน → spec tokens ใน `**title**` ไม่ scannable → defer splice เลิก (root cause ของ `นะคะ **C1**` ใน after14)
+  - **test migration**: `test_ctx_proven_form_before_detect_role` + `test_ctx_same_proof_orders_by_score` — fixture แก้เป็น canonical by_req order (selection emission จริง) assertion เดิมคงอยู่
+  - **RED**: 11 fail (ctx rerank, form_tier API ×1, subjects-first requests, subject-lead in-request, promoted-subject-lead, |||-line eaten ×2, finalize byte-exact, marker find, defer glue, segments collapsed); **GREEN**: r12 contract **156/156** · selection 13 · runtime 15 · pool-union 14+5 · grouped-exec 11+1sk · requests 10 · phase7 36+44 · phase8 51 · source-union 39 · phase4b 74 · phase6 27 · pingevox/exact-item/typed-subject/named 10+15+23+38 · compat-decision 35 · target-ownership 11 · subject_set 102 · relations 17 · claim-flow 30 · spec-grounding 36 · claim-state 52+1sk · troubleshoot 5 · boundary-fail-closed 10 · turn_decision 111 · shadow 7+17 · runtime-config 17 · incident replay 123+19sk+4xf · phase5 124 · compat_mode_filter script 144/144 · fixture validator all-rows
+  - **script-style files ที่ fail ก่อน r6 อยู่แล้ว (ไม่เกี่ยว diff)**: `test_units.py`/`test_sellable_units.py`/`test_pingevox_mistore.py` = live-Mongo dependents (units channel dead = blocker เดิม + corpus drift) — ไม่ใช่ regression ของรอบนี้
+  - **mechanism delta r6 (added/removed แยก)**: functions **+0/−1** (`form_tier` module API — logic inline ที่ pick loop; `_tier` closure ใน loop ไม่นับ helper เพราะ callsite เดียว) · regex **+0** (แก้ pattern เดิม 2 จุดใน `_strip_kb_markup` — `^\s*\|.*\|\s*$` + `\|{2,}` fullmatch guard + `(\s*)\|{2,}(\s*)` preserve-ws — ไม่เพิ่ม def) · keyword tables **+0** · guards **+0** · decision owners **−1** (ctx re-sort ลบ — selection เหลือ owner เดียว) · DB queries **+0** · card fields **+0** · imports **−1** (acx ← form_tier/ROLE_RANK) · item/shop/model special cases = **0** · F1/F2 preserved (`_LEADING_PARTICLE`/`_FEATURE_SEARCH_RES`/`_extract_product_features` = 0 refs)
+  - **staging: empty · no commit/push/PR/deploy**
+
+- **PART 5 operator gate — PENDING `APPROVE_SELLABLE_UNITS_GENERATION_BUILD_AND_PUBLISH`**
+  - PART 1 verdict **B: `NO_VALID_COMPLETE_GENERATION`** — `sellable_units_meta` exists แต่ EMPTY; `sellable_units_{gid}`/`image_texts_{gid}` = 0 collections; `exports/gen/` ว่าง
+  - bounded build plan (existing `refresh_data.sh` sequence, ไม่สร้าง script ใหม่): mint gid → `export_mongo.py` → skip OCR (Q4 items ไม่มี image_texts cache → validate 0==0 ผ่าน) → `import_image_texts.py` → `build_sellable_units.py` (rule-based, gate ≥90%) → `import_sellable_units.py` → `build_embeddings.py` (local SentenceTransformer — **0 external provider calls**) → `publish_generation.py --expected auto` (bootstrap CAS)
+  - **Mongo writes (admin DB only)**: `image_texts_{gid}` ~0 docs + indexes · `sellable_units_{gid}` ~27.8k docs + 6 indexes · `sellable_units_meta` CAS 1 doc — product DB read-only ตลอด
+  - **rollback**: bootstrap ไม่มี previous → `delete_one({_id:"active", generation_id:<gid>})` (fenced) → runtime fail-closed เหมือนเดิม
+  - **post-publish verify**: read-only pointer → `resolve_snapshot(force=True)` → units fetch probe → `v:` candidates จริง → bounded live after15 (Q3→Q4) พิสูจน์ standalone adapter ก่อน bundle
+  - รอ exact approval phrase — Mongo write authorization แยกจาก code-edit
+
+#### Phase 10B r7 — safe first-generation bootstrap + residual blockers (same tree · uncommitted)
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `20f9e69` · staged=0 · `git diff --check` clean · **38-entry working manifest** (30 modified + 8 untracked — 17 prod modules + SRS + Zaapi plan + 11 test/canary files + AGENTS.md + waythrough) · Zaapi plan diff preserved · frozen log untouched
+- **operator correction**: r6 publish plan REJECTED — `image_texts_<gid>` would publish empty while shared `image_texts` holds ~14,005 records. New gate phrase `APPROVE_SAFE_FIRST_GENERATION_BUILD_AND_PUBLISH` แทน (phrase เดิม void)
+- **PART 1 audit — carry-forward mechanism EXISTS (ต้นเหตุไม่ใช่ missing mechanism)**:
+  - `run_generation_ocr` (build_image_texts.py:255-384) = merge/reuse owner เดิม: cache classify → `unchanged` reuse 0-call → `gen_dir/image_texts.jsonl`; shared `image_texts` = OCR cache เท่านั้น (runtime ไม่อ่าน)
+  - **defect chain (rejected)**: skip OCR → ไม่มี jsonl → `materialize_published` docs=[] → `image_texts_<gid>` = 0 docs + 2 indexes → `validate_generation` ผ่าน `it_coll==it_count` (0==0) → CAS pointer → runtime `snap.image_texts_collection` = ว่าง → 13,887 shared records ไม่มีทางถูกเห็น (owner-read เป็น per-gen เท่านั้น)
+  - **latent defect ที่ 2 — overwrite**: `run_generation_ocr` เขียน `image_texts.jsonl` mode `"w"` ด้วย evidence ของ scope run นั้นเท่านั้น → sellable run แล้ว nonsellable run = **ผล sellable ถูกเขียนทับทั้งไฟล์** → publish ได้เฉพาะ nonsellable evidence
+  - **latent defect ที่ 3 — legacy schema**: shared cache ทั้ง 14,005 docs เป็น **pre-4B evidence records** `{image_id,image_url,kind,model,text,truncated,ts,item_ids}` — ไม่มี `status`/`fingerprint` เลย → `_classify_images` เห็น fp=None≠fp → ทุก record = `changed` → max_calls=0 ก็ defer หมด → carry=0 แม้ run OCR step
+  - **census (Oct-19 export 11,781 docs × shared cache)**: discovered=73,240 unique images (sellable-scope 19,068 · nonsellable-only 54,172) · **reusable=13,887** (legacy evidence ทั้งหมด url-match; new-schema=0) · malformed=18 (no text/kind) · orphan=100 (cache ไม่อยู่ใน catalog) · missing=59,335 (81% catalog ไม่เคย OCR) · dup image_id=0 · indexes: image_id unique + item_ids
+  - **pointer state**: `sellable_units_meta` collection **ไม่มีอยู่เลย** (แก้จาก r6 entry "exists but empty") → ไม่มี active pointer → `resolve_snapshot()=None` → units channel dead (เหมือนเดิม)
+  - **last refresh attempt Oct-19**: export 11,781 docs → abort ก่อน OCR step (ไม่มี step line; lock ถูกเห็น held ถึง 12:13; `exports/gen/` ถูกลบทิ้งภายหลัง) — ไม่มี partial artifacts
+- **correction plan (owner-level เท่านั้น)**:
+  1. `run_generation_ocr` = merge owner เดียว: (a) legacy evidence records (status ขาด + text+kind ครบ + url normalize ตรง) = reusable unchanged — fingerprint-equivalence ผ่าน image_url โดยตรง; (b) jsonl merge = union keyed image_id, run evidence wins, deterministic sort; (c) malformed jsonl/cache rows → count + drop fail-closed; (d) counts sidecar `image_texts.counts.json` per-scope — reusable/carried/new/deferred/removed/malformed/duplicate
+  2. `validate_generation` = publish gate owner เดียว: `it_count==0` → ต้องมี sidecar ที่พิสูจน์ reusable==0 (empty จริง) — sidecar หาย/ reusable>0 → reject ก่อน CAS; manifest.counts += source/carried/new/rejected/duplicate/published
+  3. `fetch_units` = query owner เดียว: exact-item channel ผ่าน `profile.anchor_item_ids` (typed field เดิม — `_request_profile` forward digit-shaped `req.subject_refs`) — units ของ item ที่ pin ตรงเห็นทุก form (shop/sellable/base_q เดิม; `_matched_by="item"` rank เทียบ code tier)
+  4. `select_for_llm_context` = ordering owner เดียว: ลบ nested `_tier`+magic 0-5 → typed-boolean tuple ใน sort เดิม (`form_nonmatch, match!=field, composite_shape`) — ไม่มี helper/keyword/flag ใหม่
+
+- **PART 2-5 code round RESOLVED (r7) — RED 19 fail → GREEN; แก้ที่ owner เดิมทั้งหมด**
+  - **carry-forward (owner: `run_generation_ocr`)**: `_classify_images` + fingerprint-equivalence — legacy evidence doc (ไม่มี `status`/`fingerprint`) ใช้ normalized `image_url` เทียบตรงกับ discovered url (`status ok`=fp field match เดิม); legacy + text → `unchanged` reuse ผ่าน `_evidence_record` (0 calls); legacy ไม่มี text → `changed` (OCR ใหม่เท่านั้น); cache doc ไม่มี `image_id` → `malformed_cache` count + ไม่เข้า cache dict (ไม่ถูกแตะ). **merge owner เดียวของ evidence file**: union keyed `image_id` กับ jsonl เดิมของ gid — run evidence ชนะ, malformed/no-image_id row drop+count, deterministic `sorted(merged)` write — nonsellable run ไม่ทับ sellable run อีก (defect 2 ปิด). **counts sidecar `image_texts.counts.json`**: `{generation_id, scopes:{<scope>:{unchanged,new,changed,retryable_error,deferred,removed,processed,calls,carried,reusable,new_evidence,malformed,duplicate,evidence}}, totals:{…}}` accumulate ทุก run — publish-gate + manifest evidence
+  - **publish gate (owner: `validate_generation`)**: `image_texts_<gid>` ต้องมี counts ของ gid เดียวกันเสมอ (foreign-gid/missing = OCR step skipped → reject ก่อน CAS — ไม่มีทาง publish ลอย 14k shared records / untracked evidence); `it_count==0` ผ่านเฉพาะเมื่อ `totals.reusable==0 and totals.evidence==0` (empty จริงจาก source ว่าง); publish() merge `totals` int keys → `manifest.counts.image_texts_<k>` + `image_texts_empty` marker; fail ใด ๆ ก่อน CAS → pointer เดิมคงเดิม (tested)
+  - **exact-item units (boundary: `_request_profile` + `fetch_units`)**: digit-shaped `req.subject_refs` → `profile.anchor_item_ids` verbatim (executor = owner เดียว — non-digit refs ไม่เข้า); `fetch_units` เห็น anchors → item-scoped query `item_id ∈ anchors` + shop/platform/sellable/base_q เดิม **โดยไม่มี product_types/subtype/code filter** → `_matched_by="item"` `_score=2.0` (ต่ำกว่า code-hit เล็กน้อย — asked identity ยังนำ vector); anchors ไม่มี unit → channel เงียบ (code/vector ทำงานปกติ — fail closed ไม่ broaden sibling/shop); `fetch_unit_cards`/`fetch_unit_evidence` rank + all-dead exemption ใช้ `_matched_by ∈ {code,item}` — exact-item asked เห็นแม้ตาย
+  - **nested `_tier` removal (owner: `select_for_llm_context` pick loop)**: ลบ closure + magic 0–5 + adapter special เหลือ `sorted(key=lambda s: (_fs ∉ canonical_roles, (_fs ∈ roles) != (roles_source=='field'), roles ⊄ scope∪intrinsic))` — typed booleans เดิมเท่านั้น (form non-match หลังสุด · proven-form ก่อน/proven-non-match หลังสุด = match⊕field XOR · standalone ก่อน composite) — **provably identical ordering** กับ tier table เดิม (exhaustive 8-combination check); ไม่มี helper/keyword-table/flag/regex ใหม่
+  - **fixture migration**: `_stage_gen` เขียน `image_texts.counts.json` (required artifact ใหม่ — merge owner เขียนทุก run จริง); skip-simulation tests unlink counts ด้วย (skip จริง = ไม่มี artifact ทั้งคู่)
+  - **test counts**: r12 contract **159/159** (156+3 structural pins: no nested fn in `select_for_llm_context` / no `form_tier`+`_tier` symbol / no new keyword-regex-guard) · phase4b **100/100** (74+26: carry 3 + malformed 2 + dup 2 + second-scope merge 1 + fresh-wins 1 + source-immutable 1 + sidecar 1 + publish gate 6 + units-feeds-jsonl 1 + exact-item units 6 + profile forwarding 2) · selection 13 · runtime 15 · pool 14+5 · grouped-exec 11+1sk · requests 10 · exact/typed/named/pingevox 15+23+38+10 · subjects-5c 14 · subject_set 102 · phase7 36+44 · phase8 51 · relations 17 · claim-flow 30 · spec-grounding 36 · claim-state 52+1sk · troubleshoot 5 · boundary 10 · compat-decision 35 · target 11 · runtime-config 17 · turn_decision 111+17 · phase5 124 · incident 123+19sk+4xf · compat_mode_filter script 144/144 · fixture validator all-rows · gold-retrieval 5 · py_compile 6 files · `bash -n refresh_data.sh` · `git diff --check` clean
+  - **blocked (live-DB scripts — ไม่ใช่ regression)**: `test_units.py`/`test_sellable_units.py`/`test_pingevox_mistore.py` — units channel dead จนกว่า publish; corpus drift เดิม
+  - **mechanism delta r7**: functions **+0/−1** (`_tier` closure — callsite เดียวของมันคือ sort เดิม; ไม่มี def ใหม่ทุกไฟล์) · regex **+0** · keyword tables **+0** · guards **+0** · decision owners **+0** (ทุก fix ใช้ owner เดิม: merge=run_generation_ocr, gate=validate_generation, query=fetch_units, order=pick loop) · DB queries **+1** (fetch_units item-scoped branch — เพิ่มเมื่อ anchors มีเท่านั้น) · card fields **+0** · flags **+0** · item/shop/model specials **0** · shared `image_texts` mutation ใน code path ใหม่ = **0** (census/carry = read-only)
+
+#### Phase 10B r8 — final safe-generation correction (same tree · uncommitted)
+
+- **baseline**: branch `feature-phase3-aswer-quality` @ `20f9e69` · staged=0 · diff-check clean · 43-entry manifest · r7 verdict NOT approved — r7 result rejected for build/publish
+- **PART 1 — three remaining defects proven at exact boundaries**:
+  - **A — cross-scope removal** (`build_image_texts.py:400-404`): `cls` marks every cache image_id absent from THIS scope's `discovered` as `removed` → sellable run (worklist 19,068) detaches the other ~54k nonsellable records via `_cache_upsert(item_ids=[])`; nonsellable run then detaches sellable's. Each scope destroys the other's cache state.
+  - **B — bootstrap mutability** (`build_image_texts.py:327-344`): at `max_calls=0`, `calls_used(0) >= max_calls` on first non-unchanged item → every new/changed/retryable item hits `_cache_upsert(status="deferred", **base)` — **upserts ~59,335 NEW docs + annotates ~18 changed docs** into shared `image_texts`; removed loop adds ~100 more. "zero-call carry-forward" was still ~59k shared writes.
+  - **C — incomplete publication proof**: sidecar = `{generation_id, scopes:{...}, totals:{...}}` — no `completed_scopes` contract; `discovered` never recorded in counts; `evidence=len(merged)` is cumulative so totals double-count (scope1:X1 + scope2:X1+X2 = 2X1+X2); validator checks `it_coll==it_count` but never `it_count==sidecar`; single-scope run still writes sidecar → publish passes with nonsellable evidence missing; refresh `warn` continues past scope failure; sidecar write failure = print+continue.
+- **r8 plan (owner-level deletions/tightening only — no new helpers/guards/flags)**:
+  1. **Delete cross-scope removal** — drop the `removed` upsert loop from `run_generation_ocr`; orphans stay in shared cache harmlessly (they can't enter a generation — evidence builds only from export worklists); delete `removed` from classify contract tests; update SRS/waythrough wording.
+  2. **Read-only zero-call bootstrap** — reuse existing `max_calls` contract: `max_calls<=0` → unchanged-carry + sidecar counts only; skip the deferred/error/pending upsert branches entirely (no `_cache_upsert` calls, no `_extract_one` calls); positive-budget daily path keeps existing cache-state behavior (one implementation, no parallel mode).
+  3. **Exact sidecar contract** — `{generation_id, completed_scopes:[...], scopes:{<scope>:{discovered,reusable,carried,new,changed,deferred,malformed,duplicate}}, unique_discovered, published_evidence=len(merged jsonl)}`; scope marked complete only after merge+sidecar write succeed; atomic write via tmp+`os.replace` inline; sidecar write failure → `sys.exit` nonzero (no print-and-continue).
+  4. **Pre-CAS gate hardening** — `validate_generation` requires: sidecar parses + gid match + `completed_scopes=={sellable,nonsellable}` + `unique_discovered==sum(scope discovered)` + `published_evidence==count(jsonl)` + `jsonl==coll count` + reusable>0 ⇒ evidence>0 + empty ⇒ `unique_discovered==0`. Manifest records these counts verbatim.
+  5. **Refresh unchanged** — warn+continue stays (daily policy); completeness enforced solely by the publish gate.
+  6. **r7 non-generation re-audit only** — no rewrites: `_tier`/`form_tier` absent, tuple ordering identical, exact-item units unchanged, `|||` behavior intact.
+
+- **PART 2-6 code round RESOLVED (r8) — RED 10 fail → GREEN; แก้ที่ owner เดิมเท่านั้น (deletion+tightening ไม่มี helper ใหม่)**
+  - **cross-scope removal ลบ**: `_classify_images` ไม่ emit `"removed"` อีก (cache-only ids ไม่ถูก classify เลย); `removed` upsert loop + counter ลบออก — sellable run ไม่แตะ 54k nonsellable records อีกต่อไป; orphan cache docs คง byte-identical (เข้า generation ไม่ได้อยู่แล้วเพราะ evidence มาจาก worklist เท่านั้น)
+  - **read-only zero-call bootstrap**: `max_calls<=0` → หลัง unchanged-carry branch เดิม ตัดที่ `counts[state]+=1; deferred+=1 (state≠deferred)` แล้ว `continue` — ไม่มี `_cache_upsert`/`_extract_one`/pending/deferred writes เลย; `counts` ไม่มี `removed` key; daily budget>0 path เดิมไม่เปลี่ยน (ไม่มี parallel implementation)
+  - **sidecar contract แน่นอน**: `{generation_id, completed_scopes:[sorted], scopes:{<scope>:{discovered,reusable,carried,new,changed,deferred,malformed,duplicate}}, unique_discovered=Σ(discovered เฉพาะ 2 disjoint scopes), published_evidence=len(merged jsonl)}` — scope mark complete เมื่อ atomic write (tmp+`os.replace` inline — ไม่มี helper) สำเร็จ; write fail → propagate → run fail nonzero (ลบ print-and-continue); `published_evidence` = snapshot overwrite ไม่ใช่ sum (double-count ปิด)
+  - **pre-CAS gate แข็ง**: `validate_generation` reject เว้นแต่: sidecar parse+gid ตรง + `completed_scopes=={sellable,nonsellable}` + `unique_discovered==Σ` + `published_evidence==jsonl` + `jsonl==coll` + carried>0⇒evidence>0 + empty⇒`unique_discovered==0`; manifest = finals verbatim + disjoint scope sums (`discovered` ข้าม — unique_discovered คุมแล้ว) + `image_texts_empty`
+  - **stale tests migrated**: classify "removed" → absent; 2 detach tests → byte-identical; orphan test → byte-identical; `_run` รับ shared `db`+`scope`; `_stage_gen` เขียน complete 2-scope sidecar; gate tests migrate shape ใหม่
+  - **test counts**: phase4b **120/120** (100 + 20 r8: read-only bootstrap 4 + sidecar contract 7 + completeness gate 9) · r12 contract **159/159** · selection 13 · runtime 15 · pool 14+5 · grouped-exec 11+1sk · requests 10 · exact/typed/named/pingevox 15+23+38+10 · 5c 14 · subject_set 102 · phase7 36+44 · phase8 51 · incident 123+19sk+4xf · fixture validator all-rows · py_compile ×2 · bash-n · diff-check clean
+  - **r7 non-generation re-audit (verify-only, 0 rewrites)**: `_tier`/`form_tier` = 0 hits · 3 structural pins pass · tuple ordering ≡ proven · exact-item units 8/8 · `|||` intact
+  - **mechanism delta r8**: functions **+0/−0** (deleted code ไม่ใช่ def) · regex **+0** · keyword tables **+0** · guards **+0** · decision owners **+0** · DB queries **+0** · shared-cache writes at max_calls≤0 = **0** (เดิม ~59k/run) · cross-scope mutations = **0** · flags **+0** · helpers **+0**
+  - **blocked**: live-DB scripts เดิม (units channel dead จนกว่า publish); bootstrap operator sequence = manual commands with explicit `--max-calls 0` (refresh_data.sh = daily policy ไม่เปลี่ยน — warn+continue ถูก gate ที่ publish เท่านั้น)
+
+#### Phase 10B r9 — publication-gate hardening only (same tree · uncommitted)
+
+- **baseline**: `feature-phase3-aswer-quality` @ `20f9e69` · staged=0 · diff-check clean · 43-entry manifest · r8 verdict NOT approved — gate hardening only
+- **PART 1 — malformed-sidecar hole proven** (`publish_generation.validate_generation:143-171`):
+  - `completed_scopes` check reads ONLY `completed_scopes` — `scopes:{}` never verified
+  - `(cscopes.get(s) or {}).get("discovered") or 0` → empty dicts → sum=0 → fabricated `unique_discovered:0` passes → empty-publish allowed without any real scope counters
+  - missing scope key → `.get` default 0 → `unique_discovered` can match sellable-only sum
+  - non-dict scope value → `.get` → AttributeError crash (rejects ugly not clean)
+  - bool counter `True` ≡ 1 int-subclass → passes; negative counters unvalidated; string/float/null unvalidated
+  - `completed_scopes` vs `scopes` key sets never cross-checked
+  - top-level `unique_discovered`/`published_evidence` never type-checked
+- **r9 plan (inline inside existing `validate_generation` owner เท่านั้น — ไม่มี helper/schema/framework)**:
+  1. `set(scopes) == {"sellable","nonsellable"}` exact keys + `set(completed_scopes)==set(scopes)`
+  2. per-scope required counters `(discovered,reusable,carried,new,changed,deferred,malformed,duplicate)` — `isinstance(int) and not bool and >=0`; scope value ต้อง dict
+  3. `unique_discovered`/`published_evidence` — กฎเดียวกัน int/non-bool/≥0
+  4. invariants เดิมคงไว้ทั้งหมด (unique==Σ, published==jsonl, jsonl==coll, carried>0⇒evidence>0, empty⇒ud==0) — fail ทั้งหมดก่อน manifest/CAS
+  5. docstring แก้ stale `removed → item_ids=[]` claim ใน `run_generation_ocr` + SRS rows เดิมเท่านั้น
+- **r9 RED**: 15 จุดล้มตรงข้อ (empty scopes{} ถึง CAS — pointer test ล้มเพราะ publish ไม่ raise; missing nonsellable scope; missing counters ×7; bool/float/null/negative counters; completed≠scopes keys; invalid finals) / 17 ผ่าน = reject เดิมบังเอิญ (missing sellable→sum mismatch, non-dict→AttributeError, string→TypeError)
+- **r9 แก้ (inline ใน validate_generation เดียว — 0 helper/def/class/schema)**: `set(scopes)=={sellable,nonsellable}` exact keys → `set(completed_scopes)==set(scopes)` → per-scope 8 counters + 2 finals ต้อง `int & not bool & >=0` → invariants เดิมคงไว้
+- **r9 doc**: docstring `run_generation_ocr` ลบ `removed → item_ids=[]` → scoped classify worklist เดียว, cache-only/orphan ไม่ถูกแตะ, evidence เข้า generation เฉพาะ export ปัจจุบัน; SRS row `validate_generation` +shape gate (build_image_texts row ถูกต้องแล้วจาก r8)
+- **r9 verify**: 32/32 shape-gate · phase4b 152/152 · r12 159/159 · r8 classes 26/26 · py_compile ✓ · bash -n ✓ · diff-check ✓ · 0 def/class เพิ่ม · ไม่มี Mongo/provider/build/publish/stage/commit
+- **verdict**: `PHASE_10B_SAFE_BOOTSTRAP_GATE_HARDENED_BUILD_APPROVAL_PENDING` — รอ `APPROVE_SAFE_FIRST_GENERATION_BUILD_AND_PUBLISH`
+
+#### Phase 10B — EXECUTE approved first-generation build+publish (operator run)
+
+- **approval**: `APPROVE_SAFE_FIRST_GENERATION_BUILD_AND_PUBLISH` รับแล้ว — authorized: export+artifacts, read-only carry-forward, `image_texts_<gid>`+indexes, `sellable_units_<gid>`+indexes, local embeddings, manifest, **1 bootstrap CAS** (`--expected none`), pointer-only rollback ถ้า post-CAS invariant fail
+- **NOT authorized**: shared `image_texts` writes (ต้อง = 0), provider calls (ต้อง = 0), product-DB writes, grouped flags, canary/live questions, service restart/deploy/stage/commit/push/PR, gen-collection deletion
+- **PART 0 preflight**: `feature-phase3-aswer-quality` @ `20f9e69` · staged=0 · diff-check clean · 43-entry manifest · no build/publish procs · port-8010 untouched (user process, listen-only) · grouped flags OFF (`USE_GROUPED_RETRIEVAL_{SHADOW,SELECTION}` env-gated default 0, unset) · focused gates 52/52 (ShapeGate+ReadOnlyBootstrap+SidecarContract+CompletenessGate)
+
+##### EXECUTED — first-generation build+publish `g20261024-072533-2be3443e`
+
+- **elapsed**: export 1m47s · sellable-ocr 6.6s · nonsellable-ocr 7.1s · units 7s · product-npz 4m02s · unit-npz 69m20s · import-it 5.8s · import-units 1m51s · publish 1.75s
+- **counts**: export 11,783 docs · sellable {discovered 19,193, carried 5,580, deferred 13,613} · nonsellable {discovered 54,145, carried 8,243, deferred 45,902} · unique_discovered 73,338 · published_evidence 13,823 · units 28,048 (classify 93.8%≥90%) · product npz 11,783 · unit npz 28,048
+- **shared image_texts**: before/after count 14,005 · digest `23fddd02…920c1` identical — **0 writes** · provider calls **0** · admin_logs 38,129 unchanged
+- **gen collections**: `image_texts_g20261024-072533-2be3443e` (13,823; idx `_id`,`image_id`,`item_ids`) · `sellable_units_g20261024-072533-2be3443e` (28,048; idx `unit_id`,`model_codes`,`item_id`,`sellable`,`shop`,`product_type`)
+- **CAS**: `--expected none` → **`bootstrap`** · pointer `{generation_id, units_collection, image_texts_collection, manifest_path, manifest_sha256 b3caf0dd…fe63, npz_rows 28048, unit_count 28048, activated_at 2026-10-24T08:44:30Z}`
+- **post-CAS**: resolve_snapshot(force=True) → EvidenceSnapshot gid ✓ · manifest status=validated counts match all sources ✓ · gen colls readable ✓ · rollback NOT needed
+- **state**: git 43 manifest + gitignored artifacts · staged 0 · grouped flags OFF · no service/canary/commit · 8010 untouched
+- **verdict**: `PHASE_10B_FIRST_GENERATION_PUBLISHED_CANARY_PENDING` — gate ถัดไป: local grouped canary + final acceptance
+
+#### Phase 10B — Local Grouped Canary `g20261024-072533-2be3443e` (executed, audit-only)
+
+- **approval**: `APPROVE_PHASE_10B_LOCAL_GROUPED_CANARY` — subprocess-only grouped ON (`USE_GROUPED_RETRIEVAL_SELECTION=1` + persisted config True) · real Mongo reads · in-memory conv state · web/openrouter die-spies · Gemini bounded (503-only 5s×3)
+- **precondition drift found**: persisted `main_config` flags = `{grouped_retrieval_selection_enabled: True, grouped_retrieval_shadow_enabled: True}` — expected OFF; DB flag wins over env → grouped effectively ON for any DB-connected process (incl. 8010 ตัวจริงถ้า reload config ภายใน TTL)
+- **generation proof**: pointer+snapshot+counts+indexes+npz gid/rows ทุกตัวตรง · shared baseline 14,005/`23fddd02…`
+- **DRY trace (0 answer calls)**: generation ถูกใช้ทุก turn · subjects persist/pin ถูก · greeting ไม่เข้า product path · target inheritance B3→B4 ทำงาน · CTL301 ถูก exclude จาก Xiaomi17U ctx · แต่ gemini=9 (intent Pass1 เป็น provider call ทุก turn — architectural, ไม่ใช่ answer)
+- **DEFECT D1 (first failing boundary)**: `compile_answer_context` crash `AttributeError: 'NoneType' object has no attribute 'get'` — `device_compat._extract_data_transfer_mbps:110` → `p.get("canonical_specs", {}).get(...)` แตกเพราะ `canonical_specs=None` **explicit ทั้ง 11,783 docs** → spec-question ทุกเคส crash → boundary fail-closed deterministic defer — A2 ควรตอบ 480Mbps (อยู่ใน description) แต่ defer แทน · A1 ก็โดนที่ GUARD-ENFORCE layer (answer รอด)
+- **live**: gemini=14 (9 intent+5 answer) · answer_typed ≤1/turn · web=0 openrouter=0 mongo_write=0 legacy=0 · B3 CTL301 verdict "ใช้ไม่ได้" ถูกต้อง · B4 target inherit · C1 safe (guard rewrite '22 มม.') · A2/A3 deterministic defers
+- **desc-vector gap**: `480Mbps` อยู่ใน description เท่านั้น — ไม่อยู่ item_name/search_text/image_text (observation only ไม่แก้)
+- **post-state**: shared 14,005 digest identical · pointer unchanged · gen counts unchanged · canary docs persisted=0 · git 43+canary files (results gitignored)
+- **artifacts**: `docs/test/canary_phase10b_grouped.py` + `docs/test/results/phase10b_grouped_canary_20261024-085814.{json,md}` (+ dry `…_085210/085441.json`)
+- **verdict**: `PHASE_10B_GROUPED_CANARY_FAILED_FIRST_BOUNDARY_IDENTIFIED` — fix pending user decision (ห้าม patch ในรอบนี้)
+
+#### Phase 10B — EXECUTE approved D1 fix + description-retrieval rebuild + new generation + canary
+
+- **approval**: `APPROVE_PHASE_10B_D1_DESCRIPTION_RETRIEVAL_REBUILD_CANARY` — legacy `chatbot/shopeechat` only · read-only product/admin Mongo (audit+bench+canary) · new gen artifacts+collections · **1 CAS old→new GID** เฉพาะเมื่อ gates ผ่าน · fenced rollback ไป old GID เท่านั้น · bounded Gemini เฉพาะ final canary
+- **NOT authorized**: v2/v3, Web/OpenRouter, shared `image_texts` writes, product-DB writes, global flag changes, service start/stop, Docker/deploy, stage/commit/push/PR, gen deletion, `.env`/`มาแล้วจ้า.md`
+- **PART 0 state**: `feature-phase3-aswer-quality` @ `20f9e69` · 44 entries · staged=0 · diff-check clean · **no :8010 listener** · no stray procs · D1 repro crash confirmed (`canonical_specs=None`→AttributeError) · baselines r12+4b **311/311** · canary artifacts parse OK
+- **D1 root cause (confirmed)**: `device_compat._extract_data_transfer_mbps:110` assumes `p.get("canonical_specs", {})` is dict — corpus has `canonical_specs=None` on all 11,783 docs → `.get` on None → AttributeError → `compile_answer_context` raises → fail-closed defer (A2 lost grounded 480Mbps answer; A1 guard path also hit)
+- **D2 root cause (confirmed observation)**: `480Mbps` exists only in Mongo `description` — absent item_name/unit search_text/image_texts → vector+lexical corpus cannot surface description-only facts
+- **plan**: P1 audit canonical_specs producers/consumers → P2 RED → P3 owner-level normalize (single point, non-dict→{}) → P4 desc census → P5 A/B bench (A=1vec/item vs B=chunks, smallest passing wins) → P7 implement winner (grouped-only, provenance `item_id+source`, pool/selection owners unchanged) → P9 offline suites → P10 immutable rebuild CAS `--expected g20261024-072533-2be3443e` → P11 final canary → P12 report
+
+### Phase 10B — bounded description A/B benchmark (done, implementation pending)
+- Stop ที่ค้างก่อนหน้า: MPS run PID 5044 ต้อง TERM (U-state ใน Metal stream); root cause = A_BATCH=64 หนัก + checkpoint ทุก 5 batch → ดูเหมือนค้าง
+- Fix harness เท่านั้น: A_BATCH=8/B_BATCH=32/Q_BATCH=32, checkpoint ทุก batch, deadline+RSS guard ทุก loop, cache key ไม่รวม batch size, resume self-contained (corpus/rows/queries .json)
+- Oracle fix: "neg shoes" gold=40 → ไม่ใช่ negative (negative นับเฉพาะ gold=0: case/coffee)
+- Corpus: 1,000 items (500 gold + 500 distractors) hash 6322a049f80f95f9; A=1,000 rows (0 truncated); B=2,378 rows (95.4% coverage, 2.38 avg/4 max chunks)
+- Run: MPS ~911s embed A+B+Q แล้ว save ทันที; resume run 4.9s reuse ทั้งหมด (smoke test ผ่าน — ไม่ encode ซ้ำ)
+- Result: R@5 A=0.8485 B=0.9091 (+6.1pp) · must-pass R@5 A=0.90 B=0.9667 · R@1 A=0.697>B=0.636 · cross-item@1 A=0.242 B=0.303 · neg FP@0.5 = 1.0 ทั้งคู่ (ไม่มี threshold ใช้แยกได้)
+- Failed must-pass: A={ecg,spo2,qc4} B={qc4} — B กู้ ecg/spo2 ได้ (mixed-topic dilution ใน vector เดียวยาว ~900tok), qc4 fail ทั้งสอง (oracle `qc\s*4` อาจ noisy — ต้องรีวิว)
+- Winner: **B** — A fail 3 must-pass, B กู้ได้จริง 2/3 + R@5 ชนะ >2pp; qc4 fail ร่วมกันไม่ใช่หลักฐานตัดสิน
+- Artifact: docs/test/results/phase10b_description_ab_20261024-180416.{json,md} + cache .phase10b_desc_bench_cache/
+- ยังไม่ implement: เลือก B เป็น design winner สำหรับ generation rebuild รอบถัดไปเท่านั้น — รอ authorize
+- Verdict: PHASE_10B_SAFE_MPS_DESCRIPTION_BENCHMARK_COMPLETE_IMPLEMENTATION_PENDING
+
+### Phase 10B — description-chunk retrieval (winner B) implementation plan
+- Owner path: desc npz (exports/gen/<gid>/description_embeddings.npz, derived จาก snap.generation_id — ไม่แตะ pointer/snapshot contract) → `product_store.fetch_description_evidence` (channel fetcher สัญญาเดียวกับ fetch_unit_evidence: คืน UnitEvidenceFetchResult cards=to_product_card) → `_run_attempt` → make_evidence_card(source="description") → _bucket เดิม → CandidatePool เดิม (identity i:{iid} merge) → Selection เดิม → AnswerContext เดิม
+- Aggregation: chunk hits → dict per item_id {max score + winning chunk_index} → 1 card/item — ไม่เก็บ chunk ทั้งหมด (เฉพาะ winning chunk provenance)
+- Exact-item: profile.anchor_item_ids → restrict hits เป็น item นั้นเท่านั้น; anchor scoring (+3) มี precedence อยู่แล้ว
+- Wiring: `run_grouped_selection(desc_fetcher=...)` → channel_request("description") เฉพาะ productish needs (reuse PRODUCTISH_NEED_KINDS เดิม); flag-off path ไม่แตะ (channel อยู่ใน grouped เท่านั้น)
+- ไม่เพิ่ม: keyword table/regex/guard/decision owner/threshold จาก benchmark/model ใหม่/flag ใหม่
+- RED tests: docs/test/test_phase10b_description_chunks.py — chunk identity, per-item max aggregation, cross-item isolation, desc-only evidence, source compat, flag-off, malformed npz fail-closed
+- ห้าม rebuild generation / Mongo write / provider — round นี้ runtime + offline tests เท่านั้น
+
+### Phase 10B — description-chunk retrieval implementation (done, offline green)
+
+**ผลลัพธ์:** winner B implemented at existing owners — 0 new decision owners
+
+**Changed (runtime — 3 functions ใหม่ใน product_store, ทั้งหมดเท่านี้):**
+- `product_store._desc_vectors(snap)` — load `exports/gen/<gen>/description_embeddings.npz`, path-keyed cache + assert generation_id (contract เดียวกับ _load_vector_store/_unit_vectors); gen เก่าไม่มี artifact → None = no-op
+- `product_store._desc_item_docs(item_ids)` — read-only ShpProducts `item_id $in` ครั้งเดียว
+- `product_store.fetch_description_evidence(message,*,retrieval_profile,shop,limit,snap)` — UnitEvidenceFetchResult เดิม; embed_query → sims → shop mask (npz shops) → anchor_item_ids restrict (exact-item isolation) → argsort desc → max score ต่อ item_id → top-limit → to_product_card + `_score` + `_desc_hit`{item_id,chunk_id,chunk_index,score}; sim floor 0.3 = ค่าเดิม units ไม่ใช่ benchmark threshold
+- `retrieval_runtime.run_grouped_selection` — `desc_fetcher=None` kwarg; channel เพิ่มเฉพาะเมื่อ `any(n.kind in PRODUCTISH_NEED_KINDS)`; channel request ได้ `subject_refs=anchor_item_ids` (replace() บน channel_request)
+- `app.py` — desc_fetcher wired ที่ 2 callsites เดิม (KB branch + main)
+
+**RED→GREEN:** test_phase10b_description_chunks.py — 12/14 RED (missing _desc_vectors/fetcher/desc_fetcher) → 14/14 GREEN
+
+**Verify:** D1 16/16 · desc chunks 14/14 · retrieval_evidence 14 · selection 13 · grouped_req 10 · slots 14 · relations 17 · phase7 36+44 · phase8 51 · exact_item 15 · typed_subject 23 · named_product 38 · r12 159 · subject_set 102 · compat_decision 35 · turn_decision 111 · selection_runtime 15 · shadow 7 — ทั้งหมดผ่าน; test_compat_mode_filter = script-style (SystemExit:0, ไม่มี test — boundary เดิม)
+py_compile: product_store/retrieval_runtime/app/bench ✓ · git diff --check ✓ · staging 0 · gen/pointer/Mongo ไม่ถูกแตะ
+
+**Structural delta:** helpers +3 (desc block เท่านั้น), guards/regex/keyword tables/owners/provider calls/flags/deps = +0; benchmark threshold ไม่เข้า production; chunk ไม่เคยเป็น identity — aggregate ก่อน card; flag-off path เดิม 100%
+
+**รอดำเนินการ:** description_embeddings.npz build per generation + generation rebuild + CAS publish + grouped canary + final acceptance
+
+### Phase 10B — threshold correction + description builder (done, fixture green)
+
+**Review finding:** sim floor 0.3 ใน fetch_description_evidence = uncalibrated hidden relevance owner (benchmark FP@0.5=1.0) → ลบ
+
+**Correction:** mask shop/anchor ด้วย `-np.inf` + accept เฉพาะ `np.isfinite` (NaN/±inf/masked reject เป็น invalid row) — bounded top-K ตาม limit เท่านั้น; RED 3 tests fail → impl → 17/17 GREEN
+
+**Builder (existing owners, no new framework):**
+- `embedding.build_description_chunks` = canonical chunker เดียว (measured-B verbatim: newline-split → strip → dedup → paragraph-merge ≤512 tok; para>512 → hard-window; no overlap/no name/no desc cap/no semantic split)
+- `build_embeddings.build_description_npz` + `--description` — dup item doc first-wins, empty/malformed → 0 rows, dup chunk_ids/finite/dim gate, `_save_verified_npz` เดิม
+- `publish_generation.validate_generation` — desc npz optional: มี ⇒ schema gate (gid+dim+finite+row equality+unique chunk_ids+chunk↦item consistency) + sha256; ไม่มี ⇒ valid (old gens ไม่ invalid)
+- `refresh_data.sh` — desc step after unit npz, `|| warn` non-blocking
+
+**Fixture:** CMC615P(480Mbps)+CTL301+multi-chunk+empty-desc+malformed+dup-doc+2 shops+variant-text — stub embed/tokenizer (no BGE-M3/Mongo); 14/14 pass: deterministic digest ×2 builds, item/chunk/shop mapping, exclusions, finite dim, runtime _desc_vectors load (tmp gid dir), fetch→product, anchor isolation, old-gen noop, corrupt gid fail-closed, publish accept/reject
+
+**Verify:** desc 17 + builder 14 + D1 16 + evidence 14 + grouped 10 + selection 13+15 + exact_item 15 + phase7 36 + phase8 51 + phase4b_refresh 152 — py_compile ✓ bash -n ✓ diff-check ✓ staging 0
+
+**รอดำเนินการ:** full generation build (real BGE-M3 embed ทั้ง catalog) → validate → CAS publish(expected=old gid) → grouped canary → QA review → final acceptance
+
+### Phase 10B — publication gate correction (done, offline green)
+
+**Review finding (HIGH):** desc artifact fail-open — refresh `|| warn` + absent=valid → new gen publish โดยไม่มี desc source → runtime ว่างเงียบ
+
+**Fix (existing publish owner เท่านั้น):**
+- `validate_generation(..., require_description=False)` — False: absent OK (old gens), present⇒full schema gate เดิม; True: missing/0-rows reject + schema gate ก่อน manifest/CAS
+- `publish(..., require_description=False)` + `--require-description` CLI (operator precondition — ไม่ใช่ runtime flag)
+- manifest `counts.description_chunks` เมื่อ artifact มี rows + sha256 เดิม
+- `refresh_data.sh`: desc build blocking (`if ! run → ABORT exit 1`) + publish `--require-description`
+
+**RED→GREEN:** 13 RED (param ไม่มี + `|| warn`) → fixture fixes → 27/27 GREEN; missing/zero-row/wrong-gid/dim/nonfinite/row-mismatch/dup-chunk/chunk↔item reject ครบ; valid pass; cas_publish+finalize_manifest ไม่ถูกเรียกเมื่อ reject; manifest fields ครบ; legacy default path ไม่เปลี่ยน (phase4b_refresh 152/152)
+
+**Complexity delta:** runtime flags +0 · owners +0 · guards +0 · keywords/regex +0 · provider calls +0 · **operator CLI precondition +1**
+
+**Verify:** builder 27 · desc 17 · D1 16 · phase4b 152 · evidence 14 · grouped 10 · bash -n ✓ py_compile ✓ diff-check ✓ staging 0
+
+### Phase 10B — FULL GENERATION BUILD (in progress, CAS ห้าม)
+
+- OLD_GID=`g20261024-072533-2be3443e` (pointer ยืนยันแล้ว) · NEW_GID=`g20261027-025541-563ca0f0` (no dir/coll collision)
+- แผน: export → OCR carry-forward `--max-calls 0` (0 provider) sellable+nonsellable → materialize image_texts_<NEW> → units → import sellable_units_<NEW> → product/unit/description npz (BGE-M3 MPS) → validate require_description — **ไม่ publish/CAS/pointer**
+- writes เท่าที่อนุญาต: exports/gen/<NEW>/* + NEW-scoped colls เท่านั้น; provider/web=0; Product DB read-only
+
+### Zaapi Workflow + KB + Pool — Raw + Canonical design approved (2026-10-27)
+
+- ผู้ใช้เลือกแบบที่ 3: เก็บ sanitized Raw snapshot สำหรับ audit/import/export และใช้ Canonical records เป็น runtime authority เท่านั้น
+- Workflow: engine เดียวและ `runInboundDispatch` owner เดิม; ต้องรองรับ node/runtime/Flow Builder ตาม catalogue สำหรับ Facebook, LINE, TikTok, Shopee, Lazada พร้อม import/export จริง ไม่ใช่เพียง import graph เข้า node เดิม
+- Baseline package: 21 custom flows, 218 nodes, 225 edges, 31 node types ที่ใช้งานจริง, เป้าหมายประมาณ 56 applicable node types, 1 active Basic Automation
+- Workflow persistence contract: workflows, immutable workflow_versions, workflow_runs/events, explicit workflow_bindings, workflow_import_batches, workflow_raw_snapshots; imported flows = disabled unresolved drafts เสมอ
+- KB: 118 sources (113 XLSX/5 TXT, อย่างน้อย 17 header shapes) เข้า zaapi_kb_raw_sources + canonical zaapi_kb_records + immutable embedding generations; legacy KB ไม่ถูกลบ/merge
+- KB switch: `pool_sources.kb` + strict `kb_source=legacy|zaapi`; inactive backend ต้อง zero reads, ไม่มี both และไม่มี silent fallback; Zaapi KB adapter ส่งเข้า Pool/Selection/Answer owner เดิม
+- Import/export ทั้ง Workflow และ KB: dry-run, idempotent apply, version/fingerprint, canonical export, sanitized raw export, Zaapi-compatible projection เฉพาะ field ที่ reverse-map ได้; unsupported ต้องรายงาน ไม่หายเงียบ
+- เวลา: foundation/census/contracts 2 วัน; KB usable 2-4 สัปดาห์; first useful workflow (21 flows + supported used nodes) 6-10 สัปดาห์; full approved five-platform program 14-22 สัปดาห์ sequential
+- Start gate เดิม: ปิดและ commit Phase 10 ก่อน ห้ามปน implementation นี้กับ Phase 10 dirty tree
+
+## 2026-10-27 — Phase 10B: FULL GENERATION BUILD + VALIDATED (CAS pending)
+
+- OLD_GID `g20261024-072533-2be3443e` (pointer verified before AND after — unchanged, activated_at 2026-10-24T08:44:30Z)
+- NEW_GID `g20261027-025541-563ca0f0` — built in `exports/gen/` + NEW-scoped collections only
+- Build stages (existing refresh_data.sh owners, publish step SKIPPED):
+  - export 11,792 docs (OLD 11,783, +9 live drift) ~4min
+  - image-text carry-forward sellable+nonsellable: calls=0 (max-calls 0), carried 13,823 = OLD evidence count; deferred 13,636+45,938 (existing contract)
+  - image_texts_<NEW> materialized 13,823
+  - units 28,072 (OLD 28,048, +24) → sellable_units_<NEW> 28,072
+  - product npz 11,792/45MB ~3min; unit npz 28,072/109MB ~53min; desc npz 27,183/110MB ~92min (real BGE-M3 MPS, offline, no download)
+  - MPS preflight: 6.1s load, (8,1024) finite, no CPU fallback
+- validate_generation(require_description=True): VALIDATE_OK — unit 28,072=npz=col; product 11,792; desc 27,183 unique chunk_ids, chunk↦item consistent; image_texts 13,823; all sha256 computable
+- RUNTIME SMOKE defect found+fixed: export item_id = float "28018035569.0" (npz convention, same as product npz) → fetcher isdigit() rejected → 0 cards
+  - Fix: `_canon_iid` at fetcher boundary — int(float(x)) canonical; malformed→skip fail-closed; chunk_id normalized "iid:idx"; _desc_hit.item_id canonical
+  - RED test test_float_item_ids_canonicalized → GREEN; chunks 18/18, builder 27/27
+  - Live smoke NEW_GID: 3 loaders read NEW gid; anchored CMC615 fetch → desc_hit 28018035569 chunk 0 score 0.678; cross-item anchor→only that item, no leak
+- Provider/Gemini/OpenRouter/web calls: 0. Product DB read-only. Writes = NEW_GID dir + 2 NEW-scoped collections only. No CAS/publish/rollback/pointer mutation.
+- Tests: desc 18, builder 27, D1 16, evidence 14, grouped req 10, executor ?, selection 13+15, exact 15, named ?, phase4b 152 — all green; py_compile + bash -n + git diff --check clean; staging empty; branch feature-phase3-aswer-quality @20f9e69 (dirty preserved)
+- ค้าง: CAS publish (--expected OLD_GID, --require-description) รอ explicit approval → grouped canary → QA evidence review → Phase 10B acceptance
+
+## 2026-10-27 — Phase 10B plan: fail-closed identity canonicalization (pre-CAS)
+
+- Root cause: `_canon_iid` ใช้ `str(int(float(str(x))))` → "x.5"/"1e3"/"-1" alias เป็น item จริง, >2^53 เสีย precision; anchor ฝั่ง raw `str(a)` → "x.0" ไม่ match canon "x"
+- Plan: แทน impl ใน `_canon_iid` owner เดิมด้วย digit-only parse (digits | digits.0*, int(whole) ตรง ไม่ผ่าน float, reject bool/None/empty/sign/exp/fraction); anchor ผ่าน owner เดียวกัน — raw anchor มีแต่ canon ว่าง → restrict เป็น ∅ → fail closed (ห้ามเปลี่ยนเป็น unrestricted)
+- Scope: fetcher boundary เดียว, ไม่ rebuild/ไม่ publish/ไม่ Mongo write
+
+### ผลลัพธ์: identity canonicalization closed
+- `_canon_iid`: digit-only parse (digits | digits.0*), `int(whole)` ตรงไม่ผ่าน float — "x.5"/"1e3"/"-1"/exp/text/None/bool → None; >2^53 exact
+- anchor_raw non-empty + canon ∅ → restrict ∅ fail closed (ไม่ใช่ unrestricted)
+- RED 6 → GREEN 67/67; regression 269+1skip + 146; py_compile + bash -n + diff-check clean
+- NEW_GID smoke: anchor x → hit x:0 (0.678); float anchor → canon match; cross-item isolated; malformed anchor → empty
+- revalidate require_description=True → VALIDATE_OK (28072/11792/27183/13823); pointer unchanged
+
+## 2026-10-27 — Phase 10B CAS preflight → BLOCKED (shared production pointer)
+
+- Frozen state: branch feature-phase3-aswer-quality @20f9e69, staging empty, diff-check clean, 0 stray procs, docker daemon down
+- Pointer ×2 = g20261024-072533-2be3443e; NEW_GID validate(require_description=True) OK (28072/11792/27183/13823); identity tests 40/40
+- IMPACT AUDIT: admin Mongo host = REMOTE digital.in.th db "chatbot" — 64 collections รวม botworker_*, conversations_shp, messages_shp, pushevents, tickets, shops, workflows = live production admin store
+- PROOF LIVE: conversations_shp updated_at 2026-10-27T05:41:33Z (~6 นาทีก่อน audit) — production/customer traffic กำลังเขียนบน DB เดียวกับ pointer
+- sellable_units_meta{_id:"active"} อยู่บน shared DB → CAS จะ flip pointer ที่ deployed services อ่านทันที (NEW_GID artifacts อยู่แค่บนเครื่องนี้ — server ไม่มี exports/gen/<NEW> → retrieval เสี่ยงพัง)
+- DECISION: ห้าม publish — PHASE_10B_CAS_BLOCKED_SHARED_PRODUCTION_POINTER; zero writes ทั้ง round (read-only เท่านั้น)
+- Operator action needed: CAS ต้องรันบน/ชี้ environment ที่ isolate จริง หรือ copy NEW_GID artifacts + ทำ CAS ฝั่ง server ด้วยขั้นตอน deploy ที่อนุมัติ — ห้าม flip pointer จาก local เครื่อง dev ที่ชี้ shared prod Mongo
+
+## 2026-10-27 — Phase 10B pre-commit audit → BLOCKED by test-isolation finding
+
+- Frozen: branch @20f9e69, staging empty, diff-check clean, 39 paths (27M+12??), 0 stray procs, pointer=g20261024-072533-2be3443e, NEW_GID unpublished
+- Runtime/tooling audit (every hunk vs HEAD): all changes land in existing typed owners — decide_turn (roles/op authority/greeting action), intent_classifier (typed fact/spec contract + greeting + relation_target), route_context.intent_fact_scope (consumer accessor), retrieval planners propagate verbatim, answer_context constraint gate → policy_resolver.eval_spec_constraints (FieldEvidence-only, unknown≠negative, kb_inherit excluded), _canon_iid digit-only owner, desc fetcher = recall-only + exact-item fail-closed, build_description_npz atomic+validated, publish = validate→manifest→fenced CAS (no unconditional write), refresh adds blocking desc build + --require-description
+- Doc fix (allowed): SRS section-6 rows added for intent_fact_scope, norm_spec_constraints, eval_spec_constraints, format_constraint_value
+- Fresh tests: G1 218 / G2a 80 / G2b 222+1skip / G3 264+19skip+4xfail / retry standalone 4 / G4 212 — ALL PASS when test_canary_retry_policy runs in its own process
+- ⚠️ MEDIUM finding (test isolation, blocks staging): test_canary_retry_policy.py line 16 `import canary_exact_item_attribution as H` at module top → harness applies GLOBAL patches at import (rrt.run_grouped_selection=_gs, td.decide_turn=_decide, acx.compile_answer_context=_ctx, no teardown) → in combined pytest run poisons all later tests: signature (*a,**k) breaks test_run_grouped_selection_forwards_needs; _gs spy does out.get() on legit None fail-closed → AttributeError (test_pipeline_exception_returns_none_fail_closed, test_snap_unset_still_resolves_pointer); replay path → 2 pingevox tests. Verified: batch minus retry-file = 222 passed; retry file alone = 4 passed. Production code unaffected. Fix direction (not applied — audit is report-only): defer import into test scope AND wrap spies with monkeypatch.setattr for teardown, or give harness an install()/restore() context manager
+- ⚠️ LOW (pre-existing, out-of-scope): retrieval_policy._norm_id:60 still float()-based ("1e3"→"1000" alias, >2^53 precision loss) — same defect class fixed only at desc boundary (_canon_iid); different contract (passthrough vs reject). Follow-up only
+- refresh_data.sh --expected auto = pre-existing in HEAD (diff adds --require-description only) — noted, not a finding
+- Secret/path/artifact scan clean: no mongodb://, keys, /Users paths, generated artifacts in diff or untracked; no .npz/exports/gen dirs in git status
+- NO STAGING performed (Medium finding blocks); verdict: PHASE_10B_PRECOMMIT_BLOCKED_BY_FINDINGS
+
+## 2026-10-27 — test-isolation fix → combined suite green → staged
+
+- Root cause: `canary_exact_item_attribution.py` ทำ production-binding mutation 19 จุดที่ top-level (rcfg flag, ws/llm dies, cp._coll barrier, in-mem subject/timeline/claim stores, llm._client retry, ic.classify, td.decide_turn, rrt.run_grouped_selection, acx.compile_answer_context, cp.resolve_subjects) → test_canary_retry_policy import มัน → spy `(*a,**k)` ปิด signature + `_gs` crash บน None fail-closed → 5 tests พังใน combined run
+- Fix: defs ทั้งหมดคงไว้ module-level (pure) — assignments ทั้งหมดย้ายเข้า `install()` ที่ capture originals → return `restore()`; `main()` = install→try→finally restore; drop `appmod.td` (vestigial — app.py ใช้ local `_td` import); `_gs` + live `_gs_spy` ได้ None passthrough guard; `live_pingevox_mistore_inproc.py` ย้าย live-spy bindings 7 จุดเข้า `__main__` หลัง `H.install()` (ก่อนหน้า stack บน import-time patches) + restore กลับ
+- test file: `_wrap` ติดตั้ง `llm._client = H._client` ผ่าน monkeypatch (auto-restore); +5 isolation tests (import identity in-proc + subprocess, install/restore normal + exception, None passthrough)
+- GREEN: retry file alone 9; order A (retry first) 61; order B (retry last) 61 — identical; combined single-process batch = **1005 passed / 20 skipped / 4 xfailed** ใน 10.85s
+- Production bytes: chatbot/ diff unchanged this round (audit found zero binding mutation หลัง fix — grep top-level assignments = none)
+- _norm_id float() Low finding — deferred out-of-scope เดิม
+
+## 2026-10-27 — Phase 10B pre-activation closeout (Commit 1 landed)
+
+- Commit 1: `40a7d774b8a87b1056677a5eb675e76aea7a766e` — "refactor: complete phase 10b grounded retrieval" — 49 files (+11,334/−376): 19 runtime + 5 scripts + 23 test/harness + AGENTS.md (complexity-containment rules) + SRS_SSD.md
+- Implementation scope: typed subject/target roles end-to-end (intent → decide_turn → TurnPlan → planner → slots → requests → executor → selection → answer_context); greeting action at intent boundary; `_FACT_OP`/`_FACT_DESCRIBE` op-authority (speed ≠ price); deterministic segments carry origin/need_indices/subject_ids provenance; guards = schema/provenance validation only
+- Description Winner-B: multi-chunk description embeddings (paragraph split → dedupe → merge ≤512 tok) as recall-only candidate source; R@5 0.909 vs A 0.848; max-per-item aggregation; exact-anchor restriction; finite-score validation; no uncalibrated threshold; `description_embeddings.npz` = immutable gen artifact (27,183 chunks); publish gate `--require-description` blocks CAS on missing/corrupt/empty artifact
+- Identity canonicalization: `_canon_iid` = digit-only parse (digits | digits.0*), int(whole) direct — rejects fraction/exp/sign/NaN/bool/empty; >2^53 exact; malformed anchor → ∅ restrict fail-closed
+- Test-isolation fix: canary harness seams moved from import-time to install()/restore(); combined suite now order-independent
+- Final verification: order A 61 passed · order B 61 passed · combined 1,005 passed / 20 skipped / 4 xfailed · py_compile + bash -n + diff --check clean · secret/path/artifact scan clean
+- State: active pointer = g20261024-072533-2be3443e (unchanged); NEW_GID = g20261027-025541-563ca0f0 built+validated (11,792 products / 28,072 units / 27,183 desc chunks / 13,823 image texts) but UNPUBLISHED — no manifest, pointer not flipped
+- CAS blocked: pointer lives in shared production Mongo (remote admin DB, live conversations_shp traffic observed) — flipping from local checkout would hit deployed services that lack NEW_GID artifacts on server
+- grouped retrieval NOT activated (flags unchanged); zero deployment; zero production-acceptance claim
+- Remaining sequence: deploy code + NEW_GID artifacts without pointer flip → server-side validation → coordinated fenced CAS (expected=OLD_GID) → bounded grouped canary → QA review → acceptance or rollback
+- Deferred Low: `retrieval_policy._norm_id` float()-based normalization ("1e3"→"1000" alias, >2^53 precision loss) — separate pre-existing owner, out of scope, unresolved
+
+## 2026-10-27 — Phase 10B local-Docker activation rehearsal → BLOCKED (daemon down)
+
+- Frozen state verified: branch feature-phase3-aswer-quality @fd4e682, parent impl 40a7d77, staging empty, unstaged เฉพาะ docs/plans/2026-10-21-zaapi-workflow-kb-pool-master-plan.md, untracked 0
+- Docker gate FAIL: ไม่มี socket (/var/run/docker.sock, ~/.docker/run/docker.sock), ไม่มี dockerd/colima/orbstack process — client v29.8.2 แต่ daemon ไม่รัน
+- Per runbook ห้าม start Docker Desktop ผ่าน automation → รอผู้ใช้เปิดเอง
+- Verdict: PHASE_10B_LOCAL_DOCKER_WAITING_FOR_DAEMON — zero docker/artifact/mongo action; canonical gen dirs ไม่ถูกแตะ; pointer ยัง OLD_GID; git unchanged
+
+## 2026-10-27 — Phase 10B local-Docker activation rehearsal → PASSED (server deployment pending)
+
+- Topology: lab `/tmp/phase10b-local-canary-20261027-144351`; net `phase10b-net-…-144351` = `docker network --internal` (egress ไม่มี — host port publish บน internal net ล้มเหลวตามคาด); mongo `phase10b-mongo-…-144351` (mongo:7, ไม่ publish port); chat `phase10b-chat-…-144351` (8010 in-net only, health ผ่าน `docker exec`); DBs `phase10b_canary_product`/`_admin`
+- No-production proof: preflight assert MONGO_URI+ADMIN_MONGO_URI host = disposable container เท่านั้น (ไม่มี credentials/digital.in.th/IP); env providers ว่าง, ENABLE_* ทั้งหมด false; startup log `[KEYS] 0 keys`; log scan ไม่มี non-local target; internal net ปิด channel ออกทั้งหมด → shared production pointer ไม่มีทางถูกแตะ
+- Build: `chatbot-phase10b-canary:fd4e682` = sha256:fa0944886f… (13.8GB, 4m28s) จาก committed Dockerfile — image commit HEAD fd4e682
+- Seed: products 11,792; `sellable_units_<OLD|NEW>` 28,048/28,072; `image_texts_<OLD|NEW>` 13,823×2; pointer seed = OLD (owner `_pointer_set_doc` serialization)
+- Pre-CAS: pointer ×2 = OLD, snapshot resolve = OLD; `validate_generation(NEW, require_description=True)` → 28,072 units / 27,183 desc chunks / 13,823 image texts / 11,792 products
+- CAS: `publish_generation --expected OLD --require-description` → `published` (1 attempt, fenced); pointer ×2 = NEW; `previous` = OLD; manifest sha 8e8770ef…
+- Runtime: image โหลด NEW snapshot + BGE-M3 จาก host HF cache ro (`HF_HUB_OFFLINE=1`, 0 downloads); grouped selection ON (env ใน container เท่านั้น); web_search OFF asserted
+- Deterministic canary 10 turns + desc probe — counters: gemini 0 / web 0 / openrouter 0 / mongo_write 0
+  - A: tag 28018035569 exact; "Speed data เท่าไหร่ครับ" → data_transfer_speed (ไม่ใช่ price); anchor คงเดิม; desc admit เฉพาะ chunk 28018035569:0 (มี "480 Mbps")
+  - B: `10Gbps + แม่เหล็ก` → spec_constraints+required_features structured; subject_refs ว่าง (ไม่ reuse anchor); ตอบ honest no-match ไม่ fabricate
+  - C: tag CTL301 → greeting คง subject → `Xiaomi 17 Ultra` = typed compat/recommend target (usb-c/90W, drop lightning-incompat) → `หัวชาร์จล่ะ` เลือกหัวชาร์จตาม device ctx, CTL301 ไม่หลุดใน ctx; greeting ท้าย ok
+  - D: fresh-conv greetings → greeting path ถูก
+  - E: query จาก desc ของ item B (27639651334) → unanchored B ชนะ 0.9152 > A 0.8486 แต่ anchored A admit เฉพาะ chunk ของ A (raw_count=1) — cross-item isolation คงอยู่ใต้ competitor ที่แข็งกว่า
+- Rollback: `--rollback --expected-active NEW` → `rolled_back` (1 attempt); pointer ×2 = OLD; `previous` = NEW
+- Provider QA: skipped (ไม่มี credential ใน lab — by design); deterministic path ครบ
+- Results: `docs/test/results/phase10b_local_docker_rehearsal_20261027-144351.{json,md}` + `canary_20261027-075435.json`
+- Cleanup: ลบ chat+mongo containers (−v), network, lab dir ทั้งหมด; 0 canary containers/networks/volumes เหลือ; canonical `exports/gen/<OLD|NEW>` 14 files hash == baseline; git status ไม่เปลี่ยนนอกจาก log นี้ (สังเกต docs/SRS_SSD.md มี user-side edit ก่อน run — ไม่ได้แตะ)
+- Verdict: PHASE_10B_LOCAL_DOCKER_REHEARSAL_PASSED_SERVER_DEPLOYMENT_PENDING — deploy + production CAS ยังค้างตามเดิม
+
+## 2026-10-27 — Phase 10B localhost Gemini QA (process-local NEW_GID) → PASSED (server deployment pending)
+
+- Frozen: branch feature-phase3-aswer-quality @fd4e682 · staging empty · diff-check clean · 0 stray procs · :8010 free · unstaged เดิม 3 files (SRS user-edit + Zaapi plan + log นี้)
+- Pointer ×2 pre = g20261024-072533-2be3443e (activated_at 2026-10-24T08:44:30Z); validate_generation(NEW, require_description=True) = VALIDATE_OK (units 28,072 / npz 28,072 / products 11,792 / desc 27,183 / image_texts 13,823); NEW-scoped collections ยืนยัน
+- Gemini usable keys = 19 (count only); provider pinned gemini ทุก answer role process-locally
+- Execution: /tmp wrapper เดียว (ลบแล้ว) — H.install() seams + resolve_snapshot override คืน NEW_GID EvidenceSnapshot เดียว (ไม่มี pointer write/CAS/manifest) + get_provider pin + cap guard (gemini ≤20, deadline 12min) + pymongo CommandListener (read/write proof)
+- No-provider probe: product npz 11,792 · unit npz 28,072 · desc npz 27,183 · CMC615P chunks 27639651334.0:0/:1 reachable (chunk0 has 480) · pointer ยัง OLD
+- Run: pingevox 5 turns + wattaka_sana 3 turns, fresh conv ids qa10b-* — elapsed 95.6s; gemini=13 (8 intent + 5 answer_typed), attempts=13, e503=0, e429=0, web=0, OR=0, mongo_write=0 (barrier+listener)
+- Per-turn: snap_gid=NEW ทุกเทิร์น · P-Q1 exact CTL301 grounded · P-Q2/Q5 greeting zero retrieval · P-Q3 ATC615+ATC310N connector_match, CTL301 connector_disjoint explained no-CTA · P-Q4 adapter scope + Xiaomi inherit, ctx/resp = เดียวกับ after13 (bundles-first residual เดิม — structured listing form evidence ขาดตาม blocker เดิม) · W-Q1 exact CMC615P · W-Q2 **480Mbps answered** (desc chunk admitted — est_ctx_tokens 7,390; improvement vs OLD_GID defer) · W-Q3 deterministic no-match + near-miss เฉพาะ "480Mbps ไม่ถึง 10Gbps" ไม่มี magnetic pass-claim/CTA
+- Verdict: PHASE_10B_LOCALHOST_GEMINI_QA_PASSED_SERVER_DEPLOYMENT_PENDING — all 8 turns PASS
+- Results: docs/test/results/phase10b/pingevox_wattaka_1793089442_newgid_live.{json,md} (gitignored)
+- Post: pointer ×2 = OLD unchanged · gen artifacts เดิม (ls identical) · mongo writes=0 · 0 stray procs · git diff เฉพาะ 3 files เดิม + log นี้ · no commit/push/deploy/CAS
+- Residuals เหลือ: P-Q4 bundles-first ordering (missing structured listing form — blocker เดิม) · spec under-claim defer clause · persona "abubu" = config จริงของ CukTechThailand ไม่ใช่ corruption
+
+### 2026-10-2x — Phase 10B localhost QA รอบ 2 (NEW_GID, Gemini จริง): aumpornpoonsiri IMILAB W01 (SuperITMall) 3 เทิร์น — 2 FAIL_COMPOSITION
+
+- Setup เดิม (process-local NEW snap + H.install + live spies + die-barriers + cap20/12min + listener): item=18408364022 (SuperITMall, "[ลดเหลือ 699] IMILAB W01"), conv qa10b-aumporn-1793090004
+- gemini=6 (3 intent + 3 answer_typed) attempts=6 · e503=0 e429=0 · web=0 OR=0 · mongo writes=0 (harness+listener; ops find=96 getMore=15 distinct=2) · snap_gid=NEW ทุกเทิร์น · pointer pre/mid/post ×4 = OLD · 51.4s
+- Evidence (item doc 18408364022): desc มี Glory/70 ✓, ไม่มี GPS/Strava/ชีพจร/เพซ — ตรงกับคำตอบ Zaapi (70 โหมด + Glory Fit อย่างเดียว, ที่เหลือ "ไม่มีข้อมูลระบุ")
+- **Q1 PASS**: [สินค้า:18408364022] → exact item, ctx/resp/card/link ทั้งหมด = item เดียว, spec คร่าว (1.69"/100 faces/SpO2/Imilab Fit) grounded ใน name+desc
+- **Q2 FAIL_COMPOSITION** (คำถาม GPS จากมือถือ + ชีพจร/เวลา/ระยะทาง/เพซระหว่างวิ่ง): intent=product_spec compat_mode=bluetooth_general tgt_dev=IMILAB W01 · `unanswered=[{i:1, no_evidence}]` — ระบบตรวจได้ว่า need ตอบไม่ได้ แต่ composition **เงียบทิ้ง** → ตอบเป็น spec dump ทั่วไป (70 โหมด/Glory Fit/SpO2/3ATM grounded ทั้งหมด, ไม่มี fabrication) แต่ไม่เคยบอก "ไม่มีข้อมูลระบุ" → ลูกค้าไม่ได้คำตอบ yes/no
+- **Q3 FAIL_COMPOSITION** (Strava): intent=compatibility_check tgt=['สตาวา'] · ตอบ "รองรับ iOS/Android ผ่าน Imilab Fit + Glory Fit" — ไม่แตะ Strava, ไม่มี explicit "ไม่สามารถยืนยัน" (unanswered=[] — need ไม่ถูก track) + subject drift เป็น alternatives [W01,W02] พร้อม card W02 + CTA
+- **Pattern ใหม่ (defect, ไม่แก้ใน session นี้ตามข้อจำกัด)**: เมื่อ need = spec/compat ที่ evidence ไม่มี → composition deflect เป็น spec dump/แอปทั่วไป แทนที่จะประกาศ "ไม่มีข้อมูลระบุไว้ จึงไม่สามารถยืนยัน" ตาม Zaapi reference — grounded แต่ unresponsive
+- Results: docs/test/results/phase10b/aumporn_w01_1793090004_newgid_live.{json,md} (gitignored)
+- Verdict เคสนี้: PHASE_10B_LOCALHOST_GEMINI_QA_FAILED (behavioral — ไม่ใช่ infra; ไม่มี fabrication/evidence leak)
+
+### 2026-10-2x — Phase 10B correction round: answer-completeness data contract (กำลังทำ — plan ก่อนแก้)
+
+**Root cause (trace เสร็จแล้ว — 2 boundary แยกกัน ไม่ใช่จุดเดียว):**
+
+- **Q2 (no_evidence หาย)**: `compile_answer_context` ผลิต `UnansweredNeed(no_evidence)` ถูกต้อง → `compose_answer` เก็บใน `comp.unanswered_needs` → แต่ `_render_composition` (app.py) render เฉพาะ `comp.results` — **ไม่มี renderer ของ UnansweredNeed เลย** → outcome "cannot-confirm" ไม่ถึง text (เหลือแต่ observability `rd.composition.unanswered`) → model เห็นแค่ product task → spec dump แทนคำตอบ
+- **Q3 (target หาย + W02 drift)**: 2 sub-defects
+  - `_need_target` (answer_context) อ่านเฉพาะ `RetrievalRequest.target_device`/`profile.target_device` = device-normalized เท่านั้น — `route_context` โดย contract เก็บ non-device target (app/service เช่น `สตาวา`) ไว้ใน `target_refs` → `target_of[compat]=None` → verdict machinery ข้าม → need covered โดย products → ตอบเงียบๆ ไม่แตะ Strava
+  - `compile_answer_context` admit `role="alternative"` ให้ทุก operation — alternatives ควรมีเฉพาะ need ที่ขอ recommend → need describe/compat scope=explicit ได้ sibling W02 เข้า products → card+CTA W02 → `selected_ids=[W01,W02]` → subject set polluted เป็น pair
+
+**Fix plan (existing typed owners เท่านั้น — 0 guard/regex/keyword/helper-chain ใหม่):**
+
+1. `_need_target` — compat need: fallback `need.target_refs` หลัง request/profile target_device (typed verbatim target — generic ทุก label ไม่ใช่เฉพาะ Strava)
+2. `compile_answer_context` — per-need `cands`: `operation != "recommend"` → drop `role=="alternative"` (pattern เดียวกับ LOCAL_FACT_OPS subject-only filter ที่มีอยู่แล้ว)
+3. `_unanswered_segment` (answer_context, deterministic renderer ข้าง `_compat_segment`/`_constraint_segment`) + `_render_composition` append segments ของ `comp.unanswered_needs` (ข้าม deferred — owner อื่นจัดการ) — render จาก typed fields verbatim (target/subject_refs/scope/reason): no_evidence/no_answer → "ไม่มีข้อมูลยืนยัน...ไม่สามารถยืนยันได้"; no_selection → "ไม่พบข้อมูล...ในระบบของร้าน" — ไม่ใช่ "ไม่รองรับ" ทั้งสิ้น
+
+**Impact pre-analysis**: recommend op (มีไหม/แบบไหน/อันไหนดี/adapter pivot P-Q4) alternatives คงเดิม · stock/price/link (LOCAL_FACT_OPS) เดิมมี subject-gate อยู่แล้ว · device-target compat (Xiaomi/CTL301) path เดิม target_device → verdict unchanged · app-target compat = uncovered→no_evidence เสมอ (rel=None เพราะไม่มี carrier — fail-closed ถูกต้องตาม spec) · "มี X ไหม" X ไม่อยู่ → เปลี่ยนจาก "มี Y แนะนำ" เป็น "ไม่พบ X" ตาม contract ที่กำหนด · EMPTY_CONTEXT_REPLY ถูกแทนด้วย segment เมื่อทุก need unresolved — honest กว่าเดิม
+
+**RED tests ก่อนแก้**: (A) mixed grounded+no_evidence render; (B) arbitrary external-app target → unresolved UnansweredNeed; (C) describe+alternative → exact subject only; (D) need completeness invariant; (E) W01 3-turn replay offline; (F) arbitrary labels ×2
+
+### 2026-10-2x — Phase 10B answer-completeness correction (เสร็จ — verified live + offline)
+
+**Error → cause → fix → impact (ตามที่แก้จริง):**
+
+- **Q2 no_evidence outcome หายที่ render**: `comp.unanswered_needs` ไม่มี renderer → เพิ่ม `_unanswered_segment` (answer_context — deterministic, typed fields verbatim, deferred ข้าม) + `_render_composition` append ท้ายหลัง results; impact: ทุก unresolved productish need ได้ customer-visible outcome — no_evidence/no_answer = cannot-confirm, no_selection = ไม่พบในระบบ; **ห้าม "ไม่รองรับ"** เสมอ
+- **Q3 external target หาย**: `_need_target` อ่านแค่ request/profile `target_device` → +fallback `need.target_refs` (verbatim) — app/service target ไหลเข้า verdict machinery → uncovered → no_evidence+segment name target ได้; impact: Garmin Connect/Google Fit/Fitbit/unknown app ทำงานเหมือนกัน (test arbitrary labels ×2 ผ่าน)
+- **W02 drift**: gate แรก blanket `operation != "recommend"` → **regress**: `test_main_flag_on_selected_replaces` (มี WPB100L ไหม → AC65B substitute) fail เพราะ describe need ที่ subject ไม่มี card เลยต้องใช้ alternative เป็น substitute — **refine เป็น `!= "recommend" and มี subject-role cand`**: subject coverage อยู่ → alternative = drift ตัด; subject ว่าง → alternative = substitute เจตนาของ selection owner คงไว้
+- **partial-unresolved render ambiguity (review finding)**: compat need ที่ verdict decided บาง subject + unresolved บางส่วน — render แบบ blanket "…กับ {target}" ฟังดูขัดกับ verdict ที่ยืนยันแล้ว → scope เป็น: named ref → "{ref} — …กับ {target}"; id/sid refs (i:/v:/u:/n: typed prefix + digit filter — schema-aware ไม่ใช่ prose) → "สินค้าที่ตรวจสอบไม่ได้ — …กับ {target}"; ไม่มี refs → "การเชื่อมต่อ…กับ {target}" เหมือนเดิม
+
+**Complexity delta**: helper +1 (`_unanswered_segment` — class เดียวกับ `_compat_segment`/`_constraint_segment`) · guard +0 · regex +0 · keyword/phrase table +0 · decision owner +0 (render ที่ composition owner เดิม) · fallback: +1 field source ใน `_need_target` cascade (typed target_refs ไม่ใช่ owner ใหม่) · flag +0 · provider call +0 · dep +0
+
+**Verification (final code):**
+- RED→GREEN: test_phase10b_answer_completeness.py 9 tests — incident replay offline + arbitrary labels + substitute anti-regression + partial-scope render + invariant
+- Regression: fail-closed boundary + phase7 + phase8 + boundary-review = 150 · r12+typed+ownership+need_selection+compat = 255 · selection/runtime+turn_decision+subject_set+grouped+pingevox = 272 · r12+slots+relations = 190 · exact_item+canonical+desc+named = 136 — all green
+- Live Gemini NEW_GID (final code): W01 3 turns — Q1 exact; Q2 grounded + `สำหรับW01 — การเชื่อมต่อหรือความเข้ากันได้กับ IMILAB W01 — ไม่มีข้อมูลยืนยัน…` (ctx=W01 เดี่ยว, W02 ออก); Q3 `สำหรับการเชื่อมต่อหรือความเข้ากันได้กับ สตาวา — ไม่มีข้อมูลยืนยัน…` (ctx=W01, no W02 card/CTA) — gemini=6, web=0, OR=0, mongo_write=0, pointer OLD pre+post
+- Live regression (code ก่อน gate-refine — model path เหมือนกัน): pingevox 5 + wattaka 3 ครบ — gemini=19, counters 0; pingevox Q3 tail ใหม่ scope "สินค้าที่ตรวจสอบไม่ได้" ไม่ขัด verdict
+- Results: docs/test/results/phase10b/phase10b_answerfix_1793092897_newgid_live.{json,md} (all 11 turns), phase10b_answerfix_1793093368/1793093613_newgid_live.{json,md} (W01 reruns)
+- SRS: §2.3 accidental scan-review fragment ลบ (restore ประโยค IRON RULE เดิม — diff §2.3 หายเป็นศูนย์); §6 update `_render_composition`/`UnansweredNeed`/`compile_answer_context` + เพิ่มแถว `_unanswered_segment`
+- Pointer: shared active = g20261024-072533-2be3443e unchanged ×3 checks/run · NEW_GID = process-local EvidenceSnapshot override เท่านั้น · ไม่มี CAS/deploy/CAS-write
+- Git: staging empty · M answer_context/app/SRS/log + untracked test + user files เดิม (Zaapi plan, SRS — fragment เท่านั้นที่แก้ตามสั่ง)
+
+### 2026-10-2x — Phase 10B typed multi-fact correction: W01 Q2 capability-ask decomposition (กำลังทำ — plan ก่อนแก้)
+
+**Root cause (trace เสร็จ — boundary แรกที่ fail = intent schema เอง):**
+
+- intent contract ไม่มี slot สำหรับ "ความสามารถที่ลูกค้าถามว่าสินค้าทำได้ไหม" — `requested_facts`/`required_features` = closed enum, `spec_constraints` = numeric-only → model ยัด capability asks (phone-GPS / บันทึกระยะทาง-เพซ / live display ชีพจร-เวลา-ระยะทาง-เพซ) ลง `requested_facts=["description"]` + mis-slot subject `IMILAB W01` ลง `target_device`
+- downstream ทุก owner faithful propagate defect: `_REL_CONN_RE` เจอ "เชื่อมต่อ" + `_has_target_dev` → compat need trefs=("IMILAB W01") = **self-compat**; profile.target_device=idevice verbatim → `target_of` fallback ดึง label เดิมกลับ → tail "ความเข้ากันได้กับ IMILAB W01" แทน asks จริง
+- asked capabilities ไม่เคยเข้า typed record ใดเลย → ไม่มี owner ไหนพิจารณาได้ → หายเงียบ แล้ว spec dump แทนคำตอบ
+
+**Fix plan (existing typed owners เท่านั้น — 0 keyword/regex/helper-chain/guard ใหม่):**
+
+1. `intent_classifier` — field ใหม่ `capability_asks`: list ของ capability labels (สิ่งที่ลูกค้าถามว่าสินค้าทำได้/มีไหม — functions/connectivity/sensors/display) — shape-validation เท่านั้น (bounded non-empty strs, ไม่มี content classification); `target_device` doc ชี้ชัด = counterpart device เท่านั้น ไม่ใช่สินค้าที่ถาม
+2. `route_context.intent_fact_scope` → 4-tuple +asks (re-validate shape, fail closed)
+3. `turn_decision` — `TurnNeed.capability_asks` + merge union + `_tgt_refs` self-drop (ref ที่ codes ทับ subject-side codes หรือ normalize เท่า subject ref = ไม่ใช่ counterpart — generic identity invariant จาก `_extract_codes`/`resolve_route` split ที่มีอยู่) + stamp asks บน product need
+4. `answer_context` — `UnansweredNeed.capability_asks`; asks eval per-need ผ่าน `eval_spec_constraints` features channel เดิม (satisfied→claimable note, unknown→forbid-note + `UnansweredNeed(no_evidence, capability_asks=…)`); uncovered emissions attach asks; `_unanswered_segment` name ทุก ask verbatim
+
+**Pre-impact**: asks ไม่แตะ retrieval/selection (subject card เดิม serve); satisfied-ask path เปิดเมื่อ structured feature evidence มีจริงเท่านั้น (วันนี้ = ว่าง → unknown เสมอ); self-drop ตัดเฉพาะ ref ที่ code ทับ subject codes — target ต่างชื่อ/ต่าง code คงเดิม (Strava/AD1404T/iPhone ไม่กระทบ)
+
+### 2026-10-2x — Phase 10B typed multi-fact correction: W01 Q2 capability asks (เสร็จ — verified live final bytes)
+
+**Error → cause → fix → impact (ตามที่แก้จริง):**
+
+- **capability asks หายที่ intent boundary**: schema ไม่มี slot → เพิ่ม `capability_asks` ใน `classify_intent` (open labels, shape-normalize ≤200 chars/≤8 ตัว, dedupe — ไม่ใช่ closed enum; prompt doc + ตัวอย่าง few-shot 1 อันเพื่อ anchor นิยาม field); impact: คำถาม "ทำ X ได้ไหม" ทุก product_type เข้า typed contract
+- **self-compat target**: `IMILAB W01` หลุดเป็น target ของ subject W01 → `_tgt_refs` ใน `decide_turn` drop ref ที่ normalize เท่า subject ref หรือ codes ทับ subject-side codes (ผ่าน `_extract_codes` เดิม — ไม่มี regex/kw ใหม่) + `build_retrieval_profile` drop `intent.target_device` แบบเดียวกัน; impact: ref ต่างชื่อ (สตาวา/iphone/AD1404T/มือถือ) คงเป็น target ตามเดิม — proven ด้วย regression
+- **asks ไหลข้าม typed chain**: `intent_fact_scope` → 4-tuple; `TurnNeed.capability_asks` + `_add_need` merge + post-pass stamp บน product need (describe ก่อน, ไม่มี → emit describe ใหม่); `UnansweredNeed.capability_asks`; asks eval ใน `compile_answer_context` ผ่าน `eval_spec_constraints` features channel เดิม (satisfied→claimable note; unknown→limitation note "ห้ามยืนยัน" + `UnansweredNeed(no_evidence, capability_asks=…)`); `_unanswered_segment` name ทุก ask verbatim
+- **render**: `สำหรับW01 — เชื่อมต่อ GPS จากมือถือเพื่อบันทึกระยะทางและเพซวิ่ง / ดูชีพจร เวลา ระยะทาง และเพซบนหน้าจอนาฬิกาขณะวิ่ง — ไม่มีข้อมูลยืนยัน…` — แทนที่เดิม "ความเข้ากันได้กับ IMILAB W01"
+
+**Complexity delta (net)**: helpers +0 · guards +0 (self-drop = schema-invariant enforcement ที่ boundary เดิม ไม่ใช่ guard ใหม่) · regexes +0 · keyword/phrase tables +0 · typed schema fields +1 (`capability_asks` — propagate ผ่าน record เดิม ×3) · decision owners +0 · fallbacks +0 · feature flags +0 · provider calls +0 · deps +0; prompt few-shot example +1 (schema doc ไม่ใช่ runtime condition)
+
+**Verification (final bytes — digest proof):**
+- RED→GREEN: test_phase10b_answer_completeness.py 13 tests — W01 Q2 incident shape + generic self-target (ZX200) + multi-ask partial coverage + render naming
+- Regression: answer-completeness 13 · typed+ownership+related 255 · broad 171+141 · grouped retrieval 71 · route/profile/requests 179 · turn_decision+incident+classifier+compat-script 372 · fixture validator pass · py_compile 4 ไฟล์ · `git diff --check` clean
+- Live Gemini final bytes (`phase10b_answerfix_1793097324_newgid_live.{json,md}` — `code_bytes_frozen=true` pre==post sha256 ของ 5 runtime files):
+  - W01 Q1: stock+describe grounded (variant-aware, card เดียว)
+  - W01 Q2: spec text + tail name asks 2 ตัว verbatim; intent สกัด target=`มือถือ` (ไม่ใช่ IMILAB W01); compat tail `มือถือ` cannot-confirm; ไม่มี spec-dump ทดแทน, ไม่มี fabricated yes/no
+  - W01 Q3: `สตาวา` target เดิม + ask `เชื่อมเข้ากับแอปสตาวา` — cannot-confirm ×2 (asks tail + compat tail — redundant แต่ honest); resp_products = W01 เดียว ไม่มี W02
+  - Pingevox 5/5 · Wattaka 3/3 (Q2 480Mbps exact-item; Q3 honest 10Gbps+magnetic no-match + per-item constraint notes)
+- Counters: gemini=19 (≤24) attempts=19 (503=0, 429=0) answer_typed=8 ≤1/answerable turn · web=0 · openrouter=0 · mongo_write=0 · elapsed 97.5s < 15min
+- Pointer: pre==post `g20261024-072533-2be3443e` (OLD_GID) · NEW_GID `g20261027-025541-563ca0f0` process-local เท่านั้น
+- Git: staging empty · dirty = 5 runtime + SRS + log + live harness spy + untracked test + user Zaapi plan (ไม่แตะ)
+
+**Verdict**: PHASE_10B_TYPED_MULTI_FACT_CORRECTED_PRECOMMIT_READY — ยังไม่ commit ตามคำสั่ง
+
+### 2026-10-2x — Phase 10B correction round 2: capability_asks source-grounding + dedupe (กำลังทำ — plan ก่อนแก้)
+
+**Findings ที่จะแก้:**
+
+- **M1**: asks = open labels ที่ model generate — normalize เฉพาะ shape ไม่พิสูจน์ว่ามาจาก message ลูกค้า → hallucinated label ไหลถึง deterministic customer text ได้
+- **M2**: few-shot ใน prompt ใช้ W01/GPS incident จริง — incident-specific hardcode
+- **M3**: ask "เชื่อมเข้ากับแอปสตาวา" + compat target "สตาวา" render ซ้ำ 2 tails ของ need เดียวกัน
+- **M4**: asks ถูกส่งเข้า `eval_spec_constraints` ช่อง required_features — open label ไม่ใช่ canonical feature key; satisfied-path เทียม
+
+**Fix plan (existing owners เท่านั้น):**
+
+1. `intent_classifier` — grounding validation ที่ normalization เดิม: ask ต้องเป็น normalized substring ของ `message` (strip whitespace + casefold — structural เท่านั้น); found → เก็บ span ต้นฉบับของลูกค้าเป็น display text; not found → drop fail-closed; helper `_grounded_excerpt` ตัวเดียว (char-index map, ไม่มี keyword/regex) · ลบ few-shot W01 → ตัวอย่างสินค้าสมมติทั่วไป + เพิ่ม instruction: asks = exact excerpts, ห้าม paraphrase, ห้ามซ้ำ relation_target/target_device/requested_facts/required_features/spec_constraints
+2. `turn_decision` — typed ownership dedupe ที่ `_cap_asks` post-pass: ask ถูก target t ∈ `_tgt_refs` own เมื่อ norm(t) ⊂ norm(ask) และ residue เป็น relation-clause เท่านั้น (pre: หลัง `_REL_CONN_RE.sub` เหลือ ≤8 ตัว = connector+modifier; post ≤8 ตัว = question tail) → drop ask (compat need ครอบ outcome เดียว); residue ยาว = capability content อิสระ → keep — structural จาก typed grounded fields ไม่ใช่ keyword table
+3. `answer_context` — ลบ `eval_spec_constraints` open-label eval ทั้ง block: asks = residual เสมอ → emit `UnansweredNeed(no_evidence, capability_asks=…)` + forbid-note ตรงๆ (format เดิม); ไม่มี satisfied-by-string-equality path เหลือ
+
+**Pre-impact**: dedupe ยิงเฉพาะเมื่อ t อยู่ใน `_tgt_refs` จริง (typed) — W01 Q2 (trefs=มือถือ, residue ยาว) asks คงอยู่; Q3 (trefs=สตาวา, ask=clause เดียวกัน) dedupe → compat tail เดียว; classifier grounding ตัด hallucination ตั้งแต่ producer
+
+**ผลแก้จริง (r15 — done):**
+
+- **M1 fix**: `_grounded_excerpt` ตัวเดียวใน `intent_classifier` — fold ลบ whitespace+casefold แล้ว substring-match บน message; display text = span ต้นฉบับลูกค้า (ไม่ใช่ casing ของ model); ไม่เจอ → drop fail-closed; bound ≤200/≤8 เดิม
+- **M2 fix**: few-shot W01/GPS incident ถูกแทนด้วยตัวอย่างสมมติ (หูฟัง ตัดเสียงรบกวน/ปรับเพลง) + instruction: asks = exact excerpts, ห้าม paraphrase/ซ้ำ relation_target/requested_facts/required_features/spec_constraints
+- **M3 fix**: dedupe post-emit ใน `decide_turn` — ask ที่ residue = relation-clause เท่านั้น (prefix หลัง `_REL_CONN_RE.sub` ≤12 + suffix ≤10) → drop (compat tail own); residue ยาว → keep; `_REL_CONN_RE` เดิม reuse ไม่มี regex ใหม่
+- **M4 fix**: ลบ block ที่ส่ง open asks เข้า `eval_spec_constraints` features channel — residual asks → `UnansweredNeed(no_evidence)` ตรงๆ + limitation note เดิม; ไม่มี satisfied-by-equality path เหลือ
+- **บั๊กพบระหว่างทาง**: dedupe รอบแรกวางก่อน compat need emit → `_ctrefs` ว่าง → ย้ายเป็น post-pass หลังทุก need emit (order-free); residue bound เดิม ≤8 เข้มไปสำหรับ `เชื่อมแอป` (9) → ปรับ 12/10 (post เป็น discriminator จริง — Q2 residue ~33 ยัง keep)
+
+**Complexity delta (net)**: helpers +1 (`_grounded_excerpt` — producer validation เดียว) · guards +0 · regexes +0 (`_REL_CONN_RE` reuse) · keyword/phrase tables +0 · typed schema fields +0 · decision owners +0 · fallbacks +0 · provider calls +0; few-shot incident example −1 → generic +1; open-label feature-eval path −1
+
+**Verification:**
+- RED→GREEN: test_phase10b_answer_completeness.py 20 tests (7 ใหม่: ungrounded drop / source-span display / no-incident-prompt / relation-own / independent-survive / Q3-single-outcome / no-canonical-eval)
+- Regression: focused batch 296 · Phase10/retrieval/grouped/Pingevox batch 666 · compat_mode script PASS · fixture validators pass · py_compile 5 ไฟล์ · `git diff --check` clean · staging empty
+- Live Gemini final bytes (`phase10b_answerfix_1793098964_newgid_live.{json,md}` — digest `67b74c06df72ca9d6c916104` pre==post):
+  - W01 Q2: asks = source spans verbatim ×2 → tail เดียว name ทั้งคู่ + compat tail GPS cannot-confirm; ไม่มี self-target/spec-dump
+  - W01 Q3: `สตาวา` compat tail **เดียว** — duplicate ask tail หายแล้ว; cards = W01 เท่านั้น ไม่มี W02
+  - Pingevox 5/5 · Wattaka 3/3 (480Mbps exact-item + honest 10Gbps+magnetic no-match)
+- Counters: gemini=19 ≤24 · answer_typed=8 ≤1/answerable turn · web=0 · openrouter=0 · mongo_write=0 · elapsed 346.9s < 15min · aborted=None
+- Pointer: pre==post `g20261024-072533-2be3443e` · NEW_GID `g20261027-025541-563ca0f0` process-local
+
+**Verdict**: PHASE_10B_CAPABILITY_SOURCE_GROUNDING_CORRECTED_PRECOMMIT_READY — ยังไม่ commit ตามคำสั่ง
+
+### 2026-10-2x — Phase 10B correction round 3: live-QA regression (partial evidence / power-ranking / exact-item isolation) — PART 0 audit เท่านั้น ยังไม่แตะ runtime
+
+**Frozen state**: branch `feature-phase3-aswer-quality` · HEAD `fd4e682` · staging empty · `git diff --check` clean · pointer OLD_GID `g20261024-072533-2be3443e` (ไม่แตะ) · NEW_GID process-local เท่านั้น · Zaapi plan ไม่แตะ
+
+**Evidence audit จาก `phase10b_answerfix_1793098964_newgid_live.json` (final bytes จริง):**
+
+- **A. W01 Q2 — partial evidence → blanket cannot-confirm + GPS outcome ซ้ำ**
+  plan: product describe need (subj=W01, tgt=GPS) แบก asks 2 ตัว (`เชื่อมต่อ GPS…เพซวิ่ง`, `ดูชีพจร…หน้าจอนาฬิกา`) + compat need (subj=W01, tgt=GPS) — ทั้งคู่ `no_evidence` → 2 tails ซ้อนเรื่อง GPS เดียวกัน
+  item `18408364022` description ยืนยัน: ตรวจชีพจร 24 ชม., 70 sport modes, Imilab Fit/Glory Fit — แต่ asks tail ตีกลับทั้งก้อน (ชีพจรมีหลักฐานจริงแต่โดนตี cannot-confirm รวม)
+  root: `compile_answer_context` L1282-1292 emit `UnansweredNeed(no_evidence)` สำหรับทุก ask โดยไม่เช็กว่า need มี subject-attributed evidence — asks ไม่เคยไปถึง answer task เลย (NeedTask ไม่มี field แบก)
+  + `_rel_owned` nested helper ใน `decide_turn` (char thresholds 12/10) ทำให้ ask ที่ own relation-clause หลุดเป็น outcome แยกเมื่อ residue ยาว
+
+- **B. Pingevox Xiaomi 17 Ultra — ranking ทำหลัง truncate**
+  Q3 `req-0` eligible 42 → picked 3 · Q4 eligible 20 → picked 3
+  `retrieval_selection` L260-262 sort `ranked` ด้วย (constraint_hits,score) → L282-287 form partition → **L293 `picked = ranked[:per_request_limit]` (truncate ก่อน)** → L325-338 `need.ranking` sort บน `picked` ทีหลัง → adequate candidates ถูกตัดก่อน ranking เห็น
+  `filter_compatible_products` (device_compat L836) sort `_wattage_asc_key(p, min_watt)` อยู่แล้ว (adequate-first) แต่ selection re-sort ทิ้ง
+  spec typed: `_lookup_spec_db("xiaomi 17 ultra")` → min_watt=90, usb-c, HyperCharge/PD/PPS/QC; pool มี 90/100/120/140W จริง (log `[DEVICE-SPEC-LOOKUP] sort pool (min_watt=90) top3: [90.0,100.0,120.0]W`) แต่เลือก ATC310N (3A/60W) + CTL301 (Lightning→verdict incompatible ตัวเดียวที่ถูก) — 60W เสนอเป็น "ใช้งานร่วมกับได้" เต็มๆ ไม่มี slower label
+
+- **C. Wattaka CMC615P Q2 — exact-item local-fact → sibling/CarPlay leak**
+  message `Speed data เท่าไหร่?ครับ` ไม่มี explicit identity แต่ intent emit `subject_scope='explicit'` (ungrounded — `_subject_refs=()`)
+  → `resolve_subjects` L1009-1010: `explicit` → `no_subject_ref` → persisted single `27639651334` ไม่ถูก consume
+  → need ไม่มี subject_refs → slot request ไม่ pin (`retrieval_executor` L87 `anchor_item_ids` ว่าง) + `_subject_cards` ว่าง → `_conv_active_card` ว่าง → `profile.anchor_item_ids` ว่าง → description channel (`fetch_description_evidence` restrict contract มีอยู่แล้ว) ไม่ restrict → 12 eligible → เลือก sibling 51810334388/41933733847/49353001832
+  → `decide_subject_set` เห็น selected_ids 4 ตัว → persist `alternatives{4}` (corrupt subject set)
+  → `compile_answer_context`: op=describe ไม่อยู่ใน `LOCAL_FACT_OPS` gate (L1051 — gate เฉพาะ price/stock/link) → sibling cands เข้า ctx → answer รวม "ทุกรุ่น 480Mbps เหมือนกัน" + CarPlay จาก sibling description
+
+**Root causes (owner-level):**
+1. asks placement เป็น all-or-nothing ที่ ctx layer — ไม่มี path ให้ ask+evidence เข้า task (partial evidence) · owner: `answer_context` + `NeedTask`/render contract
+2. relation ownership ตัดสินด้วย char-threshold helper (`_rel_owned`) แทน typed target containment · owner: `decide_turn`
+3. pick-determining sort ทำหลัง truncation · owner: `retrieval_selection`
+4. scope `explicit` ไม่มี refs = contradictory typed state ไม่ถูก repair → resolver ข้าม anchor · owner: `decide_turn` (`_subj_scope` normalization — chain ล่างมีอยู่ครบ)
+
+**Fix plan (existing owners/fields เท่านั้น — รอ approval):**
+A. `NeedTask.capability_asks` + propagate เมื่อ need มี subject-role cand; render asks + per-subclaim separation instruction ใน `AnswerTask.render()` (closed template เดิม); ctx: asks→task เมื่อมี subject cand, ไม่มี → `UnansweredNeed` เดิม; ลบ blanket "ห้ามยืนยัน" note เมื่อ asks ไป task
+B. ลบ `_rel_owned` + thresholds; post-pass: ask containing `norm(t) in norm(ask)` (t ∈ emitted compat needs' target_refs) → stamp บน compat need ตัวนั้น (ask span เดิมครั้งเดียว); residual → product need; `_unanswered_segment`: asks present → ask span เป็น topic (name subject prefix) → target named once
+C. `retrieval_selection`: `need.ranking` + `_wattage_asc_key(card, min_watt)` ย้ายขึ้น sort บน `ranked` ก่อน `picked=ranked[:limit]`; min_watt จาก `_lookup_spec_db(req.target_device or profile.target_device เมื่อ source=='compat')`; picked ที่ watt<min → `_context_note` "จ่ายไฟต่ำกว่าสเปค — ชาร์จช้ากว่าปกติ" (note machinery เดิม)
+D. `decide_turn`: `_subj_scope=='explicit'` + `not _subject_refs` + need มี `requested_facts` → `current_single` → resolver( persisted n==1)→apply_resolved_subject_refs stamp→executor anchor_item_ids→fetch_units item-scoped + `_conv_active_card`→profile.anchor_item_ids→description restrict→subject_set single→ctx anchor เดียว; edge: n==0/n>1 → clarify (honest)
+
+**Implementation plan (r16 — approved):**
+
+- **`turn_decision.py`**:
+  1. `_add_need` — `_scope` normalization: `explicit` + `facts` non-empty + `_subject_refs` ว่าง → `current_single` (fact-question ไร้ explicit identity = ungrounded scope → resolver machinery เดิม consume; recommend/compat ไม่แตะ เพราะ facts ว่าง)
+  2. ลบ `_rel_owned` + thresholds ทั้งก้อน → post-pass typed containment: ask ที่ `norm(t) in norm(ask)` สำหรับ t ∈ target_refs ของ compat need → move ไป compat need (span เดิมครั้งเดียว); residual อยู่ product need
+- **`answer_context.py`**:
+  3. `NeedTask.capability_asks` field เดียว
+  4. `compile_answer_task` — propagate เมื่อ `n.kind=="product"` และมี ≥1 subject-role cand ใน request selections
+  5. `AnswerTask.render()` — asks line + per-subclaim separation instruction (closed template)
+  6. `compile_answer_context` — `_asks_on_task` predicate (product + subject cand ที่ selection); asks→task ไม่ emit UnansweredNeed/ไม่ติด forbid-note; UnansweredNeed carry asks เฉพาะเมื่อไม่ on task (3 จุด: uncovered/empty/asks-block); gate `LOCAL_FACT_OPS` ขยายครอบ `requested_facts` needs เมื่อมี subjects-source request (local-fact = ของ resolved subject เท่านั้น — owner เดิม)
+  7. `_unanswered_segment` — asks present → ask span เป็น topic (subject prefix คง) → target named once
+- **`retrieval_selection.py`**:
+  8. ย้าย `need.ranking` sort ขึ้นมาทำบน `ranked` ก่อน truncate
+  9. device-adequacy: `req.target_device or profile.target_device (compat channel)` → `_lookup_spec_db` → `min_watt` → `_wattage_asc_key` sort บน `ranked` ก่อน `picked`
+  10. post-picked typed labels: watt<min → `_context_note` ช้ากว่าปกติ; variants หลาย watt + ไม่มี selected variant → note กำลังไฟขึ้นกับตัวเลือก (ไม่ใช่ full-speed claim)
+- **Tests**: เพิ่มใน `test_phase10b_answer_completeness.py` (section r16) + อัปเดต 4 tests ที่ encode พฤติกรรมเก่า (asks on task / compat ownership)
+- **ไฟล์ที่แตะ**: 3 runtime + test + SRS + log เท่านั้น
+
+### r16 PART 1-2 — RED→GREEN implementation (approved existing-owner fixes)
+
+**RED**: 15 failing tests (r16 section + 5 updated-contract tests) → **GREEN**: 35/35 + regression 1024 passed/1 skipped + script validators (compat_mode_filter, legacy_turn_incident_replay, qa_context_guard) exit 0 · `py_compile` OK · `git diff --check` clean · staging empty
+
+- A: `NeedTask.capability_asks` + propagate เมื่อ ≥1 subject-role cand (`compile_answer_task`) + render asks+subclaim instruction (`AnswerTask.render`); ctx: asks→task เมื่อ subject cand, ไม่มี→UnansweredNeed เดิม + `_ask_unanswered` strip asks ออก task (single outcome)
+- B: ลบ `_rel_owned`+thresholds → typed containment move (norm(t)∈norm(ask) → compat need own); `_unanswered_segment`: ask-span-contains-target → span เป็น topic (target named once)
+- C: `need.ranking` + `_wattage_asc_key(card,min_watt)` ย้ายก่อน `picked=ranked[:limit]`; dev=req.target_device or profile.target_device (source=='compat'); below-target pick→`_context_note` ช้ากว่าปกติ; mixed-variant ไม่มี typed power→variant note; `_scope_card` merge pre-stamped note
+- D: `_add_need` scope repair — `explicit`+facts+ไม่มี refs→`current_single` (ทั้ง merge/append branches); ctx gate: `LOCAL_FACT_OPS` gate ขยายครอบ digit-pinned `subject_refs` needs (exact-item → subject-only cands)
+- ข้อค้นพบ: `test_exact_item_resolution_stamps_subject_refs` PASS ตั้งแต่ก่อนแก้ = chain ล่าง (resolver→stamp→anchor→restrict) ทำงานถูก — ขาดแค่ scope ที่ต้น
+
+
+### r16 PART 3 — live QA verification (final bytes)
+
+- Live QA run: `phase10b_answerfix_1793158164_newgid_live` — 3 convs / 11 turns, gemini=19 (cap 24), answer_typed=8, web=0, openrouter=0, mongo_write=0, mongo listener writes=0, digest pre==post, pointer unchanged, aborted=None, 129s
+- **Live-QA fix #1 (ระหว่าง QA):** asks ยังไป tail เพราะ predicate `role=="subject"` เดี่ยว — W01 subject card หลุดจาก request-selection (req-0 compat carrier taint) เหลือ description-channel cand ของ item เดียวกัน → ขยาย predicate เป็น resolved-subject-identity match (`_subj_ids` จาก `needs_for_request` cands; `_cand_keys`∩`_subj_ids` non-empty) ทั้ง 2 layer (task propagation + ctx admission) — typed เดิม ไม่มี helper ใหม่ → rerun: asks เข้า task, model แยก confirmed (HR 24h/70 modes/Imilab Fit) vs unconfirmed (GPS tail เดียว, display/pace ไม่ claim false)
+- **Live-QA fix #2:** ctx admission เดิมเทียบ ref-string (W01≠item id) — เปลี่ยนเป็น identity-set match ตาม design เดิม (subject identities จาก selected request candidates)
+- ผล acceptance ทั้งหมดบน bytes สุดท้าย:
+  - W01 Q2: confirmed ใน prose + GPS `no_evidence` tail 1 อัน (count "สตาวา"/GPS ไม่ซ้ำ) ✓
+  - W01 Q3: `สตาวา` ปรากฏ 1 ครั้งใน answer + 1 UnansweredNeed(compat) ✓
+  - Pingevox Q3/Q4: adequate candidates ก่อน (WCJ153 90W, ATC615 100W, AD1003 120W/100W) — ไม่มี 60W/65W เป็น full-speed primary; CTL301 → incompatible verdict ซื่อสัตย์; unverifiable tail ✓
+  - Wattaka Q2: `ctx_ids=['27639651334']` ตัวเดียว — C2C615/CTC615U/ATC310N/CarPlay ไม่รั่ว; 480Mbps ตอบจาก evidence ตัวเอง ✓
+  - Wattaka Q3: grounded negative (480Mbps < 10Gbps) ✓
+- ข้อสังเกต: Pingevox Q4 mixed listing ไม่ claim full-speed แบบไม่มี variant evidence (verdict+note ครอบ); below-target ไม่โดนเลือกเป็น primary รอบนี้
+- SRS_SSD.md อัปเดต 6 rows (select_for_llm_context/NeedTask/compile_answer_task/compile_answer_context/decide_turn/_unanswered_segment)
+- staging ว่าง, ไม่ commit ตาม requirement ของ phase นี้
+
+### 2026-10-28 — Phase 10B pre-commit review LOW-1..4: TEST-ONLY regression proof (approved plan — ยังไม่แก้ production)
+
+**Frozen baseline (verify แล้ว):** branch `feature-phase3-aswer-quality` · HEAD `fd4e6822a815e752a33b70244a0ceee55c27c3fb` · staging ว่าง · `git diff --check` clean · dirty เดิม = 6 runtime (r14/15/16) + SRS + Zaapi plan (unrelated) + live QA harness + log นี้ + untracked `test_phase10b_answer_completeness.py` · baseline offline ผ่าน 35+51 tests <1s ไม่มี Mongo/provider
+
+**Scope (approved TEST-ONLY):** แตะได้เฉพาะ `docs/test/test_phase10b_answer_completeness.py` + log นี้ · ห้ามแตะ `chatbot/shopeechat/`, SRS, frozen log, Zaapi plan, QA harness, .env/มาแล้วจ้า.md · ห้าม stage/commit/push/deploy/CAS/provider/Mongo · production fix ต้องขออนุมัติแยกรอบใหม่
+
+**Hypotheses (traced แล้ว — ยังไม่ proven จนกว่าเทสจะรัน):**
+
+- **LOW-1** `capability_asks` อาจหายจาก customer-visible deterministic unanswered: (a) `_unanswered_segment` return `no_selection` ก่อนถึง asks block (answer_context.py:1576-1580 vs 1600-1609) (b) `compose_answer` synth `no_answer` ตอน `product_text==""` โดยไม่ใส่ `t.capability_asks` (1766-1772) (c) `compose_answer(context=None)` synth `no_selection` ไม่ใส่ asks (1775-1781 — reachable ผ่าน `_done()` app.py:667/673/682)
+- **LOW-2** `_add_need` scope repair ยิงเฉพาะ `facts` ไม่ว่าง (turn_decision.py:449-451 append, 422-427 merge) — need แบกเฉพาะ `spec_constraints`/`required_features`/`capability_asks` + `explicit` ไร้ refs → ไม่ repair → `resolve_subjects` explicit→`no_subject_ref` (conversation_products.py:1009-1010) → persisted single ไม่ถูก consume (producible ผ่าน catch-all emit :788-794 / asks-emit :812-814)
+- **LOW-3** unknown-wattage pick ไม่มี `_context_note` เมื่อ device มี min_watt (retrieval_selection.py:360-385 — `_w` falsy + `output_power_w` ว่าง + `_vw≤1` → ไม่มี branch) และ `resolve_compat` charges/connects ใช้ connector อย่างเดียว (policy_resolver.py:794-819) → ไม่มี owner อื่นสื่อ power-uncertainty
+- **LOW-4** ask ownership (turn_decision.py:820-842 — `norm(t) ⊂ norm(ask)` → compat own): intrinsic-capability ask ที่กล่าวถึง target ก็ถูก move; undecided → tail name verbatim (bounded) แต่ **decided-compat** → task ถูก drop (answer_context.py:1362-1370) + verdict cover need (compose :1681-1688) → ask อาจหายเงียบ (severity สูงกว่าเดิมถ้า proven)
+
+**เทสที่วางไว้ (executable behavioral — offline เท่านั้น):**
+
+- LOW-1: (A) need+asks, selection ว่าง → no_selection → render ต้อง name ask (คาด RED) · (B) ctx task แบก asks + `product_text=""` → no_answer → render ต้อง name ask (คาด RED) · (C) `compose_answer(context=None)` → render ต้อง name ask (คาด RED) · control: no_evidence name asks อยู่แล้ว (GREEN เดิม)
+- LOW-2: decide_turn intent `subject_scope="explicit"` ไร้ refs — carrier แยกกัน: spec_constraints only / required_features only / capability_asks only → assert `current_single` (คาด RED); producibility ต้องพิสูจน์ need ถูก emit จริง (ไม่ใช่ synthetic state — ถ้า emit ไม่เกิด classify UNREACHABLE_INPUT); controls: explicit มี refs คงเดิม, recommend ห้าม narrow, zero/multi subjects → clarify (GREEN เดิม)
+- LOW-3: (A) unknown-watt card (ไม่มี output_power_w/variants) + stub `_lookup_spec_db` min_watt=90 → assert `_context_note` (คาด RED) · (B) ผ่าน scoped ctx — เช็ก verdict/note owner อื่นสื่อ uncertainty หรือยัง (ถ้าสื่อแล้ว → DISPROVED) · controls: below-target label, mixed-variant note, rank-before-truncate (GREEN เดิม)
+- LOW-4: (A) true relation ask มี target → compat own + outcome ถูก (GREEN เดิม) · (B) intrinsic ask กล่าวถึง target + compat undecided → ask named verbatim (คาด GREEN=bounded) · (C) intrinsic ask + **decided-compat** → assert ask ยังมี outcome (คาด RED ถ้าหาย) · label สมมติ ≥2 ตัว (Example Dock, Alpha Sync) · control: `test_ask_with_compat_target_moves_to_compat_need_once`
+
+**Classification ต่อเคส**: PROVEN_REGRESSION / DISPROVED / UNREACHABLE_INPUT / INCONCLUSIVE — RED ต้องเป็น assertion fail จากพฤติกรรมจริง ไม่ใช่ setup error · complexity delta รอบนี้: production helpers/guards/regex/kw-tables/owners/flags/deps/provider = **+0** (เทสอย่างเดียว)
+
+#### ผลรันจริง (executable proof — รันแยกตัว ทุกตัว <1.4s, subprocess timeout 60s)
+
+- **LOW-1 → PROVEN_REGRESSION ×3** (boundary จริง 3 จุด):
+  - `test_no_selection_answer_names_capability_asks` RED — asks ถึง `UnansweredNeed(no_selection)` จริง (premise GREEN) แต่ rendered outcome = `ส่วนสินค้า W01 — ไม่พบข้อมูลในระบบของร้านค่ะ` ไม่มี ask — **failing boundary = `_unanswered_segment` no_selection early-return ก่อน asks block (answer_context.py:1576-1580)**
+  - `test_no_answer_unanswered_keeps_capability_asks` RED — premise: `NeedTask.capability_asks` มี (GREEN เดิม) แต่ synth `UnansweredNeed(..., "no_answer", capability_asks=())` — **boundary = `compose_answer` no_answer synth (answer_context.py:1766-1769 ไม่ copy asks)**
+  - `test_context_absent_answer_names_capability_asks` RED — synth `UnansweredNeed(..., "no_selection", capability_asks=())` — **boundary = `compose_answer` context-absent synth (answer_context.py:1775-1781 ไม่ copy asks/target)**
+- **LOW-2 → PROVEN_REGRESSION ×3** (ทุก carrier producible ผ่าน decide_turn จริง — premise GREEN ทั้งหมด):
+  - `test_spec_only_explicit_scope_normalizes_current_single` RED — product/describe แบก `spec_constraints` อยู่ `explicit` ไร้ refs
+  - `test_feature_only_explicit_scope_normalizes_current_single` RED — `required_features=("magnetic",)` เหมือนกัน
+  - `test_ask_only_explicit_scope_normalizes_current_single` RED — `capability_asks` เหมือนกัน
+  - **boundary = `_add_need` scope-repair gate เช็กเฉพาะ `facts` (turn_decision.py:449-451) → explicit→`no_subject_ref` → persisted single ไม่ถูก consume → fan-out shape เดียวกับ Wattaka Q2 ผ่าน carrier อื่น**
+- **LOW-3 → PROVEN_REGRESSION ×2**:
+  - `test_unknown_wattage_pick_gets_uncertainty_note` RED — unknown-watt pick (ไม่มี output_power_w/variants/name-watt) + structured min_watt=90 → `_context_note=None`
+  - `test_decided_compat_unknown_wattage_surfaces_power_caveat` RED — verdict `compatible` (reason `connector_match`) แต่ `_context_note` มีแค่ role note ทั่วไป ไม่มี caveat ว่า full-speed ยืนยันไม่ได้ — **boundary = `resolve_compat` charges/connects ใช้ connector เพียงอย่างเดียว (policy_resolver.py:794-819) + note branches ไม่มี "unknown" case (retrieval_selection.py:360-385)**
+- **LOW-4 → ผสม — PROVEN_REGRESSION ที่ decided edge (severity สูงสุดของรอบ)**:
+  - `test_intrinsic_ask_named_when_compat_undecided` GREEN — intrinsic ask กล่าวถึง "Example Dock" ถูก move ไป compat (typed containment) → undecided → rendered name ask verbatim (bounded/non-breaking)
+  - `test_intrinsic_ask_named_when_compat_undecided_second_label` GREEN ("Alpha Sync" — generalize)
+  - `test_decided_compat_intrinsic_ask_still_reaches_outcome` **RED** — declared works_with proof → verdict `compatible` → task drop (answer_context.py:1362-1369) + verdict cover (compose :1681-1688) → answer = `Generic Watch A ใช้งานร่วมกับ example dock ได้ค่ะ\n\nspec ของ Generic Watch A` — **intrinsic ask "แสดง Example Dock บนหน้าจอ" หายเงียบทุกช่องทาง (task/verdict/unanswered) — need-completeness failure จริง: verdict ตอบ relation แต่ไม่ตอบ intrinsic capability**
+- **existing GREEN controls ยังผ่านครบ**: ไฟล์เดิม 35/35 + เทสใหม่ GREEN 2 = 37 passed, 9 failed (เฉพาะเทสใหม่ที่ตั้งใจ RED) · `test_capability_asks_named_when_whole_need_uncovered` (no_evidence asks) · `test_ungrounded_explicit_fact_need_normalizes_scope` (facts carrier) · explicit+refs คงเดิม · recommend ไม่ narrow · current_single 0/multi→clarify · `test_ask_with_compat_target_moves_to_compat_need_once` · below-target/mixed-variant/rank-before-truncate controls
+- **regression batches (offline, timeout-bounded)**: `test_phase7_answer_context.py` 36 pass · `test_phase10_compat_decision.py` 35 pass · `test_phase10_target_ownership.py` 11 pass · `test_phase10b_exact_item_identity.py` 15 pass · `test_turn_decision.py`+`test_retrieval_selection.py`+`test_retrieval_selection_runtime.py`+`test_conversation_subject_set.py`+`test_retrieval_slots.py` **255 pass** — unexpected: `compat_decision + exact_item_identity` รวมกันค้าง >60s **เมื่อ compat_decision รันก่อน** (reversed → 50 pass 0.91s) — hazard เดิมที่ `test_retrieval_selection_runtime.py:250-255` เคยบันทึก: `_import_app` stub `load_dotenv` → env ไม่โหลด → MongoClient default 127.0.0.1 → server-selection ~30s/call; ทุกไฟล์ผ่านแยกรัน — pre-existing infra quirk ไม่เกี่ยวกับ hypotheses
+- **git/state**: `git diff --check` clean · staging 0 ไฟล์ · HEAD `fd4e6822` branch `feature-phase3-aswer-quality` เดิม · runtime diffs เหมือน baseline เป๊ะ (acx+146/app+8/ic+51/rsel+70/rc+40/td+101) · แตะเฉพาะ test file (929→1215 บรรทัด) + log นี้ · ไม่มี provider/Mongo/service/generation-pointer activity จากเทสรอบนี้ (ยกเว้น hazard ข้างต้นที่เป็น pre-existing test-infra quirk ของ suites ที่มีอยู่ก่อน)
+- **ยังไม่ได้แก้อะไร**: 9 RED tests ตั้งใจค้างไว้ — production fix ต้อง separate plan+approval (owner-level) + SRS + pre-commit review · เสนอลำดับ fix: LOW-4c (silently-dropped ask — need-completeness failure) > LOW-1 (customer ไม่เห็นคำถามที่ตอบไม่ได้ 3 edges) > LOW-2 (follow-up fan-out risk) > LOW-3 (charger wattage uncertainty)
+
+### 2026-10-28 — Phase 10B LOW-4c: Dev Worker investigation round (read-only + offline test — ยังไม่แก้ production)
+
+**Frozen baseline (verify แล้วตรงเป๊ะ):** branch `feature-phase3-aswer-quality` · HEAD `fd4e6822a815e752a33b70244a0ceee55c27c3fb` · staging 0 · `git diff --check` clean · dirty เดิม (acx+146/app+8/ic+51/rsel+70/rc+40/td+101 + SRS + Zaapi plan + QA harness + log นี้) · test file untracked 1215 บรรทัดเดิม · ไม่มี worker อื่นแตะ relevant hunks
+
+**Part 1 — RED proof VALIDATED (PROVEN_REGRESSION confirmed):**
+
+- `pytest docs/test/test_phase10b_answer_completeness.py -k 'intrinsic_ask|decided_compat_intrinsic|ask_with_compat_target|relation_target_owns|w01_q3_relation|w01_q2_shape'` → **1 failed, 6 passed, 0.79s**
+- `test_decided_compat_intrinsic_ask_still_reaches_outcome` RED — answer = `Generic Watch A ใช้งานร่วมกับ example dock ได้ค่ะ\n\nspec ของ Generic Watch A` — ask "แสดง Example Dock บนหน้าจอ" หายทุกช่อง (task drop + verdict cover + ไม่มี UnansweredNeed)
+- generalize: Alpha Sync + Garmin Connect (decided) → silent drop เหมือนกัน
+- introspect: need[0] compat(asks) → decided(2 verdicts รวม need[1] product+target path) → task ni=1 product เท่านั้นรอด; controls: undecided → ask named verbatim (GREEN), relation ask + decided → silent **ถูกต้อง** (verdict ตอบมัน)
+
+**Part 2 — first failing boundary + missing data contract (CONFIRMED):**
+
+- boundary: `compile_answer_context` decided-set — verdicts ครบ subject → `continue` (answer_context.py:1024-1029) ข้าม `uncovered.add` → task drop (1362) + compose `covered.add(need_index)` (1685) → verdict coverage = **need-granular แต่ asks เป็น sub-need outcome ที่ไม่มี channel**
+- **missing data contract จริง:** relation ask vs intrinsic ask ผลิต TurnNeed typed state เหมือนกันเป๊ะ (compat + capability_asks=[span มี target]) — ทุก uniform fix จะ fail ฝั่งใดฝั่งหนึ่ง: emit tail ทุกตัว → relation ask ขัด verdict (works+cannot-confirm), ride task → duplicate/contradiction, keep silent → bug เดิม
+- ต้องการ typed distinction ที่ producer (model = semantic authority เดิม) — alternatives เสนอผู้ใช้ตัดสินก่อนแก้ (รอ approval)
+
+**scope รอบนี้:** อ่าน/รันเทสอย่างเดียว — ไม่แตะ production/test file, ไม่มี Mongo/provider/service/pointer action
+
+### 2026-10-28 — Phase 10B W01 Q2: TWO-FIX implementation (APPROVED) — FIX A identity/retrieval → FIX B no-selection response
+
+**Frozen baseline (verify แล้วตรงเป๊ะ):** branch `feature-phase3-aswer-quality` · HEAD `fd4e6822a815e752a33b70244a0ceee55c27c3fb` · staging 0 · `git diff --check` clean · dirty เดิม (acx/app/ic/rsel/rc/td + SRS + Zaapi plan + QA harness + log นี้) · test file untracked 1215 บรรทัด · artifact `docs/test/results/phase10b/low4c_live_1793167341.json`
+
+**Root causes (proven รอบสืบสวน — 2 ตัวอิสระ):**
+
+- **Identity (FIX A — incident root):** Q2 needs แบก `subject_refs=('W01',)` (code-shape จาก `_explicit_codes`/route.model_codes ไม่ใช่ item id) → app gate `_has_explicit_subject` (app.py:~1765) ข้าม `resolve_subjects` → `_subject_res=None`, anchor None → `_subject_cards=[]` → **ไม่มี ch:subjects เลย** (artifact sel_trace เหลือแค่ req-0 elig=0 + ch:description elig=0) → `no_selection` · พิสูจน์ exec: `resolve_subjects(explicit)→no_subject_ref` vs `current_single→resolved{18408364022}` · card name จริง `[ลดเหลือ 699] IMILAB W01 …` → `_extract_codes → ['W01','30D']` ⊇ refs → equivalence provable typed
+- **Render (FIX B — secondary):** `_unanswered_segment` (answer_context.py:~1576) early-return `no_selection` "ไม่พบข้อมูลในระบบของร้าน" ก่อน `capability_asks` block → display ask หาย + wording กว้างเกินสิ่งที่ typed state รู้ (ไม่ใช่ "ร้านไม่มี" — ctx_text เองก็สั่งห้ามสรุปหมด/เลิกขาย)
+
+**Approved plan (ยึดตาม approval verbatim):**
+
+- FIX A: `resolve_subjects` +2 typed params (`subject_refs`, `persisted_code_index`) — explicit scope + code refs → equivalence ผ่าน persisted card-name codes ด้วย canonical `_extract_codes` (owner เดิม ไม่ใช่ mechanism ใหม่) → 1 match `resolved`(narrowed set), >1 `clarify`, 0/unprovable `no_subject_ref` · app gate: digit refs veto เหมือนเดิม (mixed ก็ skip), code refs consult เฉพาะ `_plan_scope=='explicit'` · `apply_resolved_subject_refs` union-stamp `(ids + refs)` เฉพาะเมื่อ plan-scope=='explicit' (ทุก non-digit ref covered — partial → no substitution) · code index จาก `_subject_products` (timeline เดิม — DB read +0)
+- FIX B: ลบ early return → `no_selection` ไหลผ่าน named-topic + asks + clause ใหม่ "ยังไม่พบข้อมูลของสินค้านี้ในเทิร์นนี้ จึงยังตอบไม่ได้ค่ะ" (ไม่อ้าง absence) · no-asks เคสคงเดิม
+- Truth table A–H + mixed-refs + partial-coverage controls · complexity: helpers+0/guards+0/regex+0/kw+0/owners+0/fallbacks+0/flags+0/deps+0/provider+0 · typed params +2 (resolve_subjects) เท่านั้น
+- out-of-scope ตายตัว: LOW-1b/1c, LOW-4c, LOW-2, LOW-3 (RED ตั้งใจค้าง)
+
+**RED step (FIX A):** เทสใหม่ใน `test_phase10b_answer_completeness.py` — resolver truth table + e2e (decide_turn จริง → resolve → stamp → run_grouped_selection(ch:subjects) → compile → render)
+
+**FIX A — GREEN + regression evidence (รันจริง `.venv/bin/python -B -m pytest -p no:cacheprovider`):**
+
+- RED → GREEN: เทสใหม่ 4 ตัว (resolver truth table: code≡persisted→resolved narrowed / code≠persisted→no_subject_ref / mixed digit+code→skip / partial coverage→no substitution / multi-match→clarify + e2e decide_turn จริง) — RED เดิม `TypeError: unexpected keyword argument 'subject_refs'` ×4 → GREEN ทั้งหมด; e2e พิสูจน์ persisted `{18408364022}` + plan `('W01',)` → stamped `('18408364022','W01')` → `ch:subjects` selects card จริง → ctx item-attributed → ทุก ask ได้ outcome (GPS/display = cannot-confirm เพราะ card ไม่มีหลักฐาน — คำตอบที่ถูก) → ไม่มี W02 leak
+- `test_phase10b_answer_completeness.py` ทั้งไฟล์ (50 เทส): 41 passed, 9 failed = intentional-RED 8 (out-of-scope LOW-x) + `test_no_selection_answer_names_capability_asks` (FIX B ยังไม่แก้ตอนนั้น)
+- `test_conversation_subject_set.py` + `test_turn_decision.py` + `test_phase10b_exact_item_identity.py`: **228 passed**
+- `test_phase7_answer_context.py` + `test_retrieval_slots.py` + `test_retrieval_profile.py` + `test_phase2c3_action_switch.py`: **107 passed** (resolver call-site spy `test_resolve_subjects_called_exactly_once` ยังผ่าน — production call เดียว)
+- `test_phase10_compat_decision.py` + `test_phase10_target_ownership.py`: **46 passed** (รัน exact_item_identity ก่อน compat ตาม hazard เดิม)
+- `test_retrieval_selection.py` + `test_retrieval_selection_runtime.py` + `test_grouped_retrieval_requests.py` + `test_grouped_retrieval_executor.py` + `test_retrieval_relations.py`: **67 passed**
+- unexpected failures: **0** · skips: canary scripts (ต้อง live service — ไม่รันตาม hard limit) · flag-OFF fixtures ไม่มี suite เฉพาะ
+- `py_compile` 3 ไฟล์ OK · `git diff --check` clean · staging 0
+
+**Caller audit `resolve_subjects` (ก่อนเปลี่ยน signature):** production call site เดียว `app.py:~1801` (`test_resolve_subjects_called_exactly_once` ยืนยัน source count=1) · spies/refs ใน test: phase2c3 / retrieval_profile / canary_exact_item_attribution / canary_phase10b_grouped / live_pingevox_mistore_inproc / completeness / exact_item_identity / conversation_subject_set — params ใหม่ทั้งคู่ default `()`/`None` → caller เดิม behavior คงเดิม (ไม่ส่ง = code path ไม่แตะ)
+
+**FIX B — RED→GREEN + regression evidence:**
+
+- RED เดิม (proven): `test_no_selection_answer_names_capability_asks` fail — rendered `ส่วนสินค้า W01 — ไม่พบข้อมูลในระบบของร้านค่ะ` (ask หาย)
+- GREEN: `1 passed in 0.59s` — rendered ใหม่ `ส่วนสินค้า W01 — ดูชีพจร เวลา ระยะทาง และเพซบนหน้าจอนาฬิกา — ยังไม่พบข้อมูลของสินค้านี้ในเทิร์นนี้ จึงยังตอบไม่ได้ค่ะ` (ask verbatim + ไม่อ้าง absence)
+- controls ผ่าน: no_selection ไม่มี asks → `ส่วนสินค้า W01 — ไม่พบข้อมูลในระบบของร้านค่ะ` เดิม · generic no-subject → `ส่วนสินค้าที่ตรงกับคำถามนี้ — <ask> — ยังไม่พบ…เทิร์นนี้…` · no_evidence compat → `สำหรับW01 — เชื่อมต่อ GPS จากมือถือ — ไม่มีข้อมูลยืนยัน…` คงเดิม
+- ไฟล์ completeness ทั้งหมดหลัง FIX B (รันจริง): **42 passed, 8 failed** (50 เทส) — ทั้ง 8 = intentional-RED out-of-scope (LOW-1b no_answer synth / LOW-1c context=None synth / LOW-2 explicit-scope ×3 / LOW-3 wattage ×2 / LOW-4c decided-compat) — ไม่ใช่ regression ใหม่; `test_no_selection_answer_names_capability_asks` ออกจากกลุ่ม fail แล้ว
+- complexity delta จริง: helpers+0 / guards+0 / regex+0 / kw tables+0 / owners+0 / fallbacks+0 / flags+0 / deps+0 / provider calls+0 / typed params +2 (`resolve_subjects` เท่านั้น) — ตรง approved เป๊ะ
+- SRS_SSD §6 อัปเดตครบทุกฟังก์ชันที่แตะ: `resolve_subjects`, `apply_resolved_subject_refs`, app gate (`_chat_impl` subject-resolution block), `_unanswered_segment`
+- **final state:** staging 0 · commit 0 · HEAD `fd4e6822` · ไม่แตะ frozen log/Zaapi/QA artifacts · ไม่มี Mongo/provider/service/pointer activity
+
+**วิธีแก้ (สั้น):** code ref ไม่ใช่ item identity → resolver เช็ก equivalence กับ persisted card-name codes (canonical `_extract_codes` owner เดิม) ก่อนตัดสิน explicit → match เดียว resolved, >1 clarify, 0 ไม่ substitute · stamp เป็น union คง named ref ไว้ render + id เป็น exact authority · renderer เอ่ยชื่อ ask verbatim ทุกตัวแล้วบอก "ยังไม่พบข้อมูลของสินค้านี้ในเทิร์นนี้" แทน "ไม่พบข้อมูลในระบบของร้าน" → ลูกค้าเห็นคำถามตัวเองครบ + ไม่โดนบอกว่าร้านไม่มีของทั้งที่มี
+
+## Phase 10B closeout verification (verification-only round — zero code/test/SRS edits)
+
+**Frozen state (verify ใหม่ ตรงเป๊ะ):** branch `feature-phase3-aswer-quality` · `git log -4` = `2278501`(FIX B) → `40f7a67`(FIX A) → `3dfcf9c`(machinery) → `fd4e682`(baseline) · `git status --short` = เฉพาะ `M docs/plans/2026-10-21-zaapi-workflow-kb-pool-master-plan.md` · `git diff --check` clean
+
+**Part 1 — xfail inventory (พิสูจน์ยัง fail จริง ไม่ใช่ marker เปล่า):**
+
+- `.venv/bin/python -B -m pytest -p no:cacheprovider docs/test/test_phase10b_answer_completeness.py` → **42 passed, 8 xfailed** (50 เทส)
+- ไฟล์เดิม + `--runxfail` → **8 failed, 42 deselected** — ทั้ง 8 fail จริง: LOW-1b (`compose_answer` no_answer synth `answer_context.py:1773-1779` — UnansweredNeed positional ไม่ copy `capability_asks` · S) · LOW-1c (context=None synth `:1782-1788` เช่นกัน · S) · LOW-2a/b/c (`_add_need` repair `turn_decision.py:419-427,447-449` — เช็คเฉพาะ `requested_facts` ไม่รวม spec/feats/asks carriers · S รวม 3 เคส) · LOW-3a (`retrieval_selection.py:365-385` — ไม่มี unknown-watt note branch · S/M) · LOW-3b (decided compat + unknown power — ไม่มี caveat channel · M) · LOW-4c (decided-set `continue` `answer_context.py:1024-1029` + task drop `:1360-1363` — intrinsic ask ถูกกลืนเพราะ typed state ไม่แยก intrinsic/relation · L ต้องมี design decision)
+
+**Part 2 — offline regression (65 files รันแยก subprocess ละไฟล์, 120s cap):** **1896 passed, 0 failed, 13 xfailed, 21 skipped, 0 errors** (~82s) — xfail 13 = 8 Phase 10B intentional + 5 incident-replay markers (`pytest.xfail("known incident…")` runtime · skip = pending-live guards) — **zero unexpected failures** · excluded 24 = 23 script-mode (0 pytest tests, live-service harnesses รวม charger scripts `test_car_charger_regression`/`test_charger_subtype_parity`/`test_cert_standards` — ไม่มี pytest tests ให้รัน) + `test_comprehensive` (ต้อง :8010 · timeout>45s proven)
+
+**Part 3 — duplication/complexity audit `fd4e682..HEAD` (7 ไฟล์ prod +442/-82):**
+
+- new module-level defs +2 เท่านั้น: `_unanswered_segment`(answer_context) + `_grounded_excerpt`(intent_classifier) — ทั้งคู่ map plan items; `apply_resolved_subject_refs`/`resolve_subjects`/`_add_need`/`intent_fact_scope` = signature extensions ไม่ใช่ฟังก์ชันใหม่
+- consolidations verified ใช้จริง: `_to_serializable` owner เดียว (`conversation_products.py:90`) — `_sid[:-2]`/`endswith(".0")` residual = **0** · `_plan_scope` derive ครั้งเดียว (`app.py:1738-1743`) ส่งเป็น param — callee ไม่ re-derive
+- ranking sort = relocation (post-truncate→pre-truncate) ไม่ใช่ duplication — block เก่าถูกลบ · wattage ใช้ canonical owners `_lookup_spec_db`/`_wattage_asc_key`/`_extract_max_wattage` เท่านั้น
+- findings: **MED** counterpart-self predicate ×2 sites (`route_context.py:641-653` idevice guard vs `turn_decision.py:566-577` tgt_refs dedupe — operand sets ต่างกันเล็กน้อย เสี่ยง drift · แนะนำ consolidate เฟสหน้า) · **LOW** whitespace-fold `"".join(x.split()).casefold()` ×~6 sites · **LOW** `getattr(n,"capability_asks",()) or ()` copy pattern ×~5 sites (typed carriers — รับได้)
+- dead code: ไม่พบ (ทุก field ถูกอ่าน; `_ask_unanswered` ถูกใช้ใน task-strip; renderers 3 ตัว typed input ต่างกัน)
+- complexity totals vs fd4e682: helpers **+2** / guards **~+5** (mis-slot ×2, item-ref consult, ask-evidence gate, exact-item subject filter, alternative suppression) / regexes **+0** / keyword tables **+0** (intent schema key = contract ไม่ใช่ matcher) / decision owners **+1** (`_unanswered_segment`) / fallbacks **+0** / flags **+0** / dependencies **+0** / provider calls **+0** / typed params **+5** (resolve_subjects+2, apply_resolved_subject_refs+1, _add_need+1, intent_fact_scope arity+1) / typed fields **+3** (`capability_asks` บน TurnNeed/NeedTask/UnansweredNeed)
+
+**Part 4 — live Gemini QA disposable mongo:7 @127.0.0.1:27018** (`qa-mongo-phase10b`, seed เฉพาะ `exports/gen/g20261027-025541-563ca0f0/`: qa_product.ShpProducts=11792 · qa_admin sellable_units_meta=1 + units=28072 + image_texts=13823 · env overrides ก่อน load_dotenv · in-mem stores + write barrier · web/OR die · bounded 503×3@5s · NEW_GID process-local):
+
+- counters: **gemini=20 ≤24 · answer_typed=9 (≤1/turn) · attempts=20 (e503=0, e429=0) · web=0 · openrouter=0 · mongo_write=0 · elapsed=69.1s ≤15min · model=gemini-3.5-flash-lite · cost≈$0.037 · tokens prompt=124089 output=1584** · colls pre==post, digest `8c85b9426ecf16dc` unchanged · container stopped+removed (27018 closed)
+- **9/11 turns CORRECT:** W01 Q1 card ✓ · **W01 Q2 = FIX A+B verified จริง** — sel `18408364022/subject` (SUBJECT-SET decided single), asks verbatim ทั้งคู่ (`ดูชีพจร ฯลฯ`→describe, `เชื่อมต่อ GPS…`→compat ownership move), display ask ได้ outcome จากหลักฐาน + GPS ask cannot-confirm ชัดเจน — vs รอบก่อน ask หายเหลือ "ไม่พบข้อมูลในระบบของร้าน" · pingevox Q1-5 ✓ (CTL301 "ใช้งานร่วมกับ xiaomi 17 ultra ไม่ได้ค่ะ" explicit incompatible ไม่มี CTA, ไม่มี 60/65W claim — verdicts connector_match/disjoint · adapters compatible) · wattaka Q1 ✓ exact item · wattaka Q2 ✓ **480Mbps + 1GB~25s + CarPlay/Android Auto ทั้งหมด verbatim จาก description ของ item 27639651334 เอง** (query ตรงใน qa_admin/qa_product)
+- **2/11 provider-degraded (401 UNAUTHENTICATED — key rotation เจอ invalid key ไม่ใช่ code regression):** W01 Q3 — `answer_typed: ClientError 401` → `llm_error: escalated → handoff ok=False` → safe fallback "ระบบติดต่อแอดมินไม่สำเร็จ" (typed path ถูกถึง boundary: สตาวา ask typed, no_evidence, subject resolved — customer-visible outcome **unverified**) · wattaka Q3 — intent 401→`other/0.0` → honest hedge "ขอให้แอดมินตรวจสอบ" (ไม่ยืนยัน 10Gbps) + **trailing C2C515 card ใน answer text** (T8 suppress resp_products=[] แต่ model emit card จาก ctx) — **LOW finding ใหม่**: honest บน constraint แต่มี unsolicited card (intent-fallback amplified)
+- artifacts: `docs/test/results/phase10b/closeout_live_1793179849.{json,md}` · runner ad-hoc `/tmp/phase10b_live.py` (ไม่ commit)
+
+**Verdict: `PHASE_10B_CLOSE_WITH_DOCUMENTED_GAPS`** — core verified (frozen state, zero regressions, FIX A+B live-verified, attribution ตรงเป๊ะ) แต่เหลือ documented gaps: 8 intentional xfails (S/S/M/M/L per item — next-phase) + 2 live turns provider-blocked (Strava outcome + constraint path ต้อง re-verify เมื่อ provider ปกติ) + MED counterpart-self duplication + LOW card-drift observation · plan DoD [~] deletion + canary + fallback removal = operator-gated release steps ไม่ใช่ code-closeout blocker · ไม่มี commit/push/deploy · production/shared Mongo ไม่ถูกแตะ (27018 disposable เท่านั้น เขียน=0 digest คงเดิม)

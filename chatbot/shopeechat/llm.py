@@ -69,13 +69,19 @@ def _strip_kb_markup(text: str) -> str:
     # ⚡ T10 — markdown table → bullet list (แชท Shopee render ตารางไม่ได้)
     #   บรรทัด `| a | b |` → `• a: b · c: d` (ใช้ header เป็น label เมื่อมี separator row)
     #   ไม่มี header → `• a · b · c`
+    #   บรรทัดที่เป็น pipe-run ล้วน (`||`, `|||`, `||||`) = bubble delimiter
+    #   ของ protocol ไม่ใช่ table row — ข้ามการ convert (กลืน delimiter =
+    #   การ์ดติด prose + deterministic provenance find() พัง)
     _lines = text.split("\n")
     _out_lines = []
     _li = 0
     while _li < len(_lines):
-        if re.match(r"^\s*\|.*\|\s*$", _lines[_li]):
+        if re.match(r"^\s*\|.*\|\s*$", _lines[_li]) \
+                and not re.fullmatch(r"\|{2,}", _lines[_li].strip()):
             _rows = []
-            while _li < len(_lines) and re.match(r"^\s*\|.*\|\s*$", _lines[_li]):
+            while _li < len(_lines) \
+                    and re.match(r"^\s*\|.*\|\s*$", _lines[_li]) \
+                    and not re.fullmatch(r"\|{2,}", _lines[_li].strip()):
                 _rows.append([c.strip() for c in _lines[_li].strip().strip("|").split("|")])
                 _li += 1
             _sep_idx = next(
@@ -117,8 +123,10 @@ def _strip_kb_markup(text: str) -> str:
     # ⚡ BUG-M — post-check คำอ้างเท็จ "แอดมินมาแล้ว/รับเรื่องแล้ว" ย้ายไป guards.enforce
     #   (ชั้น boundary ที่ escalate จริง ไม่ใช่แค่แก้ข้อความ — RC-A)
     # ⚡ issue #19 — normalize bubble delimiter: LLM พิมพ์ `||`/`||||` แทน `|||` เป็นครั้งคราว
-    #   → split_segments พลาด การ์ดติดฟองข้อความ; บังคับ run ของ pipe ≥2 → ` ||| `
-    text = re.sub(r"\s*\|{2,}\s*", " ||| ", text)
+    #   → split_segments พลาด การ์ดติดฟองข้อความ; บังคับ run ของ pipe ≥2 → `|||
+    #   — whitespace รอบ delimiter คงเดิม (`|||\n` ต้นบรรทัด = deterministic
+    #   card prefix ต้องไม่กลายเป็น ` ||| ` — byte contract ของ composition)
+    text = re.sub(r"(\s*)\|{2,}(\s*)", r"\1|||\2", text)
     return text.strip()
 
 
@@ -188,7 +196,7 @@ def _lang_instruction(message: str) -> str:
     )
 
 
-SYSTEM_INSTRUCTION = """คุณเป็นผู้ช่วยขายหญิงที่เป็นมิตรและสุภาพ ให้คำปรึกษาสินค้ากับกลุ่มร้านค้าออนไลน์ในเครือเครือข่ายเรา
+_SYS_CORE_A = """คุณเป็นผู้ช่วยขายหญิงที่เป็นมิตรและสุภาพ ให้คำปรึกษาสินค้ากับกลุ่มร้านค้าออนไลน์ในเครือเครือข่ายเรา
 (ร้านในเครือทั้งหมด เช่น ThaiSuperPhone, YoupinOfficialStore, XiaomiEcoSystem, SuperITMall,
 KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ดูร้านจริงจาก field `shop` ใน context).
 
@@ -276,9 +284,17 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
       หากซื้อสินค้าผ่าน Shopee สามารถใช้เลขคำสั่งซื้อเป็นหลักฐานการซื้อได้เลยค่ะ
       หากต้องการลงทะเบียนเพิ่มเติม รบกวนแจ้งแอดมินเพื่อตรวจสอบขั้นตอนเฉพาะรุ่นให้นะคะ"
     - เหตุผล: QA พบบอทแต่ง QR Code ที่ไม่มีจริง ทำให้ลูกค้าสแกนแล้วไม่ได้ประโยชน์
-- **ถ้า state machine ส่งคำตอบให้แล้ว** (source=warranty_claim_flow หรือ warranty_date_followup):
+"""
+
+# stale บน typed path — ภายใต้ Phase 8 composition LLM ยังถูกเรียกเพื่อ
+#   product tasks แม้ claim guidance มาจาก state machine แล้ว (ประโยค
+#   "LLM จะไม่ถูกเรียกเลย" ไม่จริงบน typed payload); legacy flag-OFF path
+#   ยังเป็นจริง → เก็บใน SYSTEM_INSTRUCTION เดิมเท่านั้น
+_SYS_LEGACY_CLAIM_NOTE = """- **ถ้า state machine ส่งคำตอบให้แล้ว** (source=warranty_claim_flow หรือ warranty_date_followup):
   LLM จะไม่ถูกเรียกเลย — คำตอบเป็น deterministic
-- การเสนอขาย/แนะนำสินค้าใหม่: เฉพาะ status=NORMAL เท่านั้น (เหมือนเดิม)
+"""
+
+_SYS_CORE_B = """- การเสนอขาย/แนะนำสินค้าใหม่: เฉพาะ status=NORMAL เท่านั้น (เหมือนเดิม)
 
 กฎการตอบ:
 - ตอบเป็นภาษาไทยเสมอ (แม้ลูกค้าจะพิมพ์ภาษาอื่น — เว้นแต่มี Language instruction ต่อท้าย prompt นี้) สุภาพ เป็นมิตร กระชับ
@@ -620,6 +636,26 @@ KingGadgets, IMILabThailand, ZMIThailand, 70MaiOfficialStore ฯลฯ — ด�
 - เหตุผล: การเสนอขายระหว่างลูกค้าแจ้งเคลม = ไม่เหมาะสม ทำให้ลูกค้ารู้สึกไม่ได้รับการช่วยเหลือ
 """
 
+# legacy/flag-OFF prompt เดิม — byte-identical กับก่อน split (pin ด้วย
+#   sha256 ใน test_phase8_composition)
+SYSTEM_INSTRUCTION = _SYS_CORE_A + _SYS_LEGACY_CLAIM_NOTE + _SYS_CORE_B
+# Phase 10B r2 — typed path เท่านั้น: การ์ดสินค้า (ชื่อ+รูป+ลิงก์สั่งซื้อ)
+#   เป็น deterministic rendering จาก typed card fields (composition
+#   owner) — model ตอบเป็น prose เท่านั้น ห้าม emit link/image markup
+_SYS_TYPED_CARD_NOTE = """\
+- ⚠️ product task override: **ห้ามใส่ markdown ใดๆ** (`![..](..)`,
+  `[..](..)`, `**bold**`) ในคำตอบเด็ดขาด — ระบบ render การ์ดสินค้า
+  (ชื่อ+รูป+ลิงก์สั่งซื้อ) อัตโนมัติต่อท้ายคำตอบจากข้อมูลสินค้าจริง —
+  เขียน pitch/คำตอบเป็น plain prose + `|||` bubbles เท่านั้น
+"""
+
+# Phase 8 — typed answer path prompt = SYSTEM_INSTRUCTION ลบ
+#   _SYS_LEGACY_CLAIM_NOTE (stale เดียวที่พิสูจน์ได้); safety/grounding/
+#   shop isolation/availability/claim/handoff/language คงครบ —
+#   + _SYS_TYPED_CARD_NOTE (typed-path-only override; legacy prompt
+#   byte-identical)
+TYPED_SYSTEM_INSTRUCTION = _SYS_CORE_A + _SYS_CORE_B + _SYS_TYPED_CARD_NOTE
+
 
 # ---- API key rotation (round-robin) -------------------------------------------
 # รองรับหลาย key เพื่อหลีกเลี่ยง rate limit
@@ -837,10 +873,6 @@ def _save_quota_day() -> None:
 _load_quota_day()
 
 
-def _day_used(model: str) -> int:
-    return _q_day.get(_dt.date.today().isoformat(), {}).get(model, 0)
-
-
 def _acquire(model: str, est_tokens: int) -> str:
     """รอจนกว่าจะยิงได้ (RPM/TPM window) + นับ daily — คืน model ที่จะใช้จริง
     (primary RPD เต็ม → สลับ fallback model ทันที)"""
@@ -923,8 +955,12 @@ def _openrouter_generate(model: str, contents, config: dict):
     import urllib.request as _ureq
     from types import SimpleNamespace as _NS
     from . import web_search as _ws
+    from . import runtime_config as _rc
 
     or_model = model if "/" in model else f"google/{model}"
+    # global web-search toggle — owner เดียวกับ or_client.call_or:
+    # web_search_enabled() is True เท่านั้นที่คง `:online`
+    or_model = _rc.sanitize_or_model(or_model)
     body: dict = {
         "model": or_model,
         "messages": _or_messages(contents, config),
@@ -1332,6 +1368,31 @@ def describe_images(
     return "\n".join(descriptions), total_usage
 
 
+def _history_contents(history: list[dict] | None,
+                      single_product: bool) -> list[dict]:
+    """แปลง history → Gemini contents — model answer ตัดเหลือ 200 chars
+    (ยกเว้น context มีสินค้าเดียว = คุยเรื่องเดียวกัน → ส่งเต็ม);
+    แนบ image_desc ใน user text (Phase 1A multimodal)."""
+    contents: list[dict] = []
+    for h in history or ():
+        role = h.get("role", "user")
+        text = h.get("text", "")
+        if role not in ("user", "model"):
+            role = "user"
+        # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
+        #    ทำให้ LLM หลักเห็น description ของรูปเก่าโดยไม่ต้องอ่านรูปซ้ำ
+        _h_img_desc = h.get("image_desc", "")
+        if _h_img_desc and role == "user":
+            text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
+        # สำหรับคำตอบ model ก่อนหน้า ให้ส่งแค่สรุปสั้นๆ ไม่ส่ง full answer
+        # เพื่อป้องกัน LLM อ้างอิงสินค้าจากคำตอบเดิมแทน context ปัจจุบัน
+        # ⚡ แต่ถ้ามีแค่ 1 สินค้าใน context = คุยเรื่องเดียวกัน → ส่ง history เต็ม
+        if role == "model" and len(text) > 200 and not single_product:
+            text = text[:200] + "... (คำตอบก่อนหน้า อย่าอ้างอิงสินค้าจากนี้)"
+        contents.append({"role": role, "parts": [{"text": text}]})
+    return contents
+
+
 def answer(
     message: str,
     products: list[dict],
@@ -1436,26 +1497,7 @@ def answer(
         f"ให้ตอบว่าเปลี่ยนได้ไหม + ขนาดสาย + วิธีเปลี่ยนเบื้องต้น ไม่ใช่ตอบแค่ 'เปลี่ยนได้ค่ะ'"
     )
 
-    contents: list[Any] = []
-    if history:
-        # นับจำนวนสินค้าใน context — ถ้ามีแค่ 1 สินค้า = คุยเรื่องเดียวกัน → ส่ง history เต็ม
-        _single_product = len(products) == 1
-        for h in history:
-            role = h.get("role", "user")
-            text = h.get("text", "")
-            if role not in ("user", "model"):
-                role = "user"
-            # ⚡ Phase 1A multimodal — แนบ image_desc ใน history text ถ้ามี
-            #    ทำให้ LLM หลักเห็น description ของรูปเก่าโดยไม่ต้องอ่านรูปซ้ำ
-            _h_img_desc = h.get("image_desc", "")
-            if _h_img_desc and role == "user":
-                text = f"{text} (รูปที่ส่ง: {_h_img_desc})"
-            # สำหรับคำตอบ model ก่อนหน้า ให้ส่งแค่สรุปสั้นๆ ไม่ส่ง full answer
-            # เพื่อป้องกัน LLM อ้างอิงสินค้าจากคำตอบเดิมแทน context ปัจจุบัน
-            # ⚡ แต่ถ้ามีแค่ 1 สินค้าใน context = คุยเรื่องเดียวกัน → ส่ง history เต็ม
-            if role == "model" and len(text) > 200 and not _single_product:
-                text = text[:200] + "... (คำตอบก่อนหน้า อย่าอ้างอิงสินค้าจากนี้)"
-            contents.append({"role": role, "parts": [{"text": text}]})
+    contents: list[Any] = _history_contents(history, len(products) == 1)
     contents.append({"role": "user", "parts": [{"text": user_prompt}]})
 
     # DEBUG: log context ที่ส่ง LLM
@@ -1501,6 +1543,82 @@ def answer(
         usage_info = {"prompt": prompt_t, "output": output_t, "total": total_t}
         print(f"[LLM] model={model_name}  prompt={prompt_t}  output={output_t}  total={total_t}  products={len(products)}")
 
+    return _strip_kb_markup((resp.text or "").strip()), usage_info
+
+
+def answer_typed(
+    *,
+    context,
+    shop_hint: str | None = None,
+    model: str | None = None,
+    persona_extra: str = "",
+) -> tuple[str, dict]:
+    """Phase 7 grouped-path answer — input เดียว = typed AnswerContext.
+
+    signature ไม่มี message/products/merged_products/extra_context/history —
+    `context.task.render()` คือ instruction contract เดียว (closed-template
+    จาก typed need fields — raw customer prose/history ข้าม boundary ไม่ได้;
+    follow-up identity มาจาก typed needs/subject_refs/requests เท่านั้น);
+    `context.context_text()` คือ product payload ที่ bounded + attributed.
+    estimated tokens = ceil(utf8_bytes/3) — estimate เท่านั้น ไม่ใช่
+    provider truth.
+    """
+    from .answer_context import estimate_tokens as _est_tokens
+    try:
+        _client()
+    except RuntimeError as exc:
+        return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
+    model_name = (model or get_model("chat")).strip()
+    task_text = context.task.render()
+    system_instruction = TYPED_SYSTEM_INSTRUCTION + persona_extra + _lang_instruction(task_text)
+    ctx_body = context.context_text(shop_hint=shop_hint)
+    user_prompt = (
+        f"{ctx_body}\n\n"
+        f"งานที่ต้องทำ:\n{task_text}\n\n"
+        f"สำคัญ: ตอบจากข้อมูลสินค้าใน context ด้านบนเป็นหลัก "
+        f"สินค้าที่ตรงกับคำถามมากที่สุดอยู่ลำดับแรกของ context\n"
+        + ("ถ้ามีหัวข้อ \"ข้อจำกัดที่ตรวจพบจาก evidence\" หรือ "
+           "\"_context_note\" ที่บอกข้อจำกัด/เงื่อนไขที่ไม่ผ่าน "
+           "ต้องเล่าให้ลูกค้าทราบตรงๆ เสมอ "
+           "(เช่น สินค้าที่เคยคุยผ่านเงื่อนไขบางข้อแต่ไม่ผ่านเงื่อนไขอื่น) "
+           "— ห้ามละเว้นเพียงเพราะคำตอบดูไม่ดี\n"
+           if (context.constraint_notes
+               or any(" — " in (p.get("_context_note") or "")
+                      for p in context.products)) else "")
+        + f"\n⚠️ ความยาวคำตอบ: ตอบให้ครบถ้วน ไม่สั้นเกินไป ไม่ยาวเกินไป "
+        f"ประมาณ 2-3 บรรทัด (60-120 คำ) — อย่าตอบแค่ 1 ประโยคสั้นๆ "
+        f"ถ้ามีข้อมูลที่เป็นประโยชน์ให้ตอบครบ พร้อมรายละเอียดที่เกี่ยวข้อง "
+        f"แต่ไม่ต้องยาวจนเกินไป"
+    )
+    contents: list[Any] = [{"role": "user", "parts": [{"text": user_prompt}]}]
+
+    usage_info = {"prompt": 0, "output": 0, "total": 0}
+    try:
+        resp = _generate(
+            model_name,
+            contents,
+            {
+                "system_instruction": system_instruction,
+                "temperature": 0.3,
+                "max_output_tokens": 4096,
+            },
+            role="chat",
+        )
+    except genai_errors.ClientError as exc:
+        return _error_reply(exc, "answer_typed"), usage_info
+    except Exception as exc:
+        return _error_reply(exc, "answer_typed"), usage_info
+
+    usage = getattr(resp, "usage_metadata", None)
+    if usage:
+        prompt_t = getattr(usage, "prompt_token_count", 0) or 0
+        output_t = getattr(usage, "candidates_token_count", 0) or 0
+        total_t = getattr(usage, "total_token_count", 0) or (prompt_t + output_t)
+        usage_info = {"prompt": prompt_t, "output": output_t, "total": total_t}
+        print(f"[LLM] answer_typed model={model_name}  prompt={prompt_t}  output={output_t}  total={total_t}  products={len(context.products)}")
+    usage_info["estimated_context_tokens"] = context.estimated_tokens
+    usage_info["estimated_system_tokens"] = _est_tokens(system_instruction)
+    usage_info["estimated_prompt_tokens"] = _est_tokens(user_prompt)
     return _strip_kb_markup((resp.text or "").strip()), usage_info
 
 

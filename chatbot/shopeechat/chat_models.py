@@ -64,34 +64,3 @@ class ContextData:
     steps: list[dict] = field(default_factory=list)
     timing: dict = field(default_factory=dict)
     total_start: float = 0.0
-
-
-@dataclass
-class SearchData:
-    """ผลจาก web search — keywords + spec + สินค้าที่ re-query ได้."""
-    keywords: list[str] = field(default_factory=list)
-    product_type: str = ""
-    search_info: str = ""              # spec/ข้อมูลจาก search (strip URL แล้ว)
-    products: list[dict] = field(default_factory=list)  # สินค้าจาก re-query DB
-    usage: dict = field(default_factory=dict)
-    cost_usd: float = 0.0
-    elapsed: float = 0.0
-    model: str = ""
-    error: str = ""
-
-
-@dataclass
-class AnswerData:
-    """ผลจาก LLM2 — answer + products + usage."""
-    answer: str = ""
-    products: list[dict] = field(default_factory=list)
-    usage: dict = field(default_factory=dict)
-    model: str = ""
-    cost_usd: float = 0.0
-    elapsed: float = 0.0
-    source: str = ""
-    web_search_used: bool = False
-    web_search_reason: str = ""
-    handoff_to_admin: bool = False
-    handoff_reason: str = ""
-    intent: IntentData | None = None

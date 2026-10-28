@@ -352,39 +352,6 @@ WarrantyClaimState = Literal[
 ]
 
 
-@dataclass
-class WarrantyClaimContext:
-    """เก็บ state ของ warranty claim flow ระหว่าง conversation."""
-    state: WarrantyClaimState = "idle"
-    product_name: str = ""           # ชื่อสินค้าที่ลูกค้าถาม
-    warranty_months: int = 0         # ระยะเวลาประกัน (เดือน)
-    warranty_text: str = ""          # "2 ปี" ฯลฯ
-    purchase_date: str = ""          # วันที่ซื้อ (string ที่ลูกค้าให้มา)
-    order_id: str = ""               # เลขที่คำสั่งซื้อ
-    customer_name: str = ""          # ชื่อ-นามสกุล
-    customer_phone: str = ""         # เบอร์โทร
-    claim_topic: str = ""            # หัวข้อ: เคลม/ซ่อม/ประกัน
-    in_warranty: bool | None = None  # ผลการคำนวณ
-    days_remaining: int = 0
-    expiry_date: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "state": self.state,
-            "product_name": self.product_name,
-            "warranty_months": self.warranty_months,
-            "warranty_text": self.warranty_text,
-            "purchase_date": self.purchase_date,
-            "order_id": self.order_id,
-            "customer_name": self.customer_name,
-            "customer_phone": self.customer_phone,
-            "claim_topic": self.claim_topic,
-            "in_warranty": self.in_warranty,
-            "days_remaining": self.days_remaining,
-            "expiry_date": self.expiry_date,
-        }
-
-
 # คำที่บอกว่าลูกค้าอยากเคลม/ซ่อม/สินค้าเสีย
 _CLAIM_REQUEST_INDICATORS = [
     "เคลม", "ซ่อม", "เสีย", "พัง", "ไม่ทำงาน", "ใช้ไม่ได้",
@@ -700,33 +667,6 @@ def extract_customer_info(message: str) -> dict:
                  or any(c.isdigit() for c in name)):
         name = ""
     return {"name": name, "phone": phone, "order_id": order_id}
-
-
-def detect_purchase_date_and_order(message: str) -> dict:
-    """ดึงวันที่ซื้อและเลขคำสั่งซื้อจากข้อความลูกค้า.
-
-    Returns:
-        dict: {purchase_date: datetime|None, order_id: str}
-    """
-    if not message:
-        return {"purchase_date": None, "order_id": ""}
-    purchase_date = parse_purchase_date(message)
-    order_id = ""
-    # ดึงเลขคำสั่งซื้อ — เป็นเลขล้วน 10-16 หลัก (ไม่ใช่วันที่)
-    # ตัดวันที่ออกก่อน เพื่อกัน pattern ไปจับตัวเลขในวันที่
-    msg_cleaned = re.sub(r"\b\d{1,4}[/\-.]\d{1,2}[/\-.]\d{2,4}\b", "", message)
-    # ⚡ NEW-1 fix — mask เบอร์โทรออกก่อน scan order (เดิมไม่มี → เบอร์ 10 หลักกลายเป็น order_id)
-    _phone_m = _PHONE_PATTERN.search(msg_cleaned)
-    msg_cleaned = _mask_digits(
-        msg_cleaned,
-        re.sub(r"[\s\-]", "", _phone_m.group(0)) if _phone_m else "")
-    msg_cleaned = msg_cleaned.replace("-", "")
-    for m in _ORDER_ID_PATTERN.finditer(msg_cleaned):
-        candidate = m.group(0)
-        if len(candidate) >= 10:
-            order_id = candidate
-            break
-    return {"purchase_date": purchase_date, "order_id": order_id}
 
 
 def detect_warranty_duration_question(message: str) -> bool:
@@ -1068,7 +1008,6 @@ def auto_check_warranty(
         import sys
         print(f"[WARRANTY-AUTO] error: {exc}", file=sys.stderr)
         return None
-
 
 
 def auto_check_delivery_warranty(order_sn: str, shop_filter: str | None, bot_name: str) -> tuple[str, dict, str]:

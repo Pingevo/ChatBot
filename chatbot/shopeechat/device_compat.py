@@ -16,6 +16,7 @@ import re
 import sys
 from typing import TYPE_CHECKING
 
+from . import generation_pointer as _gen
 from . import product_store
 
 if TYPE_CHECKING:
@@ -58,6 +59,89 @@ def _extract_max_wattage(p: dict) -> float:
     if not matches:
         return 0.0
     return max(float(m) for m in matches)
+
+
+def _extract_max_mah(p: dict) -> float:
+    """extract ค่า mAh สูงสุดจาก spec field ก่อน ถ้าไม่มีค่อยดึงจากชื่อ."""
+    spec_mah = p.get("capacity_mah") or p.get("specs", {}).get("capacity_mah")
+    if spec_mah and isinstance(spec_mah, (int, float)) and spec_mah > 0:
+        return float(spec_mah)
+    variants = p.get("variants") or []
+    max_v = 0.0
+    for v in variants:
+        vm = v.get("capacity_mah")
+        if vm and isinstance(vm, (int, float)) and vm > max_v:
+            max_v = float(vm)
+    if max_v > 0:
+        return max_v
+    name = p.get("name") or p.get("item_name") or ""
+    if not name:
+        return 0.0
+    matches = re.findall(r"(\d+(?:\.\d+)?)\s*mah\b", name.lower())
+    if not matches:
+        return 0.0
+    return max(float(m) for m in matches)
+
+
+def _extract_weight_kg(p: dict) -> float:
+    """extract น้ำหนัก (kg) จาก spec field — ไม่มีข้อมูล → 999.0 (ตกท้ายเสมอ)"""
+    w = p.get("package_weight") or p.get("specs", {}).get("package_weight")
+    if w and isinstance(w, (int, float)) and w > 0:
+        return float(w)
+    return 999.0
+
+
+# data-transfer speed tokens — canonical Mbps normalization owner (regex
+#   เดียว ไม่มี kw table): "480Mbps"/"480 Mbps" → 480, "10Gbps"/"10 Gbps"→10000
+_DATA_SPEED_RE = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(gbps|mbps)\b", re.IGNORECASE)
+
+
+def _extract_data_transfer_mbps(p: dict) -> float:
+    """extract ความเร็วถ่ายโอนข้อมูล (Mbps) — spec field → variants → ชื่อ+desc.
+
+    canonical field: data_transfer_mbps (canonical_specs/specs/variants) —
+    text normalize เฉพาะ Mbps/Gbps token ตรงๆ (Gbps×1000) ไม่ infer จาก
+    USB generation ("USB4" ฯลฯ ไม่ใช่ค่าที่ประกาศตรง)
+    ไม่มี evidence → 0.0 (caller ถือเป็น unknown ไม่ใช่ negative)
+    """
+    spec_v = (p.get("data_transfer_mbps")
+              or p.get("specs", {}).get("data_transfer_mbps")
+              or p.get("canonical_specs", {}).get("data_transfer_mbps"))
+    if spec_v and isinstance(spec_v, (int, float)) and spec_v > 0:
+        return float(spec_v)
+    max_v = 0.0
+    for v in p.get("variants") or []:
+        vv = v.get("data_transfer_mbps")
+        if vv and isinstance(vv, (int, float)) and vv > max_v:
+            max_v = float(vv)
+    if max_v > 0:
+        return max_v
+    # text surface เดียวกับ policy_resolver._card_text (canonical card text)
+    text = " ".join(str(p.get(k) or "") for k in (
+        "name", "item_name", "description", "raw_description",
+        "description_excerpt", "image_text", "warranty_text"))
+    for m in _DATA_SPEED_RE.finditer(text):
+        v = float(m.group(1))
+        if m.group(2).lower() == "gbps":
+            v *= 1000.0
+        max_v = max(max_v, v)
+    return max_v
+
+
+# canonical spec field (route_context.detect_ranking / TurnNeed.ranking)
+#   → rank extractor — sort-key dispatch owner เดียว
+_SPEC_RANK_EXTRACTORS = {
+    "output_power_w": _extract_max_wattage,
+    "capacity_mah": _extract_max_mah,
+    "package_weight": _extract_weight_kg,
+    "data_transfer_mbps": _extract_data_transfer_mbps,
+}
+
+
+def spec_rank_key(field: str):
+    """canonical spec field → extractor fn (None ถ้า field แปลก)"""
+    return _SPEC_RANK_EXTRACTORS.get(field)
 
 
 def _wattage_asc_key(p: dict, min_watt: float | None = None) -> tuple:
@@ -246,7 +330,7 @@ def _lookup_spec_db(device_name: str) -> dict | None:
     if not canon:
         return None
     return {"device": canon, "min_watt": _DEVICE_SPECS[canon].get("wired_w"),
-            **_DEVICE_SPECS[canon]}
+            "source": "spec-db", **_DEVICE_SPECS[canon]}
 
 
 # compact device shorthand — normalize เป็น canonical เฉพาะ family ที่รู้จัก
@@ -307,23 +391,21 @@ _NON_DEVICE_TOKENS = frozenset({
 })
 
 
-def _extract_device_token(msg: str) -> str | None:
-    """⚡ ดึง target_device จากข้อความแบบ generic — ไม่ hardcode ชื่อรุ่น.
+def _device_candidates(msg: str):
+    """yield (raw_span, canon|None) ของ device-token candidates ตาม position.
 
-    จับ token รูป "letters+digits(+variant word)" — ครอบทุกรุ่นปัจจุบัน+อนาคต
-    (iphone 18 / galaxy s27 / pixel 10 / apple watch 9 / redmi note 14 …)
-    โดยไม่ต้องอัปเดต list เมื่อมี device ใหม่
-
-    กรอง false positive 2 ชั้น:
+    filters เดียวกับ _extract_device_token เดิม (false positive 2 ชั้น):
     - head อยู่ใน _NON_DEVICE_TOKENS (pd3 / usb4 / qi2 / gen 2 / set 3 / note 14 ลอยๆ)
     - รูป letters+digits+letters glued ทั้งก้อน (CTC615W / AD653U) = product code ไม่ใช่ device
-    """
+    candidate ที่ยังไม่ผ่าน authoritative validation เป็น unverified —
+    caller เจ้าของ role ตัดสินเอง (target device ต้องผ่าน _SPEC_INDEX)"""
     low = (msg or "").lower()
     for _m in _DEVICE_TOKEN_RE.finditer(low):
         cand = _m.group(0).strip()
         canon = normalize_device_alias(cand)
         if canon:
-            return canon
+            yield cand, canon
+            continue
         head_m = re.match(r"[a-z]+", cand)
         if (head_m and head_m.group(0) in _NON_DEVICE_TOKENS
                 and cand not in _SPEC_INDEX):
@@ -337,13 +419,12 @@ def _extract_device_token(msg: str) -> str | None:
             if (_cc and cand not in _SPEC_INDEX
                     and not _spec_brand(_cc.group(1))):
                 continue
-        return cand
+        yield cand, None
     # regex หลักไม่เจอ → probe alias form (mi14pro glued / ไอโฟน14โปร)
     for _m in _DEVICE_ALIAS_PROBE_RE.finditer(low):
         canon = normalize_device_alias(_m.group(0))
         if canon:
-            return canon
-    return None
+            yield _m.group(0), canon
 
 
 # ── compat mode classification (category-level — ไม่ใช่ model-level hardcode) ──
@@ -593,6 +674,7 @@ def _filter_compat_products(
     compat_mode: str = "charging",
     asked_type: str | None = None,
     web_specs: list | None = None,
+    protected_ids: set[str] | None = None,
 ) -> list[dict]:
     """⚡ CODE-level compat filter — กรองสินค้าที่ compatible กับอุปกรณ์จริง.
 
@@ -631,12 +713,21 @@ def _filter_compat_products(
     if compat_mode in ("skip", "model_fit"):
         return products
 
+    # compat decision owner = policy_resolver เดียว — mode→relation ผ่าน
+    # canonical owner; mode ที่ไม่มี typed relation (unknown/none/ฯลฯ)
+    # → ไม่กรองเลย (safe: ไม่ over-filter จาก relation ที่เดา)
+    from . import policy_resolver as _pr
+    _relation = _pr.compat_relation_for_mode(compat_mode)
+    if _relation is None:
+        return products
+
     # resolve device connector: spec DB/web parse ก่อน → intent (LLM guess) last
     device_connector = ""
     device_min_watt: float | None = None
 
     device_spec = _resolve_device_spec(device_name, web_search_extra,
                                        web_specs=web_specs)
+    _src = ""
     if device_spec:
         device_connector = device_spec.get("connector", "")
         device_min_watt = device_spec.get("min_watt")
@@ -647,6 +738,7 @@ def _filter_compat_products(
     elif intent_connector:
         device_connector = intent_connector
         device_min_watt = intent_min_watt
+        _src = "intent"
         print(f"[COMPAT-FILTER] device={device_name!r} connector={device_connector!r} "
               f"min_watt={device_min_watt} (source=intent) products={len(products)}", file=sys.stderr)
     else:
@@ -655,51 +747,75 @@ def _filter_compat_products(
     if not device_connector:
         return products
 
-    # self_compat (earphone/speaker/smartwatch/...): ของที่ถามไม่มี connector
-    # อยู่แล้ว — กฎเดียว: drop เฉพาะของที่ประกาศ plug แล้วไม่ตรง device,
-    # ambiguous (ไม่มี connector) เก็บเสมอ คงลำดับ ไม่มี watt sort
-    # — เดิม ambiguous ถูกลบเงียบๆ เมื่อ compat≥2 (หูฟังหายเพราะชาร์จปน)
-    if compat_mode == "self_compat":
-        kept: list[dict] = []
-        dropped_sc = 0
-        for p in products:
-            conns = _extract_product_connectors(p)
-            if (not conns or device_connector in conns
-                    or ("usb-a" in conns and device_connector == "usb-c")):
-                kept.append(p)
-            else:
-                dropped_sc += 1
-                _pn = (p.get("name") or p.get("item_name") or "")[:60]
-                print(f"[COMPAT-FILTER] self_compat DROP {_pn!r} connectors={conns} "
-                      f"(device={device_connector!r})", file=sys.stderr)
-        if not kept:
-            print(f"[COMPAT-FILTER] self_compat กรองแล้วว่าง → คืนทั้งหมด {len(products)} ตัว", file=sys.stderr)
-            return products
-        print(f"[COMPAT-FILTER] self_compat type={asked_type} ผ่าน {len(kept)}/{len(products)} "
-              f"(dropped={dropped_sc})", file=sys.stderr)
-        return kept
+    # Phase 5 — compat decision owner = policy_resolver.resolve_compat เดียว;
+    #   ตัวกรองนี้ map typed outcome → bucket เดิมเท่านั้น:
+    #   compatible → compat · incompatible → dropped ·
+    #   unknown/admin_review → ambiguous (ไม่เคยตี unknown เป็น incompatible)
+    from . import candidate_pool as _cp
+    # H6 — provenance ต้องติดไปกับ fact: structured source เท่านั้นที่
+    # prove compat/incompat ได้; intent/web-parse hint → unknown เสมอ
+    _dev_facts = _pr.device_field_facts(
+        device_name, {"connector": device_connector,
+                      "min_watt": device_min_watt, "source": _src})
 
+    _protected = protected_ids or set()
     compat: list[dict] = []
     ambiguous: list[dict] = []
+    protected: list[dict] = []
     dropped = 0
+    _outcomes: list[tuple[dict, str]] = []
 
     for p in products:
-        connectors = _extract_product_connectors(p)
-        if not connectors:
-            # ดึง connector ไม่ได้ → ambiguous → เก็บไว้ (ไม่ over-filter)
-            ambiguous.append(p)
-        elif device_connector in connectors:
-            # connector ตรง → compatible
+        _sid = _cp._identity_key(p)[0] or f"?:{p.get('item_id') or ''}"
+        _dec = _pr.resolve_compat(
+            subject_id=_sid,
+            target=f"device:{device_name.strip().lower()}",
+            relation=_relation,
+            subject_facts=_pr.extract_field_facts(
+                p, mentions=(device_name,)),
+            target_facts=_dev_facts)
+        _outcomes.append((p, _dec.outcome))
+        _iid = str(p.get("item_id") or "")
+        if _iid and _iid in _protected:
+            # asked subject (tier-A) — verdict ไม่ใช้ซ่อนของที่ลูกค้าถามตรง:
+            #   unknown ก็อยู่, incompatible ก็อยู่ (คำตอบต้องพูดถึงมัน)
+            #   แต่ incompatible = explanation-only — ติด note กัน LLM
+            #   เอาไปแนะนำ (H6)
+            protected.append(p)
+            if _dec.outcome == "incompatible":
+                p["_compat_verdict"] = "incompatible"
+                _cn = ("สินค้านี้เข้ากันไม่ได้กับอุปกรณ์ที่ลูกค้าถาม "
+                       "— แนบไว้เพื่ออธิบายผลเท่านั้น ห้ามแนะนำเป็นตัวเลือก")
+                p["_context_note"] = (
+                    (p.get("_context_note") or "") + " " + _cn).strip()
+        elif _dec.outcome == "compatible":
             compat.append(p)
-        elif "usb-a" in connectors and device_connector == "usb-c":
-            # USB-A adapter อาจใช้กับ USB-C device ได้ (ผ่าน A-to-C cable) → ambiguous
-            ambiguous.append(p)
-        else:
-            # connector ไม่ตรง → กรองออก
+        elif _dec.outcome == "incompatible":
             dropped += 1
             _pname = (p.get("name") or p.get("item_name") or "")[:60]
-            print(f"[COMPAT-FILTER] DROP {_pname!r} connectors={connectors} "
+            print(f"[COMPAT-FILTER] DROP {_pname!r} "
+                  f"proof={_dec.proofs[0].facts if _dec.proofs else ()} "
                   f"(device={device_connector!r})", file=sys.stderr)
+        else:
+            # unknown/admin_review → ambiguous → เก็บไว้ (ไม่ over-filter)
+            ambiguous.append(p)
+
+    # self_compat (earphone/speaker/smartwatch/...): ของที่ถามไม่มี connector
+    # อยู่แล้ว — ambiguous (ไม่มี connector) เก็บเสมอ คงลำดับเดิม ไม่มี watt sort
+    # — เดิม ambiguous ถูกลบเงียบๆ เมื่อ compat≥2 (หูฟังหายเพราะชาร์จปน)
+    if compat_mode == "self_compat":
+        kept = [p for p, oc in _outcomes
+                if oc != "incompatible"
+                or str(p.get("item_id") or "") in _protected]
+        if not kept:
+            # H6 — ทุกตัวมี typed negative proof → ไม่ echo กลับเป็น
+            #   recommendation เด็ดขาด (protected = subject ที่ถามตรง
+            #   คงไว้เพื่ออธิบายเท่านั้น — แต่ถ้ามีมันจะอยู่ใน kept แล้ว)
+            print(f"[COMPAT-FILTER] self_compat proven incompatible ทั้งหมด → return protected เท่านั้น", file=sys.stderr)
+            return protected
+        print(f"[COMPAT-FILTER] self_compat type={asked_type} ผ่าน {len(kept)}/{len(products)} "
+              f"(dropped={dropped})", file=sys.stderr)
+        return kept
 
     # ถ้ากรองเหลือน้อย → รวม ambiguous กลับ (กัน over-filter)
     if len(compat) < 2 and ambiguous:
@@ -707,20 +823,23 @@ def _filter_compat_products(
         compat.extend(ambiguous)
         ambiguous = []
 
-    # ถ้ากรองแล้วว่าง → คืนทั้งหมด (fallback ปลอดภัย)
+    # H6 — ทุก candidate มี typed negative proof → ไม่ echo กลับมาแนะนำ
+    #   (fallback เดิม `return products` เอาของที่พิสูจน์ incompatible แล้ว
+    #   กลับมาเป็น recommendation). คงไว้เฉพาะ protected subject ที่ลูกค้า
+    #   ถามตรง เพื่อให้คำตอบอธิบายผลของตัวนั้นได้
     if not compat:
-        print(f"[COMPAT-FILTER] กรองแล้วว่าง → คืนทั้งหมด {len(products)} ตัว", file=sys.stderr)
-        return products
+        print(f"[COMPAT-FILTER] ไม่มี compatible — return protected subject เท่านั้น ({len(protected)} ตัว)", file=sys.stderr)
+        return protected
 
     # sort by wattage ascending — ของที่จ่ายไฟพอ spec เครื่อง (≥min_watt) ขึ้นก่อน
     # (baseline ก่อน, upgrade ทีหลัง; ของต่ำกว่า spec ไปท้าย)
     compat.sort(key=lambda p: _wattage_asc_key(p, device_min_watt))
 
-    print(f"[COMPAT-FILTER] ผ่าน {len(compat)} จาก {len(products)} ตัว "
+    print(f"[COMPAT-FILTER] ผ่าน {len(compat) + len(protected)} จาก {len(products)} ตัว "
           f"(dropped={dropped}, ambiguous={len(ambiguous)}) "
           f"top3 wattage: {[_extract_max_wattage(p) for p in compat[:3]]}W", file=sys.stderr)
 
-    return compat
+    return compat + protected
 
 
 def _apply_product_tiers(
@@ -802,8 +921,8 @@ def _device_spec_lookup(
     hybrid_anchor_card: dict | None,
     llm_ctx_limit: int,
     resolve_subtype_fn=None,
-    retrieval_profile: RetrievalProfile | None = None,
-) -> tuple[str, list[dict], list[dict]]:
+    snap=_gen.SNAP_UNSET, retrieval_profile: RetrievalProfile | None = None,
+    ) -> tuple[str, list[dict], list[dict]]:
     """⚡ Extract device-spec-lookup logic เป็น helper — ใช้ได้ทั้ง KB path และ main path.
 
     ทำ 2 อย่าง:
@@ -835,7 +954,8 @@ def _device_spec_lookup(
     # (ไม่ hardcode ชื่อรุ่น — ครอบทุก device ปัจจุบัน+อนาคต)
     _resolved_target_device = intent_result.get("target_device") or ""
     if not _resolved_target_device:
-        _resolved_target_device = _extract_device_token(req.message) or ""
+        _resolved_target_device = next(
+            (cn or rw for rw, cn in _device_candidates(req.message)), "")
 
     if not _resolved_target_device:
         return "", [], []
@@ -878,6 +998,7 @@ def _device_spec_lookup(
                 shop_filter=req.shop,
                 limit=llm_ctx_limit,
                 desc_message=req.message,
+                snap=snap,
                 filter_unavailable=False,
                 product_types_override=_pto,
                 is_compat_check=True,  # re-query ของ compat — ข้าม unit index เหมือน main path
@@ -950,6 +1071,7 @@ def _device_spec_lookup(
             limit=llm_ctx_limit,
             desc_message=req.message,
             filter_unavailable=False,
+            snap=snap,
             product_types_override=_chg_scope,
             # ⚡ compat re-query ต้องข้าม unit index (pool เล็ก →
             #   ของ spec สูงไม่เข้า context) + sweep กว้างเหมือน main path
@@ -1022,7 +1144,7 @@ def _device_spec_lookup(
                             filter_unavailable=False,
                             product_types_override=_chg_scope,
                             is_compat_check=True,
-                            retrieval_profile=retrieval_profile)
+                            retrieval_profile=retrieval_profile, snap=snap)
                         _n2 = 0
                         for _dp in _rq2 or []:
                             _dpid = str(_dp.get("item_id") or "")
@@ -1094,5 +1216,12 @@ def _device_spec_lookup(
         _additional_products.sort(key=lambda p: _wattage_asc_key(p, _dev_min_watt))
         print(f"[DEVICE-SPEC-LOOKUP] sort pool (min_watt={_dev_min_watt}) "
               f"top3: {[_extract_max_wattage(p) for p in _additional_products[:3]]}W", file=sys.stderr)
+
+    # spec-db hit = structured device evidence (source="spec-db" อยู่ใน record
+    #   อยู่แล้ว) — typed boundary (device_spec supporting → compat verdict)
+    #   ต้องการ device facts จาก dict นี้; web short-circuit อยู่แล้วเมื่อ
+    #   _db_spec hit จึงไม่มี entry ซ้ำ
+    if _db_spec:
+        _device_ws_specs = [_db_spec, *_device_ws_specs]
 
     return _device_spec_extra, _additional_products, _device_ws_specs

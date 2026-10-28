@@ -74,7 +74,7 @@ def test_profile_types_drive_retrieval_query(monkeypatch):
     """Message alone detects no charger; profile charger+cable must drive query."""
     monkeypatch.setattr(product_store, "vector_search", lambda *a, **k: [])
     prof = _mi17_profile()
-    assert prof.product_types == frozenset({"charger"})
+    assert prof.product_types == frozenset({"charger", "cable"})
     db = _FakeDB([_doc(1, "สายชาร์จ Type-C 100W")])
     product_store.fetch_products(db, "อยากได้ที่ใช้กับ mi 17 ultra",
                                  shop_filter="KingGadgets",
@@ -164,7 +164,8 @@ def test_answerable_all_never_drops_unavailable(monkeypatch):
 
 def test_fetch_units_uses_profile_codes(monkeypatch):
     coll = _FakeColl([])
-    monkeypatch.setattr(units, "_units_coll", lambda: coll)
+    monkeypatch.setattr(units, "_resolve_snap", lambda s=None: object())
+    monkeypatch.setattr(units, "_units_coll", lambda snap=None: coll)
     monkeypatch.setattr(units, "_vector_search", lambda *a, **k: [])
     prof = route_context.build_retrieval_profile(
         "HA835 ยังมีประกันไหม", history=[],
@@ -176,7 +177,8 @@ def test_fetch_units_uses_profile_codes(monkeypatch):
 
 def test_fetch_units_profile_skips_resolve_route(monkeypatch):
     coll = _FakeColl([])
-    monkeypatch.setattr(units, "_units_coll", lambda: coll)
+    monkeypatch.setattr(units, "_resolve_snap", lambda s=None: object())
+    monkeypatch.setattr(units, "_units_coll", lambda snap=None: coll)
     monkeypatch.setattr(units, "_vector_search", lambda *a, **k: [])
     calls = []
     orig = route_context.resolve_route
@@ -190,7 +192,8 @@ def test_fetch_units_profile_skips_resolve_route(monkeypatch):
 
 def test_fetch_unit_cards_profile_skips_resolve_route(monkeypatch):
     coll = _FakeColl([])
-    monkeypatch.setattr(units, "_units_coll", lambda: coll)
+    monkeypatch.setattr(units, "_resolve_snap", lambda s=None: object())
+    monkeypatch.setattr(units, "_units_coll", lambda snap=None: coll)
     monkeypatch.setattr(units, "_vector_search", lambda *a, **k: [])
     calls = []
     monkeypatch.setattr(route_context, "resolve_route",

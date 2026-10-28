@@ -23,6 +23,7 @@ import { getConversation, closeConversation, type ProblemCategory } from "./conv
 import { resolveTemplate, type TemplateVars } from "./templateService";
 import { getHistoryForBot, getGroupedHistoryForBot, toBotImages } from "./messageService";
 import { handoffService, type HandoffOutcomeState } from "./handoffService";
+import { matchTrigger, type TriggerDoc } from "./triggerService";
 import { getCustomer } from "./customerService";
 import { logAdminEvent } from "./adminLogService";
 // ⚡ botworker parallel — test store + sandbox event log (ใช้เมื่อ msg.testSource มี)
@@ -39,6 +40,9 @@ export interface WorkflowRunDoc extends Document {
   workflow_version: number;
   conversation_id: string;
   shop_id: string;
+  // ⚡ config identity ของ run — freeze ตอนสร้าง (timeout/resume path ไม่มี msg ctx)
+  //   absent = legacy run ก่อน field นี้ → reader ใช้ shop_id (semantics เดิม)
+  config_shop_key?: string;
   platform: Platform;
   customer_id?: string;
 
@@ -89,7 +93,14 @@ export interface WorkflowRunDoc extends Document {
 export interface EngineMessage {
   message_id: string;
   conversation_id: string;
-  shop_id: string;
+  shop_id: string;           // transport domain — run records / runtime identity
+  // ⚡ config_shop_key = domain ของ workflow shop_ids[] / assignment pool — required:
+  //   caller ต้องผ่าน config identity ชัดเจน (botworker = resolved pair; test-chat =
+  //   shop param ตรงๆ) — ไม่มี transport-id fallback
+  config_shop_key: string;
+  // ⚡ shopname = catalog key ของ /chat `shop` — absent (non-worker caller) → engine
+  //   derive จาก conv.shop_name (catalog domain เดียวกัน — ไม่ใช่ transport identity)
+  shopname?: string;
   platform: Platform;
   text: string;
   customer_id?: string;
@@ -121,18 +132,23 @@ export interface DeliveredMessage {
   node_id: string;
 }
 
-export interface EngineResult {
-  // ⚡ "in_flight" = run/op กำลังถูก owner อื่น execute อยู่ — retryable, ห้ามถือเป็น terminal
-  status: "actioned" | "resumed" | "no_match" | "exit_to_bot" | "exit_drop" | "error" | "in_flight";
+export type EngineResult = {
   detail: string;
   delivered: DeliveredMessage[];
   run_id?: string;
   workflow_id?: string;
   handoff?: { agentId: string | null; reason: string; state: Exclude<HandoffOutcomeState, "failed"> };
-  // ⚡ error เท่านั้น: false = op ตายแล้ว (committed แต่ไม่มีผล) — caller ห้าม fallback ไป bot
-  //   (side effect อาจเกิดแล้วโดยไม่มีหลักฐาน); absent = error ทั่วไป fallback ได้ตามเดิม
-  recoverable?: boolean;
-}
+} & (
+  // ⚡ "in_flight" = run/op กำลังถูก owner อื่น execute อยู่ — retryable, ห้ามถือเป็น
+  //   terminal; "no_match" = ไม่มี workflow ที่ applicable (รวม resume บน run ที่จบ
+  //   แล้ว — ข้อความไม่ถูก flow ใดกิน → caller dispatch ต่อได้)
+  | { status: "actioned" | "resumed" | "no_match" | "exit_to_bot" | "exit_drop" | "in_flight";
+      recoverable?: undefined }
+  // ⚡ error ต้อง declare recoverability เสมอ (type บังคับ): false = matched-path
+  //   death (run committed แล้วตาย — side effect อาจเกิดโดยไม่มีหลักฐาน) caller ห้าม
+  //   fallback; true = error ที่ op ไม่ได้ commit — caller fall through ได้
+  | { status: "error"; recoverable: boolean }
+);
 
 /** result มาตรฐานเมื่อเสีย run ownership ระหว่างทาง — caller retry ได้ เดินต่อไม่ได้ */
 function inFlightResult(runId: string, workflowId: string | undefined, detail: string): EngineResult {
@@ -402,7 +418,7 @@ export async function matchAndRun(msg: EngineMessage): Promise<EngineResult> {
       const wf = await workflowService.getWorkflow(acquired.workflow_id);
       if (!wf) {
         if (await failRun(acquired, "workflow deleted while run active")) { /* errored */ }
-        return { status: "error", detail: "workflow not found", delivered: [], run_id: acquired.run_id, workflow_id: acquired.workflow_id };
+        return { status: "error", detail: "workflow not found", delivered: [], recoverable: false, run_id: acquired.run_id, workflow_id: acquired.workflow_id };
       }
       return runFlow(wf, acquired, msg);
     }
@@ -415,7 +431,7 @@ export async function matchAndRun(msg: EngineMessage): Promise<EngineResult> {
   }
 
   const workflows = await workflowService.listWorkflows({
-    shopId: msg.shop_id,
+    shopId: msg.config_shop_key, // shop_ids[] = config domain
     platform: msg.platform,
     enabledOnly: true,
     publishedOnly: true,
@@ -485,6 +501,7 @@ async function createRun(workflow: WorkflowDoc, msg: EngineMessage, forcedRunId?
     workflow_version: workflow.version,
     conversation_id: msg.conversation_id,
     shop_id: msg.shop_id,
+    config_shop_key: msg.config_shop_key, // freeze config identity ไว้กับ run
     platform: msg.platform,
     customer_id: msg.customer_id,
     status: "running",
@@ -545,7 +562,7 @@ async function walkGraph(
       if (!(await failRun(run, `node ${currentNodeId} not found in workflow`))) {
         return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
       }
-      return { status: "error", detail: `node ${currentNodeId} not found`, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
+      return { status: "error", detail: `node ${currentNodeId} not found`, delivered, recoverable: false, run_id: run.run_id, workflow_id: workflow.workflow_id };
     }
 
     // ── trigger node → ไป node ถัดไปตาม edge ──
@@ -589,7 +606,7 @@ async function walkGraph(
         if (!(await failRun(run, `condition ${node.subtype} error: ${condResult.error}`))) {
           return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
         }
-        return { status: "error", detail: condResult.error, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
+        return { status: "error", detail: condResult.error, delivered, recoverable: false, run_id: run.run_id, workflow_id: workflow.workflow_id };
       }
 
       const branch = condResult.branch;
@@ -657,14 +674,14 @@ async function walkGraph(
     if (!(await failRun(run, `unknown node type ${node.type}/${node.subtype}`))) {
       return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
     }
-    return { status: "error", detail: `unknown node type ${node.type}`, delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
+    return { status: "error", detail: `unknown node type ${node.type}`, delivered, recoverable: false, run_id: run.run_id, workflow_id: workflow.workflow_id };
   }
 
   // เกิน MAX_ENGINE_STEPS — กัน infinite loop (jump_to วนไม่รู้จบ)
   if (!(await failRun(run, `exceeded ${MAX_ENGINE_STEPS} steps — possible jump_to loop`))) {
     return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
   }
-  return { status: "error", detail: "max steps exceeded", delivered, run_id: run.run_id, workflow_id: workflow.workflow_id };
+  return { status: "error", detail: "max steps exceeded", delivered, recoverable: false, run_id: run.run_id, workflow_id: workflow.workflow_id };
 }
 
 // ─── runFlow / resumeFlow ──────────────────────────────────
@@ -676,7 +693,7 @@ async function runFlow(workflow: WorkflowDoc, run: WorkflowRunDoc, msg: EngineMe
     if (!(await failRun(run, "workflow has no trigger node"))) {
       return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
     }
-    return { status: "error", detail: "no trigger node", delivered: [], run_id: run.run_id, workflow_id: workflow.workflow_id };
+    return { status: "error", detail: "no trigger node", delivered: [], recoverable: false, run_id: run.run_id, workflow_id: workflow.workflow_id };
   }
   // เก็บข้อความตั้งต้นลง context
   const context = { ...run.context, initial_message: msg.text };
@@ -715,8 +732,9 @@ export async function resumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promi
     const cur = await coll.findOne({ run_id: run.run_id });
     if (cur?.resume_results?.[opKey]) return cur.resume_results[opKey];
     if (cur && cur.status !== "running" && cur.status !== "waiting_for_reply") {
-      // run จบไปแล้ว (completed/cancelled) → caller ควร fall through ไป match/trigger/bot
-      return { status: "error", detail: `run ${run.run_id} is ${cur.status} — cannot resume`, delivered: [], run_id: run.run_id, workflow_id: cur.workflow_id };
+      // run จบไปแล้ว (completed/cancelled) — ข้อความไม่ถูก flow ใดกิน → non-error
+      //   no_match: caller dispatch ต่อตามปกติ (error ไม่ใช่ "nothing to resume")
+      return { status: "no_match", detail: `run ${run.run_id} is ${cur.status} — cannot resume`, delivered: [], run_id: run.run_id, workflow_id: cur.workflow_id };
     }
     return inFlightResult(run.run_id, cur?.workflow_id, "resume in-flight — run owned by another worker");
   }
@@ -732,7 +750,7 @@ async function doResumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promise<En
     if (!(await failRun(run, "workflow deleted while run active"))) {
       return inFlightResult(run.run_id, run.workflow_id, "lost run ownership before failRun");
     }
-    return { status: "error", detail: "workflow not found", delivered: [], run_id: run.run_id };
+    return { status: "error", detail: "workflow not found", delivered: [], recoverable: false, run_id: run.run_id };
   }
 
   // ป้อนข้อความใหม่เข้า context — fenced (caller ต้องครอง run จาก acquireRun)
@@ -748,7 +766,7 @@ async function doResumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promise<En
     if (!(await failRun(run, `current node ${run.current_node_id} is not a wait node`))) {
       return inFlightResult(run.run_id, run.workflow_id, "lost run ownership before failRun");
     }
-    return { status: "error", detail: "cannot resume — not at wait node", delivered: [], run_id: run.run_id };
+    return { status: "error", detail: "cannot resume — not at wait node", delivered: [], recoverable: false, run_id: run.run_id };
   }
 
   // ⚡ Phase 2: ถ้า wait node มี Phase 2 config → validate answer_type → success/retry/exceeded
@@ -762,7 +780,61 @@ async function doResumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promise<En
     return await completeRun(workflow, run, context, [], "actioned", "wait node has no outgoing edge — flow ends", undefined, msg.operation_key);
   }
   const result = await walkGraph(workflow, { ...run, context }, msg, next[0], msg.operation_key);
-  return { ...result, status: result.status === "actioned" ? "resumed" : result.status };
+  if (result.status === "actioned") return { ...result, status: "resumed" };
+  return result;
+}
+
+// ─── Phase 9 — single inbound dispatch owner ──────────────
+
+/** workflow stage ของ fixed inbound pipeline — bot-worker + Test Chat ใช้
+ *  boundary เดียวกัน (ห้ามก๊อป precedence):
+ *    ไม่มี active run  → matchAndRun
+ *    resume no_match   → matchAndRun (run เดิมจบแล้ว — ข้อความยังไม่ถูก flow กิน)
+ *    สถานะอื่น (รวม exit_to_bot / error recoverable=true) → คืนตามเดิม ห้าม
+ *    match ซ้ำ — run เดิมอาจยังมี side effect; caller map ไป trigger/bot */
+export async function runInboundWorkflowStage(msg: EngineMessage): Promise<EngineResult> {
+  const config = await getSystemConfig();
+  if (!config.workflow_enabled) {
+    return { status: "no_match", detail: "workflow engine disabled", delivered: [] };
+  }
+  const activeRun = await getActiveRun(msg.conversation_id);
+  if (activeRun) {
+    const res = await resumeFlow(activeRun, msg);
+    if (res.status !== "no_match") return res;
+  }
+  return matchAndRun(msg);
+}
+
+/** leaf side-effect/render ของแต่ละ caller — precedence อยู่ใน owner ตัวเดียว */
+export interface InboundDispatchLeaves<R> {
+  workflowHandled(res: EngineResult): R | Promise<R>;   // actioned | resumed — terminal
+  workflowExitDrop(res: EngineResult): R | Promise<R>;  // terminal — ทิ้งข้อความ
+  workflowError(res: EngineResult): R | Promise<R>;     // error recoverable:false — terminal
+  workflowInFlight(res: EngineResult): R | Promise<R>;  // non-terminal — stop (ห้าม finalize)
+  triggerMatched(trigger: TriggerDoc): R | Promise<R>;  // trigger ตรง — caller รัน action
+  botFallback(): R | Promise<R>;                        // ไม่มี trigger — caller เรียก bot
+}
+
+/** Phase 9 — fixed order: active resume → new match → trigger → bot.
+ *  หนึ่ง inbound = หนึ่ง terminal outcome; branch บน typed status/recoverable
+ *  เท่านั้น (ห้าม parse reason string); workflow_priority ไม่มีผลแล้ว */
+export async function runInboundDispatch<R>(
+  msg: EngineMessage,
+  triggerText: string,
+  leaves: InboundDispatchLeaves<R>,
+): Promise<R> {
+  const res = await runInboundWorkflowStage(msg);
+  if (res.status === "in_flight") return leaves.workflowInFlight(res);
+  if (res.status === "error" && res.recoverable === false) return leaves.workflowError(res);
+  if (res.status === "actioned" || res.status === "resumed") return leaves.workflowHandled(res);
+  if (res.status === "exit_drop") return leaves.workflowExitDrop(res);
+  // no_match | exit_to_bot | error recoverable=true → trigger → bot
+  const trigger = await matchTrigger(triggerText, {
+    shopId: msg.config_shop_key,
+    platform: msg.platform,
+  });
+  if (trigger) return leaves.triggerMatched(trigger);
+  return leaves.botFallback();
 }
 
 // ─── Phase 2 — wait_for_reply resume with retry/timeout ──
@@ -824,10 +896,12 @@ async function resumePhase2Wait(
         return await completeRun(workflow, run, context, delivered, "actioned", "wait success but no outgoing edge — flow ends", undefined, execOpKey);
       }
       const result = await walkGraph(workflow, { ...run, context }, msg, fallback[0], execOpKey);
-      return { ...result, status: result.status === "actioned" ? "resumed" : result.status };
+      if (result.status === "actioned") return { ...result, status: "resumed" };
+      return result;
     }
     const result = await walkGraph(workflow, { ...run, context }, msg, next[0], execOpKey);
-    return { ...result, status: result.status === "actioned" ? "resumed" : result.status };
+    if (result.status === "actioned") return { ...result, status: "resumed" };
+    return result;
   }
 
   // ❌ ไม่ผ่าน → เช็ค retry
@@ -875,7 +949,8 @@ async function resumePhase2Wait(
   const exceededNext = nextNodeIds(workflow, waitNode.node_id, WAIT_BRANCH.RETRY_EXCEEDED);
   if (exceededNext.length > 0) {
     const result = await walkGraph(workflow, { ...run, context }, msg, exceededNext[0], execOpKey);
-    return { ...result, status: result.status === "actioned" ? "resumed" : result.status };
+    if (result.status === "actioned") return { ...result, status: "resumed" };
+    return result;
   }
   // ไม่มี retry_exceeded edge → จบ flow
   return await completeRun(workflow, run, context, delivered, "retry_exceeded", `wait retry exceeded ${maxRetries} — no retry_exceeded edge, flow ends`, undefined, execOpKey);
@@ -1250,7 +1325,8 @@ async function performAction(
       // เรียกบอทตอบ → คำตอบเก็บใน context.bot_answer → ส่งต่อลูกค้า
       // ⚡ planner หลักการ: หลัง let_ai_respond → fixed follow-up ทำได้ทันทีเพราะ bot_answer อยู่ใน context
       const conv = await getConversation(msg.conversation_id);
-      const shopName = conv?.shop_name || undefined;
+      // ⚡ resolved shopname (scope ctx) ก่อน — conv.shop_name หายบ่อย (~97% docs)
+      const shopName = msg.shopname ?? (conv?.shop_name || undefined);
       const history = msg.history || (msg.testSource === "botworker"
         // ⚡ botworker parallel — ใช้ grouped history เดียวกับ worker (merge botworker_messages)
         ? await getGroupedHistoryForBot({
@@ -1313,7 +1389,7 @@ async function performAction(
         } else {
           const result = await handoffService.handoffToAdminTest({
             conversationId: msg.conversation_id,
-            shopId: msg.shop_id,
+            shopId: msg.config_shop_key, // assignment pool = config domain
             platform: msg.platform,
             reason,
             source: src,
@@ -1347,7 +1423,7 @@ async function performAction(
       if (wantAdmin) {
         const outcome = await handoffService.handoffToAdmin({
           conversationId: msg.conversation_id,
-          shopId: msg.shop_id,
+          shopId: msg.config_shop_key,
           platform: msg.platform,
           reason,
           targetAdminId: wantAdmin,
@@ -1368,7 +1444,7 @@ async function performAction(
       //   failed → ไม่ surface handoff + ไม่เขียน success audit (bot ไม่ lock — ไม่มี durable state)
       const outcome = await handoffService.handoffToAdmin({
         conversationId: msg.conversation_id,
-        shopId: msg.shop_id,
+        shopId: msg.config_shop_key,
         platform: msg.platform,
         reason,
       });
@@ -1678,6 +1754,8 @@ async function processWaitTimeout(workflow: WorkflowDoc, run: WorkflowRunDoc, si
         message_id: `timeout_${run.run_id}`,
         conversation_id: run.conversation_id,
         shop_id: run.shop_id,
+        // legacy run (ก่อน field) → shop_id — semantics เดิมของ `?? msg.shop_id`
+        config_shop_key: run.config_shop_key ?? run.shop_id,
         platform: run.platform,
         customer_id: run.customer_id,
         text: "",
@@ -1710,4 +1788,6 @@ export const workflowEngine = {
   resumeFlow,
   checkWaitTimeouts,
   validateWaitAnswer,
+  runInboundWorkflowStage,
+  runInboundDispatch,
 };
