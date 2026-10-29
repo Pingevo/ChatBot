@@ -8830,3 +8830,11 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - คนที่ลาวันนี้แสดง "ลา — ปิดรับงาน" (เตรียม logic ปิดรับ handoff ตอนเชื่อม API)
 - `team/page.tsx`: Tab + `calendar`, tablist grid-cols-3→4, render `<LeaveCalendar agents={data.agents}/>`
 - verify: `npx tsc --noEmit` clean
+
+## ผ่านแล้ว (verified) — LeaveCalendar v2: partial-day leave + สวยขึ้น (2026-11-14)
+
+- model ขยาย `LeaveRecord.startTime/endTime` — ไม่ใส่=เต็มวัน, ใส่=ลาบางช่วง (ครึ่งวัน/1-2 ชม.)
+- `leaveStatusNow(leaves, adminId, now)` export → `off|partial|working` + window — พร้อมให้ handoff `pickAgent` เช็คว่าตอนนี้อยู่ในช่วงลาไหม (ปิดเฉพาะช่วง ไม่ใช่ทั้งวัน)
+- roster เปลี่ยนเป็น span bars (ลาต่อเนื่อง = แถบเดียวพาดข้ามวัน), partial = ลายทแยง striped + เวลาใน bar/tooltip; month view chip มี dot สี + เวลา
+- ชื่อคนแสดง avatar initial + สถานะวันนี้ (ลาเต็มวัน/ลา xx:xx–xx:xx ปิดรับงานช่วงนี้/รับงานแล้ว)
+- verify: `npx tsc --noEmit` clean
