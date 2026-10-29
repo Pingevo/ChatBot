@@ -232,6 +232,16 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     //   (persisted true เท่านั้นที่เปิด — invalid/missing → OFF)
     web_search_enabled: dbConfig.web_search_enabled === true,
 
+    // ⚡ Workstream E — normalize เป็น effective state เสมอ: key absent/non-bool → ON
+    //   (ตรง semantics ฝั่ง bot) เพื่อให้ UI อ่านค่าจริงได้
+    pool_sources: {
+      kb: dbConfig.pool_sources?.kb !== false,
+      mongo_catalog: dbConfig.pool_sources?.mongo_catalog !== false,
+      units: dbConfig.pool_sources?.units !== false,
+      image_text: dbConfig.pool_sources?.image_text !== false,
+    },
+    kb_source: dbConfig.kb_source === 'zaapi' ? 'zaapi' : 'legacy',
+
     updated_by: dbConfig.updated_by || 'system',
     updated_at: dbConfig.updated_at || new Date(),
   };
@@ -707,6 +717,8 @@ export const systemConfigService = {
   getSystemConfig,
   updateSystemConfig,
   setBotWorkerPlatformEnabled,
+  setKbSource,
+  zaapiKbReady,
   testIntegration,
   getAdminConfig,
   updateAdminConfig,
