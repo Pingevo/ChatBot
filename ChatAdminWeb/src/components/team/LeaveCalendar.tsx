@@ -126,9 +126,10 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
   const periodLabel = `${THAI_MONTHS[cursor.m]} ${cursor.y + 543}`;
 
   return (
-    <Card className="overflow-hidden">
+    // สูงเท่าพื้นที่จอที่เหลือหลัง header+tabs → body หลักไม่ scroll เลื่อนอยู่ใน card เท่านั้น
+    <Card className="overflow-hidden flex flex-col" style={{ height: "calc(100dvh - 250px)" }}>
       {/* header */}
-      <div className="px-4 sm:px-5 pt-4 pb-3 border-b border-border">
+      <div className="px-4 sm:px-5 pt-4 pb-3 border-b border-border shrink-0">
         <div className="flex flex-wrap items-end gap-x-3 gap-y-2">
           <div>
             <div className="flex items-center gap-2">
@@ -170,7 +171,7 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
         <div className="p-10 text-center text-sm text-text-muted">ยังไม่มี agent</div>
       ) : mode === "roster" ? (
         /* === Month roster: แถว=วันทั้งเดือน × คอลัมน์=คน + หมายเหตุ — เลื่อนแนวตั้ง header ติดบน === */
-        <div className="overflow-auto" style={{ maxHeight: "calc(100vh - 240px)" }}>
+        <div className="flex-1 min-h-0 overflow-auto">
           <table className="w-full border-collapse text-xs" style={{ minWidth: 90 + agents.length * 140 + 200 }}>
             <thead>
               <tr className="border-b border-border">
@@ -239,8 +240,8 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
           </table>
         </div>
       ) : (
-        /* === Month calendar: chip ชื่อคนที่ลาในแต่ละวัน — เลื่อนแนวตั้งได้เต็มจอ === */
-        <div className="p-3 sm:p-4 overflow-y-auto" style={{ maxHeight: "calc(100vh - 240px)" }}>
+        /* === Month calendar: chip ชื่อคนที่ลาในแต่ละวัน — เลื่อนแนวตั้งใน card === */
+        <div className="flex-1 min-h-0 p-3 sm:p-4 overflow-y-auto">
           <div className="grid grid-cols-7 gap-1.5">
             {THAI_DAYS_SHORT.map((d, i) => (
               <div key={i} className={`text-center text-[10.5px] font-semibold py-1 ${WORKING_DAYS.includes(i) ? "text-text-muted" : "text-text-subtle/50"}`}>{d}</div>
