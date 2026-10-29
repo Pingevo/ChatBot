@@ -2370,4 +2370,7 @@ export const workflowEngine = {
   validateWaitAnswer,
   runInboundWorkflowStage,
   runInboundDispatch,
+  escalateAiRun,
+  setMarketplaceAdapter,
+  matchAndRunEvent,
 };
