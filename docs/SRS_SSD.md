@@ -1116,12 +1116,14 @@ listing path:
 | Function | Purpose | Input | Output | Calls | Called by | How it works | Side effects |
 |---|---|---|---|---|---|---|---|
 | `_zaapi_allowed` | **zaapi read gate เดียว** | — | bool | `runtime_config.kb_enabled`/`kb_source` | `zaapi_kb_evidence` | kb ON **และ** kb_source=="zaapi" เท่านั้น — selector=legacy/OFF/exception → ห้ามอ่าน (fail-closed) | — |
-| `_shop_clause` | scope ตาม imported accounts | shop, platform | dict | — | `zaapi_kb_evidence` | `accounts.name =~ ^shop$ (i)` — shop ไม่อยู่ใน accounts ของ source → ไม่เห็น doc; platform เป็น filter เพิ่ม (กันชื่อชนข้าม platform); shop ว่าง → ต้องมี accounts ≥1 | — |
+| `_shop_clause` | scope ตาม imported accounts | shop, platform | dict | — | `zaapi_kb_evidence` | `accounts.name =~ ^shop$ (i)` **หรือ** `unscoped:true` (doc สร้างผ่าน admin UI — ใช้ได้ทุกร้าน) — shop ไม่อยู่ใน accounts → ไม่เห็น doc; platform เป็น filter เพิ่ม | — |
 | `zaapi_kb_evidence` | **zaapi KB → supporting evidence** (contract `KbEvidenceResult` เดียวกับ legacy) | `*, shop, platform, message, limit=20` | KbEvidenceResult | `_zaapi_allowed`, `_shop_clause`, `knowledge_base.extract_model_keywords`/`KbEvidenceResult`, `product_store._model_token_in_name`, `knowledge_base._admin_db` (lazy) | `app.py` grouped kb_fetcher เมื่อ kb_source=zaapi | gate → keywords → light pass (fields ของ docs ที่ scope เข้าร้าน ≤4000) → **ทุก keyword bounded-match ใน match cols** (รุ่น/รุ่นย่อ/แบรนด์/model/brand/ประเภท/คำถาม — matcher เดียวกับ legacy กันข้ามรุ่น) → score (model+2/hay+1/phrase+5) → fetch full เฉพาะ top → `supporting_evidence[{kind:kb_zaapi,payload:{text,fields,source}}]`; **คืน supporting เท่านั้น — imported KB ไม่สร้าง sellable candidate**; gate closed → trace `zaapi_gate_closed` zero reads | 1 light read + ≤1 `$in` read (bounded) |
 
 `app.py` wiring (P2): grouped kb_fetcher ที่ `_chat_impl` เลือก adapter ตาม `runtime_config.kb_source()` — `"zaapi"` → `kb_zaapi.zaapi_kb_evidence`, อื่น → `knowledge_base.kb_product_evidence` เดิม
 
-`docs/zaapi/script/import_zaapi_kb.py` (importer): manifest `knowledge-sources.json` → ไฟล์ xlsx=doc ต่อ row (`fields{col:val}`+`text` flattened), txt=doc เดียว; `fingerprint`=sha256 ไฟล์ (idempotent — ไม่เปลี่ยน skip); source หายจาก export → `active=false`; indexes: source_id/fingerprint/accounts.id/text; `--dry-run`/`--reset`; openpyxl 3.1.5 hyperlink patch (`address` kwarg)
+`docs/zaapi/script/import_zaapi_kb.py` (importer): manifest `knowledge-sources.json` → ไฟล์ xlsx=doc ต่อ row (`fields{col:val}`+`text` flattened), txt=doc เดียว; `fingerprint`=sha256 ไฟล์ (idempotent — ไม่เปลี่ยน skip); source หายจาก export → `active=false`; **`manual_edit:true` doc (แก้/สร้างผ่าน admin UI) importer ไม่ทับ/ลบ**; indexes: source_id/fingerprint/accounts.id/text; `--dry-run`/`--reset`; openpyxl 3.1.5 hyperlink patch (`address` kwarg)
+
+Admin UI (`/knowledge` → corpus switcher "Zaapi KB"): `api/zaapi-kb` GET `mode=sources|docs|list` (list=q/platform/active/sort+paginate) + POST create (manual doc `unscoped:true`) + `[id]` PATCH/DELETE — doc ที่แก้ mark `manual_edit`
 
 ### 6.35 `turn_decision.py` — ตัวตัดสินใจกลางต่อ 1 turn (Phase 2C.1 — Multi-Need TurnPlan, contract-only)
 

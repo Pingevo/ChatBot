@@ -38,15 +38,17 @@ def _zaapi_coll():
 
 def _shop_clause(shop: str | None, platform: str | None) -> dict:
     """scope ตาม accounts: name เทียบ shopname (case-insensitive) —
-    platform ให้เป็นบวกเท่านั้น (ชื่อชนกันข้าม platform ไม่เอามา)"""
+    platform ให้เป็นบวกเท่านั้น (ชื่อชนกันข้าม platform ไม่เอามา);
+    `unscoped` doc (สร้างผ่าน admin UI) ไม่ผูกร้าน → ใช้ได้ทุกร้าน"""
     if not shop:
-        return {"accounts.name": {"$exists": True, "$ne": ""}}
-    clause: dict = {"accounts.name":
+        return {"$or": [{"accounts.name": {"$exists": True, "$ne": ""}},
+                        {"unscoped": True}]}
+    scoped: dict = {"accounts.name":
                     {"$regex": f"^{re.escape(str(shop).strip())}$",
                      "$options": "i"}}
     if platform:
-        clause["accounts.platform"] = platform
-    return clause
+        scoped["accounts.platform"] = platform
+    return {"$or": [scoped, {"unscoped": True}]}
 
 
 def zaapi_kb_evidence(

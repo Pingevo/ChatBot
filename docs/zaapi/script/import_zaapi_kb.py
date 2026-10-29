@@ -173,7 +173,8 @@ def main() -> int:
         stats["sources"] += 1
         stats["docs"] += len(docs)
         if coll is not None:
-            coll.delete_many({"source_id": sid})
+            # manual_edit=True = doc ที่แอดมินแก้ผ่าน UI — importer ห้ามทับ/ลบ
+            coll.delete_many({"source_id": sid, "manual_edit": {"$ne": True}})
             coll.insert_many(docs)
 
     if coll is not None:
