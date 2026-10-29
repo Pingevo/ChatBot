@@ -31,7 +31,7 @@ import { testStatusConversationService, type TestSource } from "./testStatusConv
 import { statusConversationService } from "./statusConversationService";
 import { logBotworkerEvent } from "./botworkerEventService";
 import { isSafeFetchUrl } from "../lib/urlSafety";
-import { hasCanonicalConditions, evalCanonicalConditions, hasCanonicalAssignment, pickCanonicalAssignee } from "./workflowCanonicalEval";
+import { hasCanonicalConditions, evalCanonicalConditions, hasCanonicalAssignment, pickCanonicalAssignee, canonicalTriggerMatches } from "./workflowCanonicalEval";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -443,7 +443,12 @@ export async function matchAndRun(msg: EngineMessage): Promise<EngineResult> {
   for (const wf of workflows) {
     const triggerNode = wf.nodes.find((n) => n.type === "trigger");
     if (!triggerNode) continue;
-    if (!matchTriggerNode(triggerNode, msg.text)) continue;
+    // ⚡ canonical (Zaapi-import) trigger — message_received ยิงทุกข้อความ +
+    //   account scope (bound shop_ids) + once flags (per-conv / per-open)
+    //   legacy path: keyword match เท่านั้น (ไม่แตะ)
+    if (wf.import?.source === "zaapi") {
+      if (!(await canonicalTriggerMatches(triggerNode, msg, wf.workflow_id, wf.current_version_id))) continue;
+    } else if (!matchTriggerNode(triggerNode, msg.text)) continue;
 
     // ผ่าน keyword → เช็ค trigger_frequency
     if (!(await checkTriggerFrequency(wf, msg))) continue;

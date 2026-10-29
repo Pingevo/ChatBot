@@ -254,3 +254,50 @@ export async function pickCanonicalAssignee(
   if (sel.result === "contention") return { error: "reservation_contention" };
   return { pick: null, mode: "no_eligible_agent" };
 }
+
+// ─── canonical trigger match — Zaapi inbound triggers ───────────────────
+// message_received: ยิงทุกข้อความเข้า (ไม่มี keyword gate เหมือน legacy)
+//   account scope: accountIds (strip → binding kind=account → local_id=shop_id)
+//     binding row มีแต่ยังไม่ resolve → fail closed (ไม่ match)
+//     ไม่มี binding row → source ไม่ได้จำกัด account → ทุก account match
+//   triggerOncePerConversation: ยิงครั้งเดียวต่อ conversation (run เก่าสถานะใดก็นับ)
+//   triggerOncePerOpen: ยิงครั้งเดียวต่อ open episode — episode boundary =
+//     close_history ล่าสุด (run ที่เกิดหลัง close ล่าสุด = episode ปัจจุบัน)
+// subtypes อื่น (label_added/marketplace/...) ไม่ใช่ inbound-message trigger → false
+export const CANONICAL_INBOUND_TRIGGERS = new Set(["message_received"]);
+
+export async function canonicalTriggerMatches(
+  triggerNode: WorkflowNode, msg: EvalMessage,
+  workflowId: string, versionId: string | undefined,
+): Promise<boolean> {
+  if (!CANONICAL_INBOUND_TRIGGERS.has(String(triggerNode.subtype))) return false;
+
+  // account scope — binding row มีอยู่ไหม (source มี accountIds → requirement ถูกสร้าง)
+  const bindColl = await getCollection<BindingRow & { count?: number }>(COLLECTIONS.workflowBindings);
+  const acctReq = versionId
+    ? await bindColl.findOne({ workflow_id: workflowId, version_id: versionId, node_id: triggerNode.node_id, field_path: "accountIds", kind: "account" } as never)
+    : null;
+  if (acctReq) {
+    const ids = await boundLocalIds(workflowId, versionId, triggerNode.node_id, "accountIds", "account");
+    if (ids.length === 0) return false; // resolve ยังไม่เสร็จ → fail closed
+    if (!ids.includes(msg.shop_id)) return false;
+  }
+
+  const cfg = triggerNode.config as {
+    triggerOncePerConversation?: boolean; triggerOncePerOpen?: boolean;
+  } | undefined;
+  const runs = await getCollection<{ workflow_id: string; conversation_id: string; created_at: Date }>(COLLECTIONS.workflowRuns);
+  if (cfg?.triggerOncePerConversation === true) {
+    const prior = await runs.findOne({ workflow_id: workflowId, conversation_id: msg.conversation_id } as never);
+    if (prior) return false;
+  }
+  if (cfg?.triggerOncePerOpen === true) {
+    const closeHist = await getCollection<{ conversation_id: string; closed_at: Date }>(COLLECTIONS.closeHistory);
+    const lastClose = await closeHist.findOne({ conversation_id: msg.conversation_id } as never, { sort: { closed_at: -1 } });
+    const filter: Record<string, unknown> = { workflow_id: workflowId, conversation_id: msg.conversation_id };
+    if (lastClose?.closed_at) filter.created_at = { $gt: lastClose.closed_at };
+    const prior = await runs.findOne(filter as never);
+    if (prior) return false;
+  }
+  return true;
+}

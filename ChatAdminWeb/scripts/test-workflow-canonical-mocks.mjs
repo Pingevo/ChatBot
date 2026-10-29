@@ -20,6 +20,7 @@ export const COLLECTIONS = {
   systemConfigs: "system_configs",
   triggers: "triggers",
   assignmentCursors: "assignment_cursors",
+  closeHistory: "close_history",
 };
 
 export async function getCollection(name) { return mongo.getCollection(name); }

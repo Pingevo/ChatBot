@@ -290,6 +290,174 @@ async function main() {
     const p8 = await ce.pickCanonicalAssignee(assignNode, msg(), "wf_x", undefined);
     ok("error" in p8, "ไม่มี version_id → error (fail-closed)");
   }
+
+  // ─── 11. Flow 01 e2e — trigger → delay → conditions → assign ──
+  //   golden path: inbound → park 9m → sweep → in-hours → waiting>8m →
+  //   assignee ไม่ตรง → chat_assign team=all_admins → handoff persisted
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    const binds = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    const shops = await mongo.getCollection(COLLECTIONS.shops);
+    const admins = await mongo.getCollection(COLLECTIONS.admins);
+    const convs = await mongo.getCollection(COLLECTIONS.conversations);
+    const msgs = await mongo.getCollection(COLLECTIONS.messages);
+    const status = await mongo.getCollection(COLLECTIONS.statusConversation);
+    const cfg = await mongo.getCollection(COLLECTIONS.systemConfigs);
+    const cursors = await mongo.getCollection(COLLECTIONS.assignmentCursors);
+    await Promise.all([wfs, runs, binds, admins, convs, msgs, status, cursors]
+      .map((c) => c.deleteMany({}) as Promise<unknown>));
+
+    // business_hours 24/7 → ไม่ขึ้นเวลาจริงของ test
+    await shops.deleteMany({});
+    await shops.insertOne({
+      shop_id: "s1", shopname: "shop1", platform: "shopee",
+      business_hours: { timezone: "Asia/Bangkok", schedule: {
+        SUN: [{ start: 0, end: 1440 }], MON: [{ start: 0, end: 1440 }],
+        TUE: [{ start: 0, end: 1440 }], WED: [{ start: 0, end: 1440 }],
+        THU: [{ start: 0, end: 1440 }], FRI: [{ start: 0, end: 1440 }],
+        SAT: [{ start: 0, end: 1440 }] } },
+    });
+    await admins.insertMany([
+      { admin_id: "adm_a", role: "admin", active: true },
+      { admin_id: "adm_b", role: "admin", active: true },
+      { admin_id: "adm_bank", role: "admin", active: true },
+    ]);
+    await cfg.updateOne({ config_key: "main_config" } as never,
+      { $set: { config_key: "main_config", workflow_enabled: true } }, { upsert: true });
+
+    // flow 01 shape: trigger → delay → bh → waiting → assignee → assign
+    const V = "wv_f01";
+    await wfs.insertOne({
+      workflow_id: "wf_f01", name: "เก็บตกแชทค้าง", enabled: true, status: "published",
+      trigger_frequency: "every_time", current_version_id: V,
+      import: { source: "zaapi", source_workflow_id: "WF-f01" },
+      shop_ids: [], platforms: [], priority: 0,
+      nodes: [
+        { node_id: "zt", type: "trigger", subtype: "message_received",
+          config: { label: "ได้รับข้อความ", triggerOncePerConversation: false, triggerOncePerOpen: false }, position: { x: 0, y: 0 } },
+        { node_id: "zd", type: "wait", subtype: "delay",
+          config: { delay: { unit: "minutes", value: 9 } }, position: { x: 100, y: 0 } },
+        { node_id: "zb", type: "condition", subtype: "business_hours",
+          config: { label: "เวลาทำการ", conditions: [{ operator: "within_office_hours" }, { operator: "outside_office_hours" }] }, position: { x: 200, y: 0 } },
+        { node_id: "zw", type: "condition", subtype: "customer_waiting_time",
+          config: { label: "รอเกิน 8 นาที", conditions: [{ operator: "greater_than", customerWaitingTime: { unit: "minutes", value: 8 } }] }, position: { x: 300, y: 0 } },
+        { node_id: "za", type: "condition", subtype: "assignee",
+          config: { label: "มีเจ้าของในลิสต์", conditions: [{ operator: "equals" }] }, position: { x: 400, y: 0 } },
+        { node_id: "zs", type: "action", subtype: "assign_ticket",
+          config: { action: { assignment: { teamIds: [], userIds: [], assignWhenAllOoh: false, assignToLastTicketHandledBy: false, lastAssignedUsersIndex: 0 } } }, position: { x: 500, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "zt", target_node_id: "zd" },
+        { edge_id: "e2", source_node_id: "zd", target_node_id: "zb" },
+        { edge_id: "e3", source_node_id: "zb", target_node_id: "zw", branch: "condition-index-0" },
+        // e4: condition-index-1 (นอกเวลา) ไม่มี edge → flow จบ
+        { edge_id: "e5", source_node_id: "zw", target_node_id: "za", branch: "condition-index-0" },
+        // e6: waiting no-match → จบ; assignee condition-index-0 (มีเจ้าของ) → จบ
+        { edge_id: "e7", source_node_id: "za", target_node_id: "zs", branch: "no-match" },
+      ],
+    });
+    await binds.insertMany([
+      { binding_id: "wb_acc", workflow_id: "wf_f01", version_id: V, node_id: "zt",
+        field_path: "accountIds", kind: "account", count: 1, source_values: ["za_acct"],
+        status: "resolved", resolution: { mappings: [{ local_id: "s1", platform: "shopee", state: "valid" }] } },
+      { binding_id: "wb_asn", workflow_id: "wf_f01", version_id: V, node_id: "za",
+        field_path: "conditions[0].assigneeUserId", kind: "user", count: 1, source_values: ["za_u"],
+        status: "resolved", resolution: { mappings: [{ local_id: "adm_bank", state: "valid" }] } },
+      { binding_id: "wb_tm", workflow_id: "wf_f01", version_id: V, node_id: "zs",
+        field_path: "action.assignment.teamIds", kind: "team", count: 1, source_values: ["za_team"],
+        status: "resolved", resolution: { mappings: [{ local_id: "all_admins", state: "valid" }] } },
+    ]);
+    // conv ลูกค้าส่งมา 20 นาทีแล้ว ไม่มี staff ตอบ → waiting > 8m; ยังไม่มีเจ้าของ
+    await convs.insertOne({ conversation_id: "cv_e1", platform: "shopee", shop_id: "s1" });
+    await msgs.insertOne({ conversation_id: "cv_e1", direction: "in", created_timestamp: new Date(Date.now() - 20 * 60_000) });
+    await status.insertOne({ conversation_id: "cv_e1", status: "bot", assigned_to: null });
+
+    // 1) inbound → trigger match (message_received ไม่ต้องมี keywords) → park ที่ delay
+    const m: Record<string, unknown> = { conversation_id: "cv_e1", shop_id: "s1", platform: "shopee",
+      config_shop_key: "s1", text: "สวัสดี" };
+    const r1 = await eng.matchAndRun(m as never);
+    eq(r1.status, "actioned", "e2e: inbound → delay park (actioned)");
+    const run1 = await runs.findOne({ conversation_id: "cv_e1" });
+    eq(run1?.status, "waiting_for_timer", "run park ที่ delay 9m");
+    ok(run1?.resume_at instanceof Date, "resume_at ถูกตั้ง");
+
+    // 2) account scope — ข้อความจาก shop อื่น (ไม่ใช่ bound account) → no_match
+    const r2 = await eng.matchAndRun({ ...m, conversation_id: "cv_e2", shop_id: "s_other" } as never);
+    eq(r2.status, "no_match", "account scope: shop ไม่อยู่ใน bound accounts → no_match");
+
+    // 3) ถึงเวลา → sweep → resume → conditions ผ่าน → assign → handoff persisted
+    await runs.updateOne({ conversation_id: "cv_e1" } as never,
+      { $set: { resume_at: new Date(Date.now() - 1000) } });
+    const swept = await eng.sweepDueTimerRuns(new Date());
+    eq(swept.due, 1, "sweep เจอ run due");
+    const runDone = await runs.findOne({ conversation_id: "cv_e1" });
+    eq(runDone?.status, "completed", "e2e: run เดินครบ graph → completed");
+    const meta = await status.findOne({ conversation_id: "cv_e1" });
+    eq(meta?.assigned_to, "adm_a", "chat_assign → handoff persisted adm_a (round-robin แรก)");
+    eq(runDone?.outcome, "actioned", "run outcome = actioned (assign สำเร็จ)");
+
+    // 4) ครั้งสองบน conv เดียวกัน (flags ปิด → ยิงได้อีก) — เจ้าของ adm_a ไม่อยู่ใน
+    //    assignee list (adm_bank เท่านั้น) → no-match → re-assign ตาม flow +
+    //    round-robin หมุนต่อ adm_b (Zaapi semantics: list ยกเว้นเฉพาะคนที่ระบุ)
+    await msgs.insertOne({ conversation_id: "cv_e1", direction: "in", created_timestamp: new Date(Date.now() - 19 * 60_000) });
+    const r3 = await eng.matchAndRun(m as never);
+    eq(r3.status, "actioned", "re-fire: message ใหม่ → run ใหม่ park (flags=false)");
+    const runCount = await runs.countDocuments({ conversation_id: "cv_e1" });
+    eq(runCount, 2, "run ที่สองถูกสร้าง (triggerOnce flags=false)");
+    await runs.updateOne({ conversation_id: "cv_e1", status: "waiting_for_timer" } as never,
+      { $set: { resume_at: new Date(Date.now() - 1000) } });
+    await eng.sweepDueTimerRuns(new Date());
+    const meta2 = await status.findOne({ conversation_id: "cv_e1" });
+    eq(meta2?.assigned_to, "adm_b", "re-assign → round-robin หมุน adm_b (adm_a ไม่อยู่ใน assignee list)");
+  }
+
+  // ─── 12. trigger once flags ─────────────────────────────
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    const closeHist = await mongo.getCollection(COLLECTIONS.closeHistory);
+    await wfs.deleteMany({}); await runs.deleteMany({}); await closeHist.deleteMany({});
+    const trig = (flags: Record<string, unknown>) => ({
+      node_id: "zt", type: "trigger", subtype: "message_received", config: flags, position: { x: 0, y: 0 },
+    }) as never;
+    const m2: Record<string, unknown> = { conversation_id: "cv_o1", shop_id: "s1", platform: "shopee" };
+    // ไม่มี accountIds binding → ทุก account
+    const r0 = await ce.canonicalTriggerMatches(trig({}), m2 as never, "wf_o1", "wv_o1");
+    eq(r0, true, "message_received + no accountIds binding → match");
+    // once_per_conversation: run เก่าอยู่ → ไม่ match
+    await runs.insertOne({ run_id: "r_old", workflow_id: "wf_o1", conversation_id: "cv_o1", status: "completed", created_at: new Date() });
+    const r1 = await ce.canonicalTriggerMatches(trig({ triggerOncePerConversation: true }), m2 as never, "wf_o1", "wv_o1");
+    eq(r1, false, "oncePerConversation + run เดิม → ไม่ match");
+    const r1b = await ce.canonicalTriggerMatches(trig({ triggerOncePerConversation: true }), { ...m2, conversation_id: "cv_o2" } as never, "wf_o1", "wv_o1");
+    eq(r1b, true, "oncePerConversation + conv ใหม่ → match");
+    // once_per_open: close → run หลัง close นับเป็น episode ใหม่
+    const closeAt = new Date(Date.now() - 60_000);
+    await closeHist.insertOne({ conversation_id: "cv_o1", closed_at: closeAt });
+    // r_old (created now > closeAt) อยู่ใน episode ปัจจุบัน → block อยู่แล้ว;
+    //   ลบออกแล้วเหลือเฉพาะ run ก่อน close → episode ใหม่ว่าง → match
+    await runs.updateOne({ run_id: "r_old" } as never, { $set: { created_at: new Date(closeAt.getTime() - 60_000) } });
+    await runs.insertOne({ run_id: "r_ep2", workflow_id: "wf_o1", conversation_id: "cv_o1", status: "completed", created_at: new Date(closeAt.getTime() + 1000) });
+    const r2 = await ce.canonicalTriggerMatches(trig({ triggerOncePerOpen: true }), m2 as never, "wf_o1", "wv_o1");
+    eq(r2, false, "oncePerOpen + run ใน episode ปัจจุบัน → ไม่ match");
+    await runs.deleteOne({ run_id: "r_ep2" } as never);
+    const r3 = await ce.canonicalTriggerMatches(trig({ triggerOncePerOpen: true }), m2 as never, "wf_o1", "wv_o1");
+    eq(r3, true, "oncePerOpen + reopen แล้วยังไม่มี run episode นี้ → match");
+    // subtype ไม่ใช่ inbound → false (label_added ฯลฯ เป็น event source อื่น)
+    const r4 = await ce.canonicalTriggerMatches(trig({}), m2 as never, "wf_o1", "wv_o1") &&
+      await ce.canonicalTriggerMatches({ node_id: "zl", type: "trigger", subtype: "label_added", config: {}, position: { x: 0, y: 0 } } as never, m2 as never, "wf_o1", "wv_o1") === false;
+    eq(r4, true, "label_added → ไม่ match inbound (event source ต่างหาก)");
+    // accountIds binding unresolved → fail closed
+    const binds2 = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    await binds2.deleteMany({});
+    await binds2.insertOne({ binding_id: "wb_ax", workflow_id: "wf_o1", version_id: "wv_o1", node_id: "zt",
+      field_path: "accountIds", kind: "account", count: 1, source_values: ["x"], status: "unresolved" });
+    const r5 = await ce.canonicalTriggerMatches(trig({}), m2 as never, "wf_o1", "wv_o1");
+    eq(r5, false, "accountIds binding unresolved → no match (fail-closed)");
+    void eng;
+  }
 }
 
 main().then(() => {
