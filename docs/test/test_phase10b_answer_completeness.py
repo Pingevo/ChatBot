@@ -810,17 +810,21 @@ def test_need_ranking_applies_before_truncation():
 
 
 def test_ungrounded_explicit_fact_need_normalizes_scope():
-    """D: explicit scope + ไม่มี refs + fact need → current_single —
-    resolver consume persisted single ผ่าน machinery เดิม."""
+    """D: classifier emit ref_kind=current_subject → current_single —
+    resolver consume persisted single ผ่าน machinery เดิม
+    (migrated: carrier heuristic ถูกลบ — ref classification อยู่ที่
+    semantic owner)."""
     plan = td.decide_turn(
         "Speed data เท่าไหร่?ครับ",
         intent_result={"intent": "product_spec",
                        "requested_facts": ["data_transfer_speed"],
-                       "subject_scope": "explicit", "confidence": 0.9})
+                       "subject_scope": "explicit",
+                       "ref_kind": "current_subject",
+                       "confidence": 0.9})
     prod = [n for n in plan.needs if n.kind == "product"]
     assert prod, "ต้องมี product need"
     assert prod[0].subject_scope == "current_single", (
-        f"explicit ไร้ refs + fact-question → current_single — "
+        f"ref_kind=current_subject → current_single — "
         f"got {prod[0].subject_scope}")
 
 
@@ -1020,64 +1024,98 @@ def test_context_absent_answer_names_capability_asks():
         f"context-absent outcome ต้อง name ask — answer:\n{answer}")
 
 
-# ── LOW-2: ungrounded explicit scope repair ต้องครอบทุก typed carrier ───────
+# ── LOW-2: subject-ref intent contract — classifier emit typed ref_kind ─────
+#   semantic owner (classifier) บอกเหตุผลของ scope ตรงๆ — consumer
+#   (decide_turn) map typed→typed เท่านั้น: ห้าม infer scope จาก carrier
+#   presence (heuristic repair เดิมของ facts ถูกลบ)
 
-@pytest.mark.xfail(strict=False, reason="LOW-2 — awaiting separate approval")
-def test_spec_only_explicit_scope_normalizes_current_single():
-    """LOW-2a: explicit ไร้ refs + need แบก spec_constraints เพียงอย่างเดียว
-    → repair เดียวกับ facts (r16) ต้องเป็น current_single — มิฉะนั้น
-    resolver เห็น explicit → no_subject_ref → persisted single ไม่ถูก
-    consume (Wattaka Q2 fan-out shape ผ่าน carrier อื่น)."""
+def test_spec_only_current_subject_ref_kind_normalizes_scope():
+    """LOW-2a: classifier emit ref_kind="current_subject" → decide_turn
+    map เป็น current_single — spec carrier ก็ได้ผลเหมือน facts."""
     plan = td.decide_turn(
         "10Gbps + แม่เหล็ก",
         intent_result={"intent": "product_spec",
                        "spec_constraints": [{"field": "data_transfer_mbps",
                                              "op": "gte", "value": 10000}],
-                       "subject_scope": "explicit", "confidence": 0.9})
+                       "subject_scope": "explicit",
+                       "ref_kind": "current_subject",
+                       "confidence": 0.9})
     prod = [n for n in plan.needs if n.kind == "product"]
     assert prod and prod[0].spec_constraints, (
         f"premise: product need ต้องแบก spec_constraints — {plan.needs}")
-    assert not prod[0].subject_refs, (
-        f"premise: ต้องไม่มี subject refs — {prod[0].subject_refs}")
     assert prod[0].subject_scope == "current_single", (
-        f"ungrounded explicit + spec carrier → current_single — "
+        f"ref_kind=current_subject → current_single — "
         f"got {prod[0].subject_scope}")
 
 
-@pytest.mark.xfail(strict=False, reason="LOW-2 — awaiting separate approval")
-def test_feature_only_explicit_scope_normalizes_current_single():
-    """LOW-2b: required_features carrier — contract เดียวกับ spec."""
+def test_feature_only_current_subject_ref_kind_normalizes_scope():
+    """LOW-2b: required_features carrier — contract เดียวกัน."""
     plan = td.decide_turn(
         "แม่เหล็กมีไหม",
         intent_result={"intent": "product_spec",
                        "required_features": ["magnetic"],
-                       "subject_scope": "explicit", "confidence": 0.9})
+                       "subject_scope": "explicit",
+                       "ref_kind": "current_subject",
+                       "confidence": 0.9})
     prod = [n for n in plan.needs if n.kind == "product"]
     assert prod and prod[0].required_features, (
         f"premise: product need ต้องแบก required_features — {plan.needs}")
-    assert not prod[0].subject_refs, (
-        f"premise: ต้องไม่มี subject refs — {prod[0].subject_refs}")
     assert prod[0].subject_scope == "current_single", (
-        f"ungrounded explicit + feature carrier → current_single — "
+        f"ref_kind=current_subject → current_single — "
         f"got {prod[0].subject_scope}")
 
 
-@pytest.mark.xfail(strict=False, reason="LOW-2 — awaiting separate approval")
-def test_ask_only_explicit_scope_normalizes_current_single():
-    """LOW-2c: capability_asks carrier — follow-up capability question
-    (shape เดียวกับ fact follow-up) ต้อง repair เหมือนกัน."""
+def test_ask_only_current_subject_ref_kind_normalizes_scope():
+    """LOW-2c: capability_asks carrier — contract เดียวกัน."""
     plan = td.decide_turn(
         "ใช้โหมดวิ่งบนหน้าจอได้ไหม",
         intent_result={"intent": "product_spec",
                        "capability_asks": ["ใช้โหมดวิ่งบนหน้าจอได้ไหม"],
-                       "subject_scope": "explicit", "confidence": 0.9})
+                       "subject_scope": "explicit",
+                       "ref_kind": "current_subject",
+                       "confidence": 0.9})
     prod = [n for n in plan.needs if n.kind == "product"]
     assert prod and prod[0].capability_asks, (
         f"premise: product need ต้องแบก capability_asks — {plan.needs}")
-    assert not prod[0].subject_refs, (
-        f"premise: ต้องไม่มี subject refs — {prod[0].subject_refs}")
     assert prod[0].subject_scope == "current_single", (
-        f"ungrounded explicit + ask carrier → current_single — "
+        f"ref_kind=current_subject → current_single — "
+        f"got {prod[0].subject_scope}")
+
+
+def test_ref_kind_explicit_and_unknown_pass_verbatim():
+    """ref_kind != current_subject → decide_turn ไม่ override —
+    explicit_subject→explicit · new_discovery→none · unknown→pass
+    scope verbatim (classifier เจ้าของ semantic — consumer ไม่เดา)."""
+    for rk, want in (("explicit_subject", "explicit"),
+                     ("new_discovery", "none"),
+                     ("unknown", "explicit")):
+        plan = td.decide_turn(
+            "10Gbps + แม่เหล็ก",
+            intent_result={"intent": "product_spec",
+                           "spec_constraints": [
+                               {"field": "data_transfer_mbps",
+                                "op": "gte", "value": 10000}],
+                           "subject_scope": "explicit",
+                           "ref_kind": rk, "confidence": 0.9})
+        prod = [n for n in plan.needs if n.kind == "product"]
+        assert prod, f"premise — {plan.needs}"
+        assert prod[0].subject_scope == want, (
+            f"ref_kind={rk} → scope={want} — got "
+            f"{prod[0].subject_scope}")
+
+
+def test_no_ref_kind_no_repair():
+    """intent_result เก่าไม่มี ref_kind → decide_turn ไม่ repair เลย —
+    heuristic carrier-check ถูกลบ (explicit+facts ไร้ refs คง explicit)."""
+    plan = td.decide_turn(
+        "ราคาเท่าไหร่",
+        intent_result={"intent": "product_question",
+                       "requested_facts": ["price"],
+                       "subject_scope": "explicit", "confidence": 0.9})
+    prod = [n for n in plan.needs if n.kind == "product"]
+    assert prod, f"premise — {plan.needs}"
+    assert prod[0].subject_scope == "explicit", (
+        f"ไม่มี ref_kind → ไม่ repair (heuristic deleted) — "
         f"got {prod[0].subject_scope}")
 
 
@@ -1570,18 +1608,33 @@ def test_intrinsic_ask_named_when_compat_undecided_second_label():
         f"answer:\n{answer}")
 
 
-@pytest.mark.xfail(strict=False, reason="LOW-4c — awaiting separate approval")
+def _intrinsic_ask_plan_typed(target: str):
+    """intrinsic ask ที่ classifier ติดป้าย typed ask scope — semantic
+    owner บอกตรงๆ ว่า ask นี้ถาม capability ของสินค้าเอง ไม่ใช่
+    relation outcome — consumer (decide_turn) ไม่ move."""
+    msg = f"นาฬิกาแสดง {target} บนหน้าจอได้ไหม"
+    intent = {"intent": "compatibility_check",
+              "product_type": "smartwatch",
+              "relation_target": target,
+              "capability_asks": [f"แสดง {target} บนหน้าจอ"],
+              "intrinsic_asks": [f"แสดง {target} บนหน้าจอ"],
+              "subject_scope": "explicit", "confidence": 0.9}
+    return td.decide_turn(msg, intent_result=intent)
+
+
 def test_decided_compat_intrinsic_ask_still_reaches_outcome():
-    """LOW-4c: intrinsic ask ถูก move ไป compat + compat decided (declared
-    works_with proof) → verdict segment cover need — ask ต้องยังมี
-    explicit outcome (need-completeness: verdict ตอบ relation แต่ไม่
-    ตอบ intrinsic capability — ห้ามหายเงียบ)."""
-    plan = _intrinsic_ask_plan("Example Dock")
-    compat = [n for n in plan.needs if n.kind == "compat"]
-    assert compat and compat[0].capability_asks == (
+    """LOW-4c: intrinsic ask (typed intrinsic_asks) คงอยู่บน product
+    need ไม่ move ไป compat → compat decided ตอบ relation แต่ ask
+    ต้องยังมี explicit outcome (need-completeness)."""
+    plan = _intrinsic_ask_plan_typed("Example Dock")
+    prod = [n for n in plan.needs if n.kind == "product"]
+    assert prod and prod[0].capability_asks == (
         "แสดง Example Dock บนหน้าจอ",), (
-            f"premise: intrinsic ask ต้องอยู่ compat need — "
+            f"premise: intrinsic ask ต้องคงบน product need — "
             f"{[n.capability_asks for n in plan.needs]}")
+    compat = [n for n in plan.needs if n.kind == "compat"]
+    assert compat and not compat[0].capability_asks, (
+        f"premise: compat need ต้องไม่รับ intrinsic ask — {plan.needs}")
     needs = plan.needs
     req0 = _req("req-0", types=("smartwatch",), trefs=("Example Dock",),
                 target="Example Dock", cm="bluetooth_general")
@@ -1597,11 +1650,28 @@ def test_decided_compat_intrinsic_ask_still_reaches_outcome():
     v = [x for x in ctx.compat_verdicts]
     assert v and v[0].decision.outcome == "compatible", (
         f"premise: compat ต้อง decided — {ctx.compat_verdicts}")
-    answer = _render(_compose(needs, ctx,
-                              product_text="spec ของ Generic Watch A"))
-    assert "แสดง Example Dock บนหน้าจอ" in answer, (
+    # intrinsic ask ต้องมี typed outcome channel — subject evidence มี
+    #   → ride model task (model แยก subclaim จากหลักฐาน); channel =
+    #   capability_asks บน task — ห้ามหายเงียบที่ deterministic boundary
+    prod_idx = needs.index(prod[0])
+    prod_asks = tuple(
+        a for t in ctx.task.tasks
+        if t.need_index == prod_idx
+        for a in (t.capability_asks or ()))
+    assert "แสดง Example Dock บนหน้าจอ" in prod_asks, (
         f"decided-compat ห้ามทำ intrinsic ask หายเงียบ — "
-        f"answer:\n{answer}")
+        f"task:{[(t.need_index, t.capability_asks) for t in ctx.task.tasks]}")
+
+
+def test_relation_ask_still_moves_to_compat():
+    """control: ask ที่ไม่ได้ติดป้าย intrinsic → move ไป compat need
+    เหมือนเดิม (typed ask scope เท่านั้นที่หยุด move — containment
+    เดิมไม่เปลี่ยน)."""
+    plan = _intrinsic_ask_plan("Example Dock")
+    compat = [n for n in plan.needs if n.kind == "compat"]
+    c_asks = tuple(a for n in compat for a in n.capability_asks)
+    assert c_asks == ("แสดง Example Dock บนหน้าจอ",), (
+        f"relation ask ต้อง move ไป compat — got {c_asks}")
 
 
 # ── M: FIX A — code-ref ≡ persisted subject identity (W01 Q2 incident) ─────

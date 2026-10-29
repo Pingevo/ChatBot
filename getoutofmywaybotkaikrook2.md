@@ -7917,3 +7917,35 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 **mechanism delta จริง:** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 fallbacks+0 deps+0 provider+0 · normalization condition +1 (ใน block เดิม — class เดียวกับ name-echo rule) · typed fields consume +0 (compat_verdicts มีอยู่แล้ว) → **net ≈ +1 ใน owner เดิม**
 **SRS §6:** `compose_answer` (H1 co-mention clause) — ครบ
 **หมายเหตุ:** undecided outcome (unknown/admin_review) ไม่เข้าเงื่อนไข — ไม่มี verdict owner ของ truth นั้น · B2 residual (invented claim ไม่มี verdict) ยังเปิด — prose-side detection ต้อง semantic matching (forbidden) → root fix = structured model output claims (contract change แยก — รอ design approval); constraint-segment co-mention เป็น surface ที่เกี่ยวข้องแต่ต่าง shape — ยังไม่แตะ
+
+
+## กำลังทำ — LOW-2 + LOW-4c audit (RED tests เขียนแล้ว รออนุมัติแก้)
+
+- audit: heuristic repair เดิม (`explicit + facts + no refs → current_single`)
+  ครอบแค่ facts carrier — spec/feats/asks หลุด; ask-ownership move ที่
+  turn_decision ใช้ containment เท่านั้น → intrinsic ask ถูกกลืนโดย compat verdict
+- RED tests (test_phase10b_answer_completeness.py): 6 failed / 3 passed
+  - ref_kind=current_subject ×3 carriers → explicit (field ยังไม่มี)
+  - ref_kind verbatim map + no_ref_kind_no_repair → RED (พิสูจน์ heuristic
+    ยังอยู่)
+  - intrinsic_asks typed → ask โดน move ไป compat (ยังไม่ consume field)
+- เสนอ contract: classifier emit `ref_kind` + `intrinsic_asks` (semantic owner)
+  consumer ทำ typed→typed map เท่านั้น + ลบ carrier heuristic — รออนุมัติ
+
+
+## ผ่านแล้ว — LOW-2 + LOW-4c: typed ref_kind + intrinsic_asks contract
+
+- error: (a) follow-up ถาม spec/feature/ask ของตัวที่คุยอยู่ → classifier emit
+  explicit ไร้ refs → resolver ไม่ผูก current subject → ตอบผิดตัว;
+  (b) intrinsic capability ask ("แสดง X บนหน้าจอ") ถูก move ไป compat need
+  → verdict ตอบ relation → คำถามจริงหายเงียบ
+- เพราะ: semantic การอ้างอิงถูกเดาที่ consumer (carrier-presence heuristic
+  ครอบแค่ facts) + containment move เดา ask scope เอง
+- แก้: classifier emit `ref_kind` (closed enum) + `intrinsic_asks` (⊂
+  capability_asks) → decide_turn map typed→typed ที่ scope-read จุดเดียว +
+  ลบ carrier heuristic ทั้ง merge/new-need path → move loop ข้าม typed
+  intrinsic asks → intrinsic ask ride model task บน product need
+- ผลกระทบ: mechanism net: heuristic −1, typed fields +2, consume +2;
+  test เดิมที่ pin heuristic migrate เป็น inject ref_kind;
+  ref_kind ผิด → unknown/verbatim fallback = พฤติกรรมเดิม
+- verify: RED 6→GREEN 13/13 · regression 550 passed + 89 passed, 0 failed

@@ -122,6 +122,12 @@ capability_asks: list ของความสามารถ/ฟังก์ช
 - ไม่ใช่ spec ตัวเลข (→ spec_constraints), ไม่ใช่ข้อเท็จจริงมาตรฐาน (→ requested_facts),
   ไม่ใช่คู่เชื่อมต่อ/อุปกรณ์/แอปที่ระบุชื่อ (→ target_device/relation_target)
 
+intrinsic_asks: subset ของ capability_asks ที่ถาม "ความสามารถของตัวสินค้าเอง"
+  แม้ span จะเอ่ยชื่อสิ่งภายนอก — คัด span เดียวกับใน capability_asks เท่านั้น (ไม่มี → [])
+- เช่น "แสดง Strava บนหน้าจอ" = ถามว่าหน้าจอนาฬิกาแสดงได้ไหม (ถามตัวนาฬิกา)
+  ไม่ใช่ถามว่าเชื่อมต่อกับ Strava ได้ไหม → intrinsic
+- ถ้า ask ถามเรื่องเชื่อมต่อ/ความเข้ากันได้/ใช้ร่วมกับสิ่งนั้น → ไม่ใส่ที่นี่ (relation)
+
 general_qtype: ถ้า intent=general_question ระบุประเภทคำถามทั่วไป (ถ้าไม่ใช่ general_question → null)
 - "warranty_policy": ถามนโยบาย/เงื่อนไขรับประกัน (เช่น "รับประกันกี่ปี", "มีประกันไหม", "เคลมยังไง")
 - "return_policy": ถามนโยบายรับคืน/เปลี่ยนสินค้า (เช่น "รับคืนไหม", "เปลี่ยนสินค้าได้ไหม")
@@ -139,6 +145,13 @@ subject_scope: ลูกค้าอ้างอิงสินค้าที�
 - "none": ไม่อ้างอิงสินค้าเดิม (คำถามใหม่/ทั่วไป/ระบุประเภทสินค้าใหม่)
 
 subject_count: ตัวเลขจำนวนสินค้าที่ลูกค้าระบุ เฉพาะเมื่อ subject_scope=current_set ("2 อันนี้"→2, "ทั้งสาม"→3) — null ถ้าไม่ระบุตัวเลขหรือ scope อื่น
+
+ref_kind: ลูกค้าอ้างอิงสินค้าแบบใด — เลือกจาก:
+- "current_subject": ถามต่อเรื่องสินค้าที่คุยอยู่ในประวัติ โดยไม่เอ่ยชื่อ/รุ่นใหม่
+  (เช่น history คุยเรื่องสินค้าหนึ่งอยู่ แล้วถาม "10Gbps + แม่เหล็กไหม", "กันน้ำไหม", "ราคาเท่าไหร่")
+- "explicit_subject": ระบุชื่อ/รุ่น/รหัสสินค้าชัดเจนในข้อความ
+- "new_discovery": ขอดู/แนะนำสินค้าใหม่ ไม่ได้อ้างตัวที่คุยอยู่
+- "unknown": บอกไม่ได้/ไม่เกี่ยวข้อง — ถ้าไม่แน่ใจให้ตอบ "unknown" ห้ามเดา
 
 policy_reason: สาเหตุที่ลูกค้าอยากเปลี่ยน/คืน (เฉพาะเมื่อ general_qtype="return_policy" หรือคำถามเกี่ยวกับเปลี่ยน/คืน) — เลือกจาก:
 - "customer_wrong_model": ลูกค้าซื้อผิดรุ่นเอง / อยากเปลี่ยนเพราะเลือกผิด
@@ -255,6 +268,7 @@ _DEFAULT_RESULT: dict[str, Any] = {
     "general_qtype": None,
     "subject_scope": "none",
     "subject_count": None,
+    "ref_kind": "unknown",
     # Phase 5 — typed policy signals (closed enum; invalid → "unknown")
     "policy_reason": "unknown",
     "policy_item_condition": "unknown",
@@ -265,10 +279,15 @@ _DEFAULT_RESULT: dict[str, Any] = {
     "spec_constraints": [],
     # capability asks = residual source-grounded excerpt จาก message ลูกค้า
     "capability_asks": [],
+    "intrinsic_asks": [],
     "confidence": 0.0,
 }
 
 _SUBJECT_SCOPES = {"none", "explicit", "current_single", "current_set"}
+# ref classification (semantic ของ subject_scope) — closed enum;
+#   consumer map typed→typed เท่านั้น
+REF_KINDS = frozenset({
+    "current_subject", "explicit_subject", "new_discovery", "unknown"})
 
 # closed contract enums — consumer normalize ผ่าน intent_fact_scope
 # (route_context) ซ้ำอีกชั้น ค่านอก enum → drop (fail closed)
@@ -427,6 +446,17 @@ def classify_intent(
                 _seen_ca.add(_k)
                 _kept_ca.append(_span)
         result["capability_asks"] = _kept_ca[:8]
+        # intrinsic_asks = typed ask-scope จาก semantic owner — subset ของ
+        #   capability_asks ที่ผ่าน validation แล้วเท่านั้น (normalized key);
+        #   ref_kind = closed enum — ค่านอก contract → "unknown" (fail closed)
+        _ca_keys = {"".join(s.split()).casefold() for s in _kept_ca}
+        _ia = result.get("intrinsic_asks")
+        result["intrinsic_asks"] = [
+            s for s in (str(x).strip() for x in
+                        (_ia if isinstance(_ia, (list, tuple)) else ()))
+            if s and "".join(s.split()).casefold() in _ca_keys]
+        if result.get("ref_kind") not in REF_KINDS:
+            result["ref_kind"] = "unknown"
         # relation_target ต้อง grounded — คัดมาจากข้อความลูกค้าจริงเท่านั้น;
         # ไม่ใช่ str / ไม่อยู่ใน message / spec-like → None (fail closed)
         _rt = result.get("relation_target")
