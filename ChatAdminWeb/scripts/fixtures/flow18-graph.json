@@ -1,0 +1,75 @@
+{
+  "name": "เตือนลูกค้ารอเกิน 10 นาที (ของเรา)",
+  "nodes": [
+    {
+      "node_id": "zn_7kzz50",
+      "type": "trigger",
+      "subtype": "message_received",
+      "config": {
+        "label": "ได้รับข้อความ",
+        "triggerOncePerConversation": false,
+        "triggerOncePerOpen": false
+      }
+    },
+    {
+      "node_id": "zn_1eyp6p3",
+      "type": "condition",
+      "subtype": "customer_waiting_time",
+      "config": {
+        "label": "ระยะเวลาที่ลูกค้ารอการตอบกลับ",
+        "conditions": [
+          {
+            "operator": "greater_than",
+            "customerWaitingTime": {
+              "unit": "minutes",
+              "value": 9
+            }
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_9ilyqu",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_15agdhb",
+      "type": "wait",
+      "subtype": "delay",
+      "config": {
+        "label": "รอ / หยุด",
+        "delay": {
+          "unit": "minutes",
+          "value": 10
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "ze_xti424",
+      "source_node_id": "zn_7kzz50",
+      "target_node_id": "zn_15agdhb",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_5ku3sn",
+      "source_node_id": "zn_1eyp6p3",
+      "target_node_id": "zn_9ilyqu",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_1i4xzdx",
+      "source_node_id": "zn_15agdhb",
+      "target_node_id": "zn_1eyp6p3",
+      "branch": null
+    }
+  ]
+}

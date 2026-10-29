@@ -1,0 +1,229 @@
+{
+  "name": "ปัญหาการใช้งาน - รอบสองส่งต่อคน (ยังไม่ใช้)",
+  "nodes": [
+    {
+      "node_id": "zn_1lisx21",
+      "type": "trigger",
+      "subtype": "message_received",
+      "config": {
+        "label": "ได้รับข้อความ",
+        "triggerOncePerConversation": false,
+        "triggerOncePerOpen": false
+      }
+    },
+    {
+      "node_id": "zn_1ptua00",
+      "type": "condition",
+      "subtype": "message_content",
+      "config": {
+        "label": "จับคีย์เวิร์ดในข้อความลูกค้า",
+        "conditions": [
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "เปิดไม่ติด",
+              "ชาร์จไม่เข้า",
+              "ใช้ไม่ได้",
+              "ไม่ทำงาน",
+              "พัง",
+              "ต่อไม่ติด",
+              "เชื่อมต่อไม่ได้",
+              "จับคู่ไม่ได้",
+              "ค้าง",
+              "ดับเอง",
+              "จอไม่ติด",
+              "ไม่มีเสียง",
+              "แบตหมดเร็ว",
+              "ยังไม่หาย",
+              "ทำแล้วไม่ได้",
+              "ลองแล้ว",
+              "ยังเหมือนเดิม",
+              "แก้ไม่ได้",
+              "สินค้ามีปัญหา",
+              "ชำรุด"
+            ]
+          },
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "มอก",
+              "ใบรับรอง",
+              "ใบอนุญาต",
+              "มาตรฐานอุตสาหกรรม",
+              "tisi",
+              "สมอ.",
+              "ขอเอกสาร",
+              "เอกสารรับรอง",
+              "ขอดูใบ",
+              "ยืนยันได้ไหม",
+              "แน่ใจนะ",
+              "จริงหรอ",
+              "จริงไหม",
+              "ตรวจสอบได้ไหม",
+              "ใบกำกับภาษี",
+              "ใบเสร็จ",
+              "ใบกำกับ",
+              "ผู้เสียภาษี",
+              "e-tax",
+              "tax"
+            ]
+          },
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "ใช้งานไม่ได้",
+              "ใช้การไม่ได้",
+              "ไม่จ่ายไฟ",
+              "ไฟไม่เข้า",
+              "ชาร์จไม่ได้",
+              "ไม่ยอมชาร์จ",
+              "สินค้าเสีย",
+              "ของเสีย",
+              "แบตบวม",
+              "ร้อนผิดปกติ",
+              "ชาร์จช้า",
+              "ชาร์จติด",
+              "เปอร์เซ็นต์ไม่ขึ้น",
+              "สายขาด",
+              "หัวหัก",
+              "เคสแตก",
+              "ของไม่ครบ",
+              "ส่งผิดรุ่น",
+              "ได้ของผิด",
+              "ยังใช้ไม่ได้"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_1ni8cq3",
+      "type": "condition",
+      "subtype": "label",
+      "config": {
+        "label": "กรองลูกค้าจากแท็ก",
+        "conditions": [
+          {
+            "operator": "contains_all"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_1pehdml",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_iohxpd",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "รับเรื่องแล้วนะคะ เคสนี้ทางเราส่งให้เจ้าหน้าที่ดูแลต่อแล้วค่ะ รบกวนแจ้งเลขคำสั่งซื้อและรุ่นสินค้าไว้ในแชทนี้ เจ้าหน้าที่จะติดต่อกลับในเวลาทำการ (จันทร์-เสาร์ 09:00-17:30 น.) ค่ะ",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_yyv2iu",
+      "type": "action",
+      "subtype": "assign_ticket",
+      "config": {
+        "label": "มอบหมายให้",
+        "action": {
+          "assignment": {
+            "assignWhenAllOoh": true,
+            "assignToLastTicketHandledBy": false,
+            "lastAssignedUsersIndex": 1
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_bfcejv",
+      "type": "action",
+      "subtype": "remove_label",
+      "config": {
+        "label": "ลบแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_18ckz43",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 2",
+        "action": {
+          "label": {}
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "ze_1pnawfa",
+      "source_node_id": "zn_1lisx21",
+      "target_node_id": "zn_1ptua00",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_10gnzbp",
+      "source_node_id": "zn_1ptua00",
+      "target_node_id": "zn_1ni8cq3",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_106odmq",
+      "source_node_id": "zn_1ptua00",
+      "target_node_id": "zn_1ni8cq3",
+      "branch": "condition-index-1"
+    },
+    {
+      "edge_id": "ze_fuby1o",
+      "source_node_id": "zn_1ni8cq3",
+      "target_node_id": "zn_1pehdml",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_nm2gfi",
+      "source_node_id": "zn_1ni8cq3",
+      "target_node_id": "zn_18ckz43",
+      "branch": "no-match"
+    },
+    {
+      "edge_id": "ze_dw91m5",
+      "source_node_id": "zn_1pehdml",
+      "target_node_id": "zn_iohxpd",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1ou3pn0",
+      "source_node_id": "zn_iohxpd",
+      "target_node_id": "zn_yyv2iu",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1y7yz4s",
+      "source_node_id": "zn_yyv2iu",
+      "target_node_id": "zn_bfcejv",
+      "branch": null
+    }
+  ]
+}

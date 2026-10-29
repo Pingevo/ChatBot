@@ -1208,6 +1208,454 @@ async function main() {
     const stE4 = await status.findOne({ conversation_id: "cv5h" }) as { assigned_to?: string | null } | null;
     eq(stE4?.assigned_to, null, "f05-E4: unassign2 ล้าง assigned_to ก่อน park");
   }
+
+  // ─── 21. e2e per-flow เดิน graph จริง: 07/08/09/10-14/15/16/17/18/20 ──
+  //   fixtures จาก version docs จริง (scripts/fixtures/flowNN-graph.json)
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const { readFileSync } = await import("node:fs");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    const binds = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    const shops = await mongo.getCollection(COLLECTIONS.shops);
+    const admins = await mongo.getCollection(COLLECTIONS.admins);
+    const convs = await mongo.getCollection(COLLECTIONS.conversations);
+    const msgs = await mongo.getCollection(COLLECTIONS.messages);
+    const status = await mongo.getCollection(COLLECTIONS.statusConversation);
+    const cfg = await mongo.getCollection(COLLECTIONS.systemConfigs);
+    const cursors = await mongo.getCollection(COLLECTIONS.assignmentCursors);
+    await Promise.all([wfs, runs, binds, shops, admins, convs, msgs, status, cfg, cursors]
+      .map((c) => c.deleteMany({}) as Promise<unknown>));
+    const DAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+    const ALLDAY = Object.fromEntries(DAYS.map((d) => [d, [{ start: 0, end: 1440 }]]));
+    await shops.insertOne({ shop_id: "s1", shopname: "shop1", platform: "shopee",
+      business_hours: { timezone: "Asia/Bangkok", schedule: ALLDAY } });
+    await admins.insertMany([
+      { admin_id: "adm_a", role: "admin", active: true },
+      { admin_id: "adm_b", role: "admin", active: true },
+    ] as never[]);
+    await cfg.updateOne({ config_key: "main_config" } as never,
+      { $set: { config_key: "main_config", workflow_enabled: true } }, { upsert: true });
+
+    const loadGraph = (k: string) => JSON.parse(readFileSync(
+      new URL(`./fixtures/flow${k}-graph.json`, import.meta.url), "utf8")) as {
+      name?: string;
+      nodes: { node_id: string; type: string; subtype?: string; config: Record<string, unknown> }[];
+      edges: unknown[];
+    };
+    // ⚡ matchAndRun เลือก workflow แรกที่ enabled+match — ต้องเหลือตัวเดียวตอนเทส
+    //   (เจอจริง: flow ที่ insert ก่อนหน้า intercept inbound ของตัวที่เทสอยู่)
+    const only = async (keepIds: string[]) =>
+      wfs.updateMany({ workflow_id: { $nin: keepIds } } as never, { $set: { enabled: false } } as never);
+    const insertFlow = async (wfId: string, g: ReturnType<typeof loadGraph>) => {
+      const V = `wv_${wfId}`;
+      await wfs.insertOne({
+        workflow_id: wfId, name: g.name || wfId, enabled: true, status: "published",
+        trigger_frequency: "every_time", current_version_id: V,
+        import: { source: "zaapi", source_workflow_id: `WF-${wfId}` },
+        shop_ids: [], platforms: [], priority: 0,
+        nodes: g.nodes, edges: g.edges,
+      } as never);
+      return V;
+    };
+    const bind = (wfId: string, V: string, node_id: string, field_path: string, kind: string, locals: string[]) =>
+      ({ binding_id: `b_${wfId}_${node_id}_${field_path}`, workflow_id: wfId, version_id: V, node_id,
+        field_path, kind, count: locals.length, source_values: locals.map((_, i) => `za_${i}`),
+        status: "resolved", resolution: { mappings: locals.map((l) => ({ local_id: l, state: "valid" })) } });
+    const mkConv = async (cid: string, labels: string[] = [], assigned: string | null = null) => {
+      await convs.insertOne({ conversation_id: cid, platform: "shopee", shop_id: "s1", labels } as never);
+      await status.insertOne({ conversation_id: cid, status: "open", assigned_to: assigned } as never);
+    };
+    const mkMsg = (cid: string, text = "hi") =>
+      ({ conversation_id: cid, shop_id: "s1", platform: "shopee", config_shop_key: "s1", text }) as never;
+    const del = (r: { delivered?: unknown[] }) => (r.delivered || []) as { text?: string; image_url?: string }[];
+
+    // ── f18 เตือนลูกค้ารอเกิน 10 นาที: trigger → delay 10m → waiting>9m → add_label ──
+    {
+      const V = await insertFlow("wf_f18", loadGraph("18"));
+      await binds.insertMany([
+        bind("wf_f18", V, "zn_7kzz50", "accountIds", "account", ["s1"]),
+        bind("wf_f18", V, "zn_9ilyqu", "action.label.labelIds", "label", ["WAIT_TAG"]),
+      ] as never[]);
+      await only(["wf_f18"]);
+      const scope = { config: { workflow_enabled: true },
+        pairs: [{ platform: "shopee", shop_id: "s1", config_shop_key: "s1", shopname: "s", cutoff: new Date(0) }],
+        global_enabled_since: null } as never;
+      // รอ 15m > 9m → tag ติด
+      await mkConv("cv18a");
+      await msgs.insertOne({ conversation_id: "cv18a", direction: "in",
+        created_timestamp: new Date(Date.now() - 15 * 60_000) } as never);
+      const r = await eng.matchAndRun(mkMsg("cv18a"));
+      eq(r.status, "actioned", "f18: inbound → delay park");
+      await runs.updateOne({ conversation_id: "cv18a" } as never, { $set: { resume_at: new Date(Date.now() - 1000) } });
+      const sw = await eng.sweepDueTimerRuns(undefined, scope, new Date());
+      eq(sw.resumed, 1, "f18: sweep resume หลัง delay 10m");
+      const c18 = await convs.findOne({ conversation_id: "cv18a" }) as { labels?: string[] } | null;
+      ok(!!c18?.labels?.includes("WAIT_TAG"), "f18: waiting>9m → add_label");
+      // รอ 5m < 9m → condition fail → จบเงียบๆ ไม่ tag
+      await mkConv("cv18b");
+      await msgs.insertOne({ conversation_id: "cv18b", direction: "in",
+        created_timestamp: new Date(Date.now() - 5 * 60_000) } as never);
+      await eng.matchAndRun(mkMsg("cv18b"));
+      await runs.updateOne({ conversation_id: "cv18b" } as never, { $set: { resume_at: new Date(Date.now() - 1000) } });
+      await eng.sweepDueTimerRuns(undefined, scope, new Date());
+      const c18b = await convs.findOne({ conversation_id: "cv18b" }) as { labels?: string[] } | null;
+      ok(!c18b?.labels?.includes("WAIT_TAG"), "f18: waiting<9m → ไม่ tag");
+    }
+
+    // ── f20 ข้อความนอกเวลา tiktok: trigger oncePerOpen → add_label ──
+    {
+      const V = await insertFlow("wf_f20", loadGraph("20"));
+      await binds.insertMany([
+        bind("wf_f20", V, "zn_syraci", "accountIds", "account", ["s1"]),
+        bind("wf_f20", V, "zn_sbtoq3", "action.label.labelIds", "label", ["OOH_TAG"]),
+      ] as never[]);
+      await only(["wf_f20"]);
+      await mkConv("cv20a");
+      const r = await eng.matchAndRun(mkMsg("cv20a"));
+      eq(r.status, "actioned", "f20: inbound → add_label");
+      const c20 = await convs.findOne({ conversation_id: "cv20a" }) as { labels?: string[] } | null;
+      ok(!!c20?.labels?.includes("OOH_TAG"), "f20: tag ติด");
+      const r2 = await eng.matchAndRun(mkMsg("cv20a"));
+      eq(r2.status, "no_match", "f20: oncePerOpen — ข้อความ 2 ไม่ run ซ้ำ");
+    }
+
+    // ── f16 เคลม/ของเสีย: label gate(no-match) → keyword → add → send → assign ──
+    {
+      const V = await insertFlow("wf_f16", loadGraph("16"));
+      await binds.insertMany([
+        bind("wf_f16", V, "zn_wgpjz9", "accountIds", "account", ["s1"]),
+        bind("wf_f16", V, "zn_106noak", "conditions[0].labelIds", "label", ["CLAIM_DONE"]),
+        bind("wf_f16", V, "zn_qm1xyu", "action.label.labelIds", "label", ["CLAIM_DONE"]),
+        bind("wf_f16", V, "zn_ubhkzl", "action.assignment.teamIds", "team", ["all_admins"]),
+      ] as never[]);
+      await only(["wf_f16"]);
+      // keyword เคลม + ยังไม่มี tag → add → send → assign (assignWhenAllOoh:true → assign ได้เสมอ)
+      await mkConv("cv16a");
+      const r = await eng.matchAndRun(mkMsg("cv16a", "ขอเคลมสินค้าหน่อยครับ"));
+      eq(r.status, "actioned", "f16: claim keyword → run");
+      const c16 = await convs.findOne({ conversation_id: "cv16a" }) as { labels?: string[] } | null;
+      ok(!!c16?.labels?.includes("CLAIM_DONE"), "f16: add_label CLAIM_DONE");
+      const st16 = await status.findOne({ conversation_id: "cv16a" }) as { assigned_to?: string } | null;
+      ok(st16?.assigned_to === "adm_a" || st16?.assigned_to === "adm_b", "f16: ต้องถึงมือคนเสมอ → assigned");
+      // มี tag แล้ว → cond-0 dead end → ไม่ทำซ้ำ
+      await mkConv("cv16b", ["CLAIM_DONE"]);
+      await eng.matchAndRun(mkMsg("cv16b", "ขอเคลมอีก"));
+      const st16b = await status.findOne({ conversation_id: "cv16b" }) as { assigned_to?: string | null } | null;
+      eq(st16b?.assigned_to, null, "f16: มี CLAIM_DONE แล้ว → ไม่ assign ซ้ำ");
+    }
+
+    // ── f17 ปัญหาการใช้งาน รอบสอง: keyword → label contains_all → add→send→assign→remove / no-match→add ──
+    {
+      const V = await insertFlow("wf_f17", loadGraph("17"));
+      await binds.insertMany([
+        bind("wf_f17", V, "zn_1lisx21", "accountIds", "account", ["s1"]),
+        bind("wf_f17", V, "zn_1ni8cq3", "conditions[0].labelIds", "label", ["SECOND_ROUND"]),
+        bind("wf_f17", V, "zn_1pehdml", "action.label.labelIds", "label", ["FWD_TAG"]),
+        bind("wf_f17", V, "zn_18ckz43", "action.label.labelIds", "label", ["FIRST_TAG"]),
+        bind("wf_f17", V, "zn_bfcejv", "action.label.labelIds", "label", ["SECOND_ROUND"]),
+        bind("wf_f17", V, "zn_yyv2iu", "action.assignment.teamIds", "team", ["all_admins"]),
+      ] as never[]);
+      await only(["wf_f17"]);
+      // keyword + มี SECOND_ROUND → ส่งต่อคน: add FWD → send → assign → remove SECOND_ROUND
+      await mkConv("cv17a", ["SECOND_ROUND"]);
+      const r = await eng.matchAndRun(mkMsg("cv17a", "ของใช้ไม่ได้เลยครับ"));
+      eq(r.status, "actioned", "f17: keyword + second-round label → forward path");
+      const c17 = await convs.findOne({ conversation_id: "cv17a" }) as { labels?: string[] } | null;
+      ok(!!c17?.labels?.includes("FWD_TAG") && !c17?.labels?.includes("SECOND_ROUND"),
+        "f17: add FWD_TAG + remove SECOND_ROUND");
+      const st17 = await status.findOne({ conversation_id: "cv17a" }) as { assigned_to?: string } | null;
+      ok(!!st17?.assigned_to, "f17: assign → admin");
+      // keyword แต่ไม่มี SECOND_ROUND → add FIRST_TAG เท่านั้น (ไม่ assign)
+      await mkConv("cv17b");
+      await eng.matchAndRun(mkMsg("cv17b", "ของพังครับ"));
+      const c17b = await convs.findOne({ conversation_id: "cv17b" }) as { labels?: string[] } | null;
+      ok(!!c17b?.labels?.includes("FIRST_TAG"), "f17: รอบแรก → add FIRST_TAG");
+      const st17b = await status.findOne({ conversation_id: "cv17b" }) as { assigned_to?: string | null } | null;
+      eq(st17b?.assigned_to, null, "f17: รอบแรก → ไม่ assign");
+    }
+
+    // ── f07 เก็บคะแนน iSUPER: does_not_contain_any_of gate → score 5/4/3/2,1 → thanks/apology+assign ──
+    {
+      const V = await insertFlow("wf_f07", loadGraph("07"));
+      await binds.insertMany([
+        bind("wf_f07", V, "zn_b1w3xv", "accountIds", "account", ["s1"]),
+        bind("wf_f07", V, "zn_1k1d8j0", "conditions[0].labelIds", "label", ["RATED_DONE"]),
+        bind("wf_f07", V, "zn_nywnzo", "action.label.labelIds", "label", ["SCORE_5"]),
+        bind("wf_f07", V, "zn_tlt4tj", "action.label.labelIds", "label", ["SCORE_4"]),
+        bind("wf_f07", V, "zn_dzd1g0", "action.label.labelIds", "label", ["SCORE_3"]),
+        bind("wf_f07", V, "zn_1ygbo0q", "action.label.labelIds", "label", ["SCORE_LOW"]),
+        bind("wf_f07", V, "zn_1s5wu56", "action.label.labelIds", "label", ["RATED_PENDING"]),
+        bind("wf_f07", V, "zn_wpoau2", "action.label.labelIds", "label", ["RATED_PENDING"]),
+        bind("wf_f07", V, "zn_1o7wuwv", "action.assignment.teamIds", "team", ["all_admins"]),
+      ] as never[]);
+      await only(["wf_f07"]);
+      // score 5 → add SCORE_5 → remove RATED_PENDING → send thanks (ไม่ assign)
+      await mkConv("cv7a");
+      const r = await eng.matchAndRun(mkMsg("cv7a", "5"));
+      eq(r.status, "actioned", "f07: score 5 → thanks path");
+      const c7 = await convs.findOne({ conversation_id: "cv7a" }) as { labels?: string[] } | null;
+      ok(!!c7?.labels?.includes("SCORE_5"), "f07: add SCORE_5");
+      const st7 = await status.findOne({ conversation_id: "cv7a" }) as { assigned_to?: string | null } | null;
+      eq(st7?.assigned_to, null, "f07: คะแนนสูง → ไม่ assign");
+      // score 1 → apology + assign (ต้องถึงมือคน)
+      await mkConv("cv7b");
+      await eng.matchAndRun(mkMsg("cv7b", "1"));
+      const st7b = await status.findOne({ conversation_id: "cv7b" }) as { assigned_to?: string } | null;
+      ok(!!st7b?.assigned_to, "f07: score ต่ำ → apology + assign");
+      // gate: conv มี RATED_DONE → does_not_contain_any_of false → dead end
+      await mkConv("cv7c", ["RATED_DONE"]);
+      const r7c = await eng.matchAndRun(mkMsg("cv7c", "5"));
+      const run7c = await runs.findOne({ conversation_id: "cv7c" }) as { status?: string; outcome?: string } | null;
+      ok(r7c.status === "actioned" || r7c.status === "no_match" || run7c?.status === "completed",
+        "f07: RATED_DONE gate → ไม่ score ซ้ำ");
+      const st7c = await status.findOne({ conversation_id: "cv7c" }) as { assigned_to?: string | null } | null;
+      eq(st7c?.assigned_to, null, "f07: gate → ไม่ assign");
+    }
+
+    // ── f09 ประเมินแอดมิน 2: contains_all gate → score contains_one_of → thanks/apology+assign ──
+    {
+      const V = await insertFlow("wf_f09", loadGraph("09"));
+      await binds.insertMany([
+        bind("wf_f09", V, "zn_r4b9m6", "accountIds", "account", ["s1"]),
+        bind("wf_f09", V, "zn_uki2po", "conditions[0].labelIds", "label", ["RATE_REQ"]),
+        bind("wf_f09", V, "zn_1d0t1yk", "action.label.labelIds", "label", ["G5"]),
+        bind("wf_f09", V, "zn_13yme6t", "action.label.labelIds", "label", ["G4"]),
+        bind("wf_f09", V, "zn_1n7p4r0", "action.label.labelIds", "label", ["G3"]),
+        bind("wf_f09", V, "zn_i7ylyg", "action.label.labelIds", "label", ["G_LOW"]),
+        bind("wf_f09", V, "zn_1mtl6pj", "action.label.labelIds", "label", ["RATE_REQ"]),
+        bind("wf_f09", V, "zn_13j05c0", "action.label.labelIds", "label", ["RATE_REQ"]),
+        bind("wf_f09", V, "zn_1rrix76", "action.assignment.teamIds", "team", ["all_admins"]),
+      ] as never[]);
+      await only(["wf_f09"]);
+      await mkConv("cv9a", ["RATE_REQ"]);
+      const r = await eng.matchAndRun(mkMsg("cv9a", "4"));
+      eq(r.status, "actioned", "f09: score 4 → thanks path");
+      const c9 = await convs.findOne({ conversation_id: "cv9a" }) as { labels?: string[] } | null;
+      ok(!!c9?.labels?.includes("G4") && !c9?.labels?.includes("RATE_REQ"),
+        "f09: add G4 + remove RATE_REQ");
+      await mkConv("cv9b", ["RATE_REQ"]);
+      await eng.matchAndRun(mkMsg("cv9b", "1"));
+      const st9 = await status.findOne({ conversation_id: "cv9b" }) as { assigned_to?: string } | null;
+      ok(!!st9?.assigned_to, "f09: score ต่ำ → apology + assign");
+      // ไม่มี RATE_REQ → gate no-match → dead end
+      await mkConv("cv9c");
+      await eng.matchAndRun(mkMsg("cv9c", "5"));
+      const c9c = await convs.findOne({ conversation_id: "cv9c" }) as { labels?: string[] } | null;
+      ok(!c9c?.labels?.includes("G5"), "f09: ไม่มี RATE_REQ → ไม่ score");
+    }
+
+    // ── f10-14 ประเมินแอดมิน 1X: label_added → send survey → add → remove ──
+    {
+      const KEYS = ["10", "11", "12", "13", "14"] as const;
+      const LABELS: Record<string, { trig: string; add: string; rm: string }> = {
+        "10": { trig: "RATE_AI", add: "SENT_AI", rm: "REQ_AI" },
+        "11": { trig: "RATE_BOY", add: "SENT_BOY", rm: "REQ_BOY" },
+        "12": { trig: "RATE_MOO", add: "SENT_MOO", rm: "REQ_MOO" },
+        "13": { trig: "RATE_BANK", add: "SENT_BANK", rm: "REQ_BANK" },
+        "14": { trig: "RATE_BONUS", add: "SENT_BONUS", rm: "REQ_BONUS" },
+      };
+      for (const k of KEYS) {
+        const V = await insertFlow(`wf_f${k}`, loadGraph(k));
+        const g = loadGraph(k);
+        const trig = g.nodes.find((n) => n.type === "trigger")!.node_id;
+        const addN = g.nodes.find((n) => n.subtype === "add_label")!.node_id;
+        const rmN = g.nodes.find((n) => n.subtype === "remove_label")!.node_id;
+        await binds.insertMany([
+          bind(`wf_f${k}`, V, trig, "labelIds", "label", [LABELS[k].trig]),
+          bind(`wf_f${k}`, V, addN, "action.label.labelIds", "label", [LABELS[k].add]),
+          bind(`wf_f${k}`, V, rmN, "action.label.labelIds", "label", [LABELS[k].rm]),
+        ] as never[]);
+      }
+      await only(KEYS.map((k) => `wf_f${k}`));
+      // แต่ละ flow: ติด trigger label → survey ส่ง + add/remove ตาม graph จริง
+      for (const k of KEYS) {
+        const L = LABELS[k];
+        const cid = `cv${k}x`;
+        await mkConv(cid, [L.trig, L.rm]);
+        const r = await eng.matchAndRunEvent(
+          { conversation_id: cid, shop_id: "s1", platform: "shopee", config_shop_key: "s1", event_label: L.trig } as never,
+          "label_added");
+        eq(r.status, "actioned", `f${k}: label_added(${L.trig}) → run`);
+        const cx = await convs.findOne({ conversation_id: cid }) as { labels?: string[] } | null;
+        ok(!!cx?.labels?.includes(L.add) && !cx?.labels?.includes(L.rm),
+          `f${k}: add ${L.add} + remove ${L.rm}`);
+      }
+      // label อื่นที่ไม่ได้ bind → ไม่มี flow ไหนยิง
+      const rN = await eng.matchAndRunEvent(
+        { conversation_id: "cv_none", shop_id: "s1", platform: "shopee", config_shop_key: "s1", event_label: "UNRELATED" } as never,
+        "label_added");
+      eq(rN.status, "no_match", "f10-14: label ที่ไม่ได้ bind → ไม่ยิง");
+    }
+
+    // ── f08 LINE รับเรื่องปัญหาสินค้า: last_interaction → buttons → AI/assign ──
+    {
+      const g = loadGraph("08");
+      // image send nodes — corpus มี imageUrl จริง (redacted ใน dump) → ใส่คืนเพื่อเดิน graph
+      for (const n of g.nodes) {
+        if (n.subtype === "send_message" && (n.config as { action?: { message?: { type?: string } } })
+          .action?.message?.type === "image") {
+          (n.config as { action: { message: { imageUrl?: string } } }).action.message.imageUrl = "https://img.example.com/x.png";
+        }
+      }
+      const V = await insertFlow("wf_f08", g);
+      await binds.insertMany([
+        bind("wf_f08", V, "zn_qdziq3", "accountIds", "account", ["s1"]),
+        bind("wf_f08", V, "zn_1rhp1qh", "action.label.labelIds", "label", ["PROBLEM_TAG"]),
+        bind("wf_f08", V, "zn_12hx8e1", "action.assignment.teamIds", "team", ["all_admins"]),
+        bind("wf_f08", V, "zn_1pmgxxr", "action.assignment.teamIds", "team", ["all_admins"]),
+        bind("wf_f08", V, "zn_wt11f2", "action.assignment.teamIds", "team", ["all_admins"]),
+      ] as never[]);
+      await only(["wf_f08"]);
+      // A) fresh — interaction 30m <2h → no-match → jump → assign2 (assignWhenAllOoh:true)
+      await mkConv("cv8a");
+      await msgs.insertOne({ conversation_id: "cv8a", direction: "in",
+        created_timestamp: new Date(Date.now() - 30 * 60_000) } as never);
+      const r8a = await eng.matchAndRun(mkMsg("cv8a"));
+      eq(r8a.status, "actioned", "f08-A: fresh → no-match → jump → assign");
+      const st8a = await status.findOne({ conversation_id: "cv8a" }) as { assigned_to?: string } | null;
+      ok(!!st8a?.assigned_to, "f08-A: assign2 → admin");
+      // B) returning — interaction 3h >2h → send → delay 15s → button1 → กดปุ่ม → image → button2 → assign3
+      await mkConv("cv8b");
+      await msgs.insertOne({ conversation_id: "cv8b", direction: "in",
+        created_timestamp: new Date(Date.now() - 3 * 3600_000) } as never);
+      const r8b = await eng.matchAndRun(mkMsg("cv8b"));
+      eq(r8b.status, "actioned", "f08-B: returning → delay park");
+      const runB = await runs.findOne({ conversation_id: "cv8b" }) as never;
+      const rB2 = await eng.resumeTimerRun(runB, mkMsg("cv8b"));
+      eq(rB2.status, "resumed", "f08-B: delay → button template send");
+      const runB2 = await runs.findOne({ conversation_id: "cv8b" }) as { status?: string; park_kind?: string } | null;
+      ok(runB2?.status === "waiting_for_reply" || runB2?.park_kind === "wait_buttons",
+        "f08-B: park รอกดปุ่ม (button template)");
+      // ลูกค้ากดปุ่มแรก "แจ้งปัญหา" → index-0 → add_label → send+image → button2
+      const rB3 = await eng.runInboundWorkflowStage(mkMsg("cv8b", "แจ้งปัญหา"));
+      eq(rB3.status, "resumed", "f08-B: กดปุ่ม 1 resume");
+      ok(del(rB3).some((d) => d.image_url === "https://img.example.com/x.png"), "f08-B: image send หลังเลือกปัญหา");
+      const runB3 = await runs.findOne({ conversation_id: "cv8b" }) as { park_kind?: string; status?: string } | null;
+      ok(runB3?.status === "waiting_for_reply" || runB3?.park_kind === "wait_buttons", "f08-B: park รอ button2");
+      const c8b = await convs.findOne({ conversation_id: "cv8b" }) as { labels?: string[] } | null;
+      ok(!!c8b?.labels?.includes("PROBLEM_TAG"), "f08-B: add_label หลังกดปุ่ม");
+      // เลือกสินค้า "หัวชาร์จและสายชาร์จ" → send วิธีถ่ายคลิป → assign3
+      const rB4 = await eng.runInboundWorkflowStage(mkMsg("cv8b", "หัวชาร์จและสายชาร์จ"));
+      eq(rB4.status, "resumed", "f08-B: เลือกสินค้า resume");
+      const st8b = await status.findOne({ conversation_id: "cv8b" }) as { assigned_to?: string } | null;
+      ok(!!st8b?.assigned_to, "f08-B: เลือกสินค้า → assign3 → admin");
+      // C) none-selected → chatbot park → escalate → assign4 / timeout → close
+      await mkConv("cv8c");
+      await msgs.insertOne({ conversation_id: "cv8c", direction: "in",
+        created_timestamp: new Date(Date.now() - 3 * 3600_000) } as never);
+      await eng.matchAndRun(mkMsg("cv8c"));
+      const runC = await runs.findOne({ conversation_id: "cv8c" }) as never;
+      await eng.resumeTimerRun(runC, mkMsg("cv8c"));
+      // ตอบข้อความที่ไม่ตรงปุ่มไหนเลย → none-selected → chatbot park
+      const rC2 = await eng.runInboundWorkflowStage(mkMsg("cv8c", "ข้อความอื่นไม่เกี่ยว"));
+      eq(rC2.status, "resumed", "f08-C: none-selected resume");
+      const runC2 = await runs.findOne({ conversation_id: "cv8c" }) as { park_kind?: string } | null;
+      eq(runC2?.park_kind, "ai_bot", "f08-C: none-selected → chatbot park");
+      const rC3 = await eng.escalateAiRun("cv8c", mkMsg("cv8c"));
+      eq(rC3.status, "resumed", "f08-C: AI escalate → assign4");
+      const st8c = await status.findOne({ conversation_id: "cv8c" }) as { assigned_to?: string } | null;
+      ok(!!st8c?.assigned_to, "f08-C: escalate → assign4");
+      // D) button หมดเวลา → expired → jump → assign1
+      await mkConv("cv8d");
+      await msgs.insertOne({ conversation_id: "cv8d", direction: "in",
+        created_timestamp: new Date(Date.now() - 3 * 3600_000) } as never);
+      await eng.matchAndRun(mkMsg("cv8d"));
+      const runD = await runs.findOne({ conversation_id: "cv8d" }) as never;
+      await eng.resumeTimerRun(runD, mkMsg("cv8d")); // → button1 park
+      const runD2 = await runs.findOne({ conversation_id: "cv8d" }) as never;
+      const rD = await eng.resumeTimerRun(runD2, mkMsg("cv8d")); // expire buttons
+      eq(rD.status, "resumed", "f08-D: button expired resume");
+      const st8d = await status.findOne({ conversation_id: "cv8d" }) as { assigned_to?: string } | null;
+      ok(!!st8d?.assigned_to, "f08-D: expired → jump → assign1");
+      // E) chatbot timeout → close (อีก conv — park ที่ ai แล้ว expire)
+      await mkConv("cv8e");
+      await msgs.insertOne({ conversation_id: "cv8e", direction: "in",
+        created_timestamp: new Date(Date.now() - 3 * 3600_000) } as never);
+      await eng.matchAndRun(mkMsg("cv8e"));
+      const runE = await runs.findOne({ conversation_id: "cv8e" }) as never;
+      await eng.resumeTimerRun(runE, mkMsg("cv8e"));
+      await eng.runInboundWorkflowStage(mkMsg("cv8e", "ไม่ตรงปุ่ม"));
+      const runE2 = await runs.findOne({ conversation_id: "cv8e" }) as never;
+      await eng.resumeTimerRun(runE2, mkMsg("cv8e")); // ai timeout
+      const st8e = await status.findOne({ conversation_id: "cv8e" }) as { status?: string } | null;
+      eq(st8e?.status, "closed", "f08-E: ai timeout → close_ticket");
+    }
+
+    // ── f15 ตอบปกติ ทั้งทีม ฉบับปรับปรุง (36 nodes — ครอบคลุมเดียวกับ f05 ลบ assignee/event_time) ──
+    {
+      const V = await insertFlow("wf_f15", loadGraph("15"));
+      await binds.insertMany([
+        bind("wf_f15", V, "zn_1upqj8", "accountIds", "account", ["s1"]),
+        bind("wf_f15", V, "zn_aunvsq", "conditions[0].labelIds", "label", ["LBL_A"]),
+        bind("wf_f15", V, "zn_aunvsq", "conditions[1].labelIds", "label", ["LBL_B"]),
+        bind("wf_f15", V, "zn_aunvsq", "conditions[2].labelIds", "label", ["LBL_C"]),
+        bind("wf_f15", V, "zn_3z4ysy", "action.label.labelIds", "label", ["ENTRY_TAG"]),
+        bind("wf_f15", V, "zn_9pfsqq", "action.label.labelIds", "label", ["IN1"]),
+        bind("wf_f15", V, "zn_1a671pq", "action.label.labelIds", "label", ["IN2"]),
+        bind("wf_f15", V, "zn_lk36pu", "action.label.labelIds", "label", ["OOH1"]),
+        bind("wf_f15", V, "zn_1ukcplp", "action.label.labelIds", "label", ["OOH2"]),
+        bind("wf_f15", V, "zn_x5uoy7", "action.label.labelIds", "label", ["STALE"]),
+        bind("wf_f15", V, "zn_ajrrpp", "action.label.labelIds", "label", ["STALE"]),
+        bind("wf_f15", V, "zn_1h81jdd", "action.label.labelIds", "label", ["STALE"]),
+        bind("wf_f15", V, "zn_6rmwx", "action.assignment.teamIds", "team", ["all_admins"]),
+        bind("wf_f15", V, "zn_f2k8i3", "action.assignment.teamIds", "team", ["all_admins"]),
+      ] as never[]);
+      await only(["wf_f15"]);
+      // A) no labels + plain text → label no-match → content no-match → chatbot1 →
+      //    escalate → bh within → IN labels → send → unassign → assign1 (assignWhenAllOoh:true)
+      await mkConv("cv15a");
+      await eng.matchAndRun(mkMsg("cv15a"));
+      const runA = await runs.findOne({ conversation_id: "cv15a" }) as { park_kind?: string } | null;
+      eq(runA?.park_kind, "ai_bot", "f15-A: no-match chain → chatbot1 park");
+      const rA = await eng.escalateAiRun("cv15a", mkMsg("cv15a"));
+      eq(rA.status, "resumed", "f15-A: escalate resumes");
+      const stA = await status.findOne({ conversation_id: "cv15a" }) as { assigned_to?: string } | null;
+      ok(!!stA?.assigned_to, "f15-A: within → unassign → assign1");
+      const cA = await convs.findOne({ conversation_id: "cv15a" }) as { labels?: string[] } | null;
+      ok(!!cA?.labels?.includes("ENTRY_TAG") && !!cA?.labels?.includes("IN1") && !!cA?.labels?.includes("IN2"),
+        "f15-A: ENTRY + IN labels ครบ");
+      // B) AI timeout → send → close
+      await mkConv("cv15b");
+      await eng.matchAndRun(mkMsg("cv15b"));
+      const runB = await runs.findOne({ conversation_id: "cv15b" }) as never;
+      await eng.resumeTimerRun(runB, mkMsg("cv15b"));
+      const stB = await status.findOne({ conversation_id: "cv15b" }) as { status?: string } | null;
+      eq(stB?.status, "closed", "f15-B: ai timeout → close");
+      // C) OOH → escalate → outside → OOH labels → send → wfr → reply → chatbot2 → escalate → assign1
+      await shops.updateOne({ shop_id: "s1" } as never, { $set: { "business_hours.schedule": {} } });
+      await mkConv("cv15c");
+      await eng.matchAndRun(mkMsg("cv15c"));
+      await eng.escalateAiRun("cv15c", mkMsg("cv15c"));
+      const runC = await runs.findOne({ conversation_id: "cv15c" }) as { status?: string } | null;
+      eq(runC?.status, "waiting_for_reply", "f15-C: OOH → wfr park");
+      const rC = await eng.runInboundWorkflowStage(mkMsg("cv15c", "ตอบกลับ"));
+      eq(rC.status, "resumed", "f15-C: wfr-success resume → chatbot2");
+      const runC2 = await runs.findOne({ conversation_id: "cv15c" }) as { park_kind?: string } | null;
+      eq(runC2?.park_kind, "ai_bot", "f15-C: chatbot2 park");
+      await eng.escalateAiRun("cv15c", mkMsg("cv15c"));
+      const stC = await status.findOne({ conversation_id: "cv15c" }) as { assigned_to?: string } | null;
+      ok(!!stC?.assigned_to, "f15-C: chatbot2 escalate → jump → assign1");
+      // D) wfr no-respond → jump → unassign → assign1
+      await mkConv("cv15d");
+      await eng.matchAndRun(mkMsg("cv15d"));
+      await eng.escalateAiRun("cv15d", mkMsg("cv15d"));
+      const runD = await runs.findOne({ conversation_id: "cv15d" }) as never;
+      await eng.resumeTimerRun(runD, mkMsg("cv15d"));
+      const stD = await status.findOne({ conversation_id: "cv15d" }) as { assigned_to?: string } | null;
+      ok(!!stD?.assigned_to, "f15-D: wfr no-respond → jump → assign1");
+      // E) LBL_A + interaction 8d>7d → branch-0 → remove STALE → jump → chatbot1
+      await shops.updateOne({ shop_id: "s1" } as never, { $set: { "business_hours.schedule": ALLDAY } });
+      await mkConv("cv15e", ["LBL_A", "STALE"]);
+      await msgs.insertOne({ conversation_id: "cv15e", direction: "in",
+        created_timestamp: new Date(Date.now() - 8 * 24 * 3600_000) } as never);
+      await eng.matchAndRun(mkMsg("cv15e"));
+      const runE = await runs.findOne({ conversation_id: "cv15e" }) as { park_kind?: string } | null;
+      eq(runE?.park_kind, "ai_bot", "f15-E: branch-0 → remove → jump → chatbot1");
+      const cE = await convs.findOne({ conversation_id: "cv15e" }) as { labels?: string[] } | null;
+      ok(!cE?.labels?.includes("STALE"), "f15-E: remove_label STALE");
+    }
+  }
 }
 
 main().then(() => {

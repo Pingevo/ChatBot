@@ -1,0 +1,502 @@
+{
+  "name": "LINE - รับเรื่องปัญหาสินค้า (ของเรา)",
+  "nodes": [
+    {
+      "node_id": "zn_qdziq3",
+      "type": "trigger",
+      "subtype": "message_received",
+      "config": {
+        "label": "ได้รับข้อความ",
+        "triggerOncePerConversation": false,
+        "triggerOncePerOpen": true
+      }
+    },
+    {
+      "node_id": "zn_h3qauv",
+      "type": "condition",
+      "subtype": "last_interaction",
+      "config": {
+        "label": "เวลาที่ลูกค้าติดต่อล่าสุด",
+        "conditions": [
+          {
+            "operator": "greater_than",
+            "lastInteraction": {
+              "unit": "hours",
+              "value": 2
+            }
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_ass17c",
+      "type": "action",
+      "subtype": "send_button_template",
+      "config": {
+        "label": "แจ้งปัญหาครั้งแรก",
+        "action": {
+          "buttonTemplate": {
+            "title": "การติดต่อบริการ",
+            "description": "กดปุ่มตัวเลือกที่ต้องการได้ 1 ตัวเลือก",
+            "imageUrl": "[redacted]",
+            "buttons": [
+              {
+                "type": "postback",
+                "title": "แจ้งปัญหา"
+              },
+              {
+                "type": "postback",
+                "title": "ติดตามผลการส่งเคลม"
+              },
+              {
+                "type": "postback",
+                "title": "ติดต่อเจ้าหน้าที่"
+              }
+            ],
+            "expiresIn": {
+              "unit": "minutes",
+              "value": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_1rhp1qh",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 2",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_1a51pnf",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 2",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "สวัสดี คุณ {{conversationFirstName}} \nขอบคุณที่เป็นเพื่อนกับเรา\n\n⌚ เวลาทำการแอดมิน 9.00 - 17.30 น.\n\n🛠หากท่านต้องการติดต่อแจ้งปัญหาสินค้ากรุณาแจ้งข้อมูลดังนี้\n1.แจ้งอาการของสินค้าที่เป็น ภาพ หรือ คลิปวิดีโอ ที่สามารถระบุปัญหาของอาการได้อย่างชัดเจน\n2.หมายเลขคำสั่งซื้อ\n\nช่องทางตรวจสอบหมายเลข\nShopee : https://shopee.co.th/user/purchase/\nLazada : https://s.lazada.co.th/l.eWb3\n\n⭐ รายละเอียดจะเป็นผลประโยชน์ต่อลูกค้า เพื่อนำไปเป็นหลักฐานการส่งเคลม",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_1pgcixp",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 3",
+        "action": {
+          "message": {
+            "type": "image",
+            "text": "",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_19ofpwh",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 4",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "ลูกค้าสามารถติดตามผลการตรวจสอบจากไลน์นี้ได้ครับ",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_12hx8e1",
+      "type": "action",
+      "subtype": "assign_ticket",
+      "config": {
+        "label": "มอบหมายให้",
+        "action": {
+          "assignment": {
+            "assignWhenAllOoh": true,
+            "assignToLastTicketHandledBy": true,
+            "lastAssignedUsersIndex": 0
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_xsy45d",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 4",
+        "action": {
+          "message": {
+            "type": "image",
+            "text": "",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_1pmgxxr",
+      "type": "action",
+      "subtype": "assign_ticket",
+      "config": {
+        "label": "มอบหมายให้ 2",
+        "action": {
+          "assignment": {
+            "assignWhenAllOoh": true,
+            "assignToLastTicketHandledBy": true,
+            "lastAssignedUsersIndex": 0
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_zjq2db",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 5",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "เจ้าหน้าที่ตอบแชทให้ตามลำดับคิว \nเวลทำการจันทร์ - เสาร์ 9.00 - 17.30 น.",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_hzr6hm",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 2",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_15l3ajm",
+      "type": "action",
+      "subtype": "send_button_template",
+      "config": {
+        "label": "ส่งตัวเลือกปุ่มกด 2",
+        "action": {
+          "buttonTemplate": {
+            "title": "การตรวจสอบและแก้ไข",
+            "description": "เลือกรายการสินค้า",
+            "imageUrl": "[redacted]",
+            "buttons": [
+              {
+                "type": "postback",
+                "title": "หัวชาร์จและสายชาร์จ"
+              },
+              {
+                "type": "postback",
+                "title": "อื่นๆ"
+              }
+            ],
+            "expiresIn": {
+              "unit": "hours",
+              "value": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_6skbu7",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 6",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "{{nodeVariable_3pkbZEBH1wBTsLAlfwVYb}}\n\nวิธีการถ่ายคลิปตรวจสอบเพื่อแจ้งปัญหา \nhttps://youtu.be/KTvXEYCSTAA?si=kplZS9UzpsDkgv6g\n\nการทำความสะอาดสายชาร์จไอโฟนและการตรวจสอบ ( Lightning )\nhttps://youtu.be/-uSsTVVkZGc?si=f-ViqbeV8vgGxqls\n\nการทำความสะอาดช่องชาร์จไอโฟน\nhttps://youtu.be/pTmcOZl0q90?si=MIHLDv-lQm9moPUn",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_ldox26",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 3",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_t0zay3",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 4",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_1uo0xh9",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 7",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "สวัสดีคุณ {{conversationFirstName}} กรุณากดตัวที่ต้องการรับบริการ",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_145ybml",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 5",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_15j0r7l",
+      "type": "action",
+      "subtype": "let_ai_respond",
+      "config": {
+        "label": "ให้ AI จัดการแชท",
+        "action": {
+          "chatbot": {
+            "instruction": "",
+            "timeout": {
+              "unit": "hours",
+              "value": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_wt11f2",
+      "type": "action",
+      "subtype": "assign_ticket",
+      "config": {
+        "label": "มอบหมายให้ 3",
+        "action": {
+          "assignment": {
+            "assignWhenAllOoh": false,
+            "assignToLastTicketHandledBy": true,
+            "lastAssignedUsersIndex": 0
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_zq60qi",
+      "type": "action",
+      "subtype": "close_ticket",
+      "config": {
+        "label": "ปิดทิกเก็ต"
+      }
+    },
+    {
+      "node_id": "zn_1rtiph2",
+      "type": "wait",
+      "subtype": "delay",
+      "config": {
+        "label": "รอ / หยุด",
+        "delay": {
+          "unit": "seconds",
+          "value": 15
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "ze_1h306m9",
+      "source_node_id": "zn_qdziq3",
+      "target_node_id": "zn_h3qauv",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_11s95eo",
+      "source_node_id": "zn_h3qauv",
+      "target_node_id": "zn_1uo0xh9",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_1x8met0",
+      "source_node_id": "zn_h3qauv",
+      "target_node_id": "zn_145ybml",
+      "branch": "no-match"
+    },
+    {
+      "edge_id": "ze_p873w5",
+      "source_node_id": "zn_ass17c",
+      "target_node_id": "zn_1rhp1qh",
+      "branch": "btn-template-condition-index-0"
+    },
+    {
+      "edge_id": "ze_1ktzldu",
+      "source_node_id": "zn_ass17c",
+      "target_node_id": "zn_1pgcixp",
+      "branch": "btn-template-condition-index-1"
+    },
+    {
+      "edge_id": "ze_15c8kjl",
+      "source_node_id": "zn_ass17c",
+      "target_node_id": "zn_zjq2db",
+      "branch": "btn-template-condition-index-2"
+    },
+    {
+      "edge_id": "ze_vrccu8",
+      "source_node_id": "zn_ass17c",
+      "target_node_id": "zn_hzr6hm",
+      "branch": "btn-template-expired"
+    },
+    {
+      "edge_id": "ze_148qrgw",
+      "source_node_id": "zn_ass17c",
+      "target_node_id": "zn_15j0r7l",
+      "branch": "btn-template-none-selected"
+    },
+    {
+      "edge_id": "ze_12v7qxb",
+      "source_node_id": "zn_1rhp1qh",
+      "target_node_id": "zn_1a51pnf",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_zwrb1j",
+      "source_node_id": "zn_1a51pnf",
+      "target_node_id": "zn_xsy45d",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_8xtbyx",
+      "source_node_id": "zn_1pgcixp",
+      "target_node_id": "zn_19ofpwh",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_z7arjw",
+      "source_node_id": "zn_xsy45d",
+      "target_node_id": "zn_15l3ajm",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1coxe9n",
+      "source_node_id": "zn_zjq2db",
+      "target_node_id": "zn_12hx8e1",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1myfexp",
+      "source_node_id": "zn_15l3ajm",
+      "target_node_id": "zn_6skbu7",
+      "branch": "btn-template-condition-index-0"
+    },
+    {
+      "edge_id": "ze_slzlkx",
+      "source_node_id": "zn_15l3ajm",
+      "target_node_id": "zn_ldox26",
+      "branch": "btn-template-condition-index-1"
+    },
+    {
+      "edge_id": "ze_1i2b0ah",
+      "source_node_id": "zn_15l3ajm",
+      "target_node_id": "zn_t0zay3",
+      "branch": "btn-template-expired"
+    },
+    {
+      "edge_id": "ze_9dst3o",
+      "source_node_id": "zn_15l3ajm",
+      "target_node_id": "zn_t0zay3",
+      "branch": "btn-template-none-selected"
+    },
+    {
+      "edge_id": "ze_8gj4rh",
+      "source_node_id": "zn_6skbu7",
+      "target_node_id": "zn_1pmgxxr",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_mszs2s",
+      "source_node_id": "zn_1uo0xh9",
+      "target_node_id": "zn_1rtiph2",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_zufhkb",
+      "source_node_id": "zn_15j0r7l",
+      "target_node_id": "zn_wt11f2",
+      "branch": "ai-chatbot-escalate"
+    },
+    {
+      "edge_id": "ze_1u5a1re",
+      "source_node_id": "zn_15j0r7l",
+      "target_node_id": "zn_zq60qi",
+      "branch": "ai-chatbot-timeout"
+    },
+    {
+      "edge_id": "ze_1pyza69",
+      "source_node_id": "zn_1rtiph2",
+      "target_node_id": "zn_ass17c",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_fy2x1s",
+      "source_node_id": "zn_hzr6hm",
+      "target_node_id": "zn_12hx8e1",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1jl75u6",
+      "source_node_id": "zn_ldox26",
+      "target_node_id": "zn_1pmgxxr",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_cln0vz",
+      "source_node_id": "zn_t0zay3",
+      "target_node_id": "zn_1pmgxxr",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_vejjx7",
+      "source_node_id": "zn_145ybml",
+      "target_node_id": "zn_12hx8e1",
+      "branch": null
+    }
+  ]
+}

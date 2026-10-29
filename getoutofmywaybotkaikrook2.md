@@ -8808,3 +8808,18 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - **พฤติกรรมจริงที่ e2e เปิดเผย**: assignWhenAllOoh:false + ร้าน OOH → assign skip (ไม่ใช่ bug — semantics ถูก; test ต้องเปลี่ยนเวลาให้เข้าเวลาก่อนขั้น assign)
 - **pin technique**: event_time schedules ใน fixture ถูกแทนด้วย 24/7/{} เพื่อ determinism (engine ใช้ real Date — ไม่มี clock injection)
 - verify: canonical **153/153**, binding 1016, foundation 163, routes 47, tsc clean
+
+## ผ่านแล้ว (verified) — escalate wire: handoff_admin → escalateAiRun (2026-11-14)
+
+- `botWorkerService.triggerMatched` handoff_admin — หลัง pickAgent สำเร็จเรียก `workflowEngine.escalateAiRun` ปลุก run ที่ park ai_bot → เดินเส้น `ai-chatbot-escalate` (non-fatal: throw จะ log event `ai_escalate_error` ไม่ทำ outcome handoff พัง)
+- `workflowEngine` facade เพิ่ม `escalateAiRun`/`matchAndRunEvent`/`setMarketplaceAdapter`
+- mocks: idempotency stub escalateAiRun แบบ contract จริง (query ai_bot park → resume/no_match + call counter) · enable-checkpoint stub no_match · E3 assert escalateAiRun=1 หลัง handoff
+- verify: idempotency **71/71**, scope-gate 107, shop-context 34, boundary 20, enable-checkpoint 18, canonical 153, tsc clean — commit `91da248`
+
+## ผ่านแล้ว (verified) — R3 e2e per-flow ครบทุก chat flows (18/18 — marketplace พักไว้)
+
+- วิธี: dump nodes/edges จริงจาก version docs → `scripts/fixtures/flowNN-graph.json` (07,08,09,10-14,15,16,17,18,20) → เดิน graph จริงทุก branch สำคัญ พร้อม bindings จำลอง (account→s1, labels, users, team→all_admins)
+- f18 delay→waiting tag / f20 oncePerOpen tag / f16 claim keyword→send→assign(dedupe by label) / f17 รอบสอง (SECOND_ROUND→forward+assign+remove, รอบแรก→tag เท่านั้น) / f07 does_not_contain_any_of gate + score equals → thanks/apology+assign / f09 contains_all gate + score contains_one_of / f10-14 label_added→survey→add/remove (ทุก flow ยิงเฉพาะ label ที่ bind) / f08 LINE: last_interaction>2h → delay 15s → button_template (กดปุ่ม→image→button2→assign / none-selected→chatbot→escalate→assign / expired→jump→assign / ai timeout→close) / f15 36-node เต็ม: no-match chain→chatbot1, OOH→wfr→chatbot2, no-respond→jump→assign, label branch→remove→jump
+- **จับ test-design bug ตัวเอง (สำคัญกว่า engine bug)**: insert flow ใหม่โดยไม่ disable ตัวก่อน → matchAndRun เลือก workflow enabled ตัวแรก → flow ที่เทสไม่ได้ยิงเลย (label ไม่ติด/park ผิด status) — แก้ด้วย `only()` helper ปิดตัวอื่นก่อนเทส; บทเรียน: e2e multi-workflow ต้องคุม enabled set เสมอ
+- verify: canonical **220/220** (+67 assertions), binding 1016, foundation 163, routes 47, tsc clean
+- เหลือ: marketplace flows 06/19/21 e2e (พัก — ไม่มี event จริง), bindings จริง + business_hours ร้าน + activate gates
