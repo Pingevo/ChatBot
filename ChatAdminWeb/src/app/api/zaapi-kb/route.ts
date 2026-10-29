@@ -159,15 +159,18 @@ export async function POST(req: NextRequest) {
     return error("text or fields required", 400);
 
   const now = new Date().toISOString();
+  const sourceId = String(body.source_id || "manual");
   const doc = {
-    source_id: `manual:${Date.now()}`,
+    source_id: sourceId,
     source_name: String(body.source_name || "เพิ่มเอง").trim(),
     kind: "manual",
-    row_index: 0,
+    row_index: Number.isFinite(body.row_index) ? body.row_index : 0,
     fields,
     text: text || Object.entries(fields).map(([k, v]) => `${k}: ${v}`).join("\n"),
-    accounts: [],
-    unscoped: true,            // manual doc ไม่ผูกร้าน — ใช้ได้ทุกร้าน
+    // เพิ่มในกลุ่มเดิม → inherit accounts ของ source (scope เดียวกัน)
+    // สร้าง manual ทั่วไป → unscoped ใช้ได้ทุกร้าน
+    accounts: Array.isArray(body.accounts) ? body.accounts : [],
+    unscoped: body.unscoped === false ? false : sourceId === "manual",
     manual_edit: true,         // กัน importer ลบ/ทับ
     active: true,
     imported_at: now,

@@ -1,7 +1,8 @@
 "use client";
-// ZaapiKbPanel — imported Zaapi KB corpus (zaapi_kb) เป็น card list + CRUD
-// เพิ่ม/แก้/ลบ/เปิด-ปิด ได้เหมือน legacy KB — doc ที่แก้ถูก mark manual_edit
-// (importer จะไม่ทับ) · doc สร้างเอง unscoped = ใช้ได้ทุกร้าน
+// ZaapiKbPanel — imported Zaapi KB corpus (zaapi_kb) แบบกลุ่ม source + CRUD
+// docs ข้างในแก้/ลบ/เปิด-ปิดได้ · แก้แล้ว mark manual_edit (importer ไม่ทับ)
+// "เพิ่มในกลุ่มนี้" inherit accounts ของ source (scope เดียวกัน)
+// "เพิ่ม" ทั่วไป → unscoped ใช้ได้ทุกร้าน
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -19,6 +20,15 @@ import {
   Search, ChevronDown, Database, Pencil, Trash2, Plus, X, FileSpreadsheet,
 } from "lucide-react";
 
+type ZaapiSource = {
+  source_id: string;
+  source_name: string;
+  accounts: { id: string; platform: string; name: string }[];
+  docs: number;
+  active_docs: number;
+  zaapi_updated_at?: string;
+};
+
 type ZaapiDoc = {
   id: string;
   row_index: number;
@@ -28,68 +38,30 @@ type ZaapiDoc = {
   text: string;
   source_id?: string;
   source_name?: string;
-  accounts?: { id: string; platform: string; name: string }[];
-  unscoped?: boolean;
-  manual_edit?: boolean;
   active: boolean;
 };
 
-const PAGE_SIZE = 24;
-const PLATFORMS = ["Shopee", "Facebook", "Lazada", "TikTok", "LINE Official"];
+const PLATFORM_COLORS: Record<string, string> = {
+  Shopee: "bg-orange-100 text-orange-700",
+  Facebook: "bg-blue-100 text-blue-700",
+  Lazada: "bg-sky-100 text-sky-700",
+  TikTok: "bg-neutral-800 text-white",
+  "LINE Official": "bg-green-100 text-green-700",
+};
+const PAGE_SIZE = 25;
 const TITLE_COLS = ["รุ่นสินค้า", "ชื่อรุ่นสินค้าย่อ", "คำถามเกี่ยวสินค้า", "คำถาม", "รุ่น", "model"];
 
 function docTitle(d: ZaapiDoc): string {
   for (const c of TITLE_COLS) if (d.fields[c]?.trim()) return d.fields[c].trim();
   const first = Object.values(d.fields).find((v) => v?.trim());
-  return (first || d.text || d.source_name || "ไม่มีชื่อ").trim().slice(0, 80);
-}
-
-function FilterDropdown({ label, value, options, onChange }: {
-  label: string;
-  value: string;
-  options: { v: string; l: string }[];
-  onChange: (v: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const h = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    document.addEventListener("mousedown", h);
-    return () => document.removeEventListener("mousedown", h);
-  }, [open]);
-  const cur = options.find((o) => o.v === value);
-  return (
-    <div className="relative" ref={ref}>
-      <button
-        onClick={() => setOpen(!open)}
-        className="h-8 px-3 rounded-lg border border-border bg-surface text-xs text-text-muted hover:bg-surface-2 flex items-center gap-1.5"
-      >
-        {label}: <span className="text-text">{cur?.l || "ทั้งหมด"}</span>
-        <ChevronDown size={12} />
-      </button>
-      {open && (
-        <div className="absolute top-full left-0 mt-1 min-w-[140px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-          {options.map((o) => (
-            <button
-              key={o.v}
-              onClick={() => { onChange(o.v); setOpen(false); }}
-              className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${o.v === value ? "text-brand font-medium" : "text-text"}`}
-            >
-              {o.l}
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
+  return (first || d.text || "ไม่มีชื่อ").trim().slice(0, 80);
 }
 
 type EditState = {
   id?: string;
+  source_id?: string;
   source_name: string;
+  accounts?: { id: string; platform: string; name: string }[];
   fields: { k: string; v: string }[];
   text: string;
 };
@@ -98,46 +70,67 @@ export function ZaapiKbPanel() {
   const { user } = useAuth();
   const editable = canEditPage(user, "kb");
 
-  const [docs, setDocs] = useState<ZaapiDoc[]>([]);
-  const [total, setTotal] = useState(0);
+  const [sources, setSources] = useState<ZaapiSource[]>([]);
   const [loading, setLoading] = useState(true);
-  const [page, setPage] = useState(0);
-
   const [search, setSearch] = useState("");
-  const [platform, setPlatform] = useState("all");
-  const [active, setActive] = useState("all");
-  const [sortBy, setSortBy] = useState("recent");
+  const [openId, setOpenId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   useSearchShortcut(searchRef);
   const handleSearchEsc = useEscToClear(() => setSearch(""));
 
+  const [docs, setDocs] = useState<ZaapiDoc[]>([]);
+  const [docsTotal, setDocsTotal] = useState(0);
+  const [docsPage, setDocsPage] = useState(0);
+  const [docsLoading, setDocsLoading] = useState(false);
+
   const [edit, setEdit] = useState<EditState | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const load = useCallback(() => {
-    setLoading(true);
+  const loadSources = useCallback(() => {
+    api()
+      .get("/zaapi-kb", { params: { mode: "sources" } })
+      .then((r) => setSources(r.data.sources || []))
+      .catch(() => setSources([]))
+      .finally(() => setLoading(false));
+  }, []);
+  useEffect(() => { loadSources(); }, [loadSources]);
+
+  const loadDocs = useCallback((sourceId: string, page: number) => {
+    setDocsLoading(true);
     api()
       .get("/zaapi-kb", {
-        params: {
-          mode: "list", q: search || undefined,
-          platform: platform !== "all" ? platform : undefined,
-          active: active !== "all" ? active : undefined,
-          sort: sortBy, skip: page * PAGE_SIZE, limit: PAGE_SIZE,
-        },
+        params: { mode: "docs", source_id: sourceId, skip: page * PAGE_SIZE, limit: PAGE_SIZE },
       })
-      .then((r) => { setDocs(r.data.docs || []); setTotal(r.data.total || 0); })
-      .catch(() => { setDocs([]); setTotal(0); })
-      .finally(() => setLoading(false));
-  }, [search, platform, active, sortBy, page]);
+      .then((r) => { setDocs(r.data.docs || []); setDocsTotal(r.data.total || 0); })
+      .catch(() => { setDocs([]); setDocsTotal(0); })
+      .finally(() => setDocsLoading(false));
+  }, []);
 
-  useEffect(() => { load(); }, [load]);
+  function toggleSource(id: string) {
+    if (openId === id) { setOpenId(null); return; }
+    setOpenId(id);
+    setDocsPage(0);
+    loadDocs(id, 0);
+  }
 
-  function openEdit(d: ZaapiDoc) {
+  function openEditDoc(d: ZaapiDoc, s: ZaapiSource) {
     setEdit({
       id: d.id,
-      source_name: d.source_name || "",
+      source_id: s.source_id,
+      source_name: s.source_name,
+      accounts: s.accounts,
       fields: Object.entries(d.fields).map(([k, v]) => ({ k, v })),
       text: d.text,
+    });
+  }
+
+  function openCreate(s?: ZaapiSource) {
+    setEdit({
+      source_id: s?.source_id,
+      source_name: s?.source_name || "เพิ่มเอง",
+      accounts: s?.accounts,
+      fields: [{ k: "", v: "" }],
+      text: "",
     });
   }
 
@@ -154,12 +147,18 @@ export function ZaapiKbPanel() {
         toast.success("บันทึกแล้ว");
       } else {
         await api().post("/zaapi-kb", {
-          source_name: edit.source_name, fields, text: edit.text,
+          source_id: edit.source_id,
+          source_name: edit.source_name,
+          accounts: edit.accounts || [],
+          unscoped: !edit.source_id,
+          fields, text: edit.text,
         });
         toast.success("เพิ่มรายการแล้ว");
       }
+      const openSource = edit.source_id;
       setEdit(null);
-      load();
+      if (openId === openSource) loadDocs(openSource, docsPage);
+      loadSources();
     } catch {
       toast.error("บันทึกไม่สำเร็จ");
     } finally {
@@ -171,108 +170,153 @@ export function ZaapiKbPanel() {
     try {
       await api().patch(`/zaapi-kb/${d.id}`, { active: !d.active });
       setDocs((ds) => ds.map((x) => x.id === d.id ? { ...x, active: !d.active } : x));
+      loadSources();
     } catch {
       toast.error("เปลี่ยนสถานะไม่สำเร็จ");
     }
   }
 
-  async function remove(d: ZaapiDoc) {
+  async function removeDoc(d: ZaapiDoc, s: ZaapiSource) {
     if (!(await confirm.ask({ title: `ลบ "${docTitle(d)}" ?`, variant: "danger" }))) return;
     try {
       await api().delete(`/zaapi-kb/${d.id}`);
       toast.success("ลบแล้ว");
-      load();
+      loadDocs(s.source_id, docsPage);
+      loadSources();
     } catch {
       toast.error("ลบไม่สำเร็จ");
     }
   }
 
-  const totalPages = Math.ceil(total / PAGE_SIZE);
+  const filtered = sources.filter((s) => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return (
+      s.source_name.toLowerCase().includes(q) ||
+      s.accounts.some((a) => a.name.toLowerCase().includes(q) || a.platform.toLowerCase().includes(q))
+    );
+  });
+
+  if (loading) return <div className="flex justify-center py-12"><Loading size={24} /></div>;
+  if (sources.length === 0)
+    return <EmptyState icon={Database} title="ยังไม่มี Zaapi KB" description="รัน import_zaapi_kb.py เพื่อนำเข้าข้อมูล" />;
 
   return (
     <div className="space-y-3">
-      {/* Filter bar — ชุดเดียวกับ legacy: search + platform + status + sort + เพิ่ม */}
-      <div className="flex items-center gap-2 flex-wrap">
+      <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[200px] max-w-md">
           <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
           <input
             type="text"
             ref={searchRef}
             value={search}
-            onChange={(e) => { setSearch(e.target.value); setPage(0); }}
+            onChange={(e) => setSearch(e.target.value)}
             onKeyDown={handleSearchEsc}
-            placeholder="ค้นหาเนื้อหา / source..."
+            placeholder="ค้นหา source / ร้านค้า / platform..."
             className="w-full h-8 pl-8 pr-8 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
           />
           <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
         </div>
-        <FilterDropdown label="แพลตฟอร์ม" value={platform}
-          options={[{ v: "all", l: "ทั้งหมด" }, ...PLATFORMS.map((p) => ({ v: p, l: p }))]}
-          onChange={(v) => { setPlatform(v); setPage(0); }} />
-        <FilterDropdown label="สถานะ" value={active}
-          options={[{ v: "all", l: "ทั้งหมด" }, { v: "active", l: "เปิดใช้" }, { v: "inactive", l: "ปิดใช้" }]}
-          onChange={(v) => { setActive(v); setPage(0); }} />
-        <FilterDropdown label="เรียง" value={sortBy}
-          options={[{ v: "recent", l: "ล่าสุด" }, { v: "oldest", l: "เก่าสุด" }, { v: "name", l: "ชื่อ source" }]}
-          onChange={setSortBy} />
-        <span className="text-xs text-text-subtle ml-auto">{total.toLocaleString()} รายการ</span>
+        <span className="text-xs text-text-muted">{filtered.length}/{sources.length} sources</span>
         {editable && (
-          <Button size="sm" onClick={() => setEdit({ source_name: "เพิ่มเอง", fields: [{ k: "", v: "" }], text: "" })}>
-            <Plus size={14} /> เพิ่ม
+          <Button size="sm" variant="outline" onClick={() => openCreate()}>
+            <Plus size={14} /> เพิ่ม (ทุกร้าน)
           </Button>
         )}
       </div>
 
-      {/* Card list */}
-      <div className="max-h-[calc(100dvh-300px)] overflow-y-auto pr-1">
-        {loading ? (
-          <div className="flex justify-center py-12"><Loading size={24} /></div>
-        ) : docs.length === 0 ? (
-          <EmptyState icon={Database} title="ไม่พบรายการ" description="ลองล้าง filter หรือเพิ่มรายการใหม่" />
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {docs.map((d) => {
-              const platforms = [...new Set((d.accounts || []).map((a) => a.platform))];
-              return (
-                <div key={d.id} className="bg-surface rounded-xl border border-border p-4 hover:border-pale-sky transition-colors">
-                  <div className="flex items-start justify-between gap-2 mb-2">
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <Badge tone={d.kind === "manual" ? "brand" : "pale"}>
-                        {d.kind === "manual" ? "เพิ่มเอง" : d.kind === "xlsx_row" ? "Zaapi" : d.kind}
-                      </Badge>
-                      {d.source_name && <Badge tone="neutral">{d.source_name.slice(0, 40)}</Badge>}
-                      {platforms.map((p) => <Badge key={p} tone="pale">{p}</Badge>)}
-                      {d.manual_edit && <Badge tone="warning">แก้ไขแล้ว</Badge>}
-                      {!d.active && <Badge tone="neutral">ปิดอยู่</Badge>}
-                    </div>
-                    {editable && (
-                      <div className="flex items-center gap-1 shrink-0">
-                        <ToggleSwitch enabled={d.active} onChange={() => toggleActive(d)} />
-                        <button onClick={() => openEdit(d)} className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center" title="แก้ไข" aria-label="แก้ไข">
-                          <Pencil size={13} className="text-text-muted" />
-                        </button>
-                        <button onClick={() => remove(d)} className="w-9 h-9 rounded-md hover:bg-error-soft flex items-center justify-center" title="ลบ" aria-label="ลบ">
-                          <Trash2 size={13} className="text-text-muted" />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                  <div className="text-sm font-medium text-text">{docTitle(d)}</div>
-                  <p className="text-xs text-text-muted mt-1 line-clamp-2 whitespace-pre-wrap">{d.text}</p>
-                  <div className="flex items-center gap-1 mt-2 text-[10px] text-text-subtle">
-                    <FileSpreadsheet size={10} />
-                    {d.source_name} · #{d.row_index}
-                    {d.unscoped && " · ทุกร้าน"}
+      <div className="border border-border rounded-xl divide-y divide-border overflow-y-auto bg-surface max-h-[calc(100dvh-300px)]">
+        {filtered.map((s) => {
+          const platforms = [...new Set(s.accounts.map((a) => a.platform))];
+          const open = openId === s.source_id;
+          return (
+            <div key={s.source_id}>
+              <button
+                onClick={() => toggleSource(s.source_id)}
+                className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-surface-2 transition-colors"
+              >
+                <ChevronDown size={14} className={`text-text-subtle transition-transform ${open ? "" : "-rotate-90"}`} />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-medium text-text truncate">{s.source_name}</div>
+                  <div className="text-[11px] text-text-subtle mt-0.5 truncate">
+                    {s.accounts.slice(0, 3).map((a) => a.name).join(", ")}
+                    {s.accounts.length > 3 && ` +${s.accounts.length - 3}`}
+                    {s.accounts.length === 0 && "ทุกร้าน"}
                   </div>
                 </div>
-              );
-            })}
-          </div>
-        )}
+                <div className="flex items-center gap-1 shrink-0">
+                  {platforms.map((p) => (
+                    <span key={p} className={`text-[10px] px-1.5 py-0.5 rounded ${PLATFORM_COLORS[p] || "bg-surface-2 text-text-muted"}`}>
+                      {p}
+                    </span>
+                  ))}
+                </div>
+                <Badge tone={s.active_docs === s.docs ? "success" : "warning"}>
+                  {s.active_docs}/{s.docs}
+                </Badge>
+              </button>
+
+              {open && (
+                <div className="border-t border-border bg-surface-2/50 px-4 py-3">
+                  <div className="flex justify-end mb-2">
+                    {editable && (
+                      <button
+                        onClick={() => openCreate(s)}
+                        className="text-xs text-brand hover:underline flex items-center gap-1"
+                      >
+                        <Plus size={12} /> เพิ่มในกลุ่มนี้
+                      </button>
+                    )}
+                  </div>
+                  {docsLoading ? (
+                    <div className="flex justify-center py-6"><Loading size={18} /></div>
+                  ) : docs.length === 0 ? (
+                    <div className="text-xs text-text-subtle py-4 text-center">ไม่มีเอกสาร</div>
+                  ) : (
+                    <>
+                      <div className="space-y-1.5">
+                        {docs.map((d) => (
+                          <div key={d.id} className="border border-border/60 rounded-lg bg-surface px-3 py-2">
+                            <div className="flex items-center gap-2 text-[10px] text-text-subtle mb-1">
+                              <span className="font-mono">#{d.row_index}</span>
+                              <span>{d.kind}{d.sheet ? ` · ${d.sheet}` : ""}</span>
+                              {!d.active && <span className="text-error">ปิดอยู่</span>}
+                              {editable && (
+                                <span className="ml-auto flex items-center gap-1">
+                                  <ToggleSwitch enabled={d.active} onChange={() => toggleActive(d)} />
+                                  <button onClick={() => openEditDoc(d, s)} className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center" title="แก้ไข" aria-label="แก้ไข">
+                                    <Pencil size={11} className="text-text-muted" />
+                                  </button>
+                                  <button onClick={() => removeDoc(d, s)} className="w-7 h-7 rounded-md hover:bg-error-soft flex items-center justify-center" title="ลบ" aria-label="ลบ">
+                                    <Trash2 size={11} className="text-text-muted" />
+                                  </button>
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-xs font-medium text-text">{docTitle(d)}</div>
+                            <div className="text-xs text-text-muted whitespace-pre-wrap break-words max-h-32 overflow-y-auto mt-0.5">
+                              {d.text}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                      {docsTotal > PAGE_SIZE && (
+                        <div className="mt-3">
+                          <Pagination
+                            page={docsPage + 1}
+                            totalPages={Math.ceil(docsTotal / PAGE_SIZE)}
+                            onChange={(p) => { setDocsPage(p - 1); loadDocs(s.source_id, p - 1); }}
+                          />
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
       </div>
-      {totalPages > 1 && (
-        <Pagination page={page + 1} totalPages={totalPages} onChange={(p) => setPage(p - 1)} />
-      )}
 
       {/* Edit / Create modal */}
       {edit && (
@@ -333,7 +377,7 @@ export function ZaapiKbPanel() {
                   className="w-full px-3 py-2 rounded-lg border border-border bg-surface text-xs focus:outline-none focus:ring-2 focus:ring-brand/40 whitespace-pre-wrap"
                 />
               </div>
-              {!edit.id && (
+              {!edit.source_id && (
                 <p className="text-[11px] text-text-subtle">รายการที่สร้างเองจะใช้ได้กับทุกร้าน (unscoped)</p>
               )}
             </div>
