@@ -83,6 +83,7 @@ export default function KnowledgePage() {
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<Tab>("all");
   const [corpus, setCorpus] = useState<Corpus>("legacy");
+  const [openGroups, setOpenGroups] = useState<Set<string>>(new Set());
   const [showForm, setShowForm] = useState(false);
   const formModalRef = useFocusTrap<HTMLDivElement>(showForm);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -800,79 +801,88 @@ export default function KnowledgePage() {
               <span className="text-xs text-text-muted">เลือกทั้งหมดในหน้านี้ ({paged.length})</span>
             </div>
           )}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {paged.map((row) => (
-              <div
-                key={row._id}
-                className="bg-surface rounded-xl border border-border p-4 hover:border-pale-sky transition-colors"
-              >
-                <div className="flex items-start justify-between gap-2 mb-2">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <input type="checkbox" checked={row._id ? selectedIds.has(row._id) : false} onChange={() => row._id && toggleSelect(row._id)} className="w-4 h-4 rounded border-border accent-brand shrink-0" aria-label={`เลือก ${row.topic || row.model || row._id}`} />
-                    <Badge tone={row.type === "product_spec" ? "pale" : "brand"}>
-                      {row.type === "product_spec" ? "สินค้า" : "FAQ"}
+          {/* Grouped list (แบบ zaapi) — กลุ่มตาม source_file → expand → rows */}
+          <div className="border border-border rounded-xl divide-y divide-border overflow-y-auto bg-surface max-h-[calc(100dvh-300px)]">
+            {Object.entries(
+              paged.reduce<Record<string, KbRow[]>>((acc, row) => {
+                const g = row.source_file || "เพิ่มเอง";
+                (acc[g] ||= []).push(row);
+                return acc;
+              }, {})
+            ).map(([group, rows]) => {
+              const open = openGroups.has(group);
+              const activeCount = rows.filter((r) => r.active !== false).length;
+              return (
+                <div key={group}>
+                  <button
+                    onClick={() => setOpenGroups((s) => {
+                      const n = new Set(s);
+                      open ? n.delete(group) : n.add(group);
+                      return n;
+                    })}
+                    className="w-full flex items-center gap-3 px-4 py-2.5 text-left hover:bg-surface-2 transition-colors"
+                  >
+                    <ChevronDown size={14} className={`text-text-subtle transition-transform ${open ? "" : "-rotate-90"}`} />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs font-medium text-text truncate flex items-center gap-1.5">
+                        <FileSpreadsheet size={12} className="text-text-subtle shrink-0" /> {group}
+                      </div>
+                    </div>
+                    <Badge tone={activeCount === rows.length ? "success" : "warning"}>
+                      {activeCount}/{rows.length}
                     </Badge>
-                    {row.topic && <Badge tone="pale">{row.topic}</Badge>}
-                    {row.platform && row.platform !== "all" && (
-                      <Badge tone="neutral">{row.platform.charAt(0).toUpperCase() + row.platform.slice(1)}</Badge>
-                    )}
-                    {row.active === false && <Badge tone="neutral">ปิดอยู่</Badge>}
-                  </div>
-                  {editable && (
-                    <div className="flex items-center gap-1 shrink-0">
-                      <ToggleSwitch
-                        enabled={row.active !== false}
-                        onChange={() => handleToggle(row)}
-                      />
-                      <button
-                        onClick={() => openEdit(row)}
-                        className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center"
-                        title="แก้ไข"
-                        aria-label="แก้ไข"
-                      >
-                        <Pencil size={13} className="text-text-muted" />
-                      </button>
-                      <button
-                        onClick={() => handleDelete(row._id!)}
-                        className="w-9 h-9 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center"
-                        title="ลบ"
-                        aria-label="ลบ"
-                      >
-                        <Trash2 size={13} className="text-text-muted" />
-                      </button>
+                  </button>
+                  {open && (
+                    <div className="border-t border-border bg-surface-2/50 px-4 py-3 space-y-1.5">
+                      {rows.map((row) => (
+                        <div key={row._id} className="border border-border/60 rounded-lg bg-surface px-3 py-2">
+                          <div className="flex items-center gap-2 text-[10px] text-text-subtle mb-1">
+                            <input type="checkbox" checked={row._id ? selectedIds.has(row._id) : false} onChange={() => row._id && toggleSelect(row._id)} className="w-3.5 h-3.5 rounded border-border accent-brand" aria-label={`เลือก ${row.topic || row.model || row._id}`} />
+                            <Badge tone={row.type === "product_spec" ? "pale" : "brand"}>
+                              {row.type === "product_spec" ? "สินค้า" : "FAQ"}
+                            </Badge>
+                            {row.platform && row.platform !== "all" && (
+                              <Badge tone="neutral">{row.platform.charAt(0).toUpperCase() + row.platform.slice(1)}</Badge>
+                            )}
+                            {row.active === false && <span className="text-error">ปิดอยู่</span>}
+                            {editable && (
+                              <span className="ml-auto flex items-center gap-1">
+                                <ToggleSwitch
+                                  enabled={row.active !== false}
+                                  onChange={() => handleToggle(row)}
+                                />
+                                <button onClick={() => openEdit(row)} className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center" title="แก้ไข" aria-label="แก้ไข">
+                                  <Pencil size={11} className="text-text-muted" />
+                                </button>
+                                <button onClick={() => handleDelete(row._id!)} className="w-7 h-7 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center" title="ลบ" aria-label="ลบ">
+                                  <Trash2 size={11} className="text-text-muted" />
+                                </button>
+                              </span>
+                            )}
+                          </div>
+                          {row.type === "product_spec" ? (
+                            <>
+                              <div className="text-xs font-medium text-text">{row.brand} {row.model}</div>
+                              {row.highlights && (
+                                <p className="text-xs text-text-muted mt-0.5 line-clamp-2">{row.highlights}</p>
+                              )}
+                              {row.warranty_period && (
+                                <div className="text-[11px] text-text-subtle mt-0.5">รับประกัน: {row.warranty_period}</div>
+                              )}
+                            </>
+                          ) : (
+                            <>
+                              <div className="text-xs font-medium text-text">{row.topic}</div>
+                              <p className="text-xs text-text-muted mt-0.5 line-clamp-2">{row.answer}</p>
+                            </>
+                          )}
+                        </div>
+                      ))}
                     </div>
                   )}
                 </div>
-
-                {/* Content */}
-                {row.type === "product_spec" ? (
-                  <>
-                    <div className="text-sm font-medium text-text">
-                      {row.brand} {row.model}
-                    </div>
-                    {row.category && (
-                      <div className="text-xs text-text-muted mt-0.5">หมวด: {row.category}</div>
-                    )}
-                    {row.highlights && (
-                      <p className="text-xs text-text-muted mt-1 line-clamp-2">{row.highlights}</p>
-                    )}
-                    {row.warranty_period && (
-                      <div className="text-[11px] text-text-subtle mt-1">รับประกัน: {row.warranty_period}</div>
-                    )}
-                    {row.source_file && (
-                      <div className="flex items-center gap-1 mt-2 text-[10px] text-text-subtle">
-                        <FileSpreadsheet size={10} /> {row.source_file}
-                      </div>
-                    )}
-                  </>
-                ) : (
-                  <>
-                    <div className="text-sm font-medium text-text mb-1">{row.topic}</div>
-                    <p className="text-xs text-text-muted line-clamp-2">{row.answer}</p>
-                  </>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
 
           {/* Pagination */}

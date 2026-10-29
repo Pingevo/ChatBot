@@ -57,6 +57,49 @@ function docTitle(d: ZaapiDoc): string {
   return (first || d.text || "ไม่มีชื่อ").trim().slice(0, 80);
 }
 
+function FilterDropdown({ label, value, options, onChange }: {
+  label: string;
+  value: string;
+  options: { v: string; l: string }[];
+  onChange: (v: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const h = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, [open]);
+  const cur = options.find((o) => o.v === value);
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen(!open)}
+        className="h-8 px-3 rounded-lg border border-border bg-surface text-xs text-text-muted hover:bg-surface-2 flex items-center gap-1.5"
+      >
+        {label}: <span className="text-text">{cur?.l || "ทั้งหมด"}</span>
+        <ChevronDown size={12} />
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 min-w-[140px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+          {options.map((o) => (
+            <button
+              key={o.v}
+              onClick={() => { onChange(o.v); setOpen(false); }}
+              className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${o.v === value ? "text-brand font-medium" : "text-text"}`}
+            >
+              {o.l}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type EditState = {
   id?: string;
   source_id?: string;
@@ -73,6 +116,9 @@ export function ZaapiKbPanel() {
   const [sources, setSources] = useState<ZaapiSource[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [platform, setPlatform] = useState("all");
+  const [active, setActive] = useState("all");
+  const [sortBy, setSortBy] = useState("name");
   const [openId, setOpenId] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   useSearchShortcut(searchRef);
@@ -99,12 +145,17 @@ export function ZaapiKbPanel() {
     setDocsLoading(true);
     api()
       .get("/zaapi-kb", {
-        params: { mode: "docs", source_id: sourceId, skip: page * PAGE_SIZE, limit: PAGE_SIZE },
+        params: {
+          mode: "docs", source_id: sourceId,
+          q: search || undefined,
+          active: active !== "all" ? active : undefined,
+          skip: page * PAGE_SIZE, limit: PAGE_SIZE,
+        },
       })
       .then((r) => { setDocs(r.data.docs || []); setDocsTotal(r.data.total || 0); })
       .catch(() => { setDocs([]); setDocsTotal(0); })
       .finally(() => setDocsLoading(false));
-  }, []);
+  }, [search, active]);
 
   function toggleSource(id: string) {
     if (openId === id) { setOpenId(null); return; }
@@ -112,6 +163,11 @@ export function ZaapiKbPanel() {
     setDocsPage(0);
     loadDocs(id, 0);
   }
+
+  // filter เปลี่ยน → reload docs ของ source ที่เปิดอยู่
+  useEffect(() => {
+    if (openId) { setDocsPage(0); loadDocs(openId, 0); }
+  }, [search, active]); // eslint-disable-line react-hooks/exhaustive-deps
 
   function openEditDoc(d: ZaapiDoc, s: ZaapiSource) {
     setEdit({
@@ -188,14 +244,20 @@ export function ZaapiKbPanel() {
     }
   }
 
-  const filtered = sources.filter((s) => {
-    if (!search) return true;
-    const q = search.toLowerCase();
-    return (
-      s.source_name.toLowerCase().includes(q) ||
-      s.accounts.some((a) => a.name.toLowerCase().includes(q) || a.platform.toLowerCase().includes(q))
-    );
-  });
+  const filtered = sources
+    .filter((s) => {
+      if (platform !== "all" && !s.accounts.some((a) => a.platform === platform)) return false;
+      if (!search) return true;
+      const q = search.toLowerCase();
+      return (
+        s.source_name.toLowerCase().includes(q) ||
+        s.accounts.some((a) => a.name.toLowerCase().includes(q) || a.platform.toLowerCase().includes(q))
+      );
+    })
+    .sort((a, b) =>
+      sortBy === "recent"
+        ? (b.zaapi_updated_at || "").localeCompare(a.zaapi_updated_at || "")
+        : a.source_name.localeCompare(b.source_name));
 
   if (loading) return <div className="flex justify-center py-12"><Loading size={24} /></div>;
   if (sources.length === 0)
@@ -217,7 +279,16 @@ export function ZaapiKbPanel() {
           />
           <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
         </div>
-        <span className="text-xs text-text-muted">{filtered.length}/{sources.length} sources</span>
+        <FilterDropdown label="แพลตฟอร์ม" value={platform}
+          options={[{ v: "all", l: "ทั้งหมด" }, ...Object.keys(PLATFORM_COLORS).map((p) => ({ v: p, l: p }))]}
+          onChange={setPlatform} />
+        <FilterDropdown label="สถานะ" value={active}
+          options={[{ v: "all", l: "ทั้งหมด" }, { v: "active", l: "เปิดใช้" }, { v: "inactive", l: "ปิดใช้" }]}
+          onChange={setActive} />
+        <FilterDropdown label="เรียง" value={sortBy}
+          options={[{ v: "name", l: "ชื่อ source" }, { v: "recent", l: "อัปเดตล่าสุด" }]}
+          onChange={setSortBy} />
+        <span className="text-xs text-text-muted ml-auto">{filtered.length}/{sources.length} sources</span>
         {editable && (
           <Button size="sm" variant="outline" onClick={() => openCreate()}>
             <Plus size={14} /> เพิ่ม (ทุกร้าน)

@@ -59,7 +59,12 @@ export async function GET(req: NextRequest) {
     if (!sourceId) return error("source_id required", 400);
     const skip = Math.max(0, parseInt(url.searchParams.get("skip") || "0", 10));
     const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "30", 10)));
-    const filter = { source_id: sourceId };
+    const q = url.searchParams.get("q")?.trim() || "";
+    const active = url.searchParams.get("active") || "";
+    const filter: Record<string, unknown> = { source_id: sourceId };
+    if (q) filter.text = { $regex: safeRegexSearch(q), $options: "i" };
+    if (active === "active") filter.active = { $ne: false };
+    else if (active === "inactive") filter.active = false;
     const [docs, total] = await Promise.all([
       coll
         .find(filter, {
