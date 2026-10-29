@@ -106,7 +106,7 @@ export function ZaapiKbPanel() {
         </span>
       </div>
 
-      <div className="border border-border rounded-xl divide-y divide-border overflow-hidden bg-surface">
+      <div className="border border-border rounded-xl divide-y divide-border overflow-y-auto bg-surface max-h-[calc(100dvh-300px)]">
         {filtered.map((s) => {
           const platforms = [...new Set(s.accounts.map((a) => a.platform))];
           const open = openId === s.source_id;
