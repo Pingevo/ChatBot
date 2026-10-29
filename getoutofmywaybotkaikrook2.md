@@ -10147,3 +10147,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - **ผลกระทบเคสอื่น**: alias rename ล้วน — `_rc` กลับชี้ `route_context` ถูกเดิม, `kb_source()` เหมือนเดิม, ไม่มีเคสอื่นกระทบ
 - **verify**: repro ก่อนแก้ = `UnboundLocalError` at app.py:1528 → หลังแก้ in-process `chat()` คืนคำตอบจริง + HTTP POST /chat → **200** (`--reload` pickup แล้ว) · `py_compile` OK
 - branch `feature-botlogic-kb-workflow`
+
+## ผ่านแล้ว (verified) — /chat 500 บน claim path: `_has_explicit_subject` unbound (2026-10-29)
+
+- **error**: `UnboundLocalError: _has_explicit_subject` at app.py:1898 → 500 ทุก `warranty_claim` turn (iSuper earphone / KieslectThailand smartwatch ใน shadow generate)
+- **เกิดเพราะ**: commit `40a7d77` (phase 10b) เพิ่ม `or _is_claim_request` ใน explicit-subject gate (line ~1780) + เพิ่ม `_history_cards` block อ่านตัวแปรนี้ unconditional (1898) — var assign เฉพาะใน gate → claim path ข้าม gate = unbound; เคสร่วม gate: `_tagged_item_id`/`_hybrid_anchor_card` ก็กระทบได้ถ้า `_subject_cards` ว่าง
+- **แก้**: default `_has_explicit_subject = True` ก่อน gate — gated paths own subject ผ่าน channel ตัวเอง; turn ปกติ recompute ใน gate เหมือนเดิม (preserve behavior ก่อน 40a7d77 — ตอนนั้นไม่มี _history_cards)
+- **ผลกระทบเคสอื่น**: normal path ไม่เปลี่ยน; claim/tagged/hybrid กลับมาทำงาน; net change +1 default, 0 guard/owner ใหม่
+- **verify**: claim in-process → `warranty_claim_first_message` answer จริง · HTTP POST /chat claim → **200** · py_compile OK
+- branch `feature-botlogic-kb-workflow` (ต่อจาก `_rc` fix `938757e`)

@@ -1776,6 +1776,9 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             ) if i and str(i) not in _persisted_ids)
         if _subj_explicit:
             _subject_ev["explicit_ids"] = _subj_explicit
+        # gated paths (tagged/anchor/hybrid/claim) own subject ผ่าน channel
+        #   ของตัวเอง → default True; turn ปกติ recompute ใน gate ข้างล่าง
+        _has_explicit_subject = True
         if not (_tagged_item_id or anchor_card or _hybrid_anchor_card
                 or _is_claim_request):
             # explicit-subject gate: typed TurnPlan surface เท่านั้น —
