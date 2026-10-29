@@ -79,10 +79,6 @@ function leaveOn(leaves: LeaveRecord[], adminId: string, key: string): LeaveReco
 function initialOf(name: string) {
   return name.trim().charAt(0).toUpperCase() || "?";
 }
-/** ลายทแยงสำหรับเซลล์ลาบางช่วง */
-function stripeBg(hex: string) {
-  return { background: `repeating-linear-gradient(135deg, ${hex} 0px, ${hex} 3px, ${hex}33 3px, ${hex}33 7px)` };
-}
 
 /** สร้าง mock leave จากรายชื่อ agent จริง — deterministic ตาม index (เปลี่ยนเป็น API ทีหลัง) */
 function buildMockLeaves(agents: LeaveCalendarAgent[], year: number, month: number, todayKeyStr: string): LeaveRecord[] {
@@ -183,9 +179,7 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
           {Object.entries(LEAVE_META).map(([k, v]) => (
             <span key={k} className="flex items-center gap-1.5"><span className={`w-2 h-2 rounded-full ${v.dot}`} />{v.label}</span>
           ))}
-          <span className="flex items-center gap-1.5 text-text-subtle">
-            <span className="w-4 h-2 rounded-sm border border-border" style={stripeBg("#94a3b8")} /> ลาบางช่วงเวลา
-          </span>
+          <span className="text-text-subtle">แถบที่มีเวลา = ลาบางช่วง ปิดรับงานเฉพาะช่วงนั้น</span>
         </div>
       </div>
 
@@ -246,15 +240,19 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
                           {span ? (
                             <div
                               title={`${LEAVE_META[span.leave.type].label}${isPartial(span.leave) ? ` ${span.leave.startTime}–${span.leave.endTime}` : " เต็มวัน"}${span.leave.note ? ` · ${span.leave.note}` : ""}`}
-                              className="h-6 rounded-md flex items-center px-1.5 overflow-hidden"
+                              className="h-6 rounded-md flex items-center justify-center px-1.5 overflow-hidden"
                               style={{
                                 width: span.endDay - span.startDay + 1 > 1 ? `calc(${(span.endDay - span.startDay + 1) * 100}% + ${(span.endDay - span.startDay) * 6}px)` : "100%",
-                                ...(isPartial(span.leave) ? stripeBg(LEAVE_META[span.leave.type].hex) : { background: LEAVE_META[span.leave.type].hex }),
+                                background: LEAVE_META[span.leave.type].hex,
                               }}
                             >
-                              <span className="text-[9px] font-bold text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.3)] whitespace-nowrap">
-                                {LEAVE_META[span.leave.type].label}{isPartial(span.leave) ? ` ${span.leave.startTime}–${span.leave.endTime}` : ""}
-                              </span>
+                              {span.endDay > span.startDay ? (
+                                <span className="text-[9px] font-bold text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.3)] whitespace-nowrap">
+                                  {LEAVE_META[span.leave.type].label}{isPartial(span.leave) ? ` ${span.leave.startTime}–${span.leave.endTime}` : ""}
+                                </span>
+                              ) : isPartial(span.leave) ? (
+                                <Clock size={11} className="text-white" />
+                              ) : null}
                             </div>
                           ) : (
                             <div className="h-6" />
