@@ -633,11 +633,11 @@ async function main() {
     await convs.insertOne({ conversation_id: "cv_f3", platform: "shopee", shop_id: "s1", labels: [] });
     await msgs.insertOne({ conversation_id: "cv_f3", direction: "in", created_timestamp: new Date(Date.now() - 20 * 60_000) });
     const m3 = { conversation_id: "cv_f3", shop_id: "s1", platform: "shopee",
-      config_shop_key: "s1", text: "ยังไม่ตอบเลย" } as never;
+      config_shop_key: "s1", text: "ยังไม่ตอบเลย" };
     const scope3 = { config: { workflow_enabled: true },
       pairs: [{ platform: "shopee", shop_id: "s1", config_shop_key: "s1", shopname: "shop1", cutoff: new Date(0) }],
       global_enabled_since: null } as never;
-    const r1 = await eng.matchAndRun(m3);
+    const r1 = await eng.matchAndRun(m3 as never);
     eq(r1.status, "actioned", "f03: inbound → delay park");
     // ถึงเวลา → sweep → waiting>9m → tag รอตอบ → dedupe miss → send + tag dedupe
     await runs.updateOne({ conversation_id: "cv_f3" } as never,
@@ -651,7 +651,7 @@ async function main() {
     ok(labels1.includes("ได้แค่ข้อความรอ"), "f03: tag dedupe ได้แค่ข้อความรอ (หลัง send)");
     // รอบสอง — ลูกค้ามี tag dedupe แล้ว → label cond match → ไม่ส่งซ้ำ
     await msgs.insertOne({ conversation_id: "cv_f3", direction: "in", created_timestamp: new Date(Date.now() - 19 * 60_000) });
-    const r2 = await eng.matchAndRun(m3);
+    const r2 = await eng.matchAndRun(m3 as never);
     eq(r2.status, "actioned", "f03: re-fire → run ใหม่ park");
     await runs.updateOne({ conversation_id: "cv_f3", status: "waiting_for_timer" } as never,
       { $set: { resume_at: new Date(Date.now() - 1000) } });
@@ -693,16 +693,283 @@ async function main() {
     await closeHist.insertOne({ conversation_id: "cv_f4", closed_at: new Date(Date.now() - 3600_000) });
     await convs.insertOne({ conversation_id: "cv_f4", platform: "shopee", shop_id: "s1", labels: ["ได้แค่ข้อความรอ", "อื่นๆ"] });
     const m4 = { conversation_id: "cv_f4", shop_id: "s1", platform: "shopee",
-      config_shop_key: "s1", text: "เปิดใหม่นะ" } as never;
-    const r1 = await eng.matchAndRun(m4);
+      config_shop_key: "s1", text: "เปิดใหม่นะ" };
+    const r1 = await eng.matchAndRun(m4 as never);
     eq(r1.status, "actioned", "f04: episode ใหม่ → run → remove_label");
     const convA = await convs.findOne({ conversation_id: "cv_f4" });
     const l1 = (convA?.labels || []) as string[];
     ok(!l1.includes("ได้แค่ข้อความรอ"), "f04: dedupe tag ถูกลบ");
     ok(l1.includes("อื่นๆ"), "f04: label อื่นคงอยู่");
     // ข้อความที่สองใน episode เดียวกัน → oncePerOpen block → no_match
-    const r2 = await eng.matchAndRun(m4);
+    const r2 = await eng.matchAndRun(m4 as never);
     eq(r2.status, "no_match", "f04: oncePerOpen — ข้อความ 2 ใน episode เดียวกัน → ไม่ run ซ้ำ");
+  }
+
+  // ─── 17. canonical wfr — park → reply=wfr-success / expire=wfr-no-respond ──
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    await Promise.all([wfs, runs].map((c) => c.deleteMany({}) as Promise<unknown>));
+    const V = "wv_wfr";
+    const mk = (id: string) => wfs.insertOne({
+      workflow_id: id, name: "wfr test", enabled: true, status: "published",
+      trigger_frequency: "every_time", current_version_id: V,
+      import: { source: "zaapi", source_workflow_id: "WF-w" },
+      shop_ids: [], platforms: [], priority: 0,
+      nodes: [
+        { node_id: "t", type: "trigger", subtype: "message_received", config: {}, position: { x: 0, y: 0 } },
+        { node_id: "w", type: "wait", subtype: "wait_for_reply",
+          config: { waitForReply: { replyType: "any", expiresIn: { unit: "minutes", value: 5 } } }, position: { x: 1, y: 0 } },
+        { node_id: "ok", type: "action", subtype: "send_message", config: { action: { message: { type: "text", text: "got reply" } } }, position: { x: 2, y: 0 } },
+        { node_id: "to", type: "action", subtype: "send_message", config: { action: { message: { type: "text", text: "timeout msg" } } }, position: { x: 3, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "t", target_node_id: "w" },
+        { edge_id: "e2", source_node_id: "w", target_node_id: "ok", branch: "wfr-success" },
+        { edge_id: "e3", source_node_id: "w", target_node_id: "to", branch: "wfr-no-respond" },
+      ],
+    });
+    await mk("wf_wfr");
+    const scopeW = { config: { workflow_enabled: true },
+      pairs: [{ platform: "shopee", shop_id: "s1", config_shop_key: "s1", shopname: "s", cutoff: new Date(0) }],
+      global_enabled_since: null } as never;
+    const m = { conversation_id: "cv_w1", shop_id: "s1", platform: "shopee", config_shop_key: "s1", text: "hi" };
+    const r1 = await eng.matchAndRun(m as never);
+    eq(r1.status, "actioned", "wfr: park on inbound");
+    const parked = await runs.findOne({ conversation_id: "cv_w1" });
+    eq(parked?.status, "waiting_for_reply", "wfr: status waiting_for_reply");
+    ok(parked?.resume_at instanceof Date, "wfr: resume_at set from expiresIn");
+    // reply → wfr-success (inbound entry = runInboundWorkflowStage — resume ก่อน match)
+    const r2 = await eng.runInboundWorkflowStage({ ...m, text: "ตอบแล้ว" } as never);
+    eq(r2.status, "resumed", "wfr: reply resumes");
+    ok((r2.delivered || []).some((d: { text?: string }) => d.text === "got reply"), "wfr: reply → wfr-success edge (got reply)");
+    // timeout → wfr-no-respond — direct resumeTimerRun assert edge เดินจริง
+    const m2 = { ...m, conversation_id: "cv_w2" };
+    await eng.matchAndRun(m2 as never);
+    const parked2 = await runs.findOne({ conversation_id: "cv_w2" }) as never;
+    const rTo = await eng.resumeTimerRun(parked2, m2 as never);
+    ok((rTo.delivered || []).some((d: { text?: string }) => d.text === "timeout msg"), "wfr: expire → wfr-no-respond edge");
+    // sweep pickup ยังทำงานสำหรับ waiting_for_reply + resume_at (regression ที่เพิ่ม)
+    const m3 = { ...m, conversation_id: "cv_w3" };
+    await eng.matchAndRun(m3 as never);
+    await runs.updateOne({ conversation_id: "cv_w3" } as never, { $set: { resume_at: new Date(Date.now() - 1000) } });
+    const sw = await eng.sweepDueTimerRuns(undefined, scopeW, new Date());
+    eq(sw.resumed, 1, "wfr: sweep picks waiting_for_reply+resume_at due");
+  }
+
+  // ─── 18. canonical chatbot — park ai_bot → timeout/escalate ──
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    await Promise.all([wfs, runs].map((c) => c.deleteMany({}) as Promise<unknown>));
+    const V = "wv_ai";
+    await wfs.insertOne({
+      workflow_id: "wf_ai", name: "ai test", enabled: true, status: "published",
+      trigger_frequency: "every_time", current_version_id: V,
+      import: { source: "zaapi", source_workflow_id: "WF-a" },
+      shop_ids: [], platforms: [], priority: 0,
+      nodes: [
+        { node_id: "t", type: "trigger", subtype: "message_received", config: {}, position: { x: 0, y: 0 } },
+        { node_id: "ai", type: "action", subtype: "let_ai_respond",
+          config: { action: { chatbot: { timeout: { unit: "hours", value: 1 } } } }, position: { x: 1, y: 0 } },
+        { node_id: "esc", type: "action", subtype: "send_message", config: { action: { message: { type: "text", text: "escalated to human" } } }, position: { x: 2, y: 0 } },
+        { node_id: "to", type: "action", subtype: "send_message", config: { action: { message: { type: "text", text: "ai timed out" } } }, position: { x: 3, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "t", target_node_id: "ai" },
+        { edge_id: "e2", source_node_id: "ai", target_node_id: "esc", branch: "ai-chatbot-escalate" },
+        { edge_id: "e3", source_node_id: "ai", target_node_id: "to", branch: "ai-chatbot-timeout" },
+      ],
+    });
+    const scopeA = { config: { workflow_enabled: true },
+      pairs: [{ platform: "shopee", shop_id: "s1", config_shop_key: "s1", shopname: "s", cutoff: new Date(0) }],
+      global_enabled_since: null } as never;
+    const m = { conversation_id: "cv_a1", shop_id: "s1", platform: "shopee", config_shop_key: "s1", text: "hi" };
+    const r1 = await eng.matchAndRun(m as never);
+    eq(r1.status, "actioned", "ai: park");
+    const parked = await runs.findOne({ conversation_id: "cv_a1" });
+    eq(parked?.status, "waiting_for_timer", "ai: parked as timer (inbound ไม่ปลุก)");
+    eq(parked?.park_kind, "ai_bot", "ai: park_kind ai_bot");
+    // inbound ขณะ AI จัดการ → ไม่ resume workflow
+    const r2 = await eng.matchAndRun({ ...m, text: "อีกข้อความ" } as never);
+    ok(r2.status !== "resumed" || (await runs.findOne({ conversation_id: "cv_a1", status: "waiting_for_timer" })) != null,
+      "ai: inbound during ai-bot → run stays parked (bot owns conv)");
+    // escalate → ai-chatbot-escalate edge
+    const r3 = await eng.escalateAiRun("cv_a1", m as never);
+    eq(r3.status, "resumed", "ai: escalate resumes");
+    ok((r3.delivered || []).some((d: { text?: string }) => d.text === "escalated to human"), "ai: escalate → escalate edge");
+    // timeout → ai-chatbot-timeout edge — direct resumeTimerRun
+    const m2 = { ...m, conversation_id: "cv_a2" };
+    await eng.matchAndRun(m2 as never);
+    const parked2 = await runs.findOne({ conversation_id: "cv_a2" }) as never;
+    const rTo = await eng.resumeTimerRun(parked2, m2 as never);
+    ok((rTo.delivered || []).some((d: { text?: string }) => d.text === "ai timed out"), "ai: timeout → timeout edge");
+  }
+
+  // ─── 19. button template / randomizer / unassign / set_ticket_field / marketplace+review / label_added chain ──
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const ce = await import("../src/backend/service/workflowCanonicalEval");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    const convs = await mongo.getCollection(COLLECTIONS.conversations);
+    const binds = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    const statuses = await mongo.getCollection(COLLECTIONS.statusConversation);
+    await Promise.all([wfs, runs, convs, binds, statuses].map((c) => c.deleteMany({}) as Promise<unknown>));
+
+    // review conditions — payload-driven
+    {
+      const cnode = { node_id: "c", type: "condition", subtype: "review_rating",
+        config: { conditions: [{ operator: "equals", reviewRating: { value: 5 } }] } } as never;
+      const r5 = await ce.evalCanonicalConditions(cnode, { conversation_id: "x", shop_id: "s", review: { rating: 5 } } as never, "w", "v");
+      eq(r5.branch, "condition-index-0", "review_rating: rating 5 → cond-0");
+      const r3v = await ce.evalCanonicalConditions(cnode, { conversation_id: "x", shop_id: "s", review: { rating: 3 } } as never, "w", "v");
+      eq(r3v.branch, "no-match", "review_rating: rating 3 → no-match");
+      const snode = { node_id: "c2", type: "condition", subtype: "ai_review_sentiment",
+        config: { conditions: [{ operator: "equals", aiSentiment: "negative" }] } } as never;
+      const sn = await ce.evalCanonicalConditions(snode, { conversation_id: "x", shop_id: "s", review: { sentiment: "negative" } } as never, "w", "v");
+      eq(sn.branch, "condition-index-0", "ai_review_sentiment: negative → cond-0");
+    }
+
+    // marketplace event trigger + adapter actions
+    {
+      const calls: { kind: string }[] = [];
+      eng.setMarketplaceAdapter(async (a: { kind: string }) => { calls.push({ kind: a.kind }); });
+      const V = "wv_mkt";
+      await wfs.insertOne({
+        workflow_id: "wf_mkt", name: "order", enabled: true, status: "published",
+        trigger_frequency: "every_time", current_version_id: V,
+        import: { source: "zaapi", source_workflow_id: "WF-m" },
+        shop_ids: [], platforms: [], priority: 0,
+        nodes: [
+          { node_id: "t", type: "trigger", subtype: "marketplace_order_created", config: {}, position: { x: 0, y: 0 } },
+          { node_id: "oc", type: "action", subtype: "send_marketplace_order_card", config: { action: {} }, position: { x: 1, y: 0 } },
+          { node_id: "rr", type: "action", subtype: "reply_to_review", config: { action: { replyToReview: "ขอบคุณค่ะ" } }, position: { x: 2, y: 0 } },
+        ],
+        edges: [
+          { edge_id: "e1", source_node_id: "t", target_node_id: "oc" },
+          { edge_id: "e2", source_node_id: "oc", target_node_id: "rr" },
+        ],
+      });
+      const m = { conversation_id: "cv_m1", shop_id: "s1", platform: "shopee", config_shop_key: "s1" };
+      const r = await eng.matchAndRunEvent(m as never, "marketplace_order_created");
+      eq(r.status, "actioned", "mkt: order_created event → run");
+      eq(calls.length, 2, "mkt: adapter called order_card + reply_to_review");
+      eq(calls[0]?.kind, "send_marketplace_order_card", "mkt: order card first");
+      // wrong event kind → no match
+      const r2 = await eng.matchAndRunEvent(m as never, "marketplace_review_added");
+      eq(r2.status, "no_match", "mkt: review_added ≠ order_created → no_match");
+      // no adapter → fail-closed throw (เหมือน send_message image — caller เห็น error)
+      eng.setMarketplaceAdapter(null);
+      const m3 = { ...m, conversation_id: "cv_m3" };
+      let threw = false;
+      try { await eng.matchAndRunEvent(m3 as never, "marketplace_order_created"); } catch { threw = true; }
+      ok(threw, "mkt: no adapter → fail closed (throw)");
+      eng.setMarketplaceAdapter(async () => {});
+    }
+
+    // label_added chain — flow A add_label → flow B (label_added trigger) fires
+    {
+      const VA = "wv_la", VB = "wv_lb";
+      await wfs.insertMany([
+        {
+          workflow_id: "wf_la", name: "tagger", enabled: true, status: "published",
+          trigger_frequency: "every_time", current_version_id: VA,
+          import: { source: "zaapi", source_workflow_id: "WF-la" },
+          shop_ids: [], platforms: [], priority: 0,
+          nodes: [
+            { node_id: "t", type: "trigger", subtype: "message_received", config: {}, position: { x: 0, y: 0 } },
+            { node_id: "al", type: "action", subtype: "add_label", config: { action: { label: {} } }, position: { x: 1, y: 0 } },
+          ],
+          edges: [{ edge_id: "e1", source_node_id: "t", target_node_id: "al" }],
+        },
+        {
+          workflow_id: "wf_lb", name: "label listener", enabled: true, status: "published",
+          trigger_frequency: "every_time", current_version_id: VB,
+          import: { source: "zaapi", source_workflow_id: "WF-lb" },
+          shop_ids: [], platforms: [], priority: 0,
+          nodes: [
+            { node_id: "t", type: "trigger", subtype: "label_added", config: {}, position: { x: 0, y: 0 } },
+            { node_id: "sm", type: "action", subtype: "send_message", config: { action: { message: { type: "text", text: "label chain fired" } } }, position: { x: 1, y: 0 } },
+          ],
+          edges: [{ edge_id: "e1", source_node_id: "t", target_node_id: "sm" }],
+        },
+      ] as never[]);
+      await binds.insertMany([
+        { binding_id: "b1", workflow_id: "wf_la", version_id: VA, node_id: "al",
+          field_path: "action.label.labelIds", kind: "label", count: 1, source_values: ["x"],
+          status: "resolved", resolution: { mappings: [{ local_id: "CHAIN", state: "valid" }] } },
+        { binding_id: "b2", workflow_id: "wf_lb", version_id: VB, node_id: "t",
+          field_path: "labelIds", kind: "label", count: 1, source_values: ["y"],
+          status: "resolved", resolution: { mappings: [{ local_id: "CHAIN", state: "valid" }] } },
+      ] as never[]);
+      const m = { conversation_id: "cv_l1", shop_id: "s1", platform: "shopee", config_shop_key: "s1", text: "hi" };
+      await eng.matchAndRun(m as never);
+      const chainRun = await runs.findOne({ workflow_id: "wf_lb", conversation_id: "cv_l1" }) as { status?: string; outcome?: string } | null;
+      ok(chainRun != null, "label chain: add_label fired label_added flow");
+      eq(chainRun?.status, "completed", "label chain: listener flow executed (completed)");
+      eq(chainRun?.outcome, "actioned", "label chain: listener outcome actioned");
+      // unrelated label → no fire
+      const r2 = await eng.matchAndRunEvent({ ...m, event_label: "OTHER" } as never, "label_added");
+      eq(r2.status, "no_match", "label chain: ติด label อื่น → flow ไม่ยิง (binding filter)");
+    }
+
+    // unassign + set_ticket_field + randomizer + button_template e2e
+    {
+      const V = "wv_misc";
+      await wfs.deleteMany({});
+      await wfs.insertOne({
+        workflow_id: "wf_misc", name: "misc", enabled: true, status: "published",
+        trigger_frequency: "every_time", current_version_id: V,
+        import: { source: "zaapi", source_workflow_id: "WF-x" },
+        shop_ids: [], platforms: [], priority: 0,
+        nodes: [
+          { node_id: "t", type: "trigger", subtype: "message_received", config: {}, position: { x: 0, y: 0 } },
+          { node_id: "stf", type: "action", subtype: "set_ticket_field", config: { action: { setTicketField: { value: true } } }, position: { x: 1, y: 0 } },
+          { node_id: "ua", type: "action", subtype: "unassign_ticket", config: {}, position: { x: 2, y: 0 } },
+          { node_id: "bt", type: "action", subtype: "send_button_template",
+            config: { action: { buttonTemplate: { title: "เลือก", buttons: [{ title: "A" }, { title: "B" }], expiresIn: { unit: "minutes", value: 1 } } } }, position: { x: 3, y: 0 } },
+          { node_id: "ra", type: "wait", subtype: "randomizer",
+            config: { randomizer: { paths: [{ weight: 100 }, { weight: 0 }] } }, position: { x: 4, y: 0 } },
+          { node_id: "pa", type: "action", subtype: "send_message", config: { action: { message: { type: "text", text: "chose A" } } }, position: { x: 5, y: 0 } },
+          { node_id: "pb", type: "action", subtype: "send_message", config: { action: { message: { type: "text", text: "chose B" } } }, position: { x: 6, y: 0 } },
+          { node_id: "r0", type: "action", subtype: "send_message", config: { action: { message: { type: "text", text: "rnd path0" } } }, position: { x: 7, y: 0 } },
+          { node_id: "r1", type: "action", subtype: "send_message", config: { action: { message: { type: "text", text: "rnd path1" } } }, position: { x: 8, y: 0 } },
+        ],
+        edges: [
+          { edge_id: "e1", source_node_id: "t", target_node_id: "stf" },
+          { edge_id: "e2", source_node_id: "stf", target_node_id: "ua" },
+          { edge_id: "e3", source_node_id: "ua", target_node_id: "bt" },
+          { edge_id: "e4", source_node_id: "bt", target_node_id: "pa", branch: "btn-template-condition-index-0" },
+          { edge_id: "e5", source_node_id: "bt", target_node_id: "pb", branch: "btn-template-condition-index-1" },
+          { edge_id: "e6", source_node_id: "pa", target_node_id: "ra" },
+          { edge_id: "e7", source_node_id: "ra", target_node_id: "r0", branch: "randomizer-path-0" },
+          { edge_id: "e8", source_node_id: "ra", target_node_id: "r1", branch: "randomizer-path-1" },
+        ],
+      });
+      await binds.insertOne({ binding_id: "bf", workflow_id: "wf_misc", version_id: V, node_id: "stf",
+        field_path: "action.setTicketField.ticketFieldId", kind: "ticket_field", count: 1, source_values: ["x"],
+        status: "resolved", resolution: { mappings: [{ local_id: "is_order_chat", state: "valid" }] } } as never);
+      await convs.insertOne({ conversation_id: "cv_x1", platform: "shopee", shop_id: "s1", labels: [] });
+      await statuses.insertOne({ conversation_id: "cv_x1", status: "open", assigned_to: "adm_x" });
+      const m = { conversation_id: "cv_x1", shop_id: "s1", platform: "shopee", config_shop_key: "s1", text: "hi" };
+      const r1 = await eng.matchAndRun(m as never);
+      eq(r1.status, "actioned", "misc: parks at button template");
+      const convA = await convs.findOne({ conversation_id: "cv_x1" }) as { ticket_fields?: Record<string, unknown> } | null;
+      eq(convA?.ticket_fields?.is_order_chat, true, "set_ticket_field: bound field written");
+      const st = await statuses.findOne({ conversation_id: "cv_x1" }) as { assigned_to?: string | null } | null;
+      eq(st?.assigned_to, null, "unassign: assigned_to cleared");
+      // reply "A" → button index 0 → chose A → randomizer → rnd path0
+      const r2 = await eng.runInboundWorkflowStage({ ...m, text: "A" } as never);
+      if (r2.status !== "resumed") console.log("DBG misc resume:", JSON.stringify(r2).slice(0, 400));
+      eq(r2.status, "resumed", "misc: reply resumes");
+      const del = (r2.delivered || []) as { text?: string }[];
+      ok(del.some((d) => d.text === "chose A"), "button: reply 'A' → index-0 edge");
+      ok(del.some((d) => d.text === "rnd path0"), "randomizer: weight 100 → path-0");
+      ok(!del.some((d) => d.text === "chose B"), "button: ไม่ไป edge B");
+    }
   }
 }
 

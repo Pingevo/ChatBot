@@ -67,6 +67,7 @@ export type AdminActionType =
   | "workflow.assign_ticket"
   | "workflow.add_label"
   | "workflow.remove_label"
+  | "workflow.label_event_error"
   | "workflow.add_note"
   | "workflow.send_http_blocked"
   | "workflow.resume"

@@ -26,6 +26,9 @@ export interface EvalMessage {
   text?: string;
   images?: string[];
   testSource?: string;
+  // ⚡ event payload — marketplace/review triggers ส่งผ่าน msg
+  event_label?: string;                             // label_added: label ที่เพิ่งติด
+  review?: { rating?: number; sentiment?: string }; // review_*: payload จาก marketplace event
 }
 
 export interface EvalResult { branch: string; error?: string }
@@ -203,6 +206,17 @@ async function evalCanonicalCondition(
       if (op === "equals") return ids.every((l) => have.has(l));
       throw new Error(`label: unknown operator "${op}"`);
     }
+    case "review_rating": {
+      // Zaapi review_rating — equals คะแนนรีวิวจาก event payload
+      if (op !== "equals") throw new Error(`review_rating: unknown operator "${op}"`);
+      const want = Number((cond.reviewRating as { value?: number } | undefined)?.value);
+      return Number.isFinite(want) && msg.review?.rating === want;
+    }
+    case "ai_review_sentiment": {
+      // Zaapi ai_review_sentiment — equals sentiment ที่ AI วิเคราะห์จาก event payload
+      if (op !== "equals") throw new Error(`ai_review_sentiment: unknown operator "${op}"`);
+      return msg.review?.sentiment === String(cond.aiSentiment || "");
+    }
     default:
       throw new Error(`canonical condition subtype "${node.subtype}" ยังไม่มี evaluator`);
   }
@@ -333,6 +347,52 @@ export async function canonicalTriggerMatches(
     if (lastClose?.closed_at) filter.started_at = { $gt: lastClose.closed_at };
     const prior = await runs.findOne(filter as never);
     if (prior) return false;
+  }
+  return true;
+}
+
+// ─── canonical event trigger match — label_added / marketplace_* ─────────
+// ไม่ใช่ inbound message — engine เรียก matchAndRunEvent เมื่อ event เกิด:
+//   label_added → kind "label_added" (+ bound labelIds ถ้ามี → match เฉพาะ label นั้น)
+//   marketplace_* → kind = subtype ตรงๆ (order_created/return_refund/review_added/...)
+//   account scope เหมือน message_received
+export const CANONICAL_EVENT_TRIGGERS = new Set([
+  "label_added", "label_removed",
+  "marketplace_review_added", "marketplace_order_created", "marketplace_order_shipped",
+  "marketplace_order_delivered", "marketplace_order_delayed", "marketplace_payment_reminder",
+  "marketplace_order_cancelled", "marketplace_return_refund_requested",
+  "marketplace_order_delivery_failed", "marketplace_order_confirm_receipt",
+  "marketplace_product_interest",
+]);
+
+export async function canonicalEventMatches(
+  triggerNode: WorkflowNode, eventKind: string, msg: EvalMessage,
+  workflowId: string, versionId: string | undefined,
+): Promise<boolean> {
+  if (String(triggerNode.subtype) !== eventKind) return false;
+  if (!CANONICAL_EVENT_TRIGGERS.has(eventKind)) return false;
+
+  // account scope — binding row มี → resolve แล้วเทียบ shop; ไม่มี → ทุก account match
+  const bindColl = await getCollection<BindingRow & { count?: number }>(COLLECTIONS.workflowBindings);
+  const acctReq = versionId
+    ? await bindColl.findOne({ workflow_id: workflowId, version_id: versionId, node_id: triggerNode.node_id, field_path: "accountIds", kind: "account" } as never)
+    : null;
+  if (acctReq) {
+    const ids = await boundLocalIds(workflowId, versionId, triggerNode.node_id, "accountIds", "account");
+    if (ids.length === 0) return false; // resolve ยังไม่เสร็จ → fail closed
+    if (!ids.includes(msg.shop_id)) return false;
+  }
+
+  // label_added — trigger อาจจำกัด label ผ่าน binding (labelIds strip → binding kind=label)
+  if (eventKind === "label_added" || eventKind === "label_removed") {
+    const labelReq = versionId
+      ? await bindColl.findOne({ workflow_id: workflowId, version_id: versionId, node_id: triggerNode.node_id, field_path: "labelIds", kind: "label" } as never)
+      : null;
+    if (labelReq) {
+      const ids = await boundLocalIds(workflowId, versionId, triggerNode.node_id, "labelIds", "label");
+      if (ids.length === 0) return false;
+      if (!msg.event_label || !ids.includes(msg.event_label)) return false;
+    }
   }
   return true;
 }
