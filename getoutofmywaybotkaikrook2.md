@@ -8771,3 +8771,12 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - พฤติกรรมจริงที่ test เปิดเผย: re-assign เมื่อ owner ไม่อยู่ใน assignee list = ถูกตาม Zaapi (list ยกเว้นเฉพาะคนที่ระบุ) — test แรกคาด converge ผิด
 - verify: canonical suite **74/74**, binding resolution **1016**, foundation **163**, routes **47**, tsc clean
 - ค้าง: send_message image/video delivery (pipeline รับ text อย่างเดียว) · binding resolution จริงบน Mongo · business_hours ของร้านจริงต้องตั้งก่อน activate
+
+## ผ่านแล้ว (verified) — R2 slices 7-8: Flow 03+04 executable (2026-10-29)
+
+- Flow 03 (ตอบรับเมื่อลูกค้ารอเกิน 10 นาที): delay 10m → waiting>9m → add_label รอตอบเกิน10นาที → label dedupe filter → no-match → send_message → add_label ได้แค่ข้อความรอ — e2e เดินครบ รวม re-fire ที่ dedupe ถูก (label match → ไม่ส่งซ้ำ)
+- eval ใหม่: label condition `contains_one_of` = มีอันใดอันหนึ่ง (Zaapi operator จริง — เดิมมีแค่ equals)
+- Flow 04 (ล้างแท็กเมื่อเปิดทิกเก็ตใหม่): trigger `triggerOncePerOpen:true` → remove_label — **e2e จับ bug production จริง**: oncePerOpen filter query `created_at` แต่ run docs stamp `started_at` → flag ไม่เคย block บน run จริง (unit test เดิมผ่านเพราะ fixture ใช้ field ผิดเหมือนกัน) — แก้ query + fixtures; fake mongo เพิ่ม `$pull`(+$in)
+- commits: `2dcd424` (f03) → `841e537` (f04+bugfix)
+- verify: canonical suite **85/85**, tsc clean
+- เหลือใน corpus: flow 05+ = wfr/chatbot/jump_to/chat_unassign/event_time; flow 06 = marketplace triggers + order card + set_ticket_field; flow 08 = send_button_template
