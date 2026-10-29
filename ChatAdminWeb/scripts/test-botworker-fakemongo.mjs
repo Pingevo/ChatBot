@@ -168,6 +168,12 @@ export function createFakeMongo(state = {}) {
         for (const it of items) if (!arr.includes(it)) arr.push(it);
         setPath(doc, k, arr);
       }
+      else if (op === "$pull") for (const [k, v] of Object.entries(fields)) {
+        const arr = val(doc, k) ?? [];
+        if (!Array.isArray(arr)) continue;
+        const drop = v && typeof v === "object" && Array.isArray(v.$in) ? new Set(v.$in) : null;
+        setPath(doc, k, arr.filter((it) => (drop ? !drop.has(it) : it !== v)));
+      }
       else throw new Error("fake mongo: unsupported update op " + op);
     }
   }

@@ -321,7 +321,7 @@ export async function canonicalTriggerMatches(
   const cfg = triggerNode.config as {
     triggerOncePerConversation?: boolean; triggerOncePerOpen?: boolean;
   } | undefined;
-  const runs = await getCollection<{ workflow_id: string; conversation_id: string; created_at: Date }>(COLLECTIONS.workflowRuns);
+  const runs = await getCollection<{ workflow_id: string; conversation_id: string; started_at: Date }>(COLLECTIONS.workflowRuns);
   if (cfg?.triggerOncePerConversation === true) {
     const prior = await runs.findOne({ workflow_id: workflowId, conversation_id: msg.conversation_id } as never);
     if (prior) return false;
@@ -330,7 +330,7 @@ export async function canonicalTriggerMatches(
     const closeHist = await getCollection<{ conversation_id: string; closed_at: Date }>(COLLECTIONS.closeHistory);
     const lastClose = await closeHist.findOne({ conversation_id: msg.conversation_id } as never, { sort: { closed_at: -1 } });
     const filter: Record<string, unknown> = { workflow_id: workflowId, conversation_id: msg.conversation_id };
-    if (lastClose?.closed_at) filter.created_at = { $gt: lastClose.closed_at };
+    if (lastClose?.closed_at) filter.started_at = { $gt: lastClose.closed_at };
     const prior = await runs.findOne(filter as never);
     if (prior) return false;
   }

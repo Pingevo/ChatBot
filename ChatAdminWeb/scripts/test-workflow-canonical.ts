@@ -436,7 +436,7 @@ async function main() {
     const r0 = await ce.canonicalTriggerMatches(trig({}), m2 as never, "wf_o1", "wv_o1");
     eq(r0, true, "message_received + no accountIds binding → match");
     // once_per_conversation: run เก่าอยู่ → ไม่ match
-    await runs.insertOne({ run_id: "r_old", workflow_id: "wf_o1", conversation_id: "cv_o1", status: "completed", created_at: new Date() });
+    await runs.insertOne({ run_id: "r_old", workflow_id: "wf_o1", conversation_id: "cv_o1", status: "completed", started_at: new Date() });
     const r1 = await ce.canonicalTriggerMatches(trig({ triggerOncePerConversation: true }), m2 as never, "wf_o1", "wv_o1");
     eq(r1, false, "oncePerConversation + run เดิม → ไม่ match");
     const r1b = await ce.canonicalTriggerMatches(trig({ triggerOncePerConversation: true }), { ...m2, conversation_id: "cv_o2" } as never, "wf_o1", "wv_o1");
@@ -446,8 +446,8 @@ async function main() {
     await closeHist.insertOne({ conversation_id: "cv_o1", closed_at: closeAt });
     // r_old (created now > closeAt) อยู่ใน episode ปัจจุบัน → block อยู่แล้ว;
     //   ลบออกแล้วเหลือเฉพาะ run ก่อน close → episode ใหม่ว่าง → match
-    await runs.updateOne({ run_id: "r_old" } as never, { $set: { created_at: new Date(closeAt.getTime() - 60_000) } });
-    await runs.insertOne({ run_id: "r_ep2", workflow_id: "wf_o1", conversation_id: "cv_o1", status: "completed", created_at: new Date(closeAt.getTime() + 1000) });
+    await runs.updateOne({ run_id: "r_old" } as never, { $set: { started_at: new Date(closeAt.getTime() - 60_000) } });
+    await runs.insertOne({ run_id: "r_ep2", workflow_id: "wf_o1", conversation_id: "cv_o1", status: "completed", started_at: new Date(closeAt.getTime() + 1000) });
     const r2 = await ce.canonicalTriggerMatches(trig({ triggerOncePerOpen: true }), m2 as never, "wf_o1", "wv_o1");
     eq(r2, false, "oncePerOpen + run ใน episode ปัจจุบัน → ไม่ match");
     await runs.deleteOne({ run_id: "r_ep2" } as never);
@@ -660,6 +660,49 @@ async function main() {
     const run2 = await runs.findOne({ conversation_id: "cv_f3", status: "completed", run_id: { $ne: runDone?.run_id } } as never);
     const del2 = (run2?.result as { delivered?: unknown[] } | undefined)?.delivered;
     ok(!del2 || del2.length === 0, "f03: dedupe — ลูกค้ามี tag แล้ว → ไม่ส่งซ้ำ (label cond match → cond-0 ไม่มี edge → จบ)");
+  }
+
+  // ─── 16. Flow 04 e2e — oncePerOpen trigger + remove_label ──
+  //   tag dedupe ถูกลบเมื่อ conv เปิดใหม่ → flow 03 ส่งได้อีก (cross-flow contract)
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    const binds = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    const convs = await mongo.getCollection(COLLECTIONS.conversations);
+    const closeHist = await mongo.getCollection(COLLECTIONS.closeHistory);
+    await Promise.all([wfs, runs, binds, convs, closeHist].map((c) => c.deleteMany({}) as Promise<unknown>));
+    const V = "wv_f04";
+    await wfs.insertOne({
+      workflow_id: "wf_f04", name: "ล้างแท็กเมื่อเปิดใหม่", enabled: true, status: "published",
+      trigger_frequency: "every_time", current_version_id: V,
+      import: { source: "zaapi", source_workflow_id: "WF-f04" },
+      shop_ids: [], platforms: [], priority: 0,
+      nodes: [
+        { node_id: "zt", type: "trigger", subtype: "message_received",
+          config: { triggerOncePerConversation: false, triggerOncePerOpen: true }, position: { x: 0, y: 0 } },
+        { node_id: "zr", type: "action", subtype: "remove_label",
+          config: { action: { label: {} } }, position: { x: 100, y: 0 } },
+      ],
+      edges: [{ edge_id: "e1", source_node_id: "zt", target_node_id: "zr" }],
+    });
+    await binds.insertOne({ binding_id: "wb_f4", workflow_id: "wf_f04", version_id: V, node_id: "zr",
+      field_path: "action.label.labelIds", kind: "label", count: 1, source_values: ["x"],
+      status: "resolved", resolution: { mappings: [{ local_id: "ได้แค่ข้อความรอ", state: "valid" }] } });
+    // conv เคยปิดแล้วเปิดใหม่ + มี dedupe tag ค้าง
+    await closeHist.insertOne({ conversation_id: "cv_f4", closed_at: new Date(Date.now() - 3600_000) });
+    await convs.insertOne({ conversation_id: "cv_f4", platform: "shopee", shop_id: "s1", labels: ["ได้แค่ข้อความรอ", "อื่นๆ"] });
+    const m4 = { conversation_id: "cv_f4", shop_id: "s1", platform: "shopee",
+      config_shop_key: "s1", text: "เปิดใหม่นะ" } as never;
+    const r1 = await eng.matchAndRun(m4);
+    eq(r1.status, "actioned", "f04: episode ใหม่ → run → remove_label");
+    const convA = await convs.findOne({ conversation_id: "cv_f4" });
+    const l1 = (convA?.labels || []) as string[];
+    ok(!l1.includes("ได้แค่ข้อความรอ"), "f04: dedupe tag ถูกลบ");
+    ok(l1.includes("อื่นๆ"), "f04: label อื่นคงอยู่");
+    // ข้อความที่สองใน episode เดียวกัน → oncePerOpen block → no_match
+    const r2 = await eng.matchAndRun(m4);
+    eq(r2.status, "no_match", "f04: oncePerOpen — ข้อความ 2 ใน episode เดียวกัน → ไม่ run ซ้ำ");
   }
 }
 
