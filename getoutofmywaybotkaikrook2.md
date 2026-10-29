@@ -8863,3 +8863,4 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - `app.py` grouped kb_fetcher เลือก adapter ตาม `kb_source()` — legacy เดิมไม่เปลี่ยน
 - test 28/28 (+3 zaapi gate) · COMPILE_OK · SRS §6.34b
 - เหลือ P2b: รัน importer จริงเมื่อ dev mongo เปิด (127.0.0.1:27017 ตอนนี้ refused) + /config UI card + P3 let_ai_respond narrow
+- **import ขึ้น server จริงแล้ว** (2026-11-14): env จาก main `.env` → `digital.in.th/chatbot.zaapi_kb` = **8,600 docs, 118 sources, active ทั้งหมด** — batch imp-20261029T075455Z · verified ด้วย count+sample · `zaapiKbReady` ผ่านแล้ว (flip kb_source ได้)
