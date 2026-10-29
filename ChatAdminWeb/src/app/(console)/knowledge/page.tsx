@@ -34,8 +34,9 @@ import { api } from "@/lib/apiClient";
 import { Tooltip } from "@/components/ui/Tooltip";
 import { ModalSelect } from "@/components/ui/ModalSelect";
 import { FilterPresets } from "@/components/ui/FilterPresets";
+import { ZaapiKbPanel } from "@/components/knowledge/ZaapiKbPanel";
 
-type Tab = "all" | "general_faq" | "product_spec";
+type Tab = "all" | "general_faq" | "product_spec" | "zaapi";
 
 interface FormState {
   id?: string;
@@ -455,7 +456,7 @@ export default function KnowledgePage() {
         )
       }
       filterBarBelow
-      filterBar={
+      filterBar={tab === "zaapi" ? undefined :
         <>
         {/* Filter bar — search + platform + active + created by + updated by + sort */}
         <div className="flex items-center gap-2 mt-4 flex-wrap">
@@ -729,6 +730,7 @@ export default function KnowledgePage() {
           { v: "all", l: "ทั้งหมด" },
           { v: "general_faq", l: "FAQ/นโยบาย" },
           { v: "product_spec", l: "สินค้า" },
+          { v: "zaapi", l: "Zaapi KB" },
         ] as { v: Tab; l: string }[]).map((t) => (
           <button
             key={t.v}
@@ -748,7 +750,9 @@ export default function KnowledgePage() {
       </div>
 
       <div role="tabpanel" id="kb-tabpanel" aria-labelledby={`kb-tab-${tab}`}>
-      {loading ? (
+      {tab === "zaapi" ? (
+        <ZaapiKbPanel />
+      ) : loading ? (
         <div className="flex justify-center py-12">
           <Loading size={24} />
         </div>

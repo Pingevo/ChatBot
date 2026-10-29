@@ -8864,3 +8864,4 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - test 28/28 (+3 zaapi gate) · COMPILE_OK · SRS §6.34b
 - เหลือ P2b: รัน importer จริงเมื่อ dev mongo เปิด (127.0.0.1:27017 ตอนนี้ refused) + /config UI card + P3 let_ai_respond narrow
 - **import ขึ้น server จริงแล้ว** (2026-11-14): env จาก main `.env` → `digital.in.th/chatbot.zaapi_kb` = **8,600 docs, 118 sources, active ทั้งหมด** — batch imp-20261029T075455Z · verified ด้วย count+sample · `zaapiKbReady` ผ่านแล้ว (flip kb_source ได้)
+- **Zaapi KB ในหน้า /knowledge**: tab ใหม่ "Zaapi KB" (read-only) — `api/zaapi-kb?mode=sources|docs` + `components/knowledge/ZaapiKbPanel.tsx` (118 sources, accounts chips, expand ดู docs paginated) · filterBar ซ่อนตอน tab นี้ · tsc clean · api 401 (auth ปกติ)
