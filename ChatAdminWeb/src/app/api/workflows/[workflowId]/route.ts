@@ -20,7 +20,8 @@ export async function GET(
   const { workflowId } = await params;
   const workflow = await workflowService.getWorkflow(workflowId);
   if (!workflow) return error("workflow not found", 404);
-  return json({ workflow });
+  const importDetail = await workflowService.getWorkflowImportDetail(workflowId);
+  return json({ workflow, import_detail: importDetail });
 }
 
 export async function PATCH(
@@ -43,6 +44,7 @@ export async function PATCH(
     priority?: number;
     enabled?: boolean;
     status?: WorkflowStatus;
+    expected_version?: number;
   }>(req);
 
   if (!body) return error("invalid body", 400);
@@ -74,12 +76,22 @@ export async function PATCH(
   if (Object.keys(fields).length === 0) return error("no fields to update", 422);
 
   try {
+    // CAS path — editor ส่ง expected_version (version ตอนโหลด) → stale = 409 conflict
+    if (body.expected_version !== undefined) {
+      const cas = await workflowService.saveWorkflowDraft(workflowId, fields as never, body.expected_version, r.ctx.admin.admin_id);
+      if (cas.not_found) return error("workflow not found", 404);
+      if (cas.conflict) return error(`version conflict — current is v${cas.current_version}, reload before editing`, 409);
+      return json({ ok: true, version: cas.version, version_id: cas.version_id });
+    }
     const ok = await workflowService.updateWorkflow(workflowId, fields as never, r.ctx.admin.admin_id);
     if (!ok) return error("workflow not found or no changes", 404);
     return json({ ok: true });
   } catch (err) {
+    const e = err as Error & { code?: string };
+    // imported + version-owned fields without CAS → explicit 422 (not 404)
+    if (e.code === "CAS_REQUIRED") return error(e.message, 422);
     // graph validation fail → 422 พร้อม errors
-    return error((err as Error).message, 422);
+    return error(e.message, 422);
   }
 }
 

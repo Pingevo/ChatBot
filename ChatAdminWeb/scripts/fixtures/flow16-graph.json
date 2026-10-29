@@ -1,0 +1,123 @@
+{
+  "name": "เคลม / ของเสีย / คืนเงิน - ต้องถึงมือคนเสมอ",
+  "nodes": [
+    {
+      "node_id": "zn_wgpjz9",
+      "type": "trigger",
+      "subtype": "message_received",
+      "config": {
+        "label": "ได้รับข้อความ",
+        "triggerOncePerConversation": false,
+        "triggerOncePerOpen": false
+      }
+    },
+    {
+      "node_id": "zn_106noak",
+      "type": "condition",
+      "subtype": "label",
+      "config": {
+        "label": "กรองลูกค้าจากแท็ก",
+        "conditions": [
+          {
+            "operator": "contains_all"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_g1grs9",
+      "type": "condition",
+      "subtype": "message_content",
+      "config": {
+        "label": "จับคีย์เวิร์ดในข้อความลูกค้า",
+        "conditions": [
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "เคลม",
+              "ประกัน",
+              "คืนเงิน",
+              "คืนสินค้า",
+              "เปลี่ยนสินค้า",
+              "ส่งเคลม"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_qm1xyu",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_1j8466s",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "รับเรื่องแจ้งปัญหาสินค้าเรียบร้อยแล้วค่ะ\n\nเพื่อให้เจ้าหน้าที่ตรวจสอบได้เร็วที่สุด รบกวนแจ้ง 3 อย่างนี้ในแชทได้เลยค่ะ\n1. หมายเลขคำสั่งซื้อ (รบกวนพิมพ์เป็นข้อความ ไม่ต้องส่งเป็นรูป)\n2. ชื่อ และเบอร์โทรติดต่อกลับ\n3. วิดีโอที่เห็นอาการของสินค้า (ตัวอย่างการถ่าย: https://youtu.be/KTvXEYCSTAA)\n\nค่าจัดส่งสินค้าเคลม: ภายใน 7 วันแรกหลังได้รับสินค้า บริการฟรี / หลังจากนั้น น้ำหนักไม่เกิน 4 กก. 50 บาท / เกิน 4 กก. หรือชิ้นใหญ่ 100 บาท\n\nเจ้าหน้าที่จะตรวจสอบและแจ้งขั้นตอนการเคลมให้ทราบในเวลาทำการ จันทร์-เสาร์ 9.00-17.30 น. ค่ะ",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_ubhkzl",
+      "type": "action",
+      "subtype": "assign_ticket",
+      "config": {
+        "label": "มอบหมายให้",
+        "action": {
+          "assignment": {
+            "assignWhenAllOoh": true,
+            "assignToLastTicketHandledBy": false,
+            "lastAssignedUsersIndex": 1
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "ze_hjwsmm",
+      "source_node_id": "zn_wgpjz9",
+      "target_node_id": "zn_106noak",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_qmijnl",
+      "source_node_id": "zn_106noak",
+      "target_node_id": "zn_g1grs9",
+      "branch": "no-match"
+    },
+    {
+      "edge_id": "ze_1qdlvpl",
+      "source_node_id": "zn_g1grs9",
+      "target_node_id": "zn_qm1xyu",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_6csdpl",
+      "source_node_id": "zn_qm1xyu",
+      "target_node_id": "zn_1j8466s",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_amw6o0",
+      "source_node_id": "zn_1j8466s",
+      "target_node_id": "zn_ubhkzl",
+      "branch": null
+    }
+  ]
+}

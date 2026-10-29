@@ -1,0 +1,270 @@
+{
+  "name": "เก็บคะแนนจากตัวเลข - iSUPER ทดลอง (ของเรา)",
+  "nodes": [
+    {
+      "node_id": "zn_b1w3xv",
+      "type": "trigger",
+      "subtype": "message_received",
+      "config": {
+        "label": "ได้รับข้อความ",
+        "triggerOncePerConversation": false,
+        "triggerOncePerOpen": false
+      }
+    },
+    {
+      "node_id": "zn_1k1d8j0",
+      "type": "condition",
+      "subtype": "label",
+      "config": {
+        "label": "กรองลูกค้าจากแท็ก",
+        "conditions": [
+          {
+            "operator": "does_not_contain_any_of"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_f611sc",
+      "type": "condition",
+      "subtype": "message_content",
+      "config": {
+        "label": "จับคีย์เวิร์ดในข้อความลูกค้า",
+        "conditions": [
+          {
+            "operator": "equals",
+            "msgType": "text",
+            "text": [
+              "5"
+            ]
+          },
+          {
+            "operator": "equals",
+            "msgType": "text",
+            "text": [
+              "4"
+            ]
+          },
+          {
+            "operator": "equals",
+            "msgType": "text",
+            "text": [
+              "3"
+            ]
+          },
+          {
+            "operator": "equals",
+            "msgType": "text",
+            "text": [
+              "2"
+            ]
+          },
+          {
+            "operator": "equals",
+            "msgType": "text",
+            "text": [
+              "1"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_nywnzo",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_1s5wu56",
+      "type": "action",
+      "subtype": "remove_label",
+      "config": {
+        "label": "ลบแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_8v34os",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "ขอบพระคุณอย่างยิ่งสำหรับคะแนนและเวลาที่คุณลูกค้ามอบให้นะคะ ทางร้านจะนำไปปรับปรุงการดูแลให้ดียิ่งขึ้นค่ะ หากมีข้อสงสัยเพิ่มเติม ทักเข้ามาได้ตลอดเลยค่ะ",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_tlt4tj",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 2",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_dzd1g0",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 3",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_1ygbo0q",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 4",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_wpoau2",
+      "type": "action",
+      "subtype": "remove_label",
+      "config": {
+        "label": "ลบแท็ก 2",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_o0s7nx",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 2",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "ขอบพระคุณที่สละเวลาให้คะแนนนะคะ ทางร้านต้องขออภัยอย่างสูงที่การดูแลครั้งนี้ยังทำได้ไม่ดีพอค่ะ ทางร้านขอรับเรื่องไว้ปรับปรุง และจะให้เจ้าหน้าที่ติดต่อกลับเข้ามาดูแลคุณลูกค้าอีกครั้งค่ะ",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_1o7wuwv",
+      "type": "action",
+      "subtype": "assign_ticket",
+      "config": {
+        "label": "มอบหมายให้",
+        "action": {
+          "assignment": {
+            "assignWhenAllOoh": false,
+            "assignToLastTicketHandledBy": true,
+            "lastAssignedUsersIndex": 0
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "ze_1vdte2g",
+      "source_node_id": "zn_b1w3xv",
+      "target_node_id": "zn_1k1d8j0",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1s5b2ma",
+      "source_node_id": "zn_1k1d8j0",
+      "target_node_id": "zn_f611sc",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_99dm7w",
+      "source_node_id": "zn_f611sc",
+      "target_node_id": "zn_nywnzo",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_hccn8",
+      "source_node_id": "zn_f611sc",
+      "target_node_id": "zn_tlt4tj",
+      "branch": "condition-index-1"
+    },
+    {
+      "edge_id": "ze_1gjmp8a",
+      "source_node_id": "zn_f611sc",
+      "target_node_id": "zn_dzd1g0",
+      "branch": "condition-index-2"
+    },
+    {
+      "edge_id": "ze_pl7z6j",
+      "source_node_id": "zn_f611sc",
+      "target_node_id": "zn_1ygbo0q",
+      "branch": "condition-index-3"
+    },
+    {
+      "edge_id": "ze_qz5zne",
+      "source_node_id": "zn_f611sc",
+      "target_node_id": "zn_1ygbo0q",
+      "branch": "condition-index-4"
+    },
+    {
+      "edge_id": "ze_e1m6lx",
+      "source_node_id": "zn_nywnzo",
+      "target_node_id": "zn_1s5wu56",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_wqnpwt",
+      "source_node_id": "zn_1s5wu56",
+      "target_node_id": "zn_8v34os",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_f3m4mm",
+      "source_node_id": "zn_tlt4tj",
+      "target_node_id": "zn_1s5wu56",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_ywguw1",
+      "source_node_id": "zn_dzd1g0",
+      "target_node_id": "zn_1s5wu56",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_qupeu7",
+      "source_node_id": "zn_1ygbo0q",
+      "target_node_id": "zn_wpoau2",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_o2bonq",
+      "source_node_id": "zn_wpoau2",
+      "target_node_id": "zn_o0s7nx",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1nqyl2z",
+      "source_node_id": "zn_o0s7nx",
+      "target_node_id": "zn_1o7wuwv",
+      "branch": null
+    }
+  ]
+}

@@ -1,0 +1,848 @@
+{
+  "name": "ตอบปกติ ทั้งทีม - ฉบับปรับปรุง (ยังไม่ใช้)",
+  "nodes": [
+    {
+      "node_id": "zn_1upqj8",
+      "type": "trigger",
+      "subtype": "message_received",
+      "config": {
+        "label": "ข้อความที่ได้รับ",
+        "triggerOncePerConversation": false,
+        "triggerOncePerOpen": true
+      }
+    },
+    {
+      "node_id": "zn_aunvsq",
+      "type": "condition",
+      "subtype": "label",
+      "config": {
+        "label": "กรองลูกค้าจากแท็ก",
+        "conditions": [
+          {
+            "operator": "contains_all"
+          },
+          {
+            "operator": "contains_all",
+            "text": []
+          },
+          {
+            "operator": "contains_all"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_qdnqsv",
+      "type": "condition",
+      "subtype": "last_interaction",
+      "config": {
+        "label": "เวลาที่ลูกค้าติดต่อล่าสุด",
+        "conditions": [
+          {
+            "operator": "greater_than",
+            "lastInteraction": {
+              "unit": "days",
+              "value": 3
+            }
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_ksa7qd",
+      "type": "condition",
+      "subtype": "last_interaction",
+      "config": {
+        "label": "เวลาที่ลูกค้าติดต่อล่าสุด 2",
+        "conditions": [
+          {
+            "operator": "greater_than",
+            "lastInteraction": {
+              "unit": "hours",
+              "value": 1
+            }
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_1241e2q",
+      "type": "condition",
+      "subtype": "business_hours",
+      "config": {
+        "label": "ในหรือนอกเวลาทำการ 2",
+        "conditions": [
+          {
+            "operator": "within_office_hours"
+          },
+          {
+            "operator": "outside_office_hours"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_1elg899",
+      "type": "condition",
+      "subtype": "message_content",
+      "config": {
+        "label": "จับคีย์เวิร์ดในข้อความลูกค้า",
+        "conditions": [
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "ฉันไม่พอใจกับสิ่งนี้",
+              "อันนี้ใช้ไม่ได้เลย",
+              "ต้องการร้องเรียน",
+              "บริการแย่",
+              "ฉันไม่พอใจกับคำสั่งซื้อของฉัน",
+              "ต้องการเคลม",
+              "สินค้าใช้ไม่ได้",
+              "ชาร์จไฟไม่ได้",
+              "สินค้ามีปัญหา",
+              "สินค้าไม่ตรงตามโฆษนา",
+              "จะเคลมได้ที่ไหนครับ",
+              "ส่งกลับมาหรือยังครับ",
+              "ขอที่อยู่",
+              "ขอที่อยู่ส่งเคลม",
+              "ส่งเคลมที่ไหน"
+            ]
+          },
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "ไม่วัดชีพจร",
+              "นาฬิกาเปิดไม่ติด",
+              "นาฬิกาปุ่มกดไม่ได้",
+              "นาฬิกาเปิดปิดเอง",
+              "ไม่วัดค่าต่างๆ",
+              "นาฬิกาค้าง กดไม่ได้",
+              "ไฟฉายมีปัญหา"
+            ]
+          },
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "หัวชาร์จไหม้",
+              "ชาร์จช้า",
+              "ชาร์จติดๆดับๆ",
+              "สายชาร์จมีรอยไหม้",
+              "ชาร์จแล้วแบตลด",
+              "ซื้อมาใช้แล้วชาร์จไม่เข้าเคลมได้ไหมครับ",
+              "ชาร์จไฟไม่เข้า"
+            ]
+          },
+          {
+            "operator": "equals",
+            "msgType": "image",
+            "text": []
+          },
+          {
+            "operator": "equals",
+            "msgType": "video",
+            "text": []
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_j9ips1",
+      "type": "condition",
+      "subtype": "business_hours",
+      "config": {
+        "label": "ในหรือนอกเวลาทำการ 2",
+        "conditions": [
+          {
+            "operator": "within_office_hours"
+          },
+          {
+            "operator": "outside_office_hours"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_51960t",
+      "type": "condition",
+      "subtype": "last_interaction",
+      "config": {
+        "label": "เวลาที่ลูกค้าติดต่อล่าสุด 3",
+        "conditions": [
+          {
+            "operator": "greater_than",
+            "lastInteraction": {
+              "unit": "days",
+              "value": 7
+            }
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_6rmwx",
+      "type": "action",
+      "subtype": "assign_ticket",
+      "config": {
+        "label": "มอบหมายให้ 6",
+        "action": {
+          "assignment": {
+            "assignWhenAllOoh": true,
+            "assignToLastTicketHandledBy": false,
+            "lastAssignedUsersIndex": 2
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_188u0ys",
+      "type": "action",
+      "subtype": "let_ai_respond",
+      "config": {
+        "label": "ให้ AI จัดการแชท 2",
+        "action": {
+          "chatbot": {
+            "instruction": "",
+            "timeout": {
+              "unit": "days",
+              "value": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_8kh36f",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 12",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "รับเรื่องแล้วค่ะ เจ้าหน้าที่จะติดต่อกลับในเวลาทำการ (จ.-ส. 9.00-17.30 น.)",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_9pfsqq",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 2",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_188qxuy",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 9",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "ขณะนี้นอกเวลาทำการค่ะ ผู้ช่วย AI ช่วยตอบก่อนได้ เจ้าหน้าที่จะติดต่อกลับในเวลาทำการ (จ.-ส. 9.00-17.30 น.)",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_x5uoy7",
+      "type": "action",
+      "subtype": "remove_label",
+      "config": {
+        "label": "ลบแท็ก 3",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_o5519c",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 4",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_ajrrpp",
+      "type": "action",
+      "subtype": "remove_label",
+      "config": {
+        "label": "ลบแท็ก 3",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_ux1cw",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 10",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "สอบถามเพิ่มเติมได้เลยค่ะ หรือติดต่อเจ้าหน้าที่ในเวลาทำการ (จ.-ส. 9.00-17.30 น.)",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_e1bh3g",
+      "type": "action",
+      "subtype": "close_ticket",
+      "config": {
+        "label": "ปิดแชท"
+      }
+    },
+    {
+      "node_id": "zn_12e2uxz",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 2",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_18u7sgy",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 4",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_kozlfa",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 4",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_v8hurw",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 5",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_3z4ysy",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก Sale",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_1a671pq",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 3",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_18293q",
+      "type": "action",
+      "subtype": "unassign_ticket",
+      "config": {
+        "label": "ยกเลิกการมอบหมาย"
+      }
+    },
+    {
+      "node_id": "zn_tfp0zh",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 5",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "รับเรื่องแล้วค่ะ เจ้าหน้าที่จะติดต่อกลับในเวลาทำการ (จ.-ส. 9.00-17.30 น.)",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_2ua7ki",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 6",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "ขณะนี้นอกเวลาทำการค่ะ ผู้ช่วย AI ช่วยตอบก่อนได้ เจ้าหน้าที่จะติดต่อกลับในเวลาทำการ (จ.-ส. 9.00-17.30 น.)",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_f2k8i3",
+      "type": "action",
+      "subtype": "assign_ticket",
+      "config": {
+        "label": "มอบหมายให้ 2",
+        "action": {
+          "assignment": {
+            "assignWhenAllOoh": true,
+            "assignToLastTicketHandledBy": true,
+            "lastAssignedUsersIndex": 1
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_1h81jdd",
+      "type": "action",
+      "subtype": "remove_label",
+      "config": {
+        "label": "ลบแท็ก 3",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_86h03y",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 6",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_lk36pu",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 4",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_qbw242",
+      "type": "action",
+      "subtype": "let_ai_respond",
+      "config": {
+        "label": "ให้ AI จัดการแชท 3",
+        "action": {
+          "chatbot": {
+            "instruction": "",
+            "timeout": {
+              "unit": "hours",
+              "value": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_pn8pes",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 7",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_141lkk6",
+      "type": "action",
+      "subtype": "jump_to",
+      "config": {
+        "label": "เชื่อมไปยัง 8",
+        "action": {
+          "jumpTo": {
+            "maxJumps": 3
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_1ukcplp",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 5",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_16qpdiq",
+      "type": "wait",
+      "subtype": "wait_for_reply",
+      "config": {
+        "label": "รอการตอบกลับ",
+        "waitForReply": {
+          "replyType": "any",
+          "numberOfRetries": 3,
+          "invalidInputReply": {
+            "type": "text",
+            "content": "กรุณาตอบกลับด้วยข้อความ"
+          },
+          "expiresIn": {
+            "unit": "hours",
+            "value": 1
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "ze_vzpkgh",
+      "source_node_id": "zn_1upqj8",
+      "target_node_id": "zn_3z4ysy",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_oduohl",
+      "source_node_id": "zn_aunvsq",
+      "target_node_id": "zn_51960t",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_n5ugxi",
+      "source_node_id": "zn_aunvsq",
+      "target_node_id": "zn_ksa7qd",
+      "branch": "condition-index-1"
+    },
+    {
+      "edge_id": "ze_gn5cct",
+      "source_node_id": "zn_aunvsq",
+      "target_node_id": "zn_qdnqsv",
+      "branch": "condition-index-2"
+    },
+    {
+      "edge_id": "ze_zx6vab",
+      "source_node_id": "zn_aunvsq",
+      "target_node_id": "zn_1elg899",
+      "branch": "no-match"
+    },
+    {
+      "edge_id": "ze_14snb9u",
+      "source_node_id": "zn_qdnqsv",
+      "target_node_id": "zn_x5uoy7",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_1c9rloj",
+      "source_node_id": "zn_qdnqsv",
+      "target_node_id": "zn_v8hurw",
+      "branch": "no-match"
+    },
+    {
+      "edge_id": "ze_1qytb4u",
+      "source_node_id": "zn_ksa7qd",
+      "target_node_id": "zn_ajrrpp",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_ujamp3",
+      "source_node_id": "zn_ksa7qd",
+      "target_node_id": "zn_18u7sgy",
+      "branch": "no-match"
+    },
+    {
+      "edge_id": "ze_1jkynbk",
+      "source_node_id": "zn_1241e2q",
+      "target_node_id": "zn_9pfsqq",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_3hd5nv",
+      "source_node_id": "zn_1241e2q",
+      "target_node_id": "zn_lk36pu",
+      "branch": "condition-index-1"
+    },
+    {
+      "edge_id": "ze_14xnm5g",
+      "source_node_id": "zn_1elg899",
+      "target_node_id": "zn_12e2uxz",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_157n7uf",
+      "source_node_id": "zn_1elg899",
+      "target_node_id": "zn_12e2uxz",
+      "branch": "condition-index-1"
+    },
+    {
+      "edge_id": "ze_15hmtje",
+      "source_node_id": "zn_1elg899",
+      "target_node_id": "zn_12e2uxz",
+      "branch": "condition-index-2"
+    },
+    {
+      "edge_id": "ze_15rmf8d",
+      "source_node_id": "zn_1elg899",
+      "target_node_id": "zn_12e2uxz",
+      "branch": "condition-index-3"
+    },
+    {
+      "edge_id": "ze_13tp7dk",
+      "source_node_id": "zn_1elg899",
+      "target_node_id": "zn_12e2uxz",
+      "branch": "condition-index-4"
+    },
+    {
+      "edge_id": "ze_14zka19",
+      "source_node_id": "zn_1elg899",
+      "target_node_id": "zn_188u0ys",
+      "branch": "no-match"
+    },
+    {
+      "edge_id": "ze_7969u2",
+      "source_node_id": "zn_j9ips1",
+      "target_node_id": "zn_tfp0zh",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_19igb7e",
+      "source_node_id": "zn_j9ips1",
+      "target_node_id": "zn_2ua7ki",
+      "branch": "condition-index-1"
+    },
+    {
+      "edge_id": "ze_14mt78q",
+      "source_node_id": "zn_51960t",
+      "target_node_id": "zn_1h81jdd",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_1s0cqay",
+      "source_node_id": "zn_51960t",
+      "target_node_id": "zn_j9ips1",
+      "branch": "no-match"
+    },
+    {
+      "edge_id": "ze_1uxd2lu",
+      "source_node_id": "zn_188u0ys",
+      "target_node_id": "zn_1241e2q",
+      "branch": "ai-chatbot-escalate"
+    },
+    {
+      "edge_id": "ze_1cthb9l",
+      "source_node_id": "zn_188u0ys",
+      "target_node_id": "zn_ux1cw",
+      "branch": "ai-chatbot-timeout"
+    },
+    {
+      "edge_id": "ze_1t9mn7u",
+      "source_node_id": "zn_8kh36f",
+      "target_node_id": "zn_18293q",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1ubkve3",
+      "source_node_id": "zn_9pfsqq",
+      "target_node_id": "zn_1a671pq",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1o6m455",
+      "source_node_id": "zn_188qxuy",
+      "target_node_id": "zn_16qpdiq",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_ydhu1s",
+      "source_node_id": "zn_x5uoy7",
+      "target_node_id": "zn_o5519c",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_s8w9h8",
+      "source_node_id": "zn_ajrrpp",
+      "target_node_id": "zn_kozlfa",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_mso9z",
+      "source_node_id": "zn_ux1cw",
+      "target_node_id": "zn_e1bh3g",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_7glq6p",
+      "source_node_id": "zn_3z4ysy",
+      "target_node_id": "zn_aunvsq",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_768ehg",
+      "source_node_id": "zn_1a671pq",
+      "target_node_id": "zn_8kh36f",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1emt3du",
+      "source_node_id": "zn_18293q",
+      "target_node_id": "zn_6rmwx",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1757a4b",
+      "source_node_id": "zn_tfp0zh",
+      "target_node_id": "zn_f2k8i3",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_wpirp0",
+      "source_node_id": "zn_2ua7ki",
+      "target_node_id": "zn_f2k8i3",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_16h5wdc",
+      "source_node_id": "zn_1h81jdd",
+      "target_node_id": "zn_86h03y",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_84v89a",
+      "source_node_id": "zn_lk36pu",
+      "target_node_id": "zn_1ukcplp",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1gzvk84",
+      "source_node_id": "zn_qbw242",
+      "target_node_id": "zn_pn8pes",
+      "branch": "ai-chatbot-escalate"
+    },
+    {
+      "edge_id": "ze_otpor3",
+      "source_node_id": "zn_qbw242",
+      "target_node_id": "zn_pn8pes",
+      "branch": "ai-chatbot-timeout"
+    },
+    {
+      "edge_id": "ze_1dvnxmc",
+      "source_node_id": "zn_1ukcplp",
+      "target_node_id": "zn_188qxuy",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1rm6eeq",
+      "source_node_id": "zn_16qpdiq",
+      "target_node_id": "zn_qbw242",
+      "branch": "wfr-success"
+    },
+    {
+      "edge_id": "ze_sl2cqw",
+      "source_node_id": "zn_16qpdiq",
+      "target_node_id": "zn_141lkk6",
+      "branch": "wfr-no-respond"
+    },
+    {
+      "edge_id": "ze_em1urx",
+      "source_node_id": "zn_o5519c",
+      "target_node_id": "zn_188u0ys",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1enlczs",
+      "source_node_id": "zn_12e2uxz",
+      "target_node_id": "zn_1241e2q",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_3btomd",
+      "source_node_id": "zn_18u7sgy",
+      "target_node_id": "zn_qbw242",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_d4drb7",
+      "source_node_id": "zn_kozlfa",
+      "target_node_id": "zn_188u0ys",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1osiy4t",
+      "source_node_id": "zn_v8hurw",
+      "target_node_id": "zn_1241e2q",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_8ksuz",
+      "source_node_id": "zn_86h03y",
+      "target_node_id": "zn_188u0ys",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_tgijt7",
+      "source_node_id": "zn_pn8pes",
+      "target_node_id": "zn_18293q",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_vzj4kx",
+      "source_node_id": "zn_141lkk6",
+      "target_node_id": "zn_18293q",
+      "branch": null
+    }
+  ]
+}

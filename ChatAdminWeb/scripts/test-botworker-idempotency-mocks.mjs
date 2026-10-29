@@ -116,6 +116,7 @@ export const state = {
     matchAndRun: 0, resumeFlow: 0,
     // Part 1B — executions จริงของ side-effect owners (แยกจาก call count)
     handoffExec: 0, workflowExec: 0, resumeExec: 0, checkWaitTimeouts: 0,
+    escalateAiRun: 0,
   },
   events: [],
   // ⚡ hook seam — เรียกภายใน FakeCollection.findOne (จำลอง race ระหว่าง read→write)
@@ -184,7 +185,7 @@ export const state = {
 };
 
 export function resetState() {
-  state.calls = { callBot: 0, botInFlight: 0, shadowReply: 0, handoffTest: 0, reopenTest: 0, matchAndRun: 0, resumeFlow: 0, handoffExec: 0, workflowExec: 0, resumeExec: 0, checkWaitTimeouts: 0 };
+  state.calls = { callBot: 0, botInFlight: 0, shadowReply: 0, handoffTest: 0, reopenTest: 0, matchAndRun: 0, resumeFlow: 0, handoffExec: 0, workflowExec: 0, resumeExec: 0, checkWaitTimeouts: 0, escalateAiRun: 0 };
   state.events = [];
   state.findHook = null;
   state.findOneHook = null;
@@ -490,6 +491,18 @@ export const workflowEngine = {
     return out;
   },
   cancelActiveRuns: async () => 0,
+  // ⚡ mirror production contract — handoff_admin เรียกหลัง pickAgent สำเร็จ;
+  //   ปลุก run ที่ park ai_bot (waiting_for_timer+park_kind) → ai-chatbot-escalate
+  escalateAiRun: async (conversationId) => {
+    state.calls.escalateAiRun++;
+    const coll = new FakeCollection("workflow_runs");
+    const run = await coll.findOne({
+      conversation_id: conversationId, status: "waiting_for_timer", park_kind: "ai_bot",
+    });
+    if (!run) return { status: "no_match", detail: "no ai-parked run", delivered: [] };
+    await coll.updateOne({ run_id: run.run_id }, { $set: { status: "completed", updated_at: new Date() } });
+    return { status: "resumed", detail: "mock ai escalate", delivered: [], run_id: run.run_id };
+  },
   // BW-2 pin — inner timeout scan must never run under a non-leader
   checkWaitTimeouts: async () => { state.calls.checkWaitTimeouts++; return 0; },
   // ⚡ Phase 9 — mirror transition table ของ owner จริงบน leaf seeds เดิม

@@ -1,0 +1,72 @@
+{
+  "name": "ประเมินแอดมิน 1B - โบนัส (KingGadgets)",
+  "nodes": [
+    {
+      "node_id": "zn_1f34cwr",
+      "type": "trigger",
+      "subtype": "label_added",
+      "config": {
+        "label": "เพิ่มป้ายกำกับ",
+        "triggerOncePerConversation": false,
+        "triggerOncePerOpen": false
+      }
+    },
+    {
+      "node_id": "zn_210bf0",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "ขอบพระคุณที่ให้ความไว้วางใจร้านของเรานะคะ\nทางร้านอยากพัฒนาการดูแลให้ดียิ่งขึ้น รบกวนคุณลูกค้าสละเวลาสักครู่ ให้คะแนนความพึงพอใจต่อการดูแลจากเจ้าหน้าที่ครั้งนี้ โดยพิมพ์ตัวเลข 1 ถึง 5 ตอบกลับมาได้เลยค่ะ\n5 = พึงพอใจมากที่สุด  /  1 = ควรปรับปรุง\nความเห็นของคุณลูกค้ามีค่ากับเราอย่างยิ่งค่ะ",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_acvuq6",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_9g9gec",
+      "type": "action",
+      "subtype": "remove_label",
+      "config": {
+        "label": "ลบแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "ze_177zh68",
+      "source_node_id": "zn_1f34cwr",
+      "target_node_id": "zn_210bf0",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1s8wmmp",
+      "source_node_id": "zn_210bf0",
+      "target_node_id": "zn_acvuq6",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1iz2o89",
+      "source_node_id": "zn_acvuq6",
+      "target_node_id": "zn_9g9gec",
+      "branch": null
+    }
+  ]
+}

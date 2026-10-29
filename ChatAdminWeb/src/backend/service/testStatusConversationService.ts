@@ -31,7 +31,7 @@ export interface TestStatusConversationDoc {
   source: TestSource;
   // assignment
   assigned_to?: string | null;
-  assigned_at?: Date;
+  assigned_at?: Date | null;
   assignment_mode_used?: string;
   assignment_reason?: string;
   // ⚡ op key ที่ commit assignment นี้ — crash recovery ต้อง match key เท่านั้น
@@ -96,6 +96,14 @@ async function upsertTestStatus(
 }
 
 /** อัปเดต status + assigned_to (test) — operationKey = op ที่ commit assignment (crash-recovery evidence) */
+/** ⚡ botworker parallel — unassign (Zaapi chat_unassign): เอา assignee ออก คง status เดิม */
+export async function unassignTestConversation(
+  conversationId: string,
+  source: TestSource
+): Promise<void> {
+  await upsertTestStatus(conversationId, source, { assigned_to: null, assigned_at: null });
+}
+
 export async function updateTestStatus(
   conversationId: string,
   source: TestSource,
@@ -213,6 +221,19 @@ export async function addTestLabels(
   );
 }
 
+export async function removeTestLabels(
+  conversationId: string,
+  source: TestSource,
+  labels: string[]
+): Promise<void> {
+  if (labels.length === 0) return;
+  const c = await coll();
+  await c.updateOne(
+    { conversation_id: conversationId, source },
+    { $pull: { labels: { $in: labels } }, $set: { updated_at: new Date() } }
+  );
+}
+
 /** atomic assign — กัน race condition (test) */
 export async function tryTestAssign(
   conversationId: string,
@@ -294,12 +315,14 @@ export const testStatusConversationService = {
   getTestStatus,
   getTestStatusMap,
   updateTestStatus,
+  unassignTestConversation,
   tryTestAssign,
   manualTestAssign,
   assignPendingTestTicket,
   setTestPendingAssignment,
   pushTestCloseHistory,
   addTestLabels,
+  removeTestLabels,
   closeTestConversation,
   reopenTestConversation,
   setTestTopic,

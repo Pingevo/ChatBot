@@ -157,6 +157,14 @@ def _kb_qa_coll():
     return _admin_db()[coll]
 
 
+def _legacy_allowed() -> bool:
+    """central evidence-pool policy — pool_sources.kb OFF หรือ
+    kb_source=zaapi → legacy collections (knowledge_base/kb_products/kb_qa)
+    ห้ามถูกอ่าน (zero reads). เรียกที่ entry fn ก่อนทุก legacy-KB read"""
+    from . import runtime_config as _rc
+    return _rc.legacy_kb_reads_allowed()
+
+
 # ---- topic detection ----
 
 TOPIC_KEYWORDS: dict[str, list[str]] = {
@@ -248,6 +256,8 @@ def search_kb_by_model(message: str, limit: int = 5) -> list[dict[str, Any]]:
 
 def _search_kb_single(message: str, limit: int = 5) -> list[dict[str, Any]]:
     """ค้น KB แบบ single query (ไม่ใช่ comparison)."""
+    if not _legacy_allowed():
+        return []
     keywords = extract_model_keywords(message)
     if not keywords:
         return []
@@ -343,6 +353,8 @@ def get_general_faq(topic: str = "รับประกัน") -> dict[str, Any
     """ดึง general_faq ตาม topic — kb_qa ก่อน, legacy knowledge_base fallback.
 
     kb_qa เก็บคำตอบใน field `a` — normalize เป็น `answer` ให้ caller เดิม."""
+    if not _legacy_allowed():
+        return None
     q = {"type": "general_faq", "topic": topic, "active": {"$ne": False}}
     doc = _kb_qa_coll().find_one(q) or _kb_coll().find_one(q)
     if doc and not doc.get("answer"):
@@ -863,7 +875,7 @@ def _known_brands(snap=_gen.SNAP_UNSET) -> set[str]:
     ok = False
     # 2 source อิสระ — failure ของฝั่งใดฝั่งหนึ่ง ห้ามลบ brands ของอีกฝั่ง
     try:
-        raw = list(_kb_products_coll().distinct("brand"))
+        raw = list(_kb_products_coll().distinct("brand")) if _legacy_allowed() else []
         brands |= {b for b in (_norm_brand(x) for x in raw) if b}
         ok = True
     except Exception:
@@ -907,7 +919,7 @@ def _qa_docs() -> list[dict]:
         if _qa_docs_cache is not None and time.time() - _qa_docs_ts < _QA_DOCS_TTL:
             return _qa_docs_cache
         try:
-            docs = list(_kb_qa_coll().find(
+            docs = [] if not _legacy_allowed() else list(_kb_qa_coll().find(
                 {"type": "qa", "active": {"$ne": False}},
                 {"q": 1, "a": 1, "topic": 1, "model_codes": 1, "item_ids": 1}))
         except Exception:

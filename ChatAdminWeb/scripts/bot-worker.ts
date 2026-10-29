@@ -128,6 +128,15 @@ async function main() {
           } catch (err) {
             console.error(`[bot-worker] cycle ${cycle}: wait_timeout error:`, err instanceof Error ? err.message : err);
           }
+          // ⚡ Zaapi delay timers — ปลุก run ที่ resume_at ถึงแล้ว (ทุก cycle)
+          try {
+            const timers = await botWorkerService.sweepDueTimerRuns(scope);
+            if (timers.resumed > 0 || timers.errors.length > 0) {
+              console.log(`[bot-worker] cycle ${cycle}: timer_sweep due=${timers.due} resumed=${timers.resumed} errors=${timers.errors.length}`);
+            }
+          } catch (err) {
+            console.error(`[bot-worker] cycle ${cycle}: timer_sweep error:`, err instanceof Error ? err.message : err);
+          }
         }
 
         // รอตาม interval ที่ตั้งใน config — ไม่รอให้ batch เสร็จ แต่ละข้อความทำงานของมันอยู่แล้ว

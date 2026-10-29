@@ -15,7 +15,18 @@ import { Button } from "@/components/ui/Button";
 import { toast } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { nodeTypes, toXYFlowType, NODE_TYPE_META, SUBTYPE_META, type FlowNodeType } from "./nodes";
-import { Plus, Settings2, X, Save, Trash2, ArrowLeft } from "lucide-react";
+import { Plus, Settings2, X, Save, Trash2, ArrowLeft, Upload, Download, CheckCircle2, AlertTriangle } from "lucide-react";
+import {
+  WORKFLOW_PLATFORMS, listByFamily, getNodeDef, nodeAvailabilityFor,
+  availabilityBadge, validateCanonicalDraft, publishReadiness,
+  type WorkflowPlatform, type NodeFamily,
+} from "@/lib/workflow/nodeRegistry";
+import { type CanonicalDraft, type ImportPreviewReport, type BindingRequirement } from "@/lib/workflow/zaapiImport";
+import { ZaapiImportDialog } from "./ZaapiImportDialog";
+import { exportCanonical, exportZaapi, exportRawSource } from "@/lib/workflow/workflowExport";
+import { validateWorkflowGraph, type WorkflowNode } from "@/lib/workflow/graph";
+import { BindingResolutionPanel, DerivedScopeFields, type BindingPick } from "./BindingResolutionPanel";
+import type { BindingResolutionView } from "@/backend/service/workflowService";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -39,6 +50,7 @@ interface FlowSettings {
 interface WorkflowDocDTO {
   workflow_id: string;
   name: string;
+  version?: number;
   description?: string;
   enabled: boolean;
   shop_ids: string[];
@@ -49,6 +61,7 @@ interface WorkflowDocDTO {
   edges: { edge_id: string; source_node_id: string; target_node_id: string; branch?: string }[];
   priority: number;
   status: string;
+  import?: { source?: string };
 }
 
 interface ShopOption {
@@ -69,19 +82,13 @@ const defaultSettings: FlowSettings = {
   status: "draft",
 };
 
-// palette: type → subtypes ที่มี
-const PALETTE: { type: FlowNodeType; subtypes: string[] }[] = [
-  { type: "trigger", subtypes: ["message_received"] },
-  {
-    type: "condition",
-    subtypes: ["message_content", "conversation_status", "business_hours", "new_vs_returning", "assignee"],
-  },
-  {
-    type: "action",
-    subtypes: ["send_message", "let_ai_respond", "assign_ticket", "add_label", "close_ticket", "add_note", "send_http", "jump_to"],
-  },
-  { type: "wait", subtypes: ["wait_for_reply"] },
-];
+// ⚡ palette/validation/import/export ทั้งหมดอ่านจาก canonical node registry
+//    (src/lib/workflow/nodeRegistry.ts) — registry เดียวเป็น metadata owner
+const FAMILY_ORDER: NodeFamily[] = ["trigger", "condition", "action", "utility"];
+const PALETTE: { type: FlowNodeType; subtypes: string[] }[] = FAMILY_ORDER.map((f) => ({
+  type: (f === "utility" ? "wait" : f) as FlowNodeType,
+  subtypes: listByFamily(f).map((d) => d.type),
+}));
 
 let idCounter = 1;
 function genNodeId(): string {
@@ -96,6 +103,22 @@ function EditorInner({ workflowId }: { workflowId: string }) {
 
   const [settings, setSettings] = useState<FlowSettings>(defaultSettings);
   const [wfVersion, setWfVersion] = useState(0); // track ว่า save แล้ว
+  const [loadedVersion, setLoadedVersion] = useState<number | null>(null); // CAS expected_version
+  const [importDetail, setImportDetail] = useState<{
+    source?: "zaapi" | "canonical" | null;
+    source_ref?: { workflowId?: string; loadedVersionId?: string } | null;
+    current_version_id?: string | null; fingerprint?: string | null;
+    unresolved_bindings?: number; publish_blockers?: string[];
+    bindings?: { node_id: string; field_path: string; kind: string; count: number; status: string }[];
+  } | null>(null);
+  // imported marker — detail คืน non-null แม้ legacy (source:null) → เช็ค source โดยตรง
+  const isImported = importDetail?.source != null;
+  // binding-resolution surface (R1 Task 8) — view = server-produced เท่านั้น
+  // picks/repeats = controlled picker state ที่ panel emit ขึ้นมา
+  const [resolutionView, setResolutionView] = useState<BindingResolutionView | null>(null);
+  const [picks, setPicks] = useState<Record<string, Record<number, BindingPick | undefined>>>({});
+  const [repeats, setRepeats] = useState<Record<string, boolean>>({});
+  const [resolving, setResolving] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(isNew);
   const [saving, setSaving] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -129,6 +152,14 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const d = await r.json();
         const wf: WorkflowDocDTO = d.workflow;
+        setLoadedVersion(wf.version ?? null);
+        setImportDetail(d.import_detail ?? null);
+        if (d.import_detail?.source != null) {
+          try {
+            const rb = await fetch(`/api/workflows/${workflowId}/bindings`);
+            if (rb.ok) setResolutionView(await rb.json());
+          } catch { /* view absent → panel hidden */ }
+        }
         setSettings({
           name: wf.name,
           description: wf.description || "",
@@ -144,7 +175,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           id: n.node_id,
           type: toXYFlowType(n.type as FlowNodeType),
           position: n.position,
-          data: { subtype: n.subtype, config: n.config || {} },
+          data: { subtype: n.subtype, config: n.config || {}, imported: Boolean(wf.import) },
         })));
         setEdges(wf.edges.map((e) => ({
           id: e.edge_id,
@@ -171,6 +202,21 @@ function EditorInner({ workflowId }: { workflowId: string }) {
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedNodeId) || null,
     [nodes, selectedNodeId]
+  );
+
+  // inject data.selected → card ไฮไลท์ตาม selectedNodeId (click + new node)
+  // + data.usedHandles → node card render handle ครบตาม edge ที่ใช้จริง
+  const displayNodes = useMemo(
+    () => nodes.map((n) => {
+      const usedHandles = [...new Set(
+        edges.filter((e) => e.source === n.id).map((e) => e.sourceHandle || "out")
+      )];
+      const sel = n.id === selectedNodeId || undefined;
+      const prev = (n.data.usedHandles as string[] | undefined) || [];
+      if (!sel && prev.join() === usedHandles.join()) return n;
+      return { ...n, data: { ...n.data, selected: sel, usedHandles } };
+    }),
+    [nodes, edges, selectedNodeId]
   );
 
   // ── Node CRUD ──
@@ -282,6 +328,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         status: settings.status,
         nodes: wfNodes,
         edges: wfEdges,
+        ...(isNew || loadedVersion == null ? {} : { expected_version: loadedVersion }),
       };
       const r = await fetch(isNew ? "/api/workflows" : `/api/workflows/${workflowId}`, {
         method: isNew ? "POST" : "PATCH",
@@ -289,12 +336,17 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         body: JSON.stringify(body),
       });
       const d = await r.json().catch(() => ({}));
+      if (r.status === 409) {
+        toast.error(`เวอร์ชันขัดกัน — ${d.detail || d.error || "reload ก่อนแก้"}`);
+        return;
+      }
       if (!r.ok) {
         toast.error(`บันทึกไม่สำเร็จ: ${d.detail || d.error || d.message || `HTTP ${r.status}`}`);
         return;
       }
       toast.success(isNew ? "สร้าง workflow แล้ว" : "บันทึกแล้ว");
       setWfVersion(0);
+      if (typeof d.version === "number") setLoadedVersion(d.version);
       if (isNew && d.workflow?.workflow_id) {
         router.push(`/workflows/${d.workflow.workflow_id}`);
       }
@@ -304,6 +356,86 @@ function EditorInner({ workflowId }: { workflowId: string }) {
       setSaving(false);
     }
   }, [settings, nodes, edges, isNew, workflowId, router]);
+
+  // ── Binding resolution (imported workflows) ──
+  // refresh เฉพาะ server-derived state (version/detail/scope/view) — ไม่แตะ
+  // ชื่อ/canvas state ของ user
+  const refreshBindingView = useCallback(async () => {
+    try {
+      const rb = await fetch(`/api/workflows/${workflowId}/bindings`);
+      if (rb.ok) setResolutionView(await rb.json());
+      const rw = await fetch(`/api/workflows/${workflowId}`);
+      if (rw.ok) {
+        const dw = await rw.json();
+        const w: WorkflowDocDTO | undefined = dw.workflow;
+        if (w) {
+          setLoadedVersion(w.version ?? null);
+          setImportDetail(dw.import_detail ?? null);
+          setSettings((s) => ({ ...s, shop_ids: w.shop_ids || [], platforms: w.platforms || [] }));
+        }
+      }
+    } catch { /* refresh ล้ม — state เดิมคงไว้ */ }
+  }, [workflowId]);
+
+  // POST /api/workflows/[id]/bindings — payload = allowed keys เท่านั้น
+  // (binding_id + source_index + local target + repeat); identity ทุกอย่าง
+  // server โหลดเองจาก binding docs — client ไม่เคยส่ง source value/fp
+  const resolveBinding = useCallback(async (bindingId: string) => {
+    if (!resolutionView || loadedVersion == null || resolutionView.version_id == null) return;
+    const b = resolutionView.bindings.find((x) => x.binding_id === bindingId);
+    if (!b) return;
+    const bp = picks[bindingId] || {};
+    const mappings = b.sources
+      .map((s) => ({ source_index: s.source_index, ...(bp[s.source_index] || {}) }))
+      .filter((m) => typeof m.local_id === "string" && m.local_id.length > 0);
+    if (mappings.length !== b.sources.length) {
+      toast.error("เลือก target ให้ครบทุก source ก่อน resolve");
+      return;
+    }
+    setResolving(bindingId);
+    try {
+      const r = await fetch(`/api/workflows/${workflowId}/bindings`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          workflow_id: workflowId,
+          expected_version: loadedVersion,
+          version_id: resolutionView.version_id,
+          proposed: [{
+            binding_id: bindingId,
+            ...(repeats[bindingId] ? { repeat: true } : {}),
+            mappings,
+          }],
+        }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (r.status === 409) {
+        // stale expected_version — เสนอ reload ให้ดูสถานะล่าสุด (ย้ายไป version ปัจจุบัน)
+        toast.error(`เวอร์ชันขัดกัน — ${d.detail || "reload ก่อนแก้"}`);
+        const okReload = await confirm.ask({
+          title: "เวอร์ชันขัดกัน",
+          message: "workflow ถูกแก้โดย session อื่น — โหลดใหม่เพื่อดูสถานะล่าสุด?",
+          confirmText: "โหลดใหม่",
+          cancelText: "อยู่ต่อ",
+        });
+        if (okReload) window.location.reload();
+        return;
+      }
+      if (!r.ok || d.ok === false) {
+        toast.error(`resolve ไม่สำเร็จ: ${d.detail || d.error || `HTTP ${r.status}`}`);
+        return;
+      }
+      toast.success(`resolved — workflow version ${d.version}`);
+      setLoadedVersion(d.version);
+      setPicks((p) => { const n = { ...p }; delete n[bindingId]; return n; });
+      setRepeats((p) => { const n = { ...p }; delete n[bindingId]; return n; });
+      await refreshBindingView();
+    } catch (err) {
+      toast.error(`resolve ผิดพลาด: ${(err as Error).message}`);
+    } finally {
+      setResolving(null);
+    }
+  }, [resolutionView, loadedVersion, workflowId, picks, repeats, refreshBindingView]);
 
   const toggleEnabled = useCallback(async () => {
     if (isNew) {
@@ -346,7 +478,93 @@ function EditorInner({ workflowId }: { workflowId: string }) {
   const [paletteOpen, setPaletteOpen] = useState(true);
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
 
+  // ── Foundation: registry-driven import/export/validate state ──
+  const [importedDraft, setImportedDraft] = useState<CanonicalDraft | null>(null);
+  const [importBindings, setImportBindings] = useState<BindingRequirement[]>([]);
+  const [importOpen, setImportOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [paletteSearch, setPaletteSearch] = useState("");
+  const [platformFilter, setPlatformFilter] = useState<WorkflowPlatform | "">("");
+  const [lastValidation, setLastValidation] = useState<{
+    structural: { ok: boolean; errors: string[] };
+    capability: ReturnType<typeof validateCanonicalDraft>;
+  } | null>(null);
+
+  /** canvas → canonical draft shape (pure — no persistence) */
+  const canvasToDraft = useCallback((): CanonicalDraft => ({
+    name: settings.name || "untitled",
+    source: importedDraft ? "zaapi" : "local",
+    status: "draft",
+    enabled: false,
+    platforms: settings.platforms as WorkflowPlatform[],
+    nodes: nodes.map((n) => ({
+      node_id: n.id,
+      type: (n.type || "wf_action").replace("wf_", "") as WorkflowNode["type"],
+      subtype: String(n.data.subtype || ""),
+      config: n.data.config || {},
+      position: n.position,
+    })),
+    edges: edges.map((e) => ({
+      edge_id: e.id,
+      source_node_id: e.source,
+      target_node_id: e.target,
+      ...(e.sourceHandle && e.sourceHandle !== "out" ? { branch: e.sourceHandle } : {}),
+    })),
+    handleLabels: importedDraft?.handleLabels || {},
+    bindings: importBindings,
+    sourceRef: importedDraft?.sourceRef || { workflowId: "", loadedVersionId: "", versionStatuses: [], sourceStatus: "", fingerprint: "" },
+    raw: importedDraft?.raw,
+  }), [settings, nodes, edges, importedDraft, importBindings]);
+
+  const runValidate = useCallback(() => {
+    const d = canvasToDraft();
+    const structural = validateWorkflowGraph({ nodes: d.nodes, edges: d.edges });
+    const capability = validateCanonicalDraft(d.nodes, d.edges, d.platforms, d.bindings);
+    setLastValidation({ structural, capability });
+    if (structural.ok && capability.ok) toast.success("graph ผ่าน validation");
+    else toast.error([...structural.errors, ...capability.errors].join(" · ") || "validation failed");
+  }, [canvasToDraft]);
+
+  /** โหลด draft จาก import report ลง canvas — draft-only, ไม่เขียน Mongo */
+  const loadReportToCanvas = useCallback((report: ImportPreviewReport) => {
+    setImportedDraft(report.draft);
+    setImportBindings(report.bindings);
+    setSettings((s) => ({ ...s, name: report.name, status: "draft", enabled: false }));
+    setNodes(report.draft.nodes.map((n) => ({
+      id: n.node_id,
+      type: toXYFlowType(n.type as FlowNodeType),
+      position: n.position,
+      data: {
+        subtype: n.subtype, config: n.config || {},
+        importMeta: { source: "zaapi", handleLabels: report.draft.handleLabels[n.node_id] || {} },
+      },
+    })));
+    setEdges(report.draft.edges.map((e) => ({
+      id: e.edge_id, source: e.source_node_id, target: e.target_node_id,
+      sourceHandle: e.branch || "out",
+      ...(e.branch ? { label: report.draft.handleLabels[e.source_node_id]?.[e.branch] || e.branch } : {}),
+      markerEnd: { type: MarkerType.ArrowClosed },
+    })));
+    setWfVersion((v) => v + 1);
+    toast.success(`โหลด draft "${report.name}" (${report.nodeCount} nodes) — source zaapi, bindings ยังไม่ resolve`);
+  }, [setNodes, setEdges]);
+
+  const doExport = useCallback((kind: "canonical" | "zaapi" | "raw") => {
+    const d = canvasToDraft();
+    const pkg = kind === "canonical" ? exportCanonical(d) : kind === "raw" ? exportRawSource(d) : exportZaapi(d);
+    const blob = new Blob([JSON.stringify(pkg, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${d.name || "workflow"}.${kind}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    setExportOpen(false);
+  }, [canvasToDraft]);
+
   const dirty = wfVersion !== 0;
+  // imported zaapi draft → bindings unresolved + persistence อยู่นอก scope รอบนี้ → save/publish disabled
+  const saveBlocked = !!importedDraft || !settings.name.trim() || saving;
+  const saveBlockReason = importedDraft ? "imported draft — bindings ยังไม่ resolve และ persistence ไม่อยู่ใน scope รอบนี้" : !settings.name.trim() ? "ตั้งชื่อ workflow ก่อน" : "";
 
   // ⚡ กันออกจากหน้าโดยไม่บันทึก — 2 ชั้น:
   //   1) beforeunload = ปิดแท็บ/refresh (browser chrome — แก้ UI ไม่ได้ เป็นของ browser)
@@ -415,6 +633,8 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         />
         <select
           value={settings.status}
+          disabled={isImported}
+          title={isImported ? "imported workflow — status เปลี่ยนไม่ได้ (activation ถูก block ฝั่ง server)" : undefined}
           onChange={(e) => { setSettings((s) => ({ ...s, status: e.target.value as FlowSettings["status"] })); setWfVersion((v) => v + 1); }}
           className={`shrink-0 text-xs font-medium px-2 py-2 rounded-lg border focus:outline-none ${settings.status === "published"
             ? "border-success/40 bg-success/10 text-success"
@@ -427,8 +647,11 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         <button
           role="switch"
           aria-checked={settings.enabled}
+          disabled={isImported}
           onClick={toggleEnabled}
-          title={settings.enabled ? "เปิดใช้งานอยู่ — กดเพื่อปิด" : "ปิดใช้งานอยู่ — กดเพื่อเปิด"}
+          title={isImported
+            ? "imported workflow — enable blocked ฝั่ง server จนกว่า activation gates จะผ่าน"
+            : settings.enabled ? "เปิดใช้งานอยู่ — กดเพื่อปิด" : "ปิดใช้งานอยู่ — กดเพื่อเปิด"}
           className="shrink-0 inline-flex items-center gap-1.5"
         >
           <span className={`relative w-9 h-5 rounded-full transition-colors ${settings.enabled ? "bg-success" : "bg-surface-2 border border-border"}`}>
@@ -458,7 +681,48 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           <Settings2 size={14} />
           <span>Settings</span>
         </button>
+        <button
+          onClick={runValidate}
+          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border bg-surface text-text-muted border-border hover:text-text transition-colors"
+          title="ตรวจ graph + capability (pure — ไม่แตะ server)"
+        >
+          <CheckCircle2 size={14} />
+          <span>Validate</span>
+        </button>
+        <button
+          onClick={() => setImportOpen(true)}
+          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border bg-surface text-text-muted border-border hover:text-text transition-colors"
+          title="Zaapi workflow import preview (dry-run — ไม่เขียน DB)"
+        >
+          <Upload size={14} />
+          <span>Import</span>
+        </button>
+        <div className="relative">
+          <button
+            onClick={() => setExportOpen(!exportOpen)}
+            className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border bg-surface text-text-muted border-border hover:text-text transition-colors"
+            title="Export canonical / zaapi-compatible JSON"
+            aria-haspopup="menu" aria-expanded={exportOpen}
+          >
+            <Download size={14} />
+            <span>Export</span>
+          </button>
+          {exportOpen && (
+            <div role="menu" className="absolute left-0 top-full mt-1 z-50 bg-surface border border-border rounded-lg shadow-lg py-1 min-w-44">
+              <button role="menuitem" onClick={() => doExport("canonical")} className="w-full text-left px-3 py-2 text-xs hover:bg-surface-2">Canonical package (lossless)</button>
+              {importedDraft?.raw != null && (
+                <button role="menuitem" onClick={() => doExport("raw")} className="w-full text-left px-3 py-2 text-xs hover:bg-surface-2">Raw source (provenance — credentials masked)</button>
+              )}
+              <button role="menuitem" onClick={() => doExport("zaapi")} className="w-full text-left px-3 py-2 text-xs hover:bg-surface-2">Zaapi-compatible projection</button>
+            </div>
+          )}
+        </div>
         <div className="flex-1" />
+        {importedDraft && (
+          <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-brand/10 text-brand whitespace-nowrap" title="draft จาก zaapi import — save/publish ปิดจนกว่า bindings จะ resolve">
+            ● imported draft
+          </span>
+        )}
         {dirty ? (
           <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-warning/10 text-warning whitespace-nowrap" title="มีการแก้ไขยังไม่ได้บันทึก">
             ● ยังไม่บันทึก
@@ -469,9 +733,22 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           </span>
         ) : null}
         <button
+          disabled
+          title={publishReadiness({ ok: true, errors: [], unsupportedNodes: [], blockedNodes: [], unresolvedBindings: [] }).reason}
+          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-semibold rounded-lg bg-surface-2 text-text-muted opacity-50 cursor-not-allowed"
+        >
+          <AlertTriangle size={14} />
+          <span className="hidden sm:inline">Publish</span>
+          {importDetail && (importDetail.unresolved_bindings ?? 0) > 0 && (
+            <span className="hidden md:inline text-[10px] text-warning" title={(importDetail.publish_blockers || []).join("\n")}>
+              · {importDetail.unresolved_bindings} unresolved bindings
+            </span>
+          )}
+        </button>
+        <button
           onClick={save}
-          disabled={saving || !settings.name.trim()}
-          title="บันทึก workflow"
+          disabled={saveBlocked}
+          title={saveBlockReason || "บันทึก workflow"}
           className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
         >
           <Save size={14} />
@@ -508,29 +785,63 @@ function EditorInner({ workflowId }: { workflowId: string }) {
               lg:relative lg:static
               fixed inset-y-0 left-0 z-40 shadow-xl lg:shadow-none
             `}>
-              <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center justify-between mb-2">
                 <div className="text-xs font-bold text-text">เพิ่ม Node</div>
                 <button onClick={() => setPaletteOpen(false)} className="lg:hidden w-9 h-9 rounded-lg hover:bg-surface-2 flex items-center justify-center" aria-label="ปิดเมนู Node" title="ปิด">
                   <X size={16} className="text-text-muted" />
                 </button>
               </div>
+              <input
+                value={paletteSearch}
+                onChange={(e) => setPaletteSearch(e.target.value)}
+                placeholder="ค้นหา node…"
+                aria-label="ค้นหา node"
+                className="w-full mb-2 text-xs px-2 py-1.5 rounded-md border border-border bg-surface text-text focus:outline-none focus:ring-1 focus:ring-brand/30"
+              />
+              <select
+                value={platformFilter}
+                onChange={(e) => setPlatformFilter(e.target.value as WorkflowPlatform | "")}
+                aria-label="กรองตาม platform"
+                className="w-full mb-3 text-xs px-2 py-1.5 rounded-md border border-border bg-surface text-text"
+              >
+                <option value="">ทุก platform</option>
+                {WORKFLOW_PLATFORMS.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
               {PALETTE.map((group) => {
                 const meta = NODE_TYPE_META[group.type];
+                const items = group.subtypes
+                  .map((sub) => getNodeDef(sub)!)
+                  .filter((d) => {
+                    if (paletteSearch && !(d.label + " " + d.type).toLowerCase().includes(paletteSearch.toLowerCase())) return false;
+                    return true;
+                  });
+                if (items.length === 0) return null;
                 return (
                   <div key={group.type} className="mb-3">
                     <div className="text-[10px] font-bold mb-1.5" style={{ color: meta.color }}>
                       {meta.icon} {meta.label}
                     </div>
-                    {group.subtypes.map((sub) => (
-                      <button
-                        key={sub}
-                        onClick={() => { addNode(group.type, sub); if (window.innerWidth < 1024) setPaletteOpen(false); }}
-                        className="w-full text-left px-2 py-1.5 mb-1 text-xs rounded-md border hover:bg-surface-2 transition-colors flex items-center gap-1.5"
-                        style={{ borderColor: meta.border, backgroundColor: meta.bg }}
-                      >
-                        {SUBTYPE_META[sub]?.icon} {SUBTYPE_META[sub]?.label || sub}
-                      </button>
-                    ))}
+                    {items.map((d) => {
+                      const av = platformFilter ? nodeAvailabilityFor(d, platformFilter) : { state: d.availability };
+                      const usable = av.state === "supported";
+                      return (
+                        <button
+                          key={d.type}
+                          disabled={!usable}
+                          onClick={() => { addNode(group.type, d.type); if (window.innerWidth < 1024) setPaletteOpen(false); }}
+                          title={av.state === "supported" ? d.description : `${availabilityBadge(av.state)} — ${av.reason || ""}`}
+                          className="w-full text-left px-2 py-1.5 mb-1 text-xs rounded-md border transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-surface-2"
+                          style={{ borderColor: meta.border, backgroundColor: meta.bg }}
+                        >
+                          {SUBTYPE_META[d.type]?.icon} <span className="flex-1 min-w-0 truncate">{d.label}</span>
+                          <span className={`shrink-0 text-[9px] font-semibold px-1.5 py-0.5 rounded-full ${av.state === "supported" ? "bg-success/10 text-success" : av.state === "requires_adapter" ? "bg-warning/10 text-warning" : "bg-error/10 text-error"}`}>
+                            {availabilityBadge(av.state)}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 );
               })}
@@ -541,7 +852,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         {/* ── Canvas กลาง ── */}
         <div className="flex-1 min-w-0 relative">
           <ReactFlow
-            nodes={nodes}
+            nodes={displayNodes}
             edges={edges}
             nodeTypes={nodeTypes}
             onNodesChange={(c: NodeChange<Node<WFNodeData>>[]) => { onNodesChange(c); setWfVersion((v) => (c.some((x) => x.type === "position" || x.type === "remove") ? v + 1 : v)); }}
@@ -579,13 +890,32 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                   onUpdateConfig={updateSelectedConfig}
                   onUpdateSubtype={updateSelectedSubtype}
                   onDelete={deleteSelected}
+                  bindings={importBindings.filter((b) => b.node_id === selectedNode.id)}
+                  validation={lastValidation}
+                  resolution={isImported && resolutionView ? {
+                    view: resolutionView, picks, repeats, submitting: resolving,
+                    onPick: (bid, idx, p) => setPicks((prev) => {
+                      const cur = { ...(prev[bid] || {}) };
+                      if (p) cur[idx] = p; else delete cur[idx];
+                      return { ...prev, [bid]: cur };
+                    }),
+                    onRepeat: (bid, r) => setRepeats((prev) => ({ ...prev, [bid]: r })),
+                    onResolve: resolveBinding,
+                  } : null}
                 />
               ) : (
-                <FlowSettingsPanel settings={settings} setSettings={(s) => { setSettings(s); setWfVersion((v) => v + 1); }} shops={shops} />
+                <FlowSettingsPanel settings={settings} setSettings={(s) => { setSettings(s); setWfVersion((v) => v + 1); }} shops={shops} imported={isImported} />
               )}
             </div>
           </>
         )}
+
+        {/* ── Import preview modal — shared dialog (list page ใช้ตัวเดียวกัน) ── */}
+        <ZaapiImportDialog
+          open={importOpen}
+          onClose={() => setImportOpen(false)}
+          onLoadReportToCanvas={loadReportToCanvas}
+        />
       </div>
     </div>
   );
@@ -594,18 +924,34 @@ function EditorInner({ workflowId }: { workflowId: string }) {
 // ─── Node config panel — dynamic fields ตาม subtype ──
 
 function NodeConfigPanel({
-  node, allNodes, onUpdateConfig, onUpdateSubtype, onDelete,
+  node, allNodes, onUpdateConfig, onUpdateSubtype, onDelete, bindings = [], validation = null, resolution = null,
 }: {
   node: Node<WFNodeData>;
   allNodes: Node<WFNodeData>[];
   onUpdateConfig: (key: string, value: unknown) => void;
   onUpdateSubtype: (subtype: string) => void;
   onDelete: () => void;
+  bindings?: BindingRequirement[];
+  validation?: { structural: { ok: boolean; errors: string[] }; capability: ReturnType<typeof validateCanonicalDraft> } | null;
+  resolution?: {
+    view: BindingResolutionView;
+    picks: Record<string, Record<number, BindingPick | undefined>>;
+    repeats: Record<string, boolean>;
+    submitting: string | null;
+    onPick: (binding_id: string, source_index: number, pick: BindingPick | null) => void;
+    onRepeat: (binding_id: string, repeat: boolean) => void;
+    onResolve: (binding_id: string) => void;
+  } | null;
 }) {
   const cfg = node.data.config || {};
   const subtype = node.data.subtype;
   const type = (node.type || "").replace("wf_", "") as FlowNodeType;
   const subtypesOfSameType = PALETTE.find((p) => p.type === type)?.subtypes || [];
+  const regDef = getNodeDef(subtype);
+  const importMeta = node.data.importMeta as { source?: string; handleLabels?: Record<string, string> } | undefined;
+  const nodeIssues = validation
+    ? [...validation.capability.unsupportedNodes, ...validation.capability.blockedNodes].filter((i) => i.node_id === node.id)
+    : [];
 
   const inputStyle: React.CSSProperties = {
     width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--color-border)",
@@ -631,6 +977,49 @@ function NodeConfigPanel({
           ))}
         </select>
       </div>
+
+      {/* ── Registry metadata — type/version/family/availability/executor ── */}
+      {regDef && (
+        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-border)", borderRadius: 8, fontSize: 11, lineHeight: 1.6, opacity: 0.85 }}>
+          <div><b>{regDef.label}</b> <span style={{ opacity: 0.6 }}>v{regDef.version} · {regDef.family}</span></div>
+          <div>availability: <b>{availabilityBadge(regDef.availability)}</b>{regDef.availability !== "supported" ? " — publish จะถูก block" : ""}</div>
+          <div>executor: {regDef.runtimeExecutor || "ไม่มี (requires adapter)"}</div>
+          {nodeIssues.map((i) => (
+            <div key={i.reason} style={{ color: "var(--color-error)" }}>⚠ {i.reason}</div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Imported source metadata (read-only) + unresolved bindings ── */}
+      {importMeta?.source === "zaapi" && (
+        <div style={{ ...fieldGap, padding: "8px 10px", border: "1px solid var(--color-brand)", borderRadius: 8, fontSize: 11, lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 700 }}>source: zaapi (read-only)</div>
+          {importMeta.handleLabels && Object.keys(importMeta.handleLabels).length > 0 && (
+            <div>handles: {Object.entries(importMeta.handleLabels).map(([h, l]) => `${h}=${l}`).join(" · ")}</div>
+          )}
+          {bindings.length > 0 && (
+            <div style={{ color: "var(--color-warning)" }}>
+              unresolved bindings: {bindings.map((b) => `${b.kind}×${b.count} @ ${b.field_path}`).join(", ")}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Binding resolution panel (imported workflows เท่านั้น) ── */}
+      {resolution && (
+        <div style={fieldGap}>
+          <BindingResolutionPanel
+            view={resolution.view}
+            nodeId={node.id}
+            picks={resolution.picks}
+            repeats={resolution.repeats}
+            submitting={resolution.submitting}
+            onPick={resolution.onPick}
+            onRepeat={resolution.onRepeat}
+            onResolve={resolution.onResolve}
+          />
+        </div>
+      )}
 
       {subtype === "message_received" && (
         <div style={fieldGap}>
@@ -1574,11 +1963,12 @@ function SendMessageConfigPanel({
 // ─── Flow settings panel (แสดงเมื่อไม่ได้เลือก node) ──
 
 function FlowSettingsPanel({
-  settings, setSettings, shops,
+  settings, setSettings, shops, imported = false,
 }: {
   settings: FlowSettings;
   setSettings: (s: FlowSettings) => void;
   shops: ShopOption[];
+  imported?: boolean;
 }) {
   const inputStyle: React.CSSProperties = {
     width: "100%", padding: "6px 10px", borderRadius: 8, border: "1px solid var(--color-border)",
@@ -1604,6 +1994,14 @@ function FlowSettingsPanel({
         />
       </div>
 
+      {/* imported workflows: scope เป็น server-derived (จาก resolved account
+          bindings) → render read-only subtree เดียว แทน editable pickers */}
+      {imported ? (
+        <div style={fieldGap}>
+          <DerivedScopeFields platforms={settings.platforms} shop_ids={settings.shop_ids} shops={shops} />
+        </div>
+      ) : (
+      <>
       <div style={fieldGap}>
         <label style={labelStyle}>ร้านที่ใช้ flow นี้ (ไม่เลือก = ใช้ร่วมทุกร้าน)</label>
         {shops.length === 0 ? (
@@ -1662,6 +2060,8 @@ function FlowSettingsPanel({
         </div>
         <div style={{ fontSize: 10, opacity: 0.5, marginTop: 3 }}>ไม่เลือก = ทุก platform</div>
       </div>
+      </>
+      )}
 
       <div style={fieldGap}>
         <label style={labelStyle}>ความถี่ที่ flow ทำงาน</label>

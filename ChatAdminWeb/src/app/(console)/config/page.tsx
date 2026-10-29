@@ -53,12 +53,16 @@ interface SystemConfig {
   grouped_retrieval_selection_enabled: boolean;
   // ⚡ Phase 10A — global web-search operator gate (bot อ่านจาก DB ≤5s, no env fallback)
   web_search_enabled: boolean;
+  // ⚡ Workstream E — evidence pool switches (absent key → ON) + strict KB selector
+  pool_sources: { kb: boolean; mongo_catalog: boolean; units: boolean; image_text: boolean };
+  kb_source: "legacy" | "zaapi";
   updated_by: string;
   updated_at: string;
 }
 
 interface ConfigResponse {
   config: SystemConfig;
+  kbReadiness?: { ready: boolean; reason: string };
   safety: Record<string, boolean>;
   envInfo: Record<string, unknown>;
   lockedSwitches: string[];
@@ -124,6 +128,14 @@ const safeSwitches: { key: keyof SystemConfig; label: string; description: strin
   // ⚡ workflow_enabled ย้ายไป /admin-config แล้ว — admin เปิด/ปิดเองได้
 ];
 
+// ⚡ Workstream E — evidence pool sources (label + คำอธิบายต่อ toggle)
+const poolSourceRows: { key: keyof SystemConfig["pool_sources"]; label: string; description: string }[] = [
+  { key: "kb", label: "Knowledge Base", description: "เอกสารความรู้ (คำตอบสำเร็จ/สเปก) — ถังไหนดึงเลือกด้านล่าง" },
+  { key: "mongo_catalog", label: "Product Catalog", description: "สินค้า/ราคา/สต็อกจากฐาน ShpProducts" },
+  { key: "units", label: "Units", description: "หน่วยขาย/จำนวนต่อหน่วย" },
+  { key: "image_text", label: "Image Text", description: "ข้อความที่อ่านจากรูปแนบ (OCR)" },
+];
+
 const platformColors: Record<Platform, string> = {
   shopee: "text-platform-shopee",
   tiktok: "text-platform-tiktok",
@@ -146,6 +158,7 @@ export default function ConfigPage() {
   const [editingBotUrl, setEditingBotUrl] = useState<Platform | null>(null);
   const [botUrlDraft, setBotUrlDraft] = useState("");
   const [chatEngineDraft, setChatEngineDraft] = useState<"legacy" | "v2" | "v3">("legacy");
+  const [kbReadiness, setKbReadiness] = useState<{ ready: boolean; reason: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -155,6 +168,7 @@ export default function ConfigPage() {
         api().get<{ rows: ShopRow[]; total: number }>("/shops"),
       ]);
       setConfig(configRes.data.config);
+      setKbReadiness(configRes.data.kbReadiness ?? null);
       setPollingInterval(configRes.data.config.polling_interval_ms || 1000);
       setChatEngineDraft(configRes.data.config.chat_engine || "legacy");
       setShops(shopsRes.data.rows || []);
@@ -329,6 +343,57 @@ export default function ConfigPage() {
       toast.success(`เปลี่ยน "${label}" เป็น ${value ? "เปิด" : "ปิด"} แล้ว`);
     } catch (err) {
       catchError(err, "บันทึกไม่สำเร็จ");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ⚡ Workstream E — evidence pool toggles: ส่ง pool_sources ทั้ง object (server replace ทั้ง sub-doc)
+  async function handlePoolToggle(key: keyof SystemConfig["pool_sources"], value: boolean) {
+    if (!config) return;
+    const label = poolSourceRows.find(s => s.key === key)?.label || key;
+    const ok = await confirm.ask({
+      title: `${value ? "เปิด" : "ปิด"} ${label}?`,
+      message: `ยืนยันเปลี่ยน "${label}" เป็น ${value ? "เปิด" : "ปิด"} — bot ใช้ค่าใหม่ใน ~5 วินาที${!value ? " (source นี้จะไม่ถูก query เลย)" : ""}`,
+      confirmText: "บันทึก",
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const r = await api().put<{ ok: boolean; config: SystemConfig }>("/config", {
+        pool_sources: { ...config.pool_sources, [key]: value },
+      });
+      setConfig(r.data.config);
+      toast.success(`เปลี่ยน "${label}" เป็น ${value ? "เปิด" : "ปิด"} แล้ว`);
+    } catch (err) {
+      catchError(err, "บันทึกไม่สำเร็จ");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  // ⚡ Workstream E — kb_source flip (CAS + readiness gate ฝั่ง server)
+  async function handleKbSource(source: "legacy" | "zaapi") {
+    if (!config || source === config.kb_source) return;
+    const ok = await confirm.ask({
+      title: `สลับ Knowledge Base เป็น ${source === "zaapi" ? "Zaapi" : "Legacy"}?`,
+      message: source === "zaapi"
+        ? "bot จะอ่านความรู้จาก zaapi_kb เท่านั้น — legacy KB จะไม่ถูก query เลย (bot ใช้ค่าใหม่ใน ~5 วินาที)"
+        : "ย้อนกลับไปใช้ legacy KB เดิม — zaapi_kb จะไม่ถูก query (bot ใช้ค่าใหม่ใน ~5 วินาที)",
+      confirmText: "สลับ",
+    });
+    if (!ok) return;
+    setSaving(true);
+    try {
+      const r = await api().put<{ ok: boolean; config: SystemConfig }>("/config", {
+        kb_source: source,
+        expected_kb_source: config.kb_source,
+      });
+      setConfig(r.data.config);
+      toast.success(`สลับ KB source เป็น ${source} แล้ว`);
+    } catch (err) {
+      catchError(err, "สลับไม่สำเร็จ");
+      load(); // resync ถ้า CAS stale
     } finally {
       setSaving(false);
     }
@@ -548,6 +613,75 @@ export default function ConfigPage() {
 
         {/* Two-column masonry — cards สูงไม่เท่ากัน → ใช้ CSS columns ให้กระจายสมดุลอัตโนมัติ */}
         <div className="columns-1 lg:columns-2 gap-4">
+            {/* ⚡ Workstream E — Evidence Pool: 4 source toggles + strict kb selector */}
+            <Card className="p-4 break-inside-avoid mb-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Database size={14} className="text-brand" />
+                <h2 className="text-sm font-semibold text-text">Evidence Pool</h2>
+                <Badge tone={config?.kb_source === "zaapi" ? "brand" : "neutral"} className="ml-auto">
+                  KB: {config?.kb_source ?? "legacy"}
+                </Badge>
+              </div>
+
+              {/* KB source selector — CAS + readiness gate ฝั่ง server */}
+              <div className="mb-3">
+                <div className="text-[11px] font-semibold text-text-muted uppercase mb-1.5">Knowledge Base Source</div>
+                <div className="flex items-center gap-1 p-1 rounded-lg bg-surface-2 w-fit">
+                  {(["legacy", "zaapi"] as const).map((s) => {
+                    const active = config?.kb_source === s;
+                    const blocked = s === "zaapi" && kbReadiness !== null && !kbReadiness.ready;
+                    return (
+                      <button
+                        key={s}
+                        onClick={() => editable && handleKbSource(s)}
+                        disabled={saving || !editable || active || blocked}
+                        title={blocked ? `zaapi_kb ยังไม่พร้อม: ${kbReadiness?.reason}` : undefined}
+                        className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                          active ? "bg-brand text-white" : blocked ? "text-text-subtle cursor-not-allowed" : "text-text-muted hover:text-text"
+                        }`}
+                      >
+                        {s === "legacy" ? "Legacy" : "Zaapi"}
+                      </button>
+                    );
+                  })}
+                  {kbReadiness && (
+                    <Badge tone={kbReadiness.ready ? "success" : "warning"} className="ml-2">
+                      {kbReadiness.ready ? "zaapi_kb พร้อม" : "zaapi_kb ไม่พร้อม"}
+                    </Badge>
+                  )}
+                </div>
+                <div className="text-[11px] text-text-muted mt-1.5">
+                  เลือกได้ทีละถังเท่านั้น — ไม่มีผสม · bot ใช้ค่าใหม่ใน ~5 วินาที
+                </div>
+              </div>
+
+              {/* 4 source toggles — absent key → ON (default เดิม) · OFF = source ไม่ถูก query */}
+              <div className="space-y-1.5">
+                {poolSourceRows.map((s) => {
+                  const enabled = config?.pool_sources?.[s.key] !== false;
+                  return (
+                    <div key={s.key} className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-surface-2">
+                      <div className="min-w-0 flex-1 mr-3">
+                        <div className="text-sm font-medium text-text">{s.label}</div>
+                        <div className="text-[11px] text-text-muted truncate">{s.description}</div>
+                      </div>
+                      <ToggleSwitch
+                        enabled={enabled}
+                        onChange={() => editable && handlePoolToggle(s.key, !enabled)}
+                        disabled={saving || !editable}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+              {config && poolSourceRows.some(s => config.pool_sources?.[s.key] === false) && (
+                <div className="mt-2 text-[11px] text-warning flex items-center gap-1">
+                  <AlertCircle size={11} />
+                  มี source ที่ปิดอยู่ — bot จะไม่ query แหล่งนั้นเลย (zero reads)
+                </div>
+              )}
+            </Card>
+
             {/* Dangerous switches — แยกตาม platform */}
             <Card className="p-4 break-inside-avoid mb-4">
               <div className="flex items-center gap-2 mb-3">

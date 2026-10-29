@@ -15,6 +15,8 @@ export async function GET(req: NextRequest) {
   if (!r.ok) return r.response;
 
   const config = await systemConfigService.getSystemConfig(true);
+  // ⚡ Workstream E — readiness gate สำหรับ selector kb_source (cheap: count limit 1)
+  const kbReadiness = await systemConfigService.zaapiKbReady();
 
   // ข้อมูล env (ไม่เปิดเผย secret)
   const envInfo = {
@@ -28,6 +30,7 @@ export async function GET(req: NextRequest) {
 
   return json({
     config,
+    kbReadiness,
     safety: SAFETY,
     envInfo,
     // แจ้งชัดเจนว่าสวิตช์อันตรายล็อคไว้ (รองรับ 3 platform)
@@ -104,6 +107,62 @@ export async function PUT(req: NextRequest) {
     if (key in body && typeof body[key] !== "boolean") {
       return error(`${key} must be a boolean`, 422);
     }
+  }
+
+  // ⚡ Workstream E — pool_sources: object ของ boolean ต่อ source เท่านั้น
+  //   (wholesale replace ของ sub-doc — caller ต้องส่ง key ครบถ้าอยากคงค่าอื่น)
+  if ("pool_sources" in body) {
+    const v = body.pool_sources;
+    if (v === null || typeof v !== "object" || Array.isArray(v)) {
+      return error("pool_sources must be an object of { source: boolean }", 422);
+    }
+    const knownSources = ["kb", "mongo_catalog", "units", "image_text"];
+    for (const [k, val] of Object.entries(v as Record<string, unknown>)) {
+      if (!knownSources.includes(k)) {
+        return error(`pool_sources.${k} — unknown source`, 422);
+      }
+      if (typeof val !== "boolean") {
+        return error(`pool_sources.${k} must be boolean`, 422);
+      }
+    }
+  }
+
+  // ⚡ Workstream E — kb_source CAS: flip เจ้าของเดียว setKbSource
+  //   (expected_kb_source บังคับ — stale caller → 409 · zaapi ต้องผ่าน zaapiKbReady)
+  if ("kb_source" in body) {
+    const v = body.kb_source;
+    if (v !== "legacy" && v !== "zaapi") {
+      return error("kb_source must be 'legacy' or 'zaapi'", 422);
+    }
+    const exp = body.expected_kb_source;
+    if (exp !== "legacy" && exp !== "zaapi") {
+      return error("expected_kb_source must be 'legacy' or 'zaapi'", 400);
+    }
+    const extraKeys = Object.keys(body).filter(
+      (k) => k !== "kb_source" && k !== "expected_kb_source"
+    );
+    if (extraKeys.length > 0) {
+      return error(`kb_source is a single-command payload — do not combine with: ${extraKeys.join(",")}`, 422);
+    }
+    const updatedBy = r.ctx.admin.username || r.ctx.admin.email || 'admin';
+    const res = await systemConfigService.setKbSource(v, exp, updatedBy);
+    if (!res.applied) {
+      // readiness gate fail → 422 + reason · CAS stale → 409
+      return error(
+        res.reason
+          ? `kb_source=zaapi not ready: ${res.reason}`
+          : `kb_source changed by another admin — current=${res.current}`,
+        res.reason ? 422 : 409
+      );
+    }
+    if (res.changed) {
+      await logAdminEvent({
+        action_type: "config.update",
+        actor: r.ctx.admin.admin_id,
+        metadata: { changes: { kb_source: v }, updated_by: updatedBy },
+      });
+    }
+    return json({ ok: true, config: await systemConfigService.getSystemConfig(true) });
   }
 
   // ⚡ Phase 2D — bot_worker_platforms CAS: object ของ boolean ต่อ platform เท่านั้น
