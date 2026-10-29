@@ -1359,7 +1359,16 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     # ไม่เข้า model context (proof/verdict ถูก consume โดย decision แล้ว) —
     #   no_match = candidates ทุกใบ proven-fail → deterministic constraint
     #   verdict ครอบคลุม (model ไม่ตัดสิน pass/fail เอง)
-    dropped = uncovered | set(decided) | no_match
+    # asks-only needs ที่ typed outcome ครอบคลุมแล้ว (UnansweredNeed
+    # deterministic) ไม่ส่ง model task อีก — task เหลือแต่ framing
+    # (subject/scope/target) → model freestyle hedge ซ้ำกับ segment;
+    # เซ็ตเดิม + field เดิมเท่านั้น (facts/constraints/value/ranking
+    # ที่เหลือ = model work จริง → task ยังอยู่)
+    dropped = (uncovered | set(decided) | no_match
+               | {t.need_index for t in task.tasks
+                  if t.need_index in _ask_unanswered
+                  and not (t.requested_facts or t.constraints
+                           or t.value_constraints or t.ranking)})
     if dropped or _ask_unanswered:
         task = AnswerTask(
             tasks=tuple(

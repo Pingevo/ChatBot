@@ -759,8 +759,27 @@ def _render_composition(comp) -> str:
             parts.append(text)
     # unresolved productish needs = explicit outcome ของตัวเอง — render
     #   ท้ายหลัง grounded segments (deterministic จาก typed fields —
-    #   deferred needs เป็นของ domain owner อื่น ไม่ render ตรงนี้)
+    #   deferred needs เป็นของ domain owner อื่น ไม่ render ตรงนี้);
+    #   needs ชนิดเดียวกัน (reason+compat-class+subject_refs) รวมเป็น
+    #   cannot-confirm segment เดียวผ่าน renderer เดิม — หลาย ask ต่อ
+    #   subject เดียวกันไม่ให้เกิด repetitive paragraphs (per-need
+    #   granularity ยังอยู่ใน composition marker)
+    _groups: dict[tuple, list] = {}
     for u in comp.unanswered_needs:
+        _groups.setdefault(
+            (u.reason, u.operation == "compat", u.subject_refs),
+            []).append(u)
+    for us in _groups.values():
+        u = us[0]
+        if len(us) > 1:
+            u = _acx.UnansweredNeed(
+                u.need_index, u.kind, u.operation, u.subject_refs,
+                tuple(dict.fromkeys(x for w in us for x in w.scope)),
+                " / ".join(dict.fromkeys(
+                    str(w.target) for w in us if w.target)) or u.target,
+                u.reason,
+                tuple(dict.fromkeys(
+                    a for w in us for a in w.capability_asks)))
         seg = _acx._unanswered_segment(u)
         if seg and seg not in seen:
             seen.add(seg)
