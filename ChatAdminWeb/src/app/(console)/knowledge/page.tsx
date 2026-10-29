@@ -427,7 +427,7 @@ export default function KnowledgePage() {
     setFilterUpdatedBy("all");
   }
 
-  const paged = filteredRows.slice(page * pageSize, (page + 1) * pageSize);
+  const paged = filteredRows; // ไม่มี pagination — แสดงทั้งหมดใน scroll ของ card
 
   return (
     // Header — navbar แบบ shops/team
@@ -797,8 +797,8 @@ export default function KnowledgePage() {
           )}
           {paged.length > 0 && (
             <div className="flex items-center gap-2 px-1 mb-2">
-              <input type="checkbox" checked={selectedIds.size === paged.length && paged.length > 0} onChange={toggleSelectAll} className="w-4 h-4 rounded border-border accent-brand" aria-label="เลือกทั้งหมดในหน้านี้" />
-              <span className="text-xs text-text-muted">เลือกทั้งหมดในหน้านี้ ({paged.length})</span>
+              <input type="checkbox" checked={selectedIds.size === paged.length && paged.length > 0} onChange={toggleSelectAll} className="w-4 h-4 rounded border-border accent-brand" aria-label="เลือกทั้งหมด" />
+              <span className="text-xs text-text-muted">เลือกทั้งหมด ({paged.length})</span>
             </div>
           )}
           {/* Grouped list (แบบ zaapi) — กลุ่มตาม source_file → expand → rows */}
@@ -885,14 +885,7 @@ export default function KnowledgePage() {
             })}
           </div>
 
-          {/* Pagination */}
-          {filteredRows.length > pageSize && (
-            <Pagination
-              page={page + 1}
-              totalPages={Math.ceil(filteredRows.length / pageSize)}
-              onChange={(p) => setPage(p - 1)}
-            />
-          )}
+          {/* ไม่มี pagination — list scroll ใน card เต็มความสูงที่เหลือ */}
         </>
       )}
       </div>
