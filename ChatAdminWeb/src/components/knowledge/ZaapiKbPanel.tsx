@@ -1,12 +1,13 @@
 "use client";
 // ZaapiKbPanel — read-only view ของ imported Zaapi KB corpus (zaapi_kb)
 // แสดง 118 sources + docs ข้างใน — แยกจาก knowledge_base (legacy) ตาม design
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Loading } from "@/components/ui/Loading";
 import { Pagination } from "@/components/ui/Pagination";
 import { api } from "@/lib/apiClient";
+import { useSearchShortcut, useEscToClear } from "@/lib/useKeyboardShortcuts";
 import { Search, ChevronDown, Database } from "lucide-react";
 
 type ZaapiSource = {
@@ -43,6 +44,9 @@ export function ZaapiKbPanel() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [openId, setOpenId] = useState<string | null>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  useSearchShortcut(searchRef);
+  const handleSearchEsc = useEscToClear(() => setSearch(""));
 
   const [docs, setDocs] = useState<ZaapiDoc[]>([]);
   const [docsTotal, setDocsTotal] = useState(0);
@@ -95,11 +99,14 @@ export function ZaapiKbPanel() {
           <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
           <input
             type="text"
+            ref={searchRef}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            onKeyDown={handleSearchEsc}
             placeholder="ค้นหา source / ร้านค้า / platform..."
-            className="w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+            className="w-full h-8 pl-8 pr-8 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
           />
+          <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
         </div>
         <span className="text-xs text-text-muted">
           {filtered.length}/{sources.length} sources · import จาก Zaapi — ดูอย่างเดียว
