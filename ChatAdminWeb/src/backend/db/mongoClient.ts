@@ -220,6 +220,22 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.workflows, { workflow_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.workflows, { enabled: 1, status: 1 }),
     safeCreateIndex(db, COLLECTIONS.workflows, { shop_ids: 1, enabled: 1 }),
+    // ⚡ Zaapi import persistence — declaration เท่านั้น (production index = operator gate)
+    // workflow_versions — immutable canonical versions ต่อ workflow
+    safeCreateIndex(db, COLLECTIONS.workflowVersions, { version_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.workflowVersions, { workflow_id: 1, version_seq: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.workflowVersions, { workflow_id: 1, fingerprint: 1 }),
+    // workflow_import_batches — idempotent apply identity
+    safeCreateIndex(db, COLLECTIONS.workflowImportBatches, { batch_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.workflowImportBatches, { source: 1, source_fingerprint: 1 }),
+    // workflow_raw_snapshots — immutable sanitized provenance
+    safeCreateIndex(db, COLLECTIONS.workflowRawSnapshots, { snapshot_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.workflowRawSnapshots, { fingerprint: 1 }),
+    safeCreateIndex(db, COLLECTIONS.workflowRawSnapshots, { workflow_id: 1, version_id: 1 }),
+    // workflow_bindings — unresolved binding records ต่อ version
+    safeCreateIndex(db, COLLECTIONS.workflowBindings, { binding_id: 1 }, { unique: true, sparse: true }),
+    safeCreateIndex(db, COLLECTIONS.workflowBindings, { workflow_id: 1, version_id: 1 }),
+    safeCreateIndex(db, COLLECTIONS.workflowBindings, { workflow_id: 1, status: 1 }),
     // workflow_runs — state ของ flow ที่กำลังรัน/รอ reply
     safeCreateIndex(db, COLLECTIONS.workflowRuns, { run_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.workflowRuns, { conversation_id: 1, status: 1 }),

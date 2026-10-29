@@ -2784,6 +2784,17 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     if _sel_flag and _retrieval_profile is not None:
                         try:
                             from . import retrieval_runtime as _rr
+                            from . import runtime_config as _rc
+                            from . import kb_zaapi as _kbz
+                            _kb_fetcher = (
+                                (lambda: _kbz.zaapi_kb_evidence(
+                                        shop=req.shop,
+                                        platform=req.platform or "shopee",
+                                        message=req.message))
+                                if _rc.kb_source() == "zaapi"
+                                else (lambda: knowledge_base.kb_product_evidence(
+                                        db, kb_docs, shop=req.shop,
+                                        message=req.message)))
                             _grouped_sel = _rr.run_grouped_selection(
                                 _retrieval_profile, message=req.message,
                                 shop=req.shop,
@@ -2794,10 +2805,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                 needs=(_turn_plan.needs
                                        if _turn_plan else ()),
                                 snap=_snap,
-                                kb_fetcher=lambda *a, **k:
-                                    knowledge_base.kb_product_evidence(
-                                        db, kb_docs, shop=req.shop,
-                                        message=req.message),
+                                kb_fetcher=_kb_fetcher,
                                 desc_fetcher=product_store
                                     .fetch_description_evidence,
                                 supporting=([{"kind": "kb",

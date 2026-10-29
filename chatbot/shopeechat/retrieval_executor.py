@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass
 
 from . import generation_pointer as _gen
+from . import runtime_config as _rc
 from .retrieval_planner import RetrievalRequest
 from .retrieval_policy import make_evidence_card
 from .route_context import RetrievalProfile
@@ -241,8 +242,12 @@ def execute_grouped_retrieval_requests(
         fetcher = _units.fetch_unit_evidence
     if legacy_fetcher == "auto":
         legacy_fetcher = _legacy_evidence_fetcher
-    sources = [("units", fetcher)]
-    if legacy_fetcher is not None:
+    # pool admission — source ที่ central policy ปิดไม่สร้าง fetch เลย
+    # (SourceAttempt ไม่ถูกสร้างด้วย = zero reads ของ source นั้น)
+    sources: list = []
+    if _rc.source_enabled("units"):
+        sources.append(("units", fetcher))
+    if legacy_fetcher is not None and _rc.source_enabled("mongo_catalog"):
         sources.append(("legacy", legacy_fetcher))
     results: list[RetrievalExecutionResult] = []
     for req in requests:

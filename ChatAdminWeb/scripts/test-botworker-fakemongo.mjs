@@ -71,11 +71,14 @@ export function createFakeMongo(state = {}) {
     }
     const keys = state.uniqueKeys?.[name] || [];
     for (const key of keys) {
-      const v = doc[key];
-      if (v === undefined || v === null) continue;
-      const clash = fakeColl(name).find((d) => d !== excludeDoc && val(d, key) === v);
+      // key เดียว = field เดียว; "a+b" = compound unique (เช่น production
+      // (workflow_id, version_seq)) — ทุก field ต้องตรงพร้อมกันจึง clash
+      const fields = key.split("+");
+      const v = fields.map((f) => val(doc, f));
+      if (v.some((x) => x === undefined || x === null)) continue;
+      const clash = fakeColl(name).find((d) => d !== excludeDoc && fields.every((f, i) => val(d, f) === v[i]));
       if (clash) {
-        const err = new Error(`E11000 duplicate key error collection: ${name} index: ${key}_1 dup key: { ${key}: "${v}" }`);
+        const err = new Error(`E11000 duplicate key error collection: ${name} index: ${key}_1 dup key: { ${key}: ${JSON.stringify(fields.length === 1 ? v[0] : v)} }`);
         err.code = 11000;
         throw err;
       }
@@ -164,6 +167,12 @@ export function createFakeMongo(state = {}) {
         const items = v && typeof v === "object" && Array.isArray(v.$each) ? v.$each : [v];
         for (const it of items) if (!arr.includes(it)) arr.push(it);
         setPath(doc, k, arr);
+      }
+      else if (op === "$pull") for (const [k, v] of Object.entries(fields)) {
+        const arr = val(doc, k) ?? [];
+        if (!Array.isArray(arr)) continue;
+        const drop = v && typeof v === "object" && Array.isArray(v.$in) ? new Set(v.$in) : null;
+        setPath(doc, k, arr.filter((it) => (drop ? !drop.has(it) : it !== v)));
       }
       else throw new Error("fake mongo: unsupported update op " + op);
     }

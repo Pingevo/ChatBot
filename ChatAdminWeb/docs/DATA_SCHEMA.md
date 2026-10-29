@@ -15,6 +15,7 @@ sellcenter เขียนข้อมูลแชทจาก Shopee (และ
 - `admin_logs`, `system_configs`
 - `shops`, `customers`, `triggers`
 - `shadow_replies`, `quick_replies`, `close_history`
+- `workflows`, `workflow_versions`, `workflow_import_batches`, `workflow_raw_snapshots`, `workflow_bindings` — workflow engine + Zaapi import persistence (immutable versions/provenance; imported drafts stay `enabled:false`/`draft`)
 
 ---
 
@@ -272,3 +273,42 @@ db.messages.find().sort({ created_timestamp: -1 }).limit(10);
 // ดู data writer ล่าสุดทำงานปกติไหม
 db.messages.find().sort({ data_received_at: -1 }).limit(1);
 ```
+
+---
+
+## Appendix: `workflow_bindings.resolution` (admin-owned — sellcenter ห้ามแตะ)
+
+Imported Zaapi workflows มี binding docs แยกตาม version ใน `workflow_bindings`
+(`workflow_id` + `version_id` + `binding_id` deterministic) — เขียนโดย
+`workflowService.saveBindingResolutionBatch` เท่านั้น; อยู่ในกลุ่ม
+"Collections ที่ห้ามแตะ" ตามภาพรวมด้านบน
+
+`resolution` object — เขียนเมื่อ binding ถูก resolve (unresolved ไม่มี field นี้):
+
+| Field | Type | หมายเหตุ |
+|---|---|---|
+| `mappings[]` | array | mapping ต่อ `source_values[i]` — positional authoritative |
+| `mappings[].source_index` | number | index ใน `source_values[]` |
+| `mappings[].source_fp` | string | `sha256(source_value)` — server-computed, lookup only |
+| `mappings[].local_id` | string | local target (`shop_id` / label / `admin_id`) |
+| `mappings[].platform` | string | **account kind เท่านั้น** (`shopee`\|`tiktok`\|`lazada`) — non-account ห้ามมี key นี้ |
+| `mappings[].shop_id` | string | **account kind เท่านั้น** — `local_id === shop_id` เสมอ |
+| `mappings[].state` | string | `valid` \| `invalid` (target ถูกลบ → `invalid`; ไม่มี auto-repair) |
+| `mappings[].resolved_by` / `.resolved_at` | string / Date | actor + เวลาที่ resolve |
+| `mappings[].invalidated_at` / `.invalid_reason` | Date / string | เขียนเมื่อ state → `invalid` |
+| `mappings[].via` | string | `direct` = admin เลือกเอง; `repeat` = sibling binding ที่ repeat-expand |
+| `mappings[].carried` | boolean | `true` = carried forward จาก version ก่อน (import revision; CAS copy ไม่เขียน flag) |
+| `conflict` | string | optional — rejection/overlap note ล่าสุด (status ยัง `unresolved`) |
+
+Binding `status`: `resolved` = ทุก `source_values[i]` มี mapping `state:"valid"`
+ครบ · `invalid` = ≥1 mapping invalidated · อื่นๆ = `unresolved` —
+`unresolved` + `invalid` นับเป็น not-ready ทั้งคู่ (activation gate)
+
+**Derived-scope ownership:** imported workflow `platforms`/`shop_ids` =
+server-derived จาก `state:"valid"` account mappings เท่านั้น — เขียนพร้อม
+pointer ใน commit `updateOne` เดียว · แก้เองไม่ได้ (`saveWorkflowDraft` reject
+`shop_ids`/`platforms` เมื่อ doc มี `import` provenance; `updateWorkflow`
+บังคับ CAS) · legacy workflow (ไม่มี `import`) แก้ scope เองได้ตามเดิม ·
+`source_values` ที่เป็น credential-CLASS (key match url/token/secret ฯลฯ)
+ถูก mask เป็น `"[redacted]"` ก่อน persist — external ids (account/label/user)
+persist ค่าจริงสำหรับ rebind แต่ view layer mask ตอน render

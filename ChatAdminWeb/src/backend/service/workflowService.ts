@@ -6,104 +6,39 @@
 //   - edges: เชื่อม source_node_id → target_node_id (+ branch true/false สำหรับ condition)
 //
 // ⚠️ ห้าม hard delete — ใช้ soft delete (is_deleted) เหมือน triggerService
+import { createHash } from "node:crypto";
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import type { Platform } from "./systemConfigService";
 import { logAdminEvent } from "./adminLogService";
 import { pickAllowed } from "../lib/sanitizeFields";
+import { validateWorkflowGraph } from "../../lib/workflow/graph";
+import {
+  stableFingerprint, provenanceSnapshot, canonicalJson, REDACT_VALUE,
+  type BatchImportReport, type BindingRequirement, type CanonicalDraft,
+} from "../../lib/workflow/zaapiImport";
+import type { ShopDoc } from "./shopService";
+import type { AdminDoc } from "./authService";
+import { validateCanonicalDraft, publishReadiness, LOCAL_ENGINE_PLATFORMS } from "../../lib/workflow/nodeRegistry";
+import { exportCanonical } from "../../lib/workflow/workflowExport";
+import type {
+  WorkflowTriggerFrequency, WorkflowFalseBranchPolicy, WorkflowStatus,
+  WorkflowNode, WorkflowEdge,
+} from "../../lib/workflow/graph";
 
 // ─── Types ────────────────────────────────────────────────
-
-export type WorkflowTriggerFrequency = "once_per_customer" | "once_per_conversation" | "every_time";
-export type WorkflowFalseBranchPolicy = "exit_to_bot" | "exit_drop" | "stay_retry";
-export type WorkflowStatus = "draft" | "published";
-
-export type WorkflowNodeType = "trigger" | "condition" | "action" | "wait";
-
-export interface WorkflowNode {
-  node_id: string;
-  type: WorkflowNodeType;
-  subtype: string;         // ดูตารางใน docs/plans/workflow-planner.md
-  config: Record<string, unknown>;
-  position: { x: number; y: number }; // สำหรับ canvas
-}
-
-export interface WorkflowEdge {
-  edge_id: string;
-  source_node_id: string;
-  target_node_id: string;
-  branch?: string; // ⚡ generic string — รองรับทั้ง legacy "true"/"false" และ multi-branch branch_id
-}
-
-// ─── Multi-branch Condition (Phase 1 — Zaapi pattern) ─────
-// ⚡ backward compatible: condition node subtype message_content
-//    - เก่า: config = { mode, text, retry_message } → engine ประเมิน true/false
-//    - ใหม่: config = { source, branches[], fallback_branch_id } → engine ประเมิน branch_id
-//    engine ตรวจ Array.isArray(config.branches) เพื่อแยกว่าเป็น multi-branch หรือ legacy
-export type ConditionMatchType = "contains_any" | "contains_all" | "equals";
-
-export interface ConditionBranch {
-  branch_id: string;         // "b1","b2"... ใช้เป็น edge.branch ด้วย
-  match_type: ConditionMatchType;
-  keywords: string[];
-  label?: string;            // แสดงบน UI เช่น "สั่งซื้อสินค้า"
-}
-
-export interface MessageContentConfig {
-  source: "customer_reply" | "initial_message";
-  branches: ConditionBranch[];
-  fallback_branch_id: string; // ถ้าไม่ตรงเงื่อนไขเลย → ใช้ branch นี้
-}
-
-/** type guard: config เป็น multi-branch หรือไม่ */
-export function isMultiBranchCondition(config: unknown): config is MessageContentConfig {
-  return !!config && typeof config === "object"
-    && Array.isArray((config as MessageContentConfig).branches)
-    && typeof (config as MessageContentConfig).fallback_branch_id === "string";
-}
-
-// ─── Phase 2 — Wait for Reply (retry + timeout + 3-branch) ─
-// ⚡ backward compatible: wait_for_reply node
-//    - เก่า: config = { timeout_ms? } → รอ reply เดียว + global timeout
-//    - ใหม่: config = { answer_type, max_retries, retry_message?, timeout_ms } → retry + 3 branch
-//    engine ตรวจ config.answer_type !== undefined เพื่อแยกว่าเป็น Phase 2 หรือ legacy
-export type WaitAnswerType = "any" | "number" | "custom_keywords";
-
-export interface WaitForReplyConfig {
-  answer_type: WaitAnswerType;
-  max_retries: number;      // ถามซ้ำได้กี่ครั้ง (default 3)
-  retry_message?: string;   // ข้อความถามซ้ำ (ถ้าไม่ระบุ ใช้ default)
-  timeout_ms: number;       // per-node timeout (ms) — ถ้าเกิน → branch "no_reply"
-  custom_keywords?: string[]; // สำหรับ answer_type = "custom_keywords" — คำที่ถือว่าเป็นคำตอบที่ถูก
-}
-
-/** type guard: config เป็น Phase 2 wait (มี answer_type) หรือ legacy */
-export function isPhase2WaitConfig(config: unknown): config is WaitForReplyConfig {
-  return !!config && typeof config === "object"
-    && typeof (config as WaitForReplyConfig).answer_type === "string";
-}
-
-/** 3 branch ที่ออกจาก wait node (Phase 2) */
-export const WAIT_BRANCH = {
-  SUCCESS: "success",
-  RETRY_EXCEEDED: "retry_exceeded",
-  NO_REPLY: "no_reply",
-} as const;
-
-// ─── Phase 3 — Add Label: Tag Picker ──────────────────────
-// ⚡ backward compatible: add_label node
-//    - เก่า: config = { label: string } → ติด label เดียว
-//    - ใหม่: config = { label_ids: string[] } → ติดหลาย label (chip picker)
-//    engine ตรวจ Array.isArray(config.label_ids) เพื่อแยก
-export interface AddLabelConfig {
-  label_ids: string[];   // label ที่เลือกจาก TagPicker
-}
-
-/** type guard: config เป็น Phase 3 add_label (มี label_ids array) หรือ legacy */
-export function isPhase3AddLabelConfig(config: unknown): config is AddLabelConfig {
-  return !!config && typeof config === "object"
-    && Array.isArray((config as AddLabelConfig).label_ids);
-}
+// ⚡ pure graph types + validateWorkflowGraph ย้ายไป src/lib/workflow/graph.ts
+//    (import ได้โดยไม่ชน env gate) — re-export ที่นี่เพื่อคง public API เดิม
+export type {
+  WorkflowTriggerFrequency, WorkflowFalseBranchPolicy, WorkflowStatus,
+  WorkflowNodeType, WorkflowNode, WorkflowEdge,
+  ConditionMatchType, ConditionBranch, MessageContentConfig,
+  WaitAnswerType, WaitForReplyConfig, AddLabelConfig,
+} from "../../lib/workflow/graph";
+export {
+  validateWorkflowGraph, isMultiBranchCondition, isPhase2WaitConfig,
+  isPhase3AddLabelConfig, WAIT_BRANCH,
+} from "../../lib/workflow/graph";
 
 export interface WorkflowDoc extends Document {
   workflow_id: string;
@@ -142,143 +77,96 @@ export interface WorkflowDoc extends Document {
   // Restore (หลัง soft delete)
   restored_at?: Date | null;
   restored_by?: string;
+  // ⚡ Import provenance — มีเฉพาะ flow ที่ import จาก external (zaapi)
+  current_version_id?: string;   // pointer → workflow_versions ล่าสุด
+  import?: {
+    source: "zaapi" | "canonical";
+    source_workflow_id: string;
+    batch_id: string;
+  };
+}
+
+// ─── Import persistence doc types ─────────────────────────
+export interface WorkflowVersionDoc extends Document {
+  version_id: string;
+  workflow_id: string;
+  version_seq: number;                 // monotonic ต่อ workflow — เท่ากับ workflows.version
+  schema_version: "canonical-workflow/1";
+  name: string;
+  description?: string;
+  shop_ids?: string[];
+  trigger_frequency?: WorkflowTriggerFrequency;
+  false_branch_policy?: WorkflowFalseBranchPolicy;
+  priority?: number;
+  platforms: Platform[];
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
+  handle_labels: Record<string, Record<string, string>>;
+  source_ref: CanonicalDraft["sourceRef"];
+  import_batch_id?: string;
+  fingerprint: string;                 // content fingerprint ของ version นี้
+  created_at: Date;
+  created_by: string;
+}
+
+export interface WorkflowImportBatchDoc extends Document {
+  batch_id: string;
+  source: "zaapi" | "canonical";
+  source_fingerprint: string;
+  flow_count: number;
+  node_count: number;
+  edge_count: number;
+  bindings_total: number;
+  synthesized_edges: number;
+  unresolved_step_refs: number;
+  mismatched_step_refs: number;
+  warnings: string[];
+  conflicts: unknown[];
+  status: "in_progress" | "applied" | "failed";
+  workflow_ids: string[];
+  claim_token?: string | null;
+  claim_expires_at?: Date | null;
+  last_error?: string;
+  created_at: Date;
+  created_by: string;
+  applied_at?: Date;
+}
+
+export interface WorkflowRawSnapshotDoc extends Document {
+  snapshot_id: string;
+  workflow_id: string;
+  version_id: string;
+  source_workflow_id: string;   // zaapi workflowId — audit/rebind identity
+  source_version_id: string;
+  source_status: string;
+  fingerprint: string;
+  raw: unknown;                 // sanitized provenance — credentials masked, external ids kept for rebind
+  created_at: Date;
+}
+
+export type BindingStatus = "unresolved" | "resolved" | "invalid";
+export interface WorkflowBindingDoc extends Document {
+  binding_id: string;
+  workflow_id: string;
+  version_id: string;
+  node_id: string;              // local zn_* id
+  field_path: string;
+  kind: string;
+  count: number;
+  source_ref: string;           // path ใน raw snapshot
+  source_values: unknown[];     // external ids (rebind data) — credentials ไม่เข้า (raw mask แล้ว)
+  status: BindingStatus;
+  resolution?: {                // server-computed resolution state (R1 Task 1: direct only)
+    mappings: ResolutionMapping[];
+    conflict?: string;          // overlap conflict marker (Task 5)
+  };
+  created_at: Date;
 }
 
 // ─── Helpers ──────────────────────────────────────────────
 
 function genWorkflowId(): string {
   return "wf_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-}
-
-/** ตรวจ node graph พื้นฐานก่อน save — กัน graph พังทำ engine ลูปไม่รู้จบ
- *  ⚡ graph ว่างทั้งคู่ (nodes=[] + edges=[]) = draft shell ที่สร้างจาก modal → อนุญาต */
-export function validateWorkflowGraph(doc: {
-  nodes: WorkflowNode[];
-  edges: WorkflowEdge[];
-}): { ok: boolean; errors: string[] } {
-  const errors: string[] = [];
-  const nodeIds = new Set(doc.nodes.map((n) => n.node_id));
-
-  // ⚡ draft shell — ยังไม่มี node เลย = อนุญาต (user จะวาดใน editor)
-  if (doc.nodes.length === 0 && doc.edges.length === 0) {
-    return { ok: true, errors: [] };
-  }
-  if (doc.nodes.length === 0 && doc.edges.length > 0) {
-    errors.push("มี edges แต่ไม่มี nodes");
-  }
-
-  // node_id ห้ามซ้ำ
-  if (nodeIds.size !== doc.nodes.length) {
-    errors.push("node_id ซ้ำกันใน graph");
-  }
-
-  // ต้องมี trigger node แค่ 1 ตัว (จุดเริ่ม flow)
-  const triggerNodes = doc.nodes.filter((n) => n.type === "trigger");
-  if (triggerNodes.length === 0) errors.push("ต้องมี trigger node อย่างน้อย 1 ตัว");
-  if (triggerNodes.length > 1) errors.push("มี trigger node ได้แค่ 1 ตัว (จุดเริ่ม flow)");
-
-  // edge ต้องอ้าง node ที่มีอยู่จริง
-  for (const e of doc.edges) {
-    if (!nodeIds.has(e.source_node_id)) errors.push(`edge ${e.edge_id}: source ${e.source_node_id} ไม่มีอยู่`);
-    if (!nodeIds.has(e.target_node_id)) errors.push(`edge ${e.edge_id}: target ${e.target_node_id} ไม่มีอยู่`);
-  }
-
-  // trigger node ต้องมี edge ออก
-  for (const t of triggerNodes) {
-    const hasOut = doc.edges.some((e) => e.source_node_id === t.node_id);
-    if (!hasOut) errors.push(`trigger node ${t.node_id} ไม่มี edge ออก`);
-  }
-
-  // ⚡ Phase 1 — multi-branch condition validation
-  // สำหรับ condition node subtype message_content ที่ใช้ multi-branch config
-  // legacy binary (mode/text) ไม่ต้อง validate เพิ่ม เพราะ engine ยังรองรับ
-  for (const n of doc.nodes) {
-    if (n.type !== "condition" || n.subtype !== "message_content") continue;
-    if (!isMultiBranchCondition(n.config)) continue;
-
-    const cfg = n.config;
-    const branchIds = new Set<string>();
-    for (const b of cfg.branches) {
-      if (!b.branch_id || !b.branch_id.trim()) {
-        errors.push(`condition ${n.node_id}: branch_id ห้ามว่าง`);
-        continue;
-      }
-      if (branchIds.has(b.branch_id)) {
-        errors.push(`condition ${n.node_id}: branch_id "${b.branch_id}" ซ้ำกัน`);
-      }
-      branchIds.add(b.branch_id);
-      if (!Array.isArray(b.keywords) || b.keywords.length === 0) {
-        errors.push(`condition ${n.node_id}: branch "${b.branch_id}" ต้องมี keywords อย่างน้อย 1 คำ`);
-      }
-      if (!["contains_any", "contains_all", "equals"].includes(b.match_type)) {
-        errors.push(`condition ${n.node_id}: branch "${b.branch_id}" match_type ไม่ถูกต้อง`);
-      }
-    }
-    // fallback_branch_id ต้องไม่ตรงกับ branch_id ใดๆ
-    if (!cfg.fallback_branch_id || !cfg.fallback_branch_id.trim()) {
-      errors.push(`condition ${n.node_id}: fallback_branch_id ห้ามว่าง`);
-    } else if (branchIds.has(cfg.fallback_branch_id)) {
-      errors.push(`condition ${n.node_id}: fallback_branch_id "${cfg.fallback_branch_id}" ต้องไม่ตรงกับ branch_id ใดๆ`);
-    }
-
-    // edge ที่ออกจาก condition node นี้ ต้องมี branch ตรงกับ branch_id หรือ fallback_branch_id
-    const validBranches = new Set([...branchIds, cfg.fallback_branch_id]);
-    for (const e of doc.edges) {
-      if (e.source_node_id !== n.node_id) continue;
-      if (e.branch === undefined || e.branch === "") {
-        errors.push(`edge ${e.edge_id}: ออกจาก multi-branch condition ${n.node_id} แต่ไม่มี branch`);
-        continue;
-      }
-      if (!validBranches.has(e.branch)) {
-        errors.push(`edge ${e.edge_id}: branch "${e.branch}" ไม่มีใน condition ${n.node_id}`);
-      }
-    }
-  }
-
-  // ⚡ Phase 2 — wait_for_reply node validation
-  // ถ้า wait node มี Phase 2 config (answer_type) → edge ต้องเป็น success/retry_exceeded/no_reply
-  // ทั้ง 3 branch optional — ถ้าไม่มี edge ของ branch นั้น engine จบ flow ด้วย outcome นั้น
-  // แต่ถ้ามี edge ที่อ้าง branch อื่นที่ไม่ใช่ 3 ตัวนี้ → reject (กัน ghost branch)
-  for (const n of doc.nodes) {
-    if (n.type !== "wait" || n.subtype !== "wait_for_reply") continue;
-    if (!isPhase2WaitConfig(n.config)) continue;
-
-    const validWaitBranches: Set<string> = new Set([WAIT_BRANCH.SUCCESS, WAIT_BRANCH.RETRY_EXCEEDED, WAIT_BRANCH.NO_REPLY]);
-    for (const e of doc.edges) {
-      if (e.source_node_id !== n.node_id) continue;
-      if (e.branch === undefined || e.branch === "") {
-        // legacy wait edge (ไม่มี branch) — ยังอนุญาต เพราะ engine ใช้เป็น fallback ถ้าไม่มี success edge
-        continue;
-      }
-      if (!validWaitBranches.has(e.branch)) {
-        errors.push(`edge ${e.edge_id}: wait node ${n.node_id} branch "${e.branch}" ไม่ถูกต้อง — ต้องเป็น success/retry_exceeded/no_reply`);
-      }
-    }
-
-    // max_retries ต้อง >= 0
-    const maxRetries = Number(n.config.max_retries);
-    if (isNaN(maxRetries) || maxRetries < 0) {
-      errors.push(`wait node ${n.node_id}: max_retries ต้องเป็นตัวเลข >= 0`);
-    }
-    // timeout_ms ต้อง > 0
-    const timeoutMs = Number(n.config.timeout_ms);
-    if (isNaN(timeoutMs) || timeoutMs <= 0) {
-      errors.push(`wait node ${n.node_id}: timeout_ms ต้องเป็นตัวเลข > 0`);
-    }
-    // answer_type ต้องถูกต้อง
-    if (!["any", "number", "custom_keywords"].includes(n.config.answer_type)) {
-      errors.push(`wait node ${n.node_id}: answer_type ไม่ถูกต้อง — ต้องเป็น any/number/custom_keywords`);
-    }
-    // ถ้า answer_type = custom_keywords → ต้องมี custom_keywords >= 1
-    if (n.config.answer_type === "custom_keywords") {
-      const kws = n.config.custom_keywords;
-      if (!Array.isArray(kws) || kws.length === 0) {
-        errors.push(`wait node ${n.node_id}: answer_type=custom_keywords ต้องมี custom_keywords >= 1`);
-      }
-    }
-  }
-
-  return { ok: errors.length === 0, errors };
 }
 
 // ─── CRUD ─────────────────────────────────────────────────
@@ -362,6 +250,34 @@ export async function getWorkflow(workflowId: string): Promise<WorkflowDoc | nul
   return coll.findOne({ workflow_id: workflowId, is_deleted: { $ne: true } });
 }
 
+// Activation invariant (owner เดียวใน mutation path นี้) — imported workflow
+// (มี `import` provenance) ห้าม enabled:true / status:"published" จน publish
+// readiness ผ่าน (unresolved bindings=0 + blockers=0 จาก detail surface เดิม)
+// legacy workflow ไม่มี provenance → พฤติกรรมเดิม ไม่โดน gate
+async function _assertActivationAllowed(
+  workflowId: string,
+  before: WorkflowDoc,
+  fields: { enabled?: unknown; status?: unknown },
+): Promise<void> {
+  if (fields.enabled !== true && fields.status !== "published") return;
+  if (!before.import) return;
+  const detail = await getWorkflowImportDetail(workflowId);
+  const validationOk = !!detail && detail.unresolved_bindings === 0 && detail.invalid_bindings === 0
+    && detail.publish_blockers.length === 0;
+  // publishReadiness = foundation gate owner — runtimeActivation=false → imported block ทุกตัวรอบนี้
+  const ready = validationOk && publishReadiness({
+    ok: validationOk, errors: detail?.publish_blockers ?? [],
+    unsupportedNodes: [], blockedNodes: [], unresolvedBindings: [],
+  }).canPublish;
+  if (!ready) {
+    throw new Error(
+      `imported workflow activation blocked: ${detail?.unresolved_bindings ?? "?"} unresolved bindings, ` +
+      `${detail?.invalid_bindings ?? "?"} invalid bindings, ` +
+      `${detail?.publish_blockers.length ?? "?"} publish blockers, foundation gate not open — resolve before enabling/publishing`
+    );
+  }
+}
+
 export async function updateWorkflow(
   workflowId: string,
   fields: Partial<
@@ -395,6 +311,16 @@ export async function updateWorkflow(
 
   // ⚡ เก็บค่าเดิมเพื่อ log ว่าเปลี่ยนจากอะไรเป็นอะไร
   const before = await coll.findOne({ workflow_id: workflowId, is_deleted: { $ne: true } });
+  // imported workflow: version-owned fields ต้องผ่าน CAS (saveWorkflowDraft+expected_version)
+  // — non-CAS path เขียนโดยไม่มี immutable version doc = history bypass
+  // enabled/status = activation state (ผ่าน invariant เดิม); ทุก allowed field อื่น = version-owned
+  if (before?.import && Object.keys(safeFields).some((k) => k !== "enabled" && k !== "status")) {
+    throw Object.assign(
+      new Error("imported workflow: version-owned fields require expected_version (CAS saveWorkflowDraft)"),
+      { code: "CAS_REQUIRED" }
+    );
+  }
+  if (before) await _assertActivationAllowed(workflowId, before, safeFields);
 
   const result = await coll.updateOne(
     { workflow_id: workflowId, is_deleted: { $ne: true } },
@@ -431,6 +357,7 @@ export async function toggleWorkflow(workflowId: string, enabled: boolean, updat
   const coll = await getCollection<WorkflowDoc>(COLLECTIONS.workflows);
   // ⚡ เก็บค่าเดิมเพื่อ log
   const before = await coll.findOne({ workflow_id: workflowId, is_deleted: { $ne: true } });
+  if (before) await _assertActivationAllowed(workflowId, before, { enabled });
   const result = await coll.updateOne(
     { workflow_id: workflowId, is_deleted: { $ne: true } },
     { $set: { enabled, updated_at: new Date(), updated_by: updatedBy }, $inc: { version: 1 } }
@@ -497,6 +424,1664 @@ export async function restoreWorkflow(workflowId: string, restoredBy?: string): 
   return result.modifiedCount > 0;
 }
 
+// ─── Import persistence (Zaapi canonical → disabled draft) ─
+// Consume BatchImportReport จาก zaapiImport preview — batch ต้อง ok + ไม่มี
+// unsupported types ไม่งั้น reject ก่อนเขียนอะไรเลย. deterministic ids +
+// idempotent findOne→insert (fake Mongo ไม่มี multi-doc tx) — re-apply ปลอดภัย
+// enabled:false / status:"draft" เสมอ — ไม่มี auto-publish/runtime activation
+
+function _shortHash(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) >>> 0;
+  return h.toString(36);
+}
+
+/** resolve "nodes[srcId].data.<path>" ใน raw snapshot → external id values (สำหรับ binding.source_values) */
+function _resolveRawPath(raw: unknown, ref: string): unknown[] {
+  const m = /^nodes\[([^\]]+)\]\.data\.(.+)$/.exec(ref);
+  if (!m || !raw || typeof raw !== "object") return [];
+  const nodes = (raw as { nodes?: { id?: string; data?: Record<string, unknown> }[] }).nodes || [];
+  const node = nodes.find((n) => n.id === m[1]);
+  let cur: unknown = node?.data;
+  for (const seg of m[2].replace(/\[(\d+)\]/g, ".$1").split(".")) {
+    if (cur == null || typeof cur !== "object") return [];
+    cur = (cur as Record<string, unknown>)[seg];
+  }
+  if (cur == null) return [];
+  return Array.isArray(cur) ? cur : [cur];
+}
+
+export interface ApplyImportResult {
+  ok: boolean;
+  already_applied?: boolean;
+  batch_id: string;
+  workflow_ids: string[];
+  flow_count: number;
+  node_count: number;
+  edge_count: number;
+  bindings_total: number;
+  warnings: string[];
+  conflicts: unknown[];
+}
+
+function _impErr(msg: string, code: "IMPORT_INVALID" | "IMPORT_IN_PROGRESS"): Error {
+  return Object.assign(new Error(msg), { code });
+}
+
+const IMPORT_CLAIM_LEASE_MS = 60_000;
+
+// fencing + renewal — stale claimant (takeover) ห้าม mutate workflow/pointer
+// ทุก mutable boundary = atomic validate+renew: token เดิมที่ยังครอง ownership
+// (lease หมดอายุแต่ไม่ถูก takeover → renew ต่อ; token เปลี่ยน → fenced)
+async function _assertImportClaim(
+  batches: Awaited<ReturnType<typeof getCollection<WorkflowImportBatchDoc>>>,
+  batchId: string, claim: string,
+): Promise<void> {
+  const r = await batches.updateOne(
+    { batch_id: batchId, claim_token: claim, status: "in_progress" },
+    { $set: { claim_expires_at: new Date(Date.now() + IMPORT_CLAIM_LEASE_MS) } }
+  );
+  if (r.matchedCount === 0) {
+    throw _impErr(`import batch ${batchId} claim lost — fenced before workflow mutation`, "IMPORT_IN_PROGRESS");
+  }
+}
+
+// completeness gate — "artifacts ของ batch นี้ครบ" แยกจาก "batch นี้ current"
+// ตรวจ version(fingerprint identity)/snapshot/bindings ของ batch ตัวเอง —
+// import_batch_id เป็น provenance ไม่ใช่ completeness key (cross-batch reuse
+// fingerprint เดียวกัน = artifact เดียวกัน ไม่สร้างซ้ำ)
+// เท่านั้น — ไม่ผูก workflow.current_version_id (historical replay ผ่านได้
+// โดยไม่ repoint)
+async function _batchComplete(
+  batch: BatchImportReport, batchId: string,
+  workflows: Awaited<ReturnType<typeof getCollection<WorkflowDoc>>>,
+  versions: Awaited<ReturnType<typeof getCollection<WorkflowVersionDoc>>>,
+  snapshots: Awaited<ReturnType<typeof getCollection<WorkflowRawSnapshotDoc>>>,
+  bindings: Awaited<ReturnType<typeof getCollection<WorkflowBindingDoc>>>,
+): Promise<string[] | null | "corrupt"> {
+  const workflowIds: string[] = [];
+  for (const report of batch.reports) {
+    const wfId = "wf_imp_" + _shortHash(report.draft.sourceRef.workflowId || report.flowKeyHash);
+    const wf = await workflows.findOne({ workflow_id: wfId, is_deleted: { $ne: true } });
+    if (!wf) return null;
+    // version selection = identity {workflow_id, fingerprint + requirement set}
+    // — same canonical fp อาจมีหลาย artifact variant (source_values ต่าง);
+    // completeness ต้องเทียบ version ที่ requirement ตรง report นี้เท่านั้น
+    const reqTuples = report.draft.bindings.map((b) => `${b.node_id}|${b.field_path}|${b.kind}|${b.count}|${canonicalJson(_resolveRawPath(report.draft.raw, b.source_ref))}`);
+    const reqKey = canonicalJson([...reqTuples].sort());
+    let version: WorkflowVersionDoc | null = null;
+    let sawCorrupt = false;
+    for (const cand of await versions.find({ workflow_id: wfId, fingerprint: report.fingerprint }).toArray()) {
+      const candBinds = await bindings.find({ workflow_id: wfId, version_id: cand.version_id }).toArray();
+      const candRaw = (await snapshots.findOne({ workflow_id: wfId, version_id: cand.version_id }))?.raw;
+      const candReqs = candBinds.map((x) => `${x.node_id}|${x.field_path}|${x.kind}|${x.count}|${canonicalJson(x.source_values)}`);
+      // row/raw identity ต้องตรวจทุก candidate ก่อน accept — persisted row ต้อง
+      // ถูก input ของมันเอง explain (resolve source_ref ใน cand.raw ได้ค่าเดียวกัน)
+      // ไม่งั้น snapshot corrupt/ไม่ตรงกัน ผ่าน exact-tuple match ได้ → fail closed
+      const seenReq = new Set<string>();
+      let bogus = false;
+      for (const row of candBinds) {
+        const t = `${row.node_id}|${row.field_path}|${row.kind}|${row.count}|${canonicalJson(row.source_values)}`;
+        if (seenReq.has(t) || !Array.isArray(row.source_values) || row.source_values.length === 0
+          || canonicalJson(_resolveRawPath(candRaw, row.source_ref)) !== canonicalJson(row.source_values)) { bogus = true; break; }
+        seenReq.add(t);
+      }
+      if (canonicalJson([...candReqs].sort()) === reqKey) {
+        if (bogus) { sawCorrupt = true; continue; }
+        version = cand; break;
+      }
+      const missing = reqTuples.filter((t) => !candReqs.includes(t));
+      // expected ⊆ persisted (missing=0): extras bogus → corrupt; legit →
+      // variant; missing>0 → ไม่เลือก → null → reconcile → dupVersion classify
+      if (missing.length === 0 && bogus) sawCorrupt = true;
+    }
+    if (!version) return sawCorrupt ? "corrupt" : null;
+    const snap = await snapshots.findOne({ workflow_id: wfId, version_id: version.version_id });
+    if (!snap) return null;
+    // bindings: exact set equality — expected deterministic ids เท่านั้น
+    // missing → reconcile ได้; extra/corrupt identity → fail closed (operator inspect)
+    const expected = new Set(
+      report.draft.bindings.map((b) => "wb_" + _shortHash(`${version.version_id}:${b.node_id}:${b.field_path}:${b.kind}`))
+    );
+    const persisted = await bindings.find({ workflow_id: wfId, version_id: version.version_id }).toArray();
+    const persistedIds = new Set(persisted.map((b) => b.binding_id));
+    for (const e of expected) if (!persistedIds.has(e)) return null;
+    // duplicate rows (Set collapse) / unexpected ids → corrupt (fail closed)
+    if (persisted.length !== persistedIds.size || persistedIds.size !== expected.size) return "corrupt";
+    workflowIds.push(wfId);
+  }
+  return workflowIds;
+}
+
+export async function applyImportBatch(batch: BatchImportReport, actor: string): Promise<ApplyImportResult> {
+  // fail closed: malformed graph / dangling+mismatched step refs / unsupported types → zero writes
+  if (!batch.ok) throw _impErr("import batch invalid: flow report ไม่ผ่าน (structural/step-ref anomalies)", "IMPORT_INVALID");
+  if (batch.unsupportedTypes.length > 0) {
+    throw _impErr("import batch invalid: unsupported node types " + batch.unsupportedTypes.map((u) => u.type).join(","), "IMPORT_INVALID");
+  }
+
+  // batch idempotency key = workflow identity + canonical fp + binding
+  // requirement identity (node_id|field_path|kind|count|ordered source_values
+  // — canonical fp ไม่ครอบคลุม external values; values เปลี่ยน = input ต่าง
+  // = batch ต่าง ไม่ใช่ already_applied)
+  const batchFp = stableFingerprint({
+    source: "zaapi",
+    flows: batch.reports.map((r) => `${r.draft.sourceRef.workflowId}|${r.fingerprint}|${canonicalJson(
+      r.draft.bindings.map((b) => `${b.node_id}|${b.field_path}|${b.kind}|${b.count}|${canonicalJson(_resolveRawPath(r.draft.raw, b.source_ref))}`).sort())}`),
+  });
+  const batchId = "wib_" + _shortHash(batchFp);
+
+  const batches = await getCollection<WorkflowImportBatchDoc>(COLLECTIONS.workflowImportBatches);
+  const workflows = await getCollection<WorkflowDoc>(COLLECTIONS.workflows);
+  const versions = await getCollection<WorkflowVersionDoc>(COLLECTIONS.workflowVersions);
+  const snapshots = await getCollection<WorkflowRawSnapshotDoc>(COLLECTIONS.workflowRawSnapshots);
+  const bindings = await getCollection<WorkflowBindingDoc>(COLLECTIONS.workflowBindings);
+  const now = new Date();
+  // claim token+lease — single applier; lease หมดอายุ = claimant ตาย → takeover ได้
+  const claim = `c_${Math.random().toString(36).slice(2)}_${Date.now().toString(36)}`;
+  const claimExpiry = new Date(now.getTime() + IMPORT_CLAIM_LEASE_MS);
+
+  const existing = await batches.findOne({ batch_id: batchId });
+  if (existing) {
+    if (existing.source_fingerprint !== batchFp) throw _impErr(`import batch conflict: ${batchId} fingerprint mismatch`, "IMPORT_INVALID");
+    // applied + artifacts ครบเท่านั้นที่ตอบ already_applied (ไม่ผูก current pointer)
+    if (existing.status === "applied") {
+      const doneIds = await _batchComplete(batch, batchId, workflows, versions, snapshots, bindings);
+      if (doneIds === "corrupt") {
+        throw _impErr(`import batch ${batchId}: unexpected binding identity — fail closed for operator inspection`, "IMPORT_INVALID");
+      }
+      if (doneIds) {
+        return {
+          ok: true, already_applied: true, batch_id: batchId,
+          workflow_ids: doneIds, flow_count: existing.flow_count,
+          node_count: existing.node_count, edge_count: existing.edge_count,
+          bindings_total: existing.bindings_total, warnings: existing.warnings, conflicts: existing.conflicts,
+        };
+      }
+      // applied แต่ incomplete → reconcile artifacts ด้วย claim เดียวกัน
+    }
+    // acquire — lease null/หมดอายุเท่านั้น (stale claimant = dead worker → takeover)
+    const claimed = await batches.updateOne(
+      { batch_id: batchId, $or: [{ claim_expires_at: null }, { claim_expires_at: { $lte: now } }] },
+      { $set: { claim_token: claim, claim_expires_at: claimExpiry, status: "in_progress" } }
+    );
+    if (claimed.matchedCount === 0) {
+      throw _impErr(`import batch ${batchId} apply already in progress`, "IMPORT_IN_PROGRESS");
+    }
+  } else {
+    // fresh batch — insert พร้อม claim เป็น atomic record เดียว
+    const batchDoc: WorkflowImportBatchDoc = {
+      batch_id: batchId, source: "zaapi", source_fingerprint: batchFp,
+      flow_count: batch.flowCount, node_count: batch.nodeCount, edge_count: batch.edgeCount,
+      bindings_total: batch.bindingsTotal,
+      synthesized_edges: batch.reports.reduce((s, r) => s + r.stepRefs.synthesized, 0),
+      unresolved_step_refs: batch.reports.reduce((s, r) => s + r.unresolvedStepRefs.length, 0),
+      mismatched_step_refs: batch.reports.reduce((s, r) => s + r.stepRefs.mismatched, 0),
+      warnings: batch.reports.flatMap((r) => r.warnings),
+      conflicts: batch.conflicts,
+      status: "in_progress", workflow_ids: [],
+      claim_token: claim, claim_expires_at: claimExpiry,
+      created_at: now, created_by: actor,
+    };
+    try {
+      await batches.insertOne(batchDoc);
+    } catch (e) {
+      // E11000 — caller อื่น insert ก่อน → มัน claim อยู่ → in-progress conflict
+      if ((e as { code?: number }).code === 11000) {
+        throw _impErr(`import batch ${batchId} apply already in progress`, "IMPORT_IN_PROGRESS");
+      }
+      throw e;
+    }
+  }
+
+  const workflowIds: string[] = [];
+  try {
+
+    for (const report of batch.reports) {
+      const d = report.draft;
+      const srcWfId = d.sourceRef.workflowId;
+      const wfId = "wf_imp_" + _shortHash(srcWfId || report.flowKeyHash);
+
+      const existingWf = await workflows.findOne({ workflow_id: wfId, is_deleted: { $ne: true } });
+      if (existingWf && existingWf.import && existingWf.import.source_workflow_id !== srcWfId) {
+        throw _impErr(`import conflict: ${wfId} belongs to source ${existingWf.import.source_workflow_id}`, "IMPORT_INVALID");
+      }
+
+      // per-flow idempotency — version fingerprint เดิม → reuse (ไม่ bump/re-point)
+      // resume: version อาจมีแล้วจาก crashed attempt — snapshot/bindings ต้อง verify แยก
+      // version reuse = artifact เดียวกันเท่านั้น: canonical proj ตรง (G —
+      // normalize volatile/provenance) + binding requirement identity ตรง
+      // ทุกตัว (K — fp ไม่ครอบคลุม external source_values; values ต่าง =
+      // requirement/artifact ต่าง → version ใหม่ ไม่ reuse ไม่ corrupt)
+      const reqTuples = d.bindings.map((b) => `${b.node_id}|${b.field_path}|${b.kind}|${b.count}|${canonicalJson(_resolveRawPath(d.raw, b.source_ref))}`);
+      const reqKey = canonicalJson([...reqTuples].sort());
+      let dupVersion: WorkflowVersionDoc | null = null;
+      for (const cand of await versions.find({ workflow_id: wfId, fingerprint: report.fingerprint }).toArray()) {
+        const candSeq = cand.version_seq;
+        const expectedDoc = {
+          version_id: "wv_" + _shortHash(`${wfId}:${candSeq}:${report.fingerprint}`), workflow_id: wfId, version_seq: candSeq,
+          schema_version: "canonical-workflow/1" as const,
+          name: d.name, platforms: d.platforms.filter((p) => (LOCAL_ENGINE_PLATFORMS as string[]).includes(p)) as Platform[], nodes: d.nodes, edges: d.edges,
+          handle_labels: d.handleLabels, fingerprint: report.fingerprint,
+        };
+        if (canonicalJson(JSON.parse(JSON.stringify({ ...expectedDoc, _id: "x" as never, created_at: "x" as never, created_by: "x" as never, import_batch_id: "x" as never, source_ref: { workflowId: srcWfId } })))
+          !== canonicalJson(JSON.parse(JSON.stringify({ ...cand, _id: "x", created_at: "x", created_by: "x", import_batch_id: "x", source_ref: { workflowId: (cand.source_ref as { workflowId?: string } | undefined)?.workflowId } })))) {
+          throw new Error(`version artifact for fingerprint ${report.fingerprint} mismatched — corrupt deterministic identity`);
+        }
+        const candBinds = await bindings.find({ workflow_id: wfId, version_id: cand.version_id }).toArray();
+        const candRaw = (await snapshots.findOne({ workflow_id: wfId, version_id: cand.version_id }))?.raw;
+        const candReqs = candBinds.map((x) => `${x.node_id}|${x.field_path}|${x.kind}|${x.count}|${canonicalJson(x.source_values)}`);
+        // persisted row ต้องถูก input ของมันเอง explain: resolve source_ref ใน
+        // snapshot raw ของมันเอง — resolve ว่าง/ไม่ตรง/dup tuple = corrupt
+        // binding identity (input เดียวกัน emit requirement ครั้งเดียวเท่านั้น)
+        const seenReq = new Set<string>();
+        let bogus = false;
+        for (const row of candBinds) {
+          const t = `${row.node_id}|${row.field_path}|${row.kind}|${row.count}|${canonicalJson(row.source_values)}`;
+          if (seenReq.has(t) || !Array.isArray(row.source_values) || row.source_values.length === 0
+            || canonicalJson(_resolveRawPath(candRaw, row.source_ref)) !== canonicalJson(row.source_values)) { bogus = true; break; }
+          seenReq.add(t);
+        }
+        if (bogus) {
+          throw _impErr(`version artifact at (workflow_id=${wfId}, version_seq=${candSeq}) holds corrupt binding identity — fail closed for operator inspection`, "IMPORT_INVALID");
+        }
+        if (canonicalJson([...candReqs].sort()) === reqKey) { dupVersion = cand; break; }
+        // subset = incomplete retry เฉพาะเมื่อ missing req ก็อยู่ใน input ของ
+        // cand (resolve source_ref ใน cand.raw ได้ค่าเดียวกัน) — resolve ว่าง/
+        // ต่าง = cand เกิดจาก input variant อื่น → ข้าม (version ใหม่)
+        if (candReqs.every((t) => reqTuples.includes(t)) && candReqs.length < reqTuples.length) {
+          let candIncomplete = true;
+          for (const b of d.bindings) {
+            const vals = _resolveRawPath(d.raw, b.source_ref);
+            const t = `${b.node_id}|${b.field_path}|${b.kind}|${b.count}|${canonicalJson(vals)}`;
+            if (!candReqs.includes(t)
+              && canonicalJson(_resolveRawPath(candRaw, b.source_ref)) !== canonicalJson(vals)) { candIncomplete = false; break; }
+          }
+          if (candIncomplete) { dupVersion = cand; break; }
+        }
+      }
+      let seq = dupVersion?.version_seq ?? (existingWf?.version ?? 0) + 1;
+      let versionId = dupVersion?.version_id ?? "wv_" + _shortHash(`${wfId}:${seq}:${report.fingerprint}`);
+      if (!dupVersion) {
+        // seq slot ชน crash-orphan / divergent lineage → verify/bump + insert ใน
+        // loop เดียว — production unique (workflow_id, version_seq) เป็น gate
+        // สุดท้าย; E11000 = check→insert race → verify slot ใหม่ (orphan ไม่
+        // ขวาง payload ใหม่ถาวร — pattern เดียวกับ CAS writer)
+        // fingerprint = lookup index ไม่ใช่ identity proof: reuse เฉพาะ doc ที่
+        // canonical projection ตรงทุก field (normalize เฉพาะ _id/created_at/
+        // created_by — volatile) — same-fp แต่ payload ต่าง = corrupt artifact →
+        // fail closed (pattern เดียวกับ resolution writer multiplicity gate)
+        for (;;) {
+          const expectedDoc = {
+            version_id: versionId, workflow_id: wfId, version_seq: seq,
+            schema_version: "canonical-workflow/1" as const,
+            // platforms: intersect กับ local-engine platforms — facebook/line ของ zaapi เก็บใน raw provenance
+            name: d.name, platforms: d.platforms.filter((p) => (LOCAL_ENGINE_PLATFORMS as string[]).includes(p)) as Platform[], nodes: d.nodes, edges: d.edges,
+            handle_labels: d.handleLabels, source_ref: d.sourceRef,
+            import_batch_id: batchId, fingerprint: report.fingerprint,
+            created_at: now, created_by: actor,
+          };
+          const expectedProj = canonicalJson(JSON.parse(JSON.stringify({ ...expectedDoc, _id: "x" as never, created_at: "x" as never, created_by: "x" as never, import_batch_id: "x" as never, source_ref: { workflowId: srcWfId } })));
+          const clash = await versions.findOne({ workflow_id: wfId, version_seq: seq });
+          if (clash) {
+            if (canonicalJson(JSON.parse(JSON.stringify({ ...clash, _id: "x", created_at: "x", created_by: "x", import_batch_id: "x", source_ref: { workflowId: (clash.source_ref as { workflowId?: string } | undefined)?.workflowId } }))) === expectedProj) { versionId = clash.version_id; break; }
+            if (clash.fingerprint === report.fingerprint) {
+              throw new Error(`version artifact at (workflow_id=${wfId}, version_seq=${seq}) matches fingerprint but not canonical identity — corrupt deterministic identity`);
+            }
+            seq += 1;
+            versionId = "wv_" + _shortHash(`${wfId}:${seq}:${report.fingerprint}`);
+            continue;
+          }
+          try {
+            await versions.insertOne(expectedDoc);
+            break;
+          } catch (e) {
+            if ((e as { code?: number }).code !== 11000) throw e;
+            // E11000 — จำแนก unique key ที่ชน (production: version_id +
+            // (workflow_id,version_seq)) + verify canonical identity: version_id
+            // ชน → proj ตรง resume / ต่าง corrupt fail-closed · seq ชน → proj
+            // ตรง resume / same-fp-diff-proj corrupt / ต่าง fp bump · อธิบาย
+            // ไม่ได้ → rethrow (ไม่วน retry ค่าเดิมไม่จบ)
+            const byId = await versions.findOne({ version_id: versionId });
+            if (byId) {
+              if (canonicalJson(JSON.parse(JSON.stringify({ ...byId, _id: "x", created_at: "x", created_by: "x", import_batch_id: "x", source_ref: { workflowId: (byId.source_ref as { workflowId?: string } | undefined)?.workflowId } }))) !== expectedProj) {
+                throw new Error(`version_id ${versionId} holds mismatched artifact — corrupt deterministic identity`);
+              }
+              break;
+            }
+            const slot = await versions.findOne({ workflow_id: wfId, version_seq: seq });
+            if (!slot) throw e;
+            if (canonicalJson(JSON.parse(JSON.stringify({ ...slot, _id: "x", created_at: "x", created_by: "x", import_batch_id: "x", source_ref: { workflowId: (slot.source_ref as { workflowId?: string } | undefined)?.workflowId } }))) === expectedProj) { versionId = slot.version_id; break; }
+            if (slot.fingerprint === report.fingerprint) {
+              throw new Error(`version artifact at (workflow_id=${wfId}, version_seq=${seq}) matches fingerprint but not canonical identity — corrupt deterministic identity`);
+            }
+            seq += 1;
+            versionId = "wv_" + _shortHash(`${wfId}:${seq}:${report.fingerprint}`);
+          }
+        }
+      }
+
+      const snapshotId = "wrs_" + _shortHash(`${wfId}:${versionId}`);
+      if (!(await snapshots.findOne({ snapshot_id: snapshotId }))) {
+        await snapshots.insertOne({
+          snapshot_id: snapshotId,
+          workflow_id: wfId, version_id: versionId,
+          source_workflow_id: srcWfId, source_version_id: d.sourceRef.loadedVersionId,
+          source_status: d.sourceRef.sourceStatus,
+          fingerprint: d.sourceRef.fingerprint, raw: d.raw ?? null,
+          created_at: now,
+        });
+      }
+
+      // carry-forward (spec §6A) — carry source = lineage predecessor:
+      // forward revision = pointed version ณ ตอนอ่าน (revision ที่ workflow
+      // วิวัฒน์มาจริง — seq-1 อาจเป็น crash-orphan/divergent branch ที่ไม่เคย
+      // ถูกชี้ ไม่ใช่ predecessor) · historical reconcile (dupVersion seq <
+      // current) → seq-1 เสมอ — ห้ามดึง resolution จาก pointed/newer version
+      // มาเขียนลง version เก่า (no newer-version bleed)
+      const prevVersion = dupVersion
+        ? (seq > 1 ? await versions.findOne({ workflow_id: wfId, version_seq: seq - 1 }) : null)
+        : (existingWf?.current_version_id
+            ? await versions.findOne({ version_id: existingWf.current_version_id })
+            : null);
+      const prevBinds = prevVersion
+        ? await bindings.find({ workflow_id: wfId, version_id: prevVersion.version_id }).toArray()
+        : [];
+      const carryTargets = prevBinds.some((x) => (x.resolution?.mappings?.length ?? 0) > 0);
+      const shops = carryTargets ? await getCollection<{ shop_id: string; platform: string }>(COLLECTIONS.shops) : null;
+      const admins = carryTargets ? await getCollection<{ admin_id: string; active?: boolean }>(COLLECTIONS.admins) : null;
+      const conversations = carryTargets ? await getCollection(COLLECTIONS.conversations) : null;
+      let labelSet: Set<string> | null = null;
+      for (const b of d.bindings) {
+        const bindingId = "wb_" + _shortHash(`${versionId}:${b.node_id}:${b.field_path}:${b.kind}`);
+        if (await bindings.findOne({ binding_id: bindingId })) continue; // resume — เขียนแล้ว
+        const sourceValues = _resolveRawPath(d.raw, b.source_ref);
+        // exact gate — requirement identity ตรงทุก field เท่านั้น (canonicalJson
+        // = exact ordered equality, authoritative; ไม่มี fuzzy/heuristic match)
+        const pb = prevBinds.find((x) => x.node_id === b.node_id && x.field_path === b.field_path
+          && x.kind === b.kind && x.count === b.count
+          && canonicalJson(x.source_values) === canonicalJson(sourceValues));
+        const doc: WorkflowBindingDoc = {
+          binding_id: bindingId,
+          workflow_id: wfId, version_id: versionId,
+          node_id: b.node_id, field_path: b.field_path, kind: b.kind, count: b.count,
+          source_ref: b.source_ref, source_values: sourceValues,
+          status: "unresolved", created_at: now,
+        };
+        // mapping carry — source_fp integrity ต้องตรง source_values ชุดเดียวกัน
+        // (positional source_index ห้ามชี้ผิดตัว) — ไม่ตรง → fresh unresolved
+        if (pb?.resolution?.mappings?.length
+          && pb.resolution.mappings.every((m) => Number.isInteger(m.source_index) && m.source_index >= 0
+            && m.source_index < sourceValues.length
+            && m.source_fp === createHash("sha256").update(canonicalJson(sourceValues[m.source_index])).digest("hex"))) {
+          // local-target revalidation — typed switch เดียวกับ resolution batch:
+          // target หาย → state:"invalid" เก็บไว้ inspect (ไม่ drop เงียบ)
+          const maps: ResolutionMapping[] = [];
+          for (const m of pb.resolution.mappings) {
+            const c: ResolutionMapping = { ...m, carried: true };
+            let targetOk = false;
+            if (b.kind !== "account" && (c.platform !== undefined || c.shop_id !== undefined)) targetOk = false;
+            else switch (b.kind) {
+              case "account":
+                targetOk = c.platform !== undefined && c.shop_id !== undefined && c.local_id === c.shop_id
+                  && (await shops!.findOne({ shop_id: c.shop_id, platform: c.platform })) != null;
+                break;
+              case "label":
+                if (!labelSet) labelSet = new Set(((await conversations!.distinct("labels", {})) as unknown[]).flat() as string[]);
+                targetOk = labelSet.has(c.local_id);
+                break;
+              case "user": {
+                const adm = await admins!.findOne({ admin_id: c.local_id });
+                targetOk = adm != null && adm.active !== false;
+                break;
+              }
+              default: break;
+            }
+            c.state = targetOk ? "valid" : "invalid";
+            if (!targetOk) {
+              c.invalidated_at = c.invalidated_at ?? now;
+              c.invalid_reason = c.invalid_reason ?? "local target missing";
+            } else {
+              delete c.invalidated_at;
+              delete c.invalid_reason;
+            }
+            maps.push(c);
+          }
+          doc.status = maps.some((m) => m.state === "invalid") ? "invalid" : pb.status;
+          doc.resolution = { mappings: maps, ...(pb.resolution.conflict ? { conflict: pb.resolution.conflict } : {}) };
+        } else if (pb?.resolution?.conflict && !(pb.resolution.mappings?.length)) {
+          // conflict-only resolution (mappings ว่าง) — carry marker เดิมเพื่อ
+          // inspection parity กับ CAS verbatim copy
+          doc.resolution = { mappings: [], conflict: pb.resolution.conflict };
+        }
+        await bindings.insertOne(doc);
+      }
+
+      if (!existingWf) {
+        await _assertImportClaim(batches, batchId, claim); // fence ก่อน mutable write
+        await workflows.insertOne({
+          workflow_id: wfId, name: d.name, enabled: false,
+          shop_ids: [], platforms: d.platforms.filter((p) => (LOCAL_ENGINE_PLATFORMS as string[]).includes(p)) as Platform[],
+          trigger_frequency: "every_time", false_branch_policy: "exit_to_bot",
+          nodes: d.nodes, edges: d.edges, priority: 0,
+          version: 1, status: "draft",
+          created_by: actor, created_at: now, updated_at: now,
+          current_version_id: versionId,
+          import: { source: "zaapi", source_workflow_id: srcWfId, batch_id: batchId },
+        });
+      } else {
+        // repoint เฉพาะเมื่อ revision ใหม่กว่า current — historical reconcile ไม่ repoint
+        const curVer = existingWf.current_version_id
+          ? await versions.findOne({ version_id: existingWf.current_version_id })
+          : null;
+        const curSeq = curVer?.version_seq ?? 0;
+        if (existingWf.current_version_id !== versionId && seq > curSeq) {
+          // derived scope = valid account mappings ของ version ใหม่ — pointer +
+          // scope ต้องขยับ atomic ใน update เดียว (invariant เดียวกับ resolution
+          // commit "half-update ไม่มี"); draft.platforms = [] เสมอ — ห้ามเขียน
+          // ทับ derived scope ด้วย source value · zero eligible → scope ว่าง
+          // (empty scope ≠ match-all — readiness blocker คุมอยู่แล้ว)
+          const newBinds = await bindings.find({ workflow_id: wfId, version_id: versionId }).toArray();
+          const derivedPlatforms = [...new Set(newBinds.flatMap((b) => (b.resolution?.mappings ?? [])
+            .filter((m) => m.state === "valid" && m.platform != null).map((m) => m.platform as Platform)))].sort();
+          const derivedShopIds = [...new Set(newBinds.flatMap((b) => (b.resolution?.mappings ?? [])
+            .filter((m) => m.state === "valid" && m.shop_id != null).map((m) => m.shop_id as string)))].sort();
+          // force disabled/draft ใน update เดียวกับ graph/pointer flip —
+          // imported revision ห้ามเปลี่ยน graph ของ workflow ที่ยัง active
+          await _assertImportClaim(batches, batchId, claim); // fence ก่อน repoint
+          // monotone version CAS — repoint เฉพาะเมื่อ counter ณ commit ยังต่ำ
+          // กว่า seq ของเรา: winner ที่ใหม่กว่าชนะไปแล้ว (version >= seq) →
+          // matchedCount=0 → skip (pointer/scope ไม่ถอย — artifacts คงเป็น
+          // immutable history) · revision ที่ใหม่กว่ามาถึงทีหลัง stale read
+          // (version < seq) → repoint ได้ — ไม่ first-writer-wins
+          await workflows.updateOne(
+            { workflow_id: wfId, is_deleted: { $ne: true }, version: { $lt: seq } },
+            { $set: {
+              name: d.name, nodes: d.nodes, edges: d.edges,
+              platforms: derivedPlatforms, shop_ids: derivedShopIds,
+              current_version_id: versionId, version: seq,
+              enabled: false, status: "draft",
+              import: { source: "zaapi", source_workflow_id: srcWfId, batch_id: batchId },
+              updated_at: now, updated_by: actor,
+            } }
+          );
+        }
+      }
+      workflowIds.push(wfId);
+    }
+
+    // completeness gate — finalize เฉพาะเมื่อ artifacts ของ batch ครบจริง
+    const completeIds = await _batchComplete(batch, batchId, workflows, versions, snapshots, bindings);
+    if (completeIds === "corrupt") {
+      throw _impErr(`import batch ${batchId}: unexpected binding identity — fail closed for operator inspection`, "IMPORT_INVALID");
+    }
+    if (!completeIds) {
+      throw _impErr(`import batch ${batchId} incomplete: missing records after apply loop`, "IMPORT_INVALID");
+    }
+    // fencing — claim_token ใน filter: stale claimant finalize ไม่ได้
+    const finalized = await batches.updateOne(
+      { batch_id: batchId, claim_token: claim },
+      { $set: { status: "applied", workflow_ids: completeIds, applied_at: new Date(), claim_token: null, claim_expires_at: null } }
+    );
+    if (finalized.matchedCount === 0) {
+      throw _impErr(`import batch ${batchId} claim lost — another applier took over`, "IMPORT_IN_PROGRESS");
+    }
+  } catch (e) {
+    // recoverable state — retry payload เดิมซ่อมต่อได้ (deterministic ids)
+    // release เฉพาะเมื่อยังถือ claim (fencing — stale claimant ปล่อยไม่ได้)
+    try {
+      await batches.updateOne(
+        { batch_id: batchId, claim_token: claim },
+        { $set: { status: "failed", last_error: (e as Error).message, claim_token: null, claim_expires_at: null } }
+      );
+    } catch { /* batch doc อาจเขียนไม่ได้ — อย่ากลืน error เดิม */ }
+    throw e;
+  }
+
+  // audit หลัง commit — audit fail ไม่ทำให้ client เข้าใจว่า import ไม่สำเร็จ
+  try {
+    await logAdminEvent({
+      action_type: "workflow.import_apply", actor,
+      metadata: { batch_id: batchId, flow_count: batch.flowCount, node_count: batch.nodeCount, bindings_total: batch.bindingsTotal, workflow_ids: workflowIds },
+    });
+  } catch { /* post-commit audit failure — commit สำเร็จแล้ว */ }
+  return {
+    ok: true, batch_id: batchId, workflow_ids: workflowIds,
+    flow_count: batch.flowCount, node_count: batch.nodeCount, edge_count: batch.edgeCount,
+    bindings_total: batch.bindingsTotal,
+    warnings: batch.reports.flatMap((r) => r.warnings), conflicts: batch.conflicts,
+  };
+}
+
+// ─── CAS save (optimistic concurrency) ────────────────────
+// expectedVersion ต้องตรง workflows.version ปัจจุบัน — ไม่ตรง = conflict (ไม่
+// เขียนทับ). Commit point = updateOne เดียวที่พริก fields+version+pointer พร้อมกัน
+// — immutable version doc + carried bindings เขียนก่อน (deterministic ids →
+// retry payload เดิม resume ได้ idempotent). enabled/status ผ่าน CAS ได้สำหรับ
+// legacy workflow; imported → activation invariant เดียวกับ update/toggle
+export interface CasSaveResult {
+  ok: boolean;
+  conflict?: boolean;
+  not_found?: boolean;
+  version?: number;
+  version_id?: string;
+  current_version?: number;
+}
+
+const CAS_SAVE_ALLOWLIST = [
+  "name", "description", "shop_ids", "platforms", "trigger_frequency",
+  "false_branch_policy", "nodes", "edges", "priority", "enabled", "status",
+] as const;
+
+export async function saveWorkflowDraft(
+  workflowId: string,
+  fields: Partial<Pick<WorkflowDoc,
+    "name" | "description" | "shop_ids" | "platforms" | "trigger_frequency" |
+    "false_branch_policy" | "nodes" | "edges" | "priority" | "enabled" | "status">>,
+  expectedVersion: number,
+  actor: string,
+): Promise<CasSaveResult> {
+  const coll = await getCollection<WorkflowDoc>(COLLECTIONS.workflows);
+  const before = await coll.findOne({ workflow_id: workflowId, is_deleted: { $ne: true } });
+  if (!before) return { ok: false, not_found: true };
+  if (before.version !== expectedVersion) {
+    return { ok: false, conflict: true, current_version: before.version };
+  }
+  const unknown = Object.keys(fields).filter((k) => !(CAS_SAVE_ALLOWLIST as readonly string[]).includes(k));
+  if (unknown.length > 0) throw new Error("unsupported fields: " + unknown.join(","));
+  const safeFields = pickAllowed(fields as Record<string, unknown>, CAS_SAVE_ALLOWLIST);
+  await _assertActivationAllowed(workflowId, before, safeFields);
+  // imported workflow: shop_ids/platforms เป็น derived index (recompute จาก resolved
+  // account bindings ตอน version write) — ไม่ใช่ editable field ผ่าน draft save
+  // spec §9: doc-level scope ไม่ใช่ authority ของ imported flow; legacy ผ่านเดิม
+  if (before.import) {
+    const scopeKeys = (["shop_ids", "platforms"] as const).filter((k) => safeFields[k] !== undefined);
+    if (scopeKeys.length > 0) {
+      throw new Error(
+        `imported workflow scope derives from resolved account bindings — ` +
+        `${scopeKeys.join(", ")} not editable via draft save`
+      );
+    }
+  }
+  const mergedNodes = (safeFields.nodes as WorkflowNode[] | undefined) ?? before.nodes;
+  const mergedEdges = (safeFields.edges as WorkflowEdge[] | undefined) ?? before.edges;
+  const graph = validateWorkflowGraph({ nodes: mergedNodes, edges: mergedEdges });
+  if (!graph.ok) throw new Error("workflow graph invalid: " + graph.errors.join("; "));
+
+  // canonical version payload — field ที่ version owner รับผิดชอบทั้งหมด
+  // (activation state: enabled/status/is_deleted ไม่อยู่ version history)
+  const payload = {
+    name: (safeFields.name as string | undefined) ?? before.name,
+    description: (safeFields.description as string | undefined) ?? before.description,
+    shop_ids: (safeFields.shop_ids as string[] | undefined) ?? before.shop_ids,
+    platforms: (safeFields.platforms as Platform[] | undefined) ?? before.platforms,
+    trigger_frequency: (safeFields.trigger_frequency as WorkflowTriggerFrequency | undefined) ?? before.trigger_frequency,
+    false_branch_policy: (safeFields.false_branch_policy as WorkflowFalseBranchPolicy | undefined) ?? before.false_branch_policy,
+    priority: (safeFields.priority as number | undefined) ?? before.priority,
+    nodes: mergedNodes, edges: mergedEdges, handle_labels: {},
+  };
+  const payloadFp = stableFingerprint(payload);
+  const now = new Date();
+  const versions = await getCollection<WorkflowVersionDoc>(COLLECTIONS.workflowVersions);
+
+  // 1) immutable version doc — deterministic id จาก payload เดียวกัน
+  //    seq collision (orphan จาก crash / payload ต่าง) → bump seq จนหา slot ว่าง
+  //    — orphan ไม่ขวาง payload ใหม่ถาวร
+  let seq = expectedVersion + 1;
+  let versionId = "wv_" + _shortHash(`${workflowId}:${seq}:${payloadFp}`);
+  for (;;) {
+    // canonical identity — fingerprint เป็น index ไม่ใช่ artifact proof: reuse
+    // เฉพาะ doc ที่ canonical projection ตรงทุก field (normalize เฉพาะ
+    // _id/created_at/created_by) — same-fp diff-payload = corrupt → fail closed
+    const expectedDoc = {
+      version_id: versionId, workflow_id: workflowId, version_seq: seq,
+      schema_version: "canonical-workflow/1" as const,
+      ...payload,
+      source_ref: before.import ? { workflowId: before.import.source_workflow_id, loadedVersionId: "", versionStatuses: [], sourceStatus: "", fingerprint: "" } : { workflowId: "", loadedVersionId: "", versionStatuses: [], sourceStatus: "", fingerprint: "" },
+      import_batch_id: before.import?.batch_id,
+      fingerprint: payloadFp,
+      created_at: now, created_by: actor,
+    };
+    const dd = expectedDoc as Record<string, unknown>;
+    for (const k of Object.keys(dd)) if (dd[k] === undefined) delete dd[k]; // canonical persisted shape — BSON drops undefined
+    const expectedProj = canonicalJson(JSON.parse(JSON.stringify({ ...dd, _id: "x" as never, created_at: "x" as never, created_by: "x" as never, import_batch_id: "x" as never, source_ref: { workflowId: (dd.source_ref as { workflowId?: string } | undefined)?.workflowId } })));
+    const clash = await versions.findOne({ workflow_id: workflowId, version_seq: seq });
+    if (clash) {
+      if (canonicalJson(JSON.parse(JSON.stringify({ ...clash, _id: "x", created_at: "x", created_by: "x", import_batch_id: "x", source_ref: { workflowId: (clash.source_ref as { workflowId?: string } | undefined)?.workflowId } }))) === expectedProj) { versionId = clash.version_id; break; }
+      if (clash.fingerprint === payloadFp) {
+        throw new Error(`version artifact at (workflow_id=${workflowId}, version_seq=${seq}) matches fingerprint but not canonical identity — corrupt deterministic identity`);
+      }
+      seq += 1;
+      versionId = "wv_" + _shortHash(`${workflowId}:${seq}:${payloadFp}`);
+      continue;
+    }
+    const byId = await versions.findOne({ version_id: versionId });
+    if (byId) {
+      // version_id ถูกถืออยู่ — reuse ได้เฉพาะ artifact เดียวกัน (canonical ตรง)
+      if (canonicalJson(JSON.parse(JSON.stringify({ ...byId, _id: "x", created_at: "x", created_by: "x", import_batch_id: "x", source_ref: { workflowId: (byId.source_ref as { workflowId?: string } | undefined)?.workflowId } }))) !== expectedProj) {
+        throw new Error(`version_id ${versionId} holds mismatched artifact — corrupt deterministic identity`);
+      }
+      break; // resume — artifact เดิม
+    }
+    try {
+      await versions.insertOne(expectedDoc);
+      break;
+    } catch (e) {
+      // verify→insert race — unique ทั้งสองกุญแจเป็น gate สุดท้าย: จำแนก version_id
+      // (proj ตรง resume / ต่าง corrupt fail-closed) vs seq (proj ตรง resume /
+      // same-fp-diff-proj corrupt / ต่าง fp bump) · อธิบายไม่ได้ → rethrow
+      if ((e as { code?: number }).code !== 11000) throw e;
+      const byId2 = await versions.findOne({ version_id: versionId });
+      if (byId2) {
+        if (canonicalJson(JSON.parse(JSON.stringify({ ...byId2, _id: "x", created_at: "x", created_by: "x", import_batch_id: "x", source_ref: { workflowId: (byId2.source_ref as { workflowId?: string } | undefined)?.workflowId } }))) !== expectedProj) {
+          throw new Error(`version_id ${versionId} holds mismatched artifact — corrupt deterministic identity`);
+        }
+        break;
+      }
+      const slot = await versions.findOne({ workflow_id: workflowId, version_seq: seq });
+      if (!slot) throw e;
+      if (canonicalJson(JSON.parse(JSON.stringify({ ...slot, _id: "x", created_at: "x", created_by: "x", import_batch_id: "x", source_ref: { workflowId: (slot.source_ref as { workflowId?: string } | undefined)?.workflowId } }))) === expectedProj) { versionId = slot.version_id; break; }
+      if (slot.fingerprint === payloadFp) {
+        throw new Error(`version artifact at (workflow_id=${workflowId}, version_seq=${seq}) matches fingerprint but not canonical identity — corrupt deterministic identity`);
+      }
+      seq += 1;
+      versionId = "wv_" + _shortHash(`${workflowId}:${seq}:${payloadFp}`);
+    }
+  }
+
+  // 2) bindings carry-forward — requirement identity = node survive + type/subtype
+  //    เดิม (binding kind/field_path derive จาก source node type — subtype เปลี่ยน
+  //    = requirement หาย → drop เหมือน node ถูกลบ; historical version เก็บ binding
+  //    เดิม immutable อยู่แล้ว). resolution carry เฉพาะเมื่อ source_fp integrity
+  //    ตรง source_values เดิม + target ยัง valid — target หาย → state:"invalid"
+  //    เก็บ inspect (status:"invalid" sticky — heal ผ่าน resolution เท่านั้น)
+  if (before.current_version_id) {
+    const bindings = await getCollection<WorkflowBindingDoc>(COLLECTIONS.workflowBindings);
+    const prev = await bindings.find({ workflow_id: workflowId, version_id: before.current_version_id }).toArray();
+    const mergedById = new Map(mergedNodes.map((n) => [n.node_id, n]));
+    const prevNodeById = new Map(before.nodes.map((n) => [n.node_id, n]));
+    const carriers = prev.filter((x) => {
+      const nn = mergedById.get(x.node_id);
+      const pn = prevNodeById.get(x.node_id);
+      if (nn == null || pn == null || nn.type !== pn.type || nn.subtype !== pn.subtype) return false;
+      // binding-consuming container ต้องยังอยู่ — field_path = path ใน source
+      // node data; canonical config strip เฉพาะ binding key (container structure
+      // คงอยู่) → parent path resolve ไม่ได้ = field/container ถูกลบ = requirement
+      // หาย → drop เหมือน node deletion · root-level field (parent "" = config
+      // root เสมอมี) — canonical config ไม่เคยเก็บ external id key ให้ลบอยู่แล้ว
+      const parent = /[.\[]/.test(x.field_path) ? x.field_path.replace(/[.\[][^.\[\]]*$/, "") : "";
+      let cur: unknown = nn.config;
+      for (const seg of parent.replace(/\[(\d+)\]/g, ".$1").split(".")) {
+        if (!seg) continue;
+        if (cur == null || typeof cur !== "object") return false;
+        cur = (cur as Record<string, unknown>)[seg];
+      }
+      return cur != null;
+    });
+    const carryTargets = carriers.some((x) => (x.resolution?.mappings?.length ?? 0) > 0);
+    const shops = carryTargets ? await getCollection<{ shop_id: string; platform: string }>(COLLECTIONS.shops) : null;
+    const admins = carryTargets ? await getCollection<{ admin_id: string; active?: boolean }>(COLLECTIONS.admins) : null;
+    const conversations = carryTargets ? await getCollection(COLLECTIONS.conversations) : null;
+    let labelSet: Set<string> | null = null;
+    for (const b of carriers) {
+      const bindingId = "wb_" + _shortHash(`${versionId}:${b.node_id}:${b.field_path}:${b.kind}`);
+      if (await bindings.findOne({ binding_id: bindingId })) continue; // resume
+      const doc = {
+        ...b,
+        _id: undefined as never,
+        binding_id: bindingId,
+        version_id: versionId,
+        created_at: now,
+      } as WorkflowBindingDoc;
+      if (b.resolution?.mappings?.length) {
+        if (Array.isArray(b.source_values)
+          && b.resolution.mappings.every((m) => Number.isInteger(m.source_index) && m.source_index >= 0
+          && m.source_index < b.source_values.length
+          && m.source_fp === createHash("sha256").update(canonicalJson(b.source_values[m.source_index])).digest("hex"))) {
+          // verbatim field copy (carried provenance คงเดิม) + target revalidation
+          const maps: ResolutionMapping[] = [];
+          for (const m of b.resolution.mappings) {
+            const c: ResolutionMapping = { ...m };
+            let targetOk = false;
+            if (b.kind !== "account" && (c.platform !== undefined || c.shop_id !== undefined)) targetOk = false;
+            else switch (b.kind) {
+              case "account":
+                targetOk = c.platform !== undefined && c.shop_id !== undefined && c.local_id === c.shop_id
+                  && (await shops!.findOne({ shop_id: c.shop_id, platform: c.platform })) != null;
+                break;
+              case "label":
+                if (!labelSet) labelSet = new Set(((await conversations!.distinct("labels", {})) as unknown[]).flat() as string[]);
+                targetOk = labelSet.has(c.local_id);
+                break;
+              case "user": {
+                const adm = await admins!.findOne({ admin_id: c.local_id });
+                targetOk = adm != null && adm.active !== false;
+                break;
+              }
+              default: break;
+            }
+            c.state = targetOk ? "valid" : "invalid";
+            if (!targetOk) {
+              c.invalidated_at = c.invalidated_at ?? now;
+              c.invalid_reason = c.invalid_reason ?? "local target missing";
+            } else {
+              delete c.invalidated_at;
+              delete c.invalid_reason;
+            }
+            maps.push(c);
+          }
+          doc.status = maps.some((m) => m.state === "invalid") ? "invalid" : b.status;
+          doc.resolution = { mappings: maps, ...(b.resolution.conflict ? { conflict: b.resolution.conflict } : {}) };
+        } else {
+          // source_fp ไม่ตรง source_values — requirement drift/corruption →
+          // resolution ห้าม carry (positional source_index อาจชี้ผิดตัว)
+          doc.status = "unresolved";
+          delete doc.resolution;
+        }
+      }
+      await bindings.insertOne(doc);
+    }
+  }
+
+  // 3) commit point — fields+version+pointer พริกใน updateOne เดียว
+  //    `$set version:seq` (ไม่ใช่ $inc) — orphan seq-skip ต้องสะท้อนใน counter
+  //    crash ก่อนหน้านี้ = orphan immutable docs เท่านั้น, runtime state เดิม
+  const result = await coll.updateOne(
+    { workflow_id: workflowId, is_deleted: { $ne: true }, version: expectedVersion },
+    { $set: { ...safeFields, current_version_id: versionId, version: seq, updated_at: new Date(), updated_by: actor } }
+  );
+  if (result.matchedCount === 0) {
+    return { ok: false, conflict: true, current_version: before.version };
+  }
+
+  // audit หลัง commit — audit fail ไม่กลืน commit
+  try {
+    await logAdminEvent({
+      action_type: "workflow.cas_save", actor,
+      metadata: { workflow_id: workflowId, version: seq, fields: Object.keys(safeFields) },
+    });
+  } catch { /* post-commit audit failure — commit สำเร็จแล้ว */ }
+  return { ok: true, version: seq, version_id: versionId };
+}
+
+// ─── Binding resolution (direct) ──────────────────────────
+// saveBindingResolutionBatch — client ส่งเฉพาะ (binding_id, source_index) → local_id
+// server เป็นเจ้าของ identity ทั้งหมด: binding docs + source_values โหลดจาก DB,
+// source_fp = sha256(canonicalJson(source_value)) คำนวณฝั่ง server — client-
+// supplied source identity ถูก reject (forbidden keys ทุกระดับ).
+// Commit = updateOne เดียว (pointer+version+derived scope พร้อมกัน) หลัง immutable
+// version doc + version-scoped bindings เขียน (deterministic ids → retry/E11000
+// idempotent). audit หลัง commit เท่านั้น. repeat:true → exact same-kind sibling
+// expansion ใน version เดียวกัน (canonicalJson equality เท่านั้น — ไม่มี fuzzy)
+export interface ResolutionMapping {
+  source_index: number;
+  source_fp: string;            // sha256 hex — server-computed จาก source_values
+  local_id: string;
+  platform?: Platform;          // account kind เท่านั้น
+  shop_id?: string;             // account kind เท่านั้น
+  state: "valid" | "invalid";
+  resolved_by: string;
+  resolved_at: Date;
+  invalidated_at?: Date;
+  invalid_reason?: string;
+  via: "direct" | "repeat";
+  carried?: boolean;            // carried forward จาก version ก่อน (Task 4)
+}
+
+export interface BindingResolutionRequest {
+  workflow_id: string;          // ต้องตรง route param
+  expected_version: number;
+  version_id: string;           // current_version_id ที่ client อ้าง
+  proposed: {
+    binding_id: string;
+    repeat?: boolean;           // Task 2 — expand target ไป exact same-kind siblings
+    mappings: { source_index: number; local_id: string; platform?: Platform; shop_id?: string }[];
+  }[];
+}
+
+export interface BindingResolutionResult {
+  ok: boolean;
+  conflict?: boolean;
+  not_found?: boolean;
+  validation?: string;
+  current_version?: number;
+  current_version_id?: string;
+  version?: number;
+  version_id?: string;
+  resolved?: number;
+  unresolved?: number;
+  invalid?: number;
+  repeated?: { binding_id: string; source_index: number }[];
+  publish_blockers?: string[];
+  overlap_conflicts?: string[];
+}
+
+// Task 7 (route) consumes — read-view contract ตาม plan §5 (server-produced display data)
+export interface BindingResolutionView {
+  workflow_id: string;
+  version_id: string | null;
+  expected_version: number;
+  bindings: {
+    binding_id: string;
+    node_id: string;
+    field_path: string;
+    kind: string;
+    count: number;
+    status: BindingStatus;
+    sources: { source_index: number; display_value: string }[];
+    resolution?: WorkflowBindingDoc["resolution"];
+  }[];
+  candidates: {
+    accounts: { platform: Platform; shop_id: string; shopname: string }[];
+    labels: string[];
+    users: { admin_id: string; display: string }[];
+    teams: { local_id: string; display: string }[];
+    ticket_fields: [];
+    urls: [];
+  };
+  unresolved: number;
+  invalid: number;
+  publish_blockers: string[];
+  overlap_conflicts: string[];
+}
+
+export async function saveBindingResolutionBatch(
+  workflowId: string,
+  request: BindingResolutionRequest,
+  actor: string,
+): Promise<BindingResolutionResult> {
+  const workflows = await getCollection<WorkflowDoc>(COLLECTIONS.workflows);
+  const versions = await getCollection<WorkflowVersionDoc>(COLLECTIONS.workflowVersions);
+  const bindings = await getCollection<WorkflowBindingDoc>(COLLECTIONS.workflowBindings);
+  const now = new Date();
+  const req = request as unknown as Record<string, unknown> | null;
+
+  // 1) strict-shape — forbidden client keys ทุกระดับ (source identity server เท่านั้น)
+  if (!req || typeof req !== "object") return { ok: false, validation: "request must be an object" };
+  const forbiddenKeys = ["node_id", "field_path", "kind", "source_value", "source_fp",
+    "source_values", "requirement_fp", "display_value", "sources"];
+  const scan: unknown[] = [req];
+  while (scan.length) {
+    const cur = scan.pop();
+    if (Array.isArray(cur)) { scan.push(...cur); continue; }
+    if (cur && typeof cur === "object") {
+      for (const [k, v] of Object.entries(cur as Record<string, unknown>)) {
+        if (forbiddenKeys.includes(k)) {
+          return { ok: false, validation: `forbidden client key: ${k} — source identity is server-loaded` };
+        }
+        scan.push(v);
+      }
+    }
+  }
+  // allowed keys ต่อระดับ — unknown key ใดๆ reject (whitelist, ไม่ใช่แค่ blacklist)
+  const allowedTop = ["workflow_id", "expected_version", "version_id", "proposed"];
+  const allowedProposal = ["binding_id", "repeat", "mappings"];
+  const allowedMapping = ["source_index", "local_id", "platform", "shop_id"];
+  for (const k of Object.keys(req)) {
+    if (!allowedTop.includes(k)) return { ok: false, validation: `unknown request key: ${k}` };
+  }
+  if (typeof req.workflow_id !== "string" || req.workflow_id !== workflowId) {
+    return { ok: false, validation: "workflow_id mismatch — route/body identity differs" };
+  }
+  if (!Number.isInteger(req.expected_version) || (req.expected_version as number) < 0) {
+    return { ok: false, validation: "expected_version must be a non-negative integer" };
+  }
+  if (typeof req.version_id !== "string" || !req.version_id.trim()) return { ok: false, validation: "version_id required" };
+  if (!Array.isArray(req.proposed) || req.proposed.length === 0) {
+    return { ok: false, validation: "proposed must be a non-empty array" };
+  }
+  const seenBinding = new Set<string>();
+  const seenIndex = new Set<string>();
+  for (const p of req.proposed as Record<string, unknown>[]) {
+    if (!p || typeof p !== "object") return { ok: false, validation: "proposal must be an object" };
+    for (const k of Object.keys(p)) {
+      if (!allowedProposal.includes(k)) return { ok: false, validation: `unknown proposal key: ${k}` };
+    }
+    if (typeof p.binding_id !== "string" || !p.binding_id.trim()) return { ok: false, validation: "proposal binding_id required" };
+    if (seenBinding.has(p.binding_id)) return { ok: false, validation: `duplicate binding_id: ${p.binding_id}` };
+    seenBinding.add(p.binding_id);
+    if (p.repeat !== undefined && typeof p.repeat !== "boolean") return { ok: false, validation: "repeat must be a boolean" };
+    if (!Array.isArray(p.mappings) || p.mappings.length === 0) {
+      return { ok: false, validation: `proposal ${p.binding_id}: mappings must be a non-empty array` };
+    }
+    for (const m of p.mappings as Record<string, unknown>[]) {
+      if (!m || typeof m !== "object") return { ok: false, validation: "mapping must be an object" };
+      for (const k of Object.keys(m)) {
+        if (!allowedMapping.includes(k)) return { ok: false, validation: `unknown mapping key: ${k}` };
+      }
+      if (!Number.isInteger(m.source_index) || (m.source_index as number) < 0) {
+        return { ok: false, validation: `proposal ${p.binding_id}: source_index must be a non-negative integer` };
+      }
+      const mapKey = `${p.binding_id}:${m.source_index}`;
+      if (seenIndex.has(mapKey)) return { ok: false, validation: `duplicate (binding_id, source_index): ${mapKey}` };
+      seenIndex.add(mapKey);
+      if (typeof m.local_id !== "string" || !m.local_id.trim()) return { ok: false, validation: `proposal ${p.binding_id}: local_id required` };
+      if (m.platform !== undefined && (typeof m.platform !== "string" || !(LOCAL_ENGINE_PLATFORMS as string[]).includes(m.platform))) {
+        return { ok: false, validation: `proposal ${p.binding_id}: platform must be one of ${LOCAL_ENGINE_PLATFORMS.join(", ")}` };
+      }
+      if (m.shop_id !== undefined && (typeof m.shop_id !== "string" || !m.shop_id.trim())) {
+        return { ok: false, validation: `proposal ${p.binding_id}: shop_id must be a non-empty string` };
+      }
+    }
+  }
+  const proposed = req.proposed as BindingResolutionRequest["proposed"];
+  const expected = req.expected_version as number;
+
+  // 2) load workflow + imported provenance — resolution มีเฉพาะ imported artifacts
+  const wf = await workflows.findOne({ workflow_id: workflowId, is_deleted: { $ne: true } });
+  if (!wf) return { ok: false, not_found: true };
+  if (!wf.import) return { ok: false, validation: "workflow is not an imported artifact — binding resolution unsupported" };
+
+  // 3) stale pointer pre-checks — conflict (zero writes)
+  if (wf.version !== expected) return { ok: false, conflict: true, current_version: wf.version };
+  if (wf.current_version_id !== req.version_id) {
+    return { ok: false, conflict: true, current_version_id: wf.current_version_id };
+  }
+  const curVersion = await versions.findOne({ version_id: req.version_id });
+  if (!curVersion) throw new Error(`current version doc ${req.version_id} missing — cannot resolve bindings`);
+
+  // 4) server-owned binding docs — scoped ด้วย {workflow_id, version_id}; id จาก
+  //    client ต้องอยู่ใน set นี้เท่านั้น (binding ของ workflow/version อื่น reject)
+  const versionBindings = (await bindings.find({ workflow_id: workflowId, version_id: req.version_id }).toArray())
+    .sort((a, b) => `${a.node_id}|${a.field_path}|${a.kind}|${a.binding_id}` < `${b.node_id}|${b.field_path}|${b.kind}|${b.binding_id}` ? -1 : 1);
+  // persisted invariants — corrupt server-owned doc → fail closed ก่อน mapping เสมอ
+  for (const b of versionBindings) {
+    if (!Number.isInteger(b.count) || b.count < 0 || !Array.isArray(b.source_values)
+      || b.source_values.length !== b.count || !b.binding_id || !b.node_id || !b.field_path || !b.kind
+      || !b.version_id || b.workflow_id !== workflowId || b.version_id !== req.version_id) {
+      throw new Error(`binding ${b.binding_id}: corrupt persisted binding`);
+    }
+    if (b.status !== "unresolved" && b.status !== "resolved" && b.status !== "invalid") {
+      throw new Error(`binding ${b.binding_id}: corrupt persisted — status ${String(b.status)} outside enum`);
+    }
+    const storedIdx = new Set<number>();
+    for (const m of b.resolution?.mappings ?? []) {
+      if (!Number.isInteger(m.source_index) || m.source_index < 0 || m.source_index >= b.source_values.length
+        || storedIdx.has(m.source_index)
+        || m.source_fp !== createHash("sha256").update(canonicalJson(b.source_values[m.source_index])).digest("hex")) {
+        throw new Error(`binding ${b.binding_id}: corrupt persisted resolution`);
+      }
+      storedIdx.add(m.source_index);
+      const mm = m as unknown as Record<string, unknown>;
+      if (typeof mm.local_id !== "string" || mm.local_id.trim() === ""
+        || (mm.state !== "valid" && mm.state !== "invalid")
+        || (mm.via !== "direct" && mm.via !== "repeat")
+        || typeof mm.resolved_by !== "string" || mm.resolved_by.trim() === ""
+        || !(mm.resolved_at instanceof Date) || Number.isNaN(mm.resolved_at.getTime())
+        || (mm.invalidated_at !== undefined && !(mm.invalidated_at instanceof Date))
+        || (mm.invalid_reason !== undefined && (typeof mm.invalid_reason !== "string" || mm.invalid_reason.trim() === ""))) {
+        throw new Error(`binding ${b.binding_id}: corrupt persisted resolution mapping`);
+      }
+      if (b.kind === "account") {
+        if (typeof mm.platform !== "string" || !(LOCAL_ENGINE_PLATFORMS as readonly string[]).includes(mm.platform)
+          || typeof mm.shop_id !== "string" || mm.shop_id.trim() === "" || mm.local_id !== mm.shop_id) {
+          throw new Error(`binding ${b.binding_id}: corrupt persisted account mapping scope`);
+        }
+      } else if (mm.platform !== undefined || mm.shop_id !== undefined) {
+        throw new Error(`binding ${b.binding_id}: corrupt persisted — scope fields on non-account mapping`);
+      }
+    }
+    if (b.status === "resolved" && (b.resolution?.mappings ?? []).filter((m) => m.state === "valid").length !== b.count) {
+      throw new Error(`binding ${b.binding_id}: corrupt persisted — resolved without complete valid coverage`);
+    }
+  }
+  const bindingById = new Map(versionBindings.map((b) => [b.binding_id, b]));
+  for (const p of proposed) {
+    if (!bindingById.has(p.binding_id)) {
+      return { ok: false, validation: `binding ${p.binding_id} not in this workflow/version scope` };
+    }
+  }
+  const proposedIds = new Set(proposed.map((p) => p.binding_id));
+
+  // 5) bounds + coverage — proposed ต้องครบทุก source_index ของ binding
+  //    worklist เดียวรวม proposed (invalid → reject) + carried (re-validate inline)
+  const targetWork: { b: WorkflowBindingDoc; m: { source_index: number; local_id: string; platform?: Platform; shop_id?: string }; carried?: ResolutionMapping }[] = [];
+  for (const p of proposed) {
+    const b = bindingById.get(p.binding_id)!;
+    const srcVals = Array.isArray(b.source_values) ? b.source_values : [];
+    const covered = new Set<number>();
+    for (const m of p.mappings) {
+      if (m.source_index >= srcVals.length) {
+        return { ok: false, validation: `binding ${p.binding_id}: source_index ${m.source_index} out of bounds (${srcVals.length} sources)` };
+      }
+      covered.add(m.source_index);
+      targetWork.push({ b, m });
+    }
+    if (covered.size !== b.count) {
+      return { ok: false, validation: `binding ${p.binding_id}: partial mapping — ${covered.size}/${b.count} source indexes covered` };
+    }
+  }
+  // carried mappings (non-proposed bindings ที่ resolved ไว้ก่อน) — deep copy แล้ว
+  // re-validate target ใน switch เดียวกัน — target หาย → state:"invalid" ติดไป version ใหม่
+  const carriedMaps = new Map<string, ResolutionMapping[]>();
+  for (const b of versionBindings) {
+    if (proposedIds.has(b.binding_id) || !b.resolution?.mappings?.length) continue;
+    const copies = b.resolution.mappings.map((m) => {
+      const c = { ...m } as unknown as Record<string, unknown>;
+      for (const k of Object.keys(c)) if (c[k] === undefined) delete c[k];
+      return c as unknown as ResolutionMapping;
+    }).sort((x, y) => x.source_index - y.source_index);
+    carriedMaps.set(b.binding_id, copies);
+    for (const cm of copies) targetWork.push({ b, m: cm, carried: cm });
+  }
+  // repeat expansion — proposal repeat:true: exact same-kind sibling ใน version
+  // เดียวกันเท่านั้น (canonicalJson deep equality — ไม่มี substring/keyword/regex,
+  // ไม่ cross-kind, ไม่ infer scope); target ใช้ค่า confirm ของ proposal เดิม,
+  // repeat mapping เข้า typed switch เดียวกัน (ไม่ bypass target existence)
+  const repeatApplied = new Map<string, ResolutionMapping[]>();
+  const repeated: { binding_id: string; source_index: number }[] = [];
+  for (const p of proposed) {
+    if (p.repeat !== true) continue;
+    const b = bindingById.get(p.binding_id)!;
+    for (const m of p.mappings) {
+      const srcCj = canonicalJson(b.source_values[m.source_index]);
+      for (const sb of versionBindings) {
+        if (sb.binding_id === b.binding_id || sb.kind !== b.kind) continue;
+        for (let i = 0; i < sb.source_values.length; i++) {
+          if (canonicalJson(sb.source_values[i]) !== srcCj) continue;
+          const sibProposal = proposed.find((q) => q.binding_id === sb.binding_id);
+          if (sibProposal) {
+            const pm = sibProposal.mappings.find((q) => q.source_index === i)!;
+            if (pm.local_id !== m.local_id || pm.platform !== m.platform || pm.shop_id !== m.shop_id) {
+              return { ok: false, validation: `binding ${sb.binding_id}: repeat conflicts with proposed mapping at source_index ${i}` };
+            }
+            continue;
+          }
+          const prev = (repeatApplied.get(sb.binding_id) ?? []).find((r) => r.source_index === i);
+          if (prev) {
+            if (prev.local_id !== m.local_id || prev.platform !== m.platform || prev.shop_id !== m.shop_id) {
+              return { ok: false, validation: `binding ${sb.binding_id}: repeat conflict at source_index ${i} — proposals map the same source to different targets` };
+            }
+            continue;
+          }
+          const rm: ResolutionMapping = {
+            source_index: i,
+            source_fp: createHash("sha256").update(canonicalJson(sb.source_values[i])).digest("hex"),
+            local_id: m.local_id,
+            ...(m.platform !== undefined ? { platform: m.platform } : {}),
+            ...(m.shop_id !== undefined ? { shop_id: m.shop_id } : {}),
+            state: "valid",
+            resolved_by: actor,
+            resolved_at: now,
+            via: "repeat",
+          };
+          targetWork.push({ b: sb, m: rm });
+          const bucket = repeatApplied.get(sb.binding_id);
+          if (bucket) bucket.push(rm); else repeatApplied.set(sb.binding_id, [rm]);
+        }
+      }
+    }
+  }
+
+  // 6) typed switch — local-target existence ตาม kind (account scope fields ใช้ได้
+  //    เฉพาะ account) — proposed invalid → reject; carried invalid → mark state
+  const shops = await getCollection<{ shop_id: string; platform: string }>(COLLECTIONS.shops);
+  const admins = await getCollection<{ admin_id: string; active?: boolean }>(COLLECTIONS.admins);
+  const conversations = await getCollection(COLLECTIONS.conversations);
+  let labelSet: Set<string> | null = null;
+  for (const w of targetWork) {
+    let targetOk = false;
+    let targetErr = "";
+    if (w.b.kind !== "account" && (w.m.platform !== undefined || w.m.shop_id !== undefined)) {
+      targetErr = `binding ${w.b.binding_id}: platform/shop_id scope fields only valid on account kind`;
+    } else switch (w.b.kind) {
+      case "account":
+        if (w.m.platform === undefined || w.m.shop_id === undefined) {
+          targetErr = `binding ${w.b.binding_id}: account mapping requires platform + shop_id`;
+        } else if (w.m.local_id !== w.m.shop_id) {
+          targetErr = `binding ${w.b.binding_id}: account local_id must equal shop_id`;
+        } else if (!(await shops.findOne({ shop_id: w.m.shop_id, platform: w.m.platform }))) {
+          targetErr = `binding ${w.b.binding_id}: account target ${w.m.shop_id}@${w.m.platform} not found in shops`;
+        } else targetOk = true;
+        break;
+      case "label":
+        if (!labelSet) labelSet = new Set(((await conversations.distinct("labels", {})) as unknown[]).flat() as string[]);
+        targetOk = labelSet.has(w.m.local_id);
+        if (!targetOk) targetErr = `binding ${w.b.binding_id}: label ${w.m.local_id} not in conversations.labels`;
+        break;
+      case "user": {
+        const adm = await admins.findOne({ admin_id: w.m.local_id });
+        targetOk = adm != null && adm.active !== false;
+        if (!targetOk) targetErr = `binding ${w.b.binding_id}: user ${w.m.local_id} ${adm == null ? "not found" : "inactive"}`;
+        break;
+      }
+      case "team":
+        // Zaapi team = แอดมินทั้งหมดในระบบ — local target เดียวที่ถูกต้องคือ
+        //   sentinel "all_admins" (global assignment pool ของ assignmentService)
+        targetOk = w.m.local_id === "all_admins";
+        if (!targetOk) targetErr = `binding ${w.b.binding_id}: team resolves to local_id "all_admins" only`;
+        break;
+      case "ticket_field":
+      case "url":
+        targetErr = `binding ${w.b.binding_id}: unresolvable — ${w.b.kind} target kind unsupported`;
+        break;
+      default:
+        targetErr = `binding ${w.b.binding_id}: unresolvable — unsupported kind ${w.b.kind}`;
+    }
+    if (w.carried) {
+      w.carried.state = targetOk ? "valid" : "invalid";
+      if (!targetOk) {
+        w.carried.invalidated_at = w.carried.invalidated_at ?? now;
+        w.carried.invalid_reason = w.carried.invalid_reason ?? "local target missing";
+      } else {
+        delete w.carried.invalidated_at;
+        delete w.carried.invalid_reason;
+      }
+    } else if (!targetOk) {
+      return { ok: false, validation: targetErr };
+    }
+  }
+
+  // 7) complete resolution state ต่อ binding — deterministic (timestamps ไม่อยู่ใน fp input)
+  const resolutionByBinding = new Map<string, { status: BindingStatus; mappings: ResolutionMapping[]; conflict?: string }>();
+  for (const p of proposed) {
+    const b = bindingById.get(p.binding_id)!;
+    const srcVals = Array.isArray(b.source_values) ? b.source_values : [];
+    resolutionByBinding.set(b.binding_id, {
+      status: "resolved",
+      mappings: [...p.mappings].sort((x, y) => x.source_index - y.source_index).map((m) => ({
+        source_index: m.source_index,
+        source_fp: createHash("sha256").update(canonicalJson(srcVals[m.source_index])).digest("hex"),
+        local_id: m.local_id,
+        ...(m.platform !== undefined ? { platform: m.platform } : {}),
+        ...(m.shop_id !== undefined ? { shop_id: m.shop_id } : {}),
+        state: "valid",
+        resolved_by: actor,
+        resolved_at: now,
+        via: "direct",
+      })),
+    });
+  }
+  for (const b of versionBindings) {
+    if (proposedIds.has(b.binding_id)) continue;
+    const carried = carriedMaps.get(b.binding_id);
+    const rms = repeatApplied.get(b.binding_id);
+    if (!carried?.length && !rms?.length) {
+      resolutionByBinding.set(b.binding_id, { status: b.status,
+        mappings: (b.resolution?.mappings ?? []).map((m) => {
+          const c = { ...m } as unknown as Record<string, unknown>;
+          for (const k of Object.keys(c)) if (c[k] === undefined) delete c[k];
+          return c as unknown as ResolutionMapping;
+        }),
+        conflict: b.resolution?.conflict });
+      continue;
+    }
+    if (!rms?.length) {
+      resolutionByBinding.set(b.binding_id, {
+        status: carried!.some((m) => m.state === "invalid") ? "invalid" : b.status,
+        mappings: carried!,
+        conflict: b.resolution?.conflict,
+      });
+      continue;
+    }
+    // repeat merge — existing ที่ index เดียวกัน: valid+target เดียวกัน = no-op;
+    // ต่างหรือ invalid → fail closed (explicit direct proposal เท่านั้นที่แก้ได้)
+    const merged = [...(carried ?? [])];
+    for (const rm of rms) {
+      const ex = merged.find((m) => m.source_index === rm.source_index);
+      if (ex === undefined) {
+        merged.push(rm);
+        repeated.push({ binding_id: b.binding_id, source_index: rm.source_index });
+        continue;
+      }
+      if (ex.state === "valid" && ex.local_id === rm.local_id
+        && ex.platform === rm.platform && ex.shop_id === rm.shop_id) continue;
+      return { ok: false, validation: `binding ${b.binding_id}: repeat conflicts with existing mapping at source_index ${rm.source_index} — requires explicit direct proposal` };
+    }
+    merged.sort((x, y) => x.source_index - y.source_index);
+    resolutionByBinding.set(b.binding_id, {
+      status: merged.some((m) => m.state === "invalid") ? "invalid"
+        : (merged.length === b.count && merged.every((m) => m.state === "valid") ? "resolved" : b.status),
+      mappings: merged,
+      conflict: b.resolution?.conflict,
+    });
+  }
+
+  // 8) derive scope — valid account mappings เท่านั้น (blocker semantics = Task 3)
+  const derivedPlatforms = [...new Set([...resolutionByBinding.values()]
+    .flatMap((r) => r.mappings.filter((m) => m.state === "valid" && m.platform != null).map((m) => m.platform as Platform)))].sort();
+  const derivedShopIds = [...new Set([...resolutionByBinding.values()]
+    .flatMap((r) => r.mappings.filter((m) => m.state === "valid" && m.shop_id != null).map((m) => m.shop_id as string)))].sort();
+
+  // 8b) scope readiness — version-scoped account requirements
+  //     (kind==="account" && count>0) truth table: eligible mapping =
+  //     state==="valid" + platform + shop_id present · complete ต่อเมื่อ
+  //     status==="resolved" + eligible === count (invalid status ไม่มี auto
+  //     repair — explicit direct resolution เท่านั้น) · zero eligible →
+  //     no-resolved blocker · coverage/status ไม่ครบ → incomplete blocker ·
+  //     ไม่มี requirement บน imported workflow → explicit global-scope blocker
+  //     (empty scope ≠ authorization — save ยัง commit disabled/draft เสมอ
+  //     ให้ admin resolve ต่อได้)
+  const accountReqs = versionBindings.filter((b) => b.kind === "account" && b.count > 0);
+  const scopeBlockers: string[] = [];
+  if (accountReqs.length > 0) {
+    const eligiblePerReq = accountReqs.map((b) => (resolutionByBinding.get(b.binding_id)?.mappings ?? [])
+      .filter((m) => m.state === "valid" && m.platform != null && m.shop_id != null).length);
+    if (eligiblePerReq.every((n) => n === 0)) {
+      scopeBlockers.push("account_scope: no resolved account mappings");
+    } else if (accountReqs.some((b, i) => resolutionByBinding.get(b.binding_id)?.status !== "resolved"
+        || eligiblePerReq[i] !== b.count)) {
+      scopeBlockers.push("account_scope: incomplete account mappings");
+    }
+  } else if (wf.import != null) {
+    scopeBlockers.push("scope: explicit global scope approval required");
+  }
+
+  // 9) version payload = canonical graph เดิม + derived scope + complete resolution —
+  //    fingerprint ครอบคลุม resolution → retry deterministic
+  // versionPayload ต้องมี BSON-safe shape เดียว — undefined-valued keys ถูก BSON drop
+  // (edges[].branch, description ฯลฯ) → JSON round-trip strip เพื่อให้ fp/expected projection
+  // เสถียรไม่ว่า curVersion จะผ่าน BSON serialize มาแล้วหรือยัง (payload = plain JSON, ไม่มี Date)
+  const versionPayloadRaw = {
+    name: curVersion.name, description: curVersion.description,
+    shop_ids: derivedShopIds, platforms: derivedPlatforms,
+    trigger_frequency: curVersion.trigger_frequency, false_branch_policy: curVersion.false_branch_policy,
+    priority: curVersion.priority,
+    nodes: curVersion.nodes, edges: curVersion.edges, handle_labels: curVersion.handle_labels,
+  };
+  const versionPayload = JSON.parse(JSON.stringify(versionPayloadRaw)) as typeof versionPayloadRaw;
+  const fpIn = {
+    ...versionPayload,
+    resolution: versionBindings.map((b) => {
+      const r = resolutionByBinding.get(b.binding_id)!;
+      return {
+        node_id: b.node_id, field_path: b.field_path, kind: b.kind, status: r.status,
+        mappings: r.mappings.map((m) => ({ source_index: m.source_index, source_fp: m.source_fp,
+          local_id: m.local_id,
+          ...(m.platform !== undefined ? { platform: m.platform } : {}),
+          ...(m.shop_id !== undefined ? { shop_id: m.shop_id } : {}),
+          state: m.state, via: m.via,
+          ...(m.carried !== undefined ? { carried: m.carried } : {}) })),
+      };
+    }),
+  };
+  const fp = stableFingerprint(fpIn);
+
+  // 10) version artifact verify-or-insert — E11000 ไม่ใช่หลักฐานว่า artifact เดิมถูก:
+  //     ทุก reuse path ต้องรีอ่าน + เทียบ canonical payload จริง (volatile fields
+  //     normalized เป็น "x") — id mismatch/seq-foreign/phantom → fail closed
+  let seq = expected + 1;
+  let versionId = "";
+  let expectedProj = "";
+  for (;;) {
+    versionId = "wv_" + _shortHash(`${workflowId}:${seq}:${fp}`);
+    expectedProj = canonicalJson(JSON.parse(JSON.stringify({ _id: "x", created_at: "x", created_by: "x",
+      version_id: versionId, workflow_id: workflowId, version_seq: seq,
+      schema_version: "canonical-workflow/1", ...versionPayload,
+      source_ref: curVersion.source_ref, import_batch_id: curVersion.import_batch_id, fingerprint: fp })));
+    const candidates = await versions.find({ $or: [
+      { version_id: versionId }, { workflow_id: workflowId, version_seq: seq } ] }).toArray();
+    let verified = false;
+    let seqTaken = false;
+    for (const cand of candidates) {
+      const same = canonicalJson(JSON.parse(JSON.stringify({ ...cand, _id: "x" as never, created_at: "x" as never, created_by: "x" }))) === expectedProj;
+      if (cand.version_id === versionId) {
+        if (!same) throw new Error(`version_id ${versionId} holds mismatched artifact — corrupt deterministic identity`);
+        verified = true;
+      } else seqTaken = true; // seq ถูกยึดด้วย payload อื่น → bump
+    }
+    if (verified) break;
+    if (seqTaken) { seq += 1; continue; }
+    try {
+      await versions.insertOne({ version_id: versionId, workflow_id: workflowId, version_seq: seq,
+        schema_version: "canonical-workflow/1", ...versionPayload,
+        ...(curVersion.source_ref !== undefined ? { source_ref: curVersion.source_ref } : {}),
+        ...(curVersion.import_batch_id !== undefined ? { import_batch_id: curVersion.import_batch_id } : {}),
+        fingerprint: fp, created_at: now, created_by: actor } as WorkflowVersionDoc);
+      break;
+    } catch (e) {
+      if ((e as { code?: number }).code !== 11000) throw e;
+      // E11000: reread ทั้งสองกุญแจ — exact artifact → reuse; seq collision → bump;
+      // ไม่มี artifact ที่อธิบายได้ → throw (fail closed)
+      const after = await versions.find({ $or: [
+        { version_id: versionId }, { workflow_id: workflowId, version_seq: seq } ] }).toArray();
+      let explained = false;
+      for (const cand of after) {
+        const same = canonicalJson(JSON.parse(JSON.stringify({ ...cand, _id: "x" as never, created_at: "x" as never, created_by: "x" }))) === expectedProj;
+        if (cand.version_id === versionId) {
+          if (!same) throw new Error(`version_id ${versionId} holds mismatched artifact — corrupt deterministic identity`);
+          explained = true;
+        } else seqTaken = true;
+      }
+      if (explained) break;
+      if (seqTaken) { seq += 1; continue; }
+      throw e;
+    }
+  }
+  // post-land multiplicity gate — app-level detection เท่านั้น (ไม่แทน atomic unique index):
+  // ต้องมี doc เดียวถือ (workflow_id,version_seq) และ doc เดียวถือ version_id ซึ่งเป็น
+  // artifact เดียวกันตาม canonical payload — divergence → fail closed ก่อน binding/pointer CAS
+  const seqOwners = await versions.find({ workflow_id: workflowId, version_seq: seq }).toArray();
+  const idOwners = await versions.find({ version_id: versionId }).toArray();
+  const ownerProjs = [seqOwners[0], idOwners[0]].map((c) => c == null ? "<missing>"
+    : canonicalJson(JSON.parse(JSON.stringify({ ...c, _id: "x" as never, created_at: "x" as never, created_by: "x" }))));
+  if (seqOwners.length !== 1 || idOwners.length !== 1
+    || seqOwners[0].version_id !== versionId || idOwners[0].version_seq !== seq
+    || ownerProjs[0] !== expectedProj || ownerProjs[1] !== expectedProj) {
+    throw new Error(`version artifact multiplicity at (workflow_id=${workflowId}, version_seq=${seq})/version_id=${versionId} — refusing commit (app-level gate; production unique indexes still required)`);
+  }
+
+  // 11) expected binding set — deterministic id; reuse เฉพาะเมื่อ canonical payload
+  //     ตรงทุก field (timestamps/actor normalized) — mismatch/extra/missing → fail closed
+  const expectedBindings = versionBindings.map((b) => {
+    const r = resolutionByBinding.get(b.binding_id)!;
+    const doc = {
+      ...b, _id: undefined as never,
+      binding_id: "wb_" + _shortHash(`${versionId}:${b.node_id}:${b.field_path}:${b.kind}`),
+      version_id: versionId, status: r.status, created_at: now,
+    } as WorkflowBindingDoc;
+    if (r.mappings.length || r.conflict) {
+      doc.resolution = { mappings: r.mappings, ...(r.conflict ? { conflict: r.conflict } : {}) };
+    } else delete doc.resolution;
+    // canonical persisted shape — undefined-valued keys ห้ามถูกเขียน (BSON drop → shape เบี้ยว)
+    const dd = doc as unknown as Record<string, unknown>;
+    for (const k of Object.keys(dd)) if (dd[k] === undefined) delete dd[k];
+    return doc;
+  });
+  const expectedBindProj = new Map<string, string>();
+  for (const exp of expectedBindings) {
+    expectedBindProj.set(exp.binding_id, canonicalJson(JSON.parse(JSON.stringify({ ...exp, _id: "x" as never, created_at: "x" as never,
+      resolution: exp.resolution ? { ...exp.resolution, mappings: exp.resolution.mappings.map((m) => ({
+        ...m, resolved_by: "x", resolved_at: "x" as never, invalidated_at: "x" as never })) } : undefined }))));
+  }
+  for (const exp of expectedBindings) {
+    const expProj = expectedBindProj.get(exp.binding_id)!;
+    const existing = await bindings.findOne({ binding_id: exp.binding_id });
+    if (existing) {
+      if (canonicalJson(JSON.parse(JSON.stringify({ ...existing, _id: "x" as never, created_at: "x" as never,
+          resolution: existing.resolution ? { ...existing.resolution, mappings: existing.resolution.mappings.map((m) => ({
+            ...m, resolved_by: "x", resolved_at: "x" as never, invalidated_at: "x" as never })) } : undefined }))) !== expProj) {
+        throw new Error(`binding ${exp.binding_id} holds mismatched artifact — corrupt deterministic identity`);
+      }
+      continue;
+    }
+    try {
+      await bindings.insertOne(exp);
+    } catch (e) {
+      if ((e as { code?: number }).code !== 11000) throw e;
+      const again = await bindings.findOne({ binding_id: exp.binding_id });
+      if (!again || canonicalJson(JSON.parse(JSON.stringify({ ...again, _id: "x" as never, created_at: "x" as never,
+          resolution: again.resolution ? { ...again.resolution, mappings: again.resolution.mappings.map((m) => ({
+            ...m, resolved_by: "x", resolved_at: "x" as never, invalidated_at: "x" as never })) } : undefined }))) !== expProj) {
+        throw new Error(`binding ${exp.binding_id}: E11000 without matching artifact — corrupt deterministic identity`);
+      }
+    }
+  }
+  // exact-set gate — persisted rows ใน scope {workflow_id, version_id} ต้องเท่ากับ
+  // expected set พอดี: ครบทุก id, ไม่มี dup, ไม่มี extra, payload ตรง — ก่อน pointer CAS เสมอ
+  const persistedBinds = await bindings.find({ workflow_id: workflowId, version_id: versionId }).toArray();
+  const expectedBindIds = new Set(expectedBindings.map((d) => d.binding_id));
+  const seenBindIds = new Set<string>();
+  for (const d of persistedBinds) {
+    if (!expectedBindIds.has(d.binding_id)) throw new Error(`binding ${d.binding_id}: unexpected row in resolved version scope`);
+    if (seenBindIds.has(d.binding_id)) throw new Error(`binding ${d.binding_id}: duplicate rows in resolved version scope`);
+    seenBindIds.add(d.binding_id);
+    if (canonicalJson(JSON.parse(JSON.stringify({ ...d, _id: "x" as never, created_at: "x" as never,
+        resolution: d.resolution ? { ...d.resolution, mappings: d.resolution.mappings.map((m) => ({
+          ...m, resolved_by: "x", resolved_at: "x" as never, invalidated_at: "x" as never })) } : undefined })))
+      !== expectedBindProj.get(d.binding_id)) {
+      throw new Error(`binding ${d.binding_id}: persisted payload diverges from expected`);
+    }
+  }
+  if (seenBindIds.size !== expectedBindIds.size) {
+    throw new Error(`binding set incomplete — ${seenBindIds.size}/${expectedBindIds.size} persisted`);
+  }
+
+  // overlap readiness (ก่อน pointer CAS): owner เดียว evaluate บน target-version
+  // artifacts ที่ persist แล้ว — snapshot ณ เวลานี้ ไม่ใช่ cross-workflow txn ·
+  // eval fail/artifact หาย → throw ก่อน commit (ไม่ flip pointer ไม่ emit audit)
+  const readiness = await getWorkflowImportDetail(workflowId, versionId);
+  if (!readiness) throw new Error(`target version ${versionId} unreadable for readiness — refusing commit`);
+  const overlapConflicts = readiness.overlap_conflicts;
+
+  // 12) commit — pointer+version+derived scope ใน updateOne เดียว (half-update ไม่มี)
+  const commit = await workflows.updateOne(
+    { workflow_id: workflowId, is_deleted: { $ne: true }, version: expected },
+    { $set: {
+      current_version_id: versionId, version: seq,
+      enabled: false, status: "draft",
+      platforms: derivedPlatforms, shop_ids: derivedShopIds,
+      updated_at: new Date(), updated_by: actor,
+    } }
+  );
+  if (commit.matchedCount === 0) {
+    // reread ครั้งเดียว — รายงาน winner จริง ไม่ใช่ค่าที่จับก่อน race; ไม่ auto-retry CAS
+    const fresh = await workflows.findOne({ workflow_id: workflowId, is_deleted: { $ne: true } });
+    return { ok: false, conflict: true,
+      current_version: fresh?.version ?? wf.version, current_version_id: fresh?.current_version_id ?? wf.current_version_id };
+  }
+
+  // 13) audit หลัง commit เท่านั้น — audit fail ไม่กลืน commit
+  let resolved = 0, unresolved = 0, invalid = 0;
+  for (const r of resolutionByBinding.values()) {
+    if (r.status === "resolved") resolved++;
+    else if (r.status === "invalid") invalid++;
+    else unresolved++;
+  }
+  repeated.sort((x, y) => x.binding_id === y.binding_id
+    ? x.source_index - y.source_index : (x.binding_id < y.binding_id ? -1 : 1));
+  try {
+    await logAdminEvent({
+      action_type: "workflow.binding_resolve", actor,
+      metadata: { workflow_id: workflowId, version_id: versionId, seq,
+        resolved, unresolved, invalid, repeated: repeated.length, overlap: overlapConflicts,
+        platforms: derivedPlatforms, shop_ids: derivedShopIds },
+    });
+  } catch { /* post-commit audit failure — commit สำเร็จแล้ว */ }
+  return { ok: true, version: seq, version_id: versionId,
+    resolved, unresolved, invalid, repeated, publish_blockers: scopeBlockers, overlap_conflicts: overlapConflicts };
+}
+
+// ─── Import detail surface (UI read model) ────────────────
+export interface WorkflowImportDetail {
+  workflow_id: string;
+  name: string;
+  source: "zaapi" | "canonical" | null;
+  source_ref: CanonicalDraft["sourceRef"] | null;
+  current_version_id: string | null;
+  version_seq: number | null;
+  import_batch_id: string | null;
+  fingerprint: string | null;
+  bindings: { node_id: string; field_path: string; kind: string; count: number; status: BindingStatus }[];
+  unresolved_bindings: number;
+  invalid_bindings: number;
+  publish_blockers: string[];
+  overlap_conflicts: string[];
+}
+
+// versionId (server-internal เท่านั้น): resolution path ส่ง target version ที่
+// artifacts persist แล้วก่อน pointer CAS — ไม่ส่ง = current_version_id เดิม
+export async function getWorkflowImportDetail(workflowId: string, versionId?: string): Promise<WorkflowImportDetail | null> {
+  const wf = await getWorkflow(workflowId);
+  if (!wf) return null;
+  const versions = await getCollection<WorkflowVersionDoc>(COLLECTIONS.workflowVersions);
+  const version = versionId != null
+    ? await versions.findOne({ version_id: versionId, workflow_id: workflowId })
+    : (wf.current_version_id ? await versions.findOne({ version_id: wf.current_version_id }) : null);
+  if (versionId != null && !version) return null; // target artifact หาย/ของ workflow อื่น → fail closed
+  const bindings = await getCollection<WorkflowBindingDoc>(COLLECTIONS.workflowBindings);
+  const binds = version ? await bindings.find({ workflow_id: workflowId, version_id: version.version_id }).toArray() : [];
+  const capability = validateCanonicalDraft(
+    version?.nodes || wf.nodes, version?.edges || wf.edges,
+    // override path: wf.platforms ยังเป็น scope เดิมก่อน CAS → ใช้ scope ที่ persist ใน target version
+    versionId != null ? (version?.platforms ?? []) : (wf.platforms || []),
+    binds.map((b) => ({ node_id: b.node_id, kind: b.kind })),
+  );
+  // scope readiness — recompute จาก version-scoped account bindings
+  // (authoritative — ไม่ใช่ wf.platforms/shop_ids) ด้วย truth table เดียวกับ
+  // write owner: zero eligible → no-resolved · status!=="resolved" หรือ coverage
+  // ไม่ครบ → incomplete · imported workflow ไม่มี requirement → global-scope
+  // blocker (canonical workflow wf.import==null → behavior เดิม)
+  const accountReqs = binds.filter((b) => b.kind === "account" && b.count > 0);
+  const scopeBlockers: string[] = [];
+  if (accountReqs.length > 0) {
+    const eligiblePerReq = accountReqs.map((b) => (b.resolution?.mappings ?? [])
+      .filter((m) => m.state === "valid" && m.platform != null && m.shop_id != null).length);
+    if (eligiblePerReq.every((n) => n === 0)) {
+      scopeBlockers.push("account_scope: no resolved account mappings");
+    } else if (accountReqs.some((b, i) => b.status !== "resolved" || eligiblePerReq[i] !== b.count)) {
+      scopeBlockers.push("account_scope: incomplete account mappings");
+    }
+  } else if (wf.import != null) {
+    scopeBlockers.push("scope: explicit global scope approval required");
+  }
+  // overlap readiness — eligibility = message_received trigger + valid resolved
+  // account pairs เท่านั้น (zero valid ≠ match-all); candidate เรียง workflow_id
+  // deterministic, report ทุกตัวที่ชน (ไม่มี winner/priority/first-match)
+  const thisScope = new Set<string>();
+  for (const b of accountReqs)
+    for (const m of b.resolution?.mappings ?? [])
+      if (m.state === "valid" && m.platform != null && m.shop_id != null)
+        thisScope.add(`${m.platform}|${m.shop_id}`);
+  const hasMsgTrigger = (version?.nodes || wf.nodes)
+    .some((n) => n.type === "trigger" && n.subtype === "message_received");
+  const overlapConflicts: string[] = [];
+  if (hasMsgTrigger && thisScope.size > 0) {
+    const workflows = await getCollection<WorkflowDoc>(COLLECTIONS.workflows);
+    const others = (await workflows.find({ is_deleted: { $ne: true }, workflow_id: { $ne: workflowId } }).toArray())
+      .sort((x, y) => (x.workflow_id < y.workflow_id ? -1 : 1));
+    for (const other of others) {
+      if (other.import != null) {
+        // imported side — resolved scope + trigger อ่านจาก current-version เดียวกัน
+        const ov = other.current_version_id ? await versions.findOne({ version_id: other.current_version_id }) : null;
+        const oscope = new Set<string>();
+        for (const b of ov ? await bindings.find({ workflow_id: other.workflow_id, version_id: ov.version_id }).toArray() : [])
+          if (b.kind === "account" && b.count > 0)
+            for (const m of b.resolution?.mappings ?? [])
+              if (m.state === "valid" && m.platform != null && m.shop_id != null)
+                oscope.add(`${m.platform}|${m.shop_id}`);
+        if ((ov?.nodes || other.nodes).some((n) => n.type === "trigger" && n.subtype === "message_received")
+          && [...oscope].some((k) => thisScope.has(k)))
+          overlapConflicts.push(`overlap with imported workflow ${other.workflow_id}`);
+      } else if (other.enabled === true && other.status === "published"
+          && other.nodes.some((n) => n.type === "trigger")) {
+        // legacy side — engine เดิม fire trigger ทุก subtype; scope = doc arrays, ว่าง = all
+        const oplats = other.platforms || [], oshops = other.shop_ids || [];
+        if ([...thisScope].some((k) => {
+          const i = k.indexOf("|");
+          return (oplats.length === 0 || oplats.includes(k.slice(0, i) as Platform))
+              && (oshops.length === 0 || oshops.includes(k.slice(i + 1)));
+        })) overlapConflicts.push(`overlap with legacy workflow ${other.workflow_id}`);
+      }
+    }
+  }
+  return {
+    workflow_id: wf.workflow_id, name: wf.name,
+    source: wf.import?.source ?? null,
+    source_ref: version?.source_ref ?? null,
+    current_version_id: version?.version_id ?? null,
+    version_seq: version?.version_seq ?? null,
+    import_batch_id: version?.import_batch_id ?? wf.import?.batch_id ?? null,
+    fingerprint: version?.fingerprint ?? null,
+    bindings: binds.map((b) => ({ node_id: b.node_id, field_path: b.field_path, kind: b.kind, count: b.count, status: b.status })),
+    unresolved_bindings: binds.filter((b) => b.status === "unresolved").length,
+    invalid_bindings: binds.filter((b) => b.status === "invalid").length,
+    publish_blockers: [...capability.errors, ...scopeBlockers, ...overlapConflicts],
+    overlap_conflicts: overlapConflicts,
+  };
+}
+
+// GET /export read-model — compose current version doc (authoritative สำหรับ
+// imported — nodes/edges/handle_labels/source_ref ครบ) หรือ doc fields ตรงๆ
+// (legacy — ไม่มี version) เป็น CanonicalDraft แล้ว exportCanonical เจนเดียว
+// กับ editor — bindings อ่านจาก persisted rows (ไม่ re-derive)
+export async function getWorkflowCanonicalExport(
+  workflowId: string,
+): Promise<ReturnType<typeof exportCanonical> | null> {
+  const wf = await getWorkflow(workflowId);
+  if (!wf) return null;
+  const versions = await getCollection<WorkflowVersionDoc>(COLLECTIONS.workflowVersions);
+  const version = wf.current_version_id
+    ? await versions.findOne({ version_id: wf.current_version_id }) : null;
+  const snapshots = await getCollection<WorkflowRawSnapshotDoc>(COLLECTIONS.workflowRawSnapshots);
+  const snapshot = version
+    ? await snapshots.findOne({ workflow_id: workflowId, version_id: version.version_id }) : null;
+  const bindings = await getCollection<WorkflowBindingDoc>(COLLECTIONS.workflowBindings);
+  const binds = version
+    ? await bindings.find({ workflow_id: workflowId, version_id: version.version_id }).toArray() : [];
+  const draft: CanonicalDraft = {
+    name: wf.name,
+    source: wf.import?.source ?? "local",
+    status: "draft", enabled: false,
+    platforms: version?.platforms ?? wf.platforms ?? [],
+    nodes: version?.nodes ?? wf.nodes ?? [],
+    edges: version?.edges ?? wf.edges ?? [],
+    handleLabels: version?.handle_labels ?? {},
+    bindings: binds.map((b) => ({
+      node_id: b.node_id, field_path: b.field_path, kind: b.kind,
+      count: b.count, source_ref: b.source_ref,
+    })),
+    sourceRef: version?.source_ref ?? {
+      workflowId: "", loadedVersionId: "", versionStatuses: [], sourceStatus: "", fingerprint: "",
+    },
+    raw: snapshot?.raw,
+  };
+  return exportCanonical(draft);
+}
+
+// GET /bindings read-view (R1 Task 7) — compose getWorkflowImportDetail +
+// version-scoped bindings + candidate reads ทั้งหมดใน owner นี้ (ไม่มี read owner ที่สอง)
+// display_value = server-produced เท่านั้น: "[redacted]" หรือค่าที่ match
+// REDACT_VALUE → "[redacted]" · non-primitive → canonicalJson truncated ·
+// credential/URL ไม่ leak ทุก path (source_values mask แล้วตอน import)
+export async function getBindingResolutionView(workflowId: string): Promise<BindingResolutionView | null> {
+  const wf = await getWorkflow(workflowId);
+  if (!wf) return null;
+  const detail = await getWorkflowImportDetail(workflowId);
+  if (!detail) return null;
+  const versionId = wf.current_version_id ?? null;
+  const bindings = await getCollection<WorkflowBindingDoc>(COLLECTIONS.workflowBindings);
+  const binds = versionId
+    ? (await bindings.find({ workflow_id: workflowId, version_id: versionId }).toArray())
+        .sort((a, b) => {
+          const ka = `${a.node_id}|${a.field_path}|${a.kind}|${a.binding_id}`;
+          const kb = `${b.node_id}|${b.field_path}|${b.kind}|${b.binding_id}`;
+          return ka < kb ? -1 : ka > kb ? 1 : 0;
+        })
+    : [];
+  // candidates — local targets ที่ resolve ได้จริงตาม validation switch (account/label/user)
+  const shops = await getCollection<ShopDoc>(COLLECTIONS.shops);
+  const admins = await getCollection<AdminDoc>(COLLECTIONS.admins);
+  const conversations = await getCollection(COLLECTIONS.conversations);
+  const accounts = (await shops.find({}).toArray())
+    .map((s) => ({ platform: s.platform, shop_id: s.shop_id, shopname: s.shopname }))
+    .sort((a, b) => (`${a.platform}|${a.shop_id}` < `${b.platform}|${b.shop_id}` ? -1 : 1));
+  const labelVals = (await conversations.distinct("labels", {})) as unknown[];
+  const labels = [...new Set(labelVals.flat() as string[])].sort();
+  const users = (await admins.find({ active: { $ne: false } }).toArray())
+    .map((a) => ({ admin_id: a.admin_id, display: a.name || a.username || a.admin_id }))
+    .sort((a, b) => (a.admin_id < b.admin_id ? -1 : 1));
+  return {
+    workflow_id: wf.workflow_id,
+    version_id: versionId,
+    expected_version: wf.version,
+    bindings: binds.map((b) => ({
+      binding_id: b.binding_id, node_id: b.node_id, field_path: b.field_path,
+      kind: b.kind, count: b.count, status: b.status,
+      sources: (Array.isArray(b.source_values) ? b.source_values : []).map((v, i) => {
+        const obj = v !== null && typeof v === "object";
+        const cj = obj ? canonicalJson(v) : null;
+        const masked = v === "[redacted]"
+          || (typeof v === "string" && REDACT_VALUE.test(v))
+          || (cj != null && REDACT_VALUE.test(cj));
+        return {
+          source_index: i,
+          display_value: masked ? "[redacted]"
+            : cj != null ? (cj.length > 120 ? cj.slice(0, 120) + "…" : cj)
+            : String(v),
+        };
+      }),
+      ...(b.resolution ? { resolution: b.resolution } : {}),
+    })),
+    // team — Zaapi team = แอดมินทั้งหมดในระบบ → ตัวเลือกเดียว "all_admins" (global pool)
+    candidates: { accounts, labels, users, teams: [{ local_id: "all_admins", display: "แอดมินทั้งหมด" }], ticket_fields: [], urls: [] },
+    unresolved: binds.filter((b) => b.status === "unresolved").length,
+    invalid: binds.filter((b) => b.status === "invalid").length,
+    publish_blockers: detail.publish_blockers,
+    overlap_conflicts: detail.overlap_conflicts,
+  };
+}
+
 export const workflowService = {
   createWorkflow,
   listWorkflows,
@@ -505,5 +2090,11 @@ export const workflowService = {
   toggleWorkflow,
   deleteWorkflow,
   restoreWorkflow,
+  applyImportBatch,
+  saveWorkflowDraft,
+  saveBindingResolutionBatch,
+  getBindingResolutionView,
+  getWorkflowImportDetail,
+  getWorkflowCanonicalExport,
   validateWorkflowGraph,
 };

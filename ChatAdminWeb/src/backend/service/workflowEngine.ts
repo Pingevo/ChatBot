@@ -31,6 +31,7 @@ import { testStatusConversationService, type TestSource } from "./testStatusConv
 import { statusConversationService } from "./statusConversationService";
 import { logBotworkerEvent } from "./botworkerEventService";
 import { isSafeFetchUrl } from "../lib/urlSafety";
+import { hasCanonicalConditions, evalCanonicalConditions, hasCanonicalAssignment, pickCanonicalAssignee, canonicalTriggerMatches, canonicalEventMatches, boundLocalIds } from "./workflowCanonicalEval";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -46,14 +47,25 @@ export interface WorkflowRunDoc extends Document {
   platform: Platform;
   customer_id?: string;
 
-  status: "running" | "waiting_for_reply" | "completed" | "cancelled" | "errored";
+  status: "running" | "waiting_for_reply" | "waiting_for_timer" | "completed" | "cancelled" | "errored";
   current_node_id: string;        // node ที่กำลังอยู่ / รออยู่
-  waiting_for?: "next_message";
+  waiting_for?: "next_message" | "timer";
+  resume_at?: Date;               // ⚡ delay node — เวลาที่ timer ต้องปลุก run (sweep เจอ resume_at<=now)
 
   // ⚡ Phase 2 — wait_for_reply retry/timeout state
   wait_retry_count?: number;      // จำนวนครั้งที่ถามซ้ำ (reset ทุกครั้งที่เข้า wait node ใหม่)
   wait_started_at?: Date;         // เวลาที่เริ่มรอล่าสุด (สำหรับ per-node timeout)
   wait_node_id?: string;          // wait node ที่กำลังรออยู่ (สำหรับ background checker)
+
+  // ⚡ canonical (Zaapi) branch-aware waits — wfr/button-template/ai-bot:
+  //   reply_branch   = edge branch เมื่อลูกค้าตอบ (wfr-success / btn-template-condition-index-N resolver)
+  //   timer_branch   = edge branch เมื่อ resume_at หมดเวลา (wfr-no-respond / ai-chatbot-timeout / btn-template-expired)
+  //   wait_buttons   = button titles ของ send_button_template — ใช้ match reply → index branch; ไม่ match → none-selected
+  //   park_kind      = "ai_bot" → run park ให้ AI จัดการ (escalate ผ่าน escalateAiRun)
+  reply_branch?: string;
+  timer_branch?: string;
+  wait_buttons?: string[];
+  park_kind?: "ai_bot";
 
   // ตัวแปรสะสมระหว่าง node (เช่น bot_answer, customer_reply, _jumps)
   context: Record<string, unknown>;
@@ -130,6 +142,7 @@ export interface DeliveredMessage {
   text: string;
   source: string;    // "workflow.send_message" | "workflow.let_ai_respond" | "workflow.stay_retry"
   node_id: string;
+  image_url?: string; // ⚡ Zaapi send_message type=image — media passthrough ไป delivery pipeline
 }
 
 export type EngineResult = {
@@ -195,7 +208,7 @@ async function ownedUpdateRun(run: WorkflowRunDoc, fields: Record<string, unknow
         run_id: run.run_id,
         owner_id: botworkerRuntime.ownerId,
         fencing_token: run.fencing_token,
-        status: { $in: ["running", "waiting_for_reply"] }, // ห้าม resurrect run ที่จบ/cancelled แล้ว
+        status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] }, // ห้าม resurrect run ที่จบ/cancelled แล้ว
       },
       { $set: set }
     );
@@ -217,7 +230,7 @@ async function heartbeatRun(run: WorkflowRunDoc): Promise<boolean> {
       run_id: run.run_id,
       owner_id: botworkerRuntime.ownerId,
       fencing_token: run.fencing_token,
-      status: { $in: ["running", "waiting_for_reply"] },
+      status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
     },
     { $set: { lease_expires_at: new Date(Date.now() + botworkerRuntime.claimLeaseMs), updated_at: new Date() } }
   );
@@ -230,9 +243,10 @@ async function acquireRun(runId: string): Promise<WorkflowRunDoc | null> {
   return coll.findOneAndUpdate(
     {
       run_id: runId,
-      status: { $in: ["running", "waiting_for_reply"] },
+      status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
       $or: [
         { status: "waiting_for_reply" },   // parked — CAS ตัวแรก flip เป็น running ก่อนเดิน graph
+        { status: "waiting_for_timer" },   // timer-parked — sweeper flip เหมือนกัน
         { lease_expires_at: { $lt: now } },
         { owner_id: { $exists: false } },
       ],
@@ -259,7 +273,7 @@ async function resolveUnacquiredRun(runId: string, workflowId?: string): Promise
   if (cur?.result) {
     return { ...cur.result, run_id: cur.run_id, workflow_id: cur.workflow_id } as EngineResult;
   }
-  if (cur && (cur.status === "running" || cur.status === "waiting_for_reply")) {
+  if (cur && (cur.status === "running" || cur.status === "waiting_for_reply" || cur.status === "waiting_for_timer")) {
     return inFlightResult(runId, cur.workflow_id, "run in-flight (owned by another worker)");
   }
   return {
@@ -281,7 +295,7 @@ async function cancelIfAbandoned(run: WorkflowRunDoc, fields: Partial<WorkflowRu
   const res = await coll.updateOne(
     {
       run_id: run.run_id,
-      status: { $in: ["running", "waiting_for_reply"] },
+      status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
       $or: [{ owner_id: { $exists: false } }, { lease_expires_at: { $lt: now } }],
     },
     { $set: { ...fields, updated_at: new Date() } }
@@ -300,7 +314,7 @@ export async function getActiveRun(conversationId: string): Promise<WorkflowRunD
   const coll = await getRunsCollection();
   const run = await coll.findOne({
     conversation_id: conversationId,
-    status: { $in: ["running", "waiting_for_reply"] },
+    status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
   });
 
   if (!run) return null;
@@ -336,7 +350,7 @@ export async function cancelActiveRuns(conversationId: string, reason: string): 
   const result = await coll.updateMany(
     {
       conversation_id: conversationId,
-      status: { $in: ["running", "waiting_for_reply"] },
+      status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
     },
     {
       $set: {
@@ -440,7 +454,12 @@ export async function matchAndRun(msg: EngineMessage): Promise<EngineResult> {
   for (const wf of workflows) {
     const triggerNode = wf.nodes.find((n) => n.type === "trigger");
     if (!triggerNode) continue;
-    if (!matchTriggerNode(triggerNode, msg.text)) continue;
+    // ⚡ canonical (Zaapi-import) trigger — message_received ยิงทุกข้อความ +
+    //   account scope (bound shop_ids) + once flags (per-conv / per-open)
+    //   legacy path: keyword match เท่านั้น (ไม่แตะ)
+    if (wf.import?.source === "zaapi") {
+      if (!(await canonicalTriggerMatches(triggerNode, msg, wf.workflow_id, wf.current_version_id))) continue;
+    } else if (!matchTriggerNode(triggerNode, msg.text)) continue;
 
     // ผ่าน keyword → เช็ค trigger_frequency
     if (!(await checkTriggerFrequency(wf, msg))) continue;
@@ -487,6 +506,31 @@ export async function matchAndRun(msg: EngineMessage): Promise<EngineResult> {
   }
 
   return { status: "no_match", detail: "no workflow matched", delivered: [] };
+}
+
+// ─── event dispatch — label_added / marketplace_* triggers ────────────────
+// ⚡ ไม่ใช่ inbound message — callers:
+//   label events: add_label/remove_label executor (workflow chain) + admin label ops
+//   marketplace events: adapter host เมื่อ Shopee/Lazada webhook เข้า
+//   msg.event_label / msg.review พา payload เข้า conditions
+export async function matchAndRunEvent(msg: EngineMessage, eventKind: string): Promise<EngineResult> {
+  const config = await getSystemConfig();
+  if (!config.workflow_enabled) {
+    return { status: "no_match", detail: "workflow engine disabled", delivered: [] };
+  }
+  const workflows = await workflowService.listWorkflows({
+    shopId: msg.config_shop_key, platform: msg.platform,
+    enabledOnly: true, publishedOnly: true,
+  });
+  for (const wf of workflows) {
+    if (wf.import?.source !== "zaapi") continue; // event triggers = canonical เท่านั้น
+    const triggerNode = wf.nodes.find((n) => n.type === "trigger");
+    if (!triggerNode) continue;
+    if (!(await canonicalEventMatches(triggerNode, eventKind, msg, wf.workflow_id, wf.current_version_id))) continue;
+    const run = await createRun(wf, msg);
+    return runFlow(wf, run, msg);
+  }
+  return { status: "no_match", detail: `no workflow matched event ${eventKind}`, delivered: [] };
 }
 
 async function createRun(workflow: WorkflowDoc, msg: EngineMessage, forcedRunId?: string): Promise<WorkflowRunDoc> {
@@ -575,6 +619,71 @@ async function walkGraph(
       continue;
     }
 
+    // ── canonical chatbot (Zaapi action.chatbot) → park ให้ AI จัดการ ──
+    //   AI owns conv จนกว่า escalate (escalateAiRun) หรือ timeout (timer_branch)
+    //   ⚡ ต้องอยู่ก่อน generic action dispatch — park เป็น run-state ไม่ใช่ performAction
+    if (node.type === "action" && node.subtype === "let_ai_respond" &&
+        (node.config as { action?: { chatbot?: unknown } }).action?.chatbot) {
+      const bot = (node.config as { action: { chatbot: { timeout?: { unit?: string; value?: number } } } }).action.chatbot;
+      const unitMs = ({ seconds: 1_000, minutes: 60_000, hours: 3_600_000, days: 86_400_000 } as Record<string, number>)[String(bot?.timeout?.unit || "")];
+      const tMs = unitMs ? Number(bot?.timeout?.value || 0) * unitMs : NaN;
+      const isResumeOpB = !!execOpKey && execOpKey !== run.operation_key;
+      const parkedB: EngineResult = {
+        status: isResumeOpB ? "resumed" : "actioned",
+        detail: `ai chatbot active — timeout ${Number.isNaN(tMs) ? "never" : new Date(Date.now() + tMs).toISOString()}`,
+        delivered, run_id: run.run_id, workflow_id: workflow.workflow_id, ...(handoff ? { handoff } : {}),
+      };
+      const waitWriteB: Record<string, unknown> = {
+        status: "waiting_for_timer", current_node_id: node.node_id,
+        waiting_for: "timer", wait_node_id: node.node_id, context,
+        timer_branch: "ai-chatbot-timeout", park_kind: "ai_bot",
+        reply_branch: undefined, wait_buttons: undefined,
+      };
+      if (!Number.isNaN(tMs) && tMs > 0) waitWriteB.resume_at = new Date(Date.now() + tMs);
+      if (!(await ownedUpdateRun(run, waitWriteB))) {
+        return inFlightResult(run.run_id, workflow.workflow_id, `lost run ownership before chatbot checkpoint at ${node.node_id}`);
+      }
+      return parkedB;
+    }
+
+    // ── canonical send_button_template → ส่งข้อความ+ปุ่ม (text fallback) แล้วรอ ──
+    //   reply match button title → btn-template-condition-index-N
+    //   reply ไม่ match → btn-template-none-selected; หมดเวลา → btn-template-expired
+    if (node.type === "action" && node.subtype === "send_button_template" &&
+        (node.config as { action?: { buttonTemplate?: unknown } }).action?.buttonTemplate) {
+      const bt = (node.config as { action: { buttonTemplate: { title?: string; description?: string; buttons?: { title?: string }[]; expiresIn?: { unit?: string; value?: number } } } }).action.buttonTemplate;
+      const buttons = Array.isArray(bt.buttons) ? bt.buttons : [];
+      if (buttons.length === 0) {
+        if (!(await failRun(run, `send_button_template ${node.node_id}: no buttons`))) {
+          return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
+        }
+        return { status: "error", detail: "button template has no buttons", delivered, recoverable: false, run_id: run.run_id, workflow_id: workflow.workflow_id };
+      }
+      const vars = await prepareTemplateVars(msg, context);
+      const text = resolveTemplate([bt.title, bt.description, ...buttons.map((b, i) => `${i + 1}. ${b.title || ""}`)].filter(Boolean).join("\n"), vars);
+      delivered.push({ text, source: "workflow.send_button_template", node_id: node.node_id });
+      const unitMs = ({ seconds: 1_000, minutes: 60_000, hours: 3_600_000, days: 86_400_000 } as Record<string, number>)[String(bt?.expiresIn?.unit || "")];
+      const btMs = unitMs ? Number(bt?.expiresIn?.value || 0) * unitMs : NaN;
+      const isResumeOpT = !!execOpKey && execOpKey !== run.operation_key;
+      const parkedT: EngineResult = {
+        status: isResumeOpT ? "resumed" : "actioned",
+        detail: `button template sent — waiting click (expires ${Number.isNaN(btMs) ? "never" : new Date(Date.now() + btMs).toISOString()})`,
+        delivered, run_id: run.run_id, workflow_id: workflow.workflow_id, ...(handoff ? { handoff } : {}),
+      };
+      const waitWriteT: Record<string, unknown> = {
+        status: "waiting_for_reply", current_node_id: node.node_id,
+        waiting_for: "next_message", wait_node_id: node.node_id, context,
+        wait_buttons: buttons.map((b) => String(b?.title || "")),
+        reply_branch: "btn-template-none-selected", timer_branch: "btn-template-expired",
+        park_kind: undefined,
+      };
+      if (!Number.isNaN(btMs) && btMs > 0) waitWriteT.resume_at = new Date(Date.now() + btMs);
+      if (!(await ownedUpdateRun(run, waitWriteT))) {
+        return inFlightResult(run.run_id, workflow.workflow_id, `lost run ownership before button-template checkpoint at ${node.node_id}`);
+      }
+      return parkedT;
+    }
+
     // ── action node → ทำ action → ไป node ถัดไป ──
     if (node.type === "action") {
       const actionResult = await performAction(workflow, run, node, msg, context, delivered);
@@ -624,6 +733,91 @@ async function walkGraph(
         return await handleFalseBranch(workflow, run, node, msg, context, delivered, execOpKey);
       }
       return await completeRun(workflow, run, context, delivered, "condition_false", `condition branch "${branch}" has no outgoing edge from ${node.node_id}`, undefined, execOpKey);
+    }
+
+    // ── delay node (canonical Zaapi) → park จนถึง resume_at; sweeper ปลุก ──
+    if (node.type === "wait" && node.subtype === "delay") {
+      const d = (node.config as { delay?: { unit?: string; value?: number } }).delay;
+      const unitMs = ({ seconds: 1_000, minutes: 60_000, hours: 3_600_000, days: 86_400_000 } as Record<string, number>)[String(d?.unit || "")];
+      const ms = unitMs ? Number(d?.value || 0) * unitMs : NaN;
+      if (Number.isNaN(ms) || ms <= 0) {
+        if (!(await failRun(run, `delay node ${node.node_id}: invalid delay config`))) {
+          return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
+        }
+        return { status: "error", detail: "invalid delay config", delivered, recoverable: false, run_id: run.run_id, workflow_id: workflow.workflow_id };
+      }
+      const resumeAt = new Date(Date.now() + ms);
+      const isResumeOpD = !!execOpKey && execOpKey !== run.operation_key;
+      const parkedResultD: EngineResult = {
+        status: isResumeOpD ? "resumed" : "actioned",
+        detail: `delay ${d?.value} ${d?.unit} — resume at ${resumeAt.toISOString()}`,
+        delivered,
+        run_id: run.run_id,
+        workflow_id: workflow.workflow_id,
+        ...(handoff ? { handoff } : {}),
+      };
+      const waitWriteD: Record<string, unknown> = {
+        status: "waiting_for_timer",
+        current_node_id: node.node_id,
+        waiting_for: "timer",
+        resume_at: resumeAt,
+        wait_node_id: node.node_id,
+        context,
+      };
+      if (run.operation_key && execOpKey === run.operation_key) {
+        waitWriteD.result = { status: "actioned", detail: parkedResultD.detail, delivered, ...(handoff ? { handoff } : {}) };
+      }
+      if (isResumeOpD) waitWriteD[`resume_results.${execOpKey}`] = parkedResultD;
+      if (!(await ownedUpdateRun(run, waitWriteD))) {
+        return inFlightResult(run.run_id, workflow.workflow_id, `lost run ownership before delay checkpoint at ${node.node_id}`);
+      }
+      return parkedResultD;
+    }
+
+    // ── canonical wfr (Zaapi waitForReply) → park รอ reply + expiry ──
+    //   reply → reply_branch (wfr-success); resume_at หมด → timer_branch (wfr-no-respond)
+    if (node.type === "wait" && node.subtype === "wait_for_reply" &&
+        (node.config as { waitForReply?: unknown }).waitForReply) {
+      const wfr = (node.config as { waitForReply: { expiresIn?: { unit?: string; value?: number } } }).waitForReply;
+      const unitMs = ({ seconds: 1_000, minutes: 60_000, hours: 3_600_000, days: 86_400_000 } as Record<string, number>)[String(wfr?.expiresIn?.unit || "")];
+      const expMs = unitMs ? Number(wfr?.expiresIn?.value || 0) * unitMs : NaN;
+      const isResumeOpW = !!execOpKey && execOpKey !== run.operation_key;
+      const parkedW: EngineResult = {
+        status: isResumeOpW ? "resumed" : "actioned",
+        detail: `wfr park at ${node.node_id} — expires ${Number.isNaN(expMs) ? "never" : new Date(Date.now() + expMs).toISOString()}`,
+        delivered, run_id: run.run_id, workflow_id: workflow.workflow_id, ...(handoff ? { handoff } : {}),
+      };
+      const waitWriteW: Record<string, unknown> = {
+        status: "waiting_for_reply", current_node_id: node.node_id,
+        waiting_for: "next_message", wait_node_id: node.node_id, context,
+        reply_branch: "wfr-success", timer_branch: "wfr-no-respond",
+        wait_buttons: undefined, park_kind: undefined,
+      };
+      if (!Number.isNaN(expMs) && expMs > 0) waitWriteW.resume_at = new Date(Date.now() + expMs);
+      if (!(await ownedUpdateRun(run, waitWriteW))) {
+        return inFlightResult(run.run_id, workflow.workflow_id, `lost run ownership before wfr checkpoint at ${node.node_id}`);
+      }
+      return parkedW;
+    }
+
+    // ── canonical randomizer → สุ่มตาม weight → randomizer-path-N ──
+    if (node.type === "wait" && node.subtype === "randomizer") {
+      const paths = ((node.config as { randomizer?: { paths?: { weight?: number }[] } }).randomizer?.paths) || [];
+      const total = paths.reduce((s, p) => s + (Number(p?.weight) || 0), 0);
+      if (paths.length === 0 || total <= 0) {
+        if (!(await failRun(run, `randomizer ${node.node_id}: invalid paths`))) {
+          return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
+        }
+        return { status: "error", detail: "invalid randomizer config", delivered, recoverable: false, run_id: run.run_id, workflow_id: workflow.workflow_id };
+      }
+      let roll = Math.random() * total, pick = paths.length - 1;
+      for (let i = 0; i < paths.length; i++) { roll -= Number(paths[i]?.weight) || 0; if (roll <= 0) { pick = i; break; } }
+      const rTargets = nextNodeIds(workflow, node.node_id, `randomizer-path-${pick}`);
+      if (rTargets.length === 0) {
+        return await completeRun(workflow, run, context, delivered, "actioned", `randomizer path ${pick} has no edge — flow ends`, handoff, execOpKey);
+      }
+      currentNodeId = rTargets[0];
+      continue;
     }
 
     // ── wait node → หยุด รอลูกค้าพิมพ์ต่อ ──
@@ -761,12 +955,32 @@ async function doResumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promise<En
   run.context = context;
 
   const waitNode = workflow.nodes.find((n) => n.node_id === run.current_node_id);
-  if (!waitNode || waitNode.type !== "wait") {
+  // ⚡ canonical branch-aware resume — wfr (wait node) / button-template (action node):
+  //   wait_buttons มี → match reply กับ button title → btn-template-condition-index-N
+  //   (match ไม่ได้ → reply_branch = none-selected); wfr → reply_branch = wfr-success
+  if (!waitNode || (!run.reply_branch && waitNode.type !== "wait") ||
+      (run.reply_branch && waitNode.type !== "wait" && waitNode.type !== "action")) {
     // current_node_id ไม่ใช่ wait node (ข้อมูลพัง) → จบ run
     if (!(await failRun(run, `current node ${run.current_node_id} is not a wait node`))) {
       return inFlightResult(run.run_id, run.workflow_id, "lost run ownership before failRun");
     }
     return { status: "error", detail: "cannot resume — not at wait node", delivered: [], recoverable: false, run_id: run.run_id };
+  }
+
+  if (run.reply_branch) {
+    let branch = run.reply_branch;
+    if (Array.isArray(run.wait_buttons) && run.wait_buttons.length > 0) {
+      const body = String(msg.text || "").trim().toLowerCase();
+      const idx = run.wait_buttons.findIndex((t) => t && body === t.trim().toLowerCase());
+      if (idx >= 0) branch = `btn-template-condition-index-${idx}`;
+    }
+    const next = nextNodeIds(workflow, waitNode.node_id, branch);
+    if (next.length === 0) {
+      return await completeRun(workflow, run, context, [], "actioned", `resume branch "${branch}" has no edge — flow ends`, undefined, msg.operation_key);
+    }
+    const r2 = await walkGraph(workflow, { ...run, context }, msg, next[0], msg.operation_key);
+    if (r2.status === "actioned") return { ...r2, status: "resumed" };
+    return r2;
   }
 
   // ⚡ Phase 2: ถ้า wait node มี Phase 2 config → validate answer_type → success/retry/exceeded
@@ -784,6 +998,152 @@ async function doResumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promise<En
   return result;
 }
 
+// ─── delay timer — park/resume (canonical Zaapi) ──────────
+
+/**
+ * ปลุก run ที่ park อยู่ที่ delay node — sweeper เรียกเมื่อ resume_at <= now
+ * ⚡ ไม่ inject customer_reply (timer ไม่ใช่ข้อความใหม่) — advance ผ่าน delay
+ *   node ไป edge ถัดไปเหมือน wait-resume เดิม; ownership ผ่าน acquireRun เดียวกัน
+ */
+export async function resumeTimerRun(run: WorkflowRunDoc, msg: EngineMessage): Promise<EngineResult> {
+  const acquired = await acquireRun(run.run_id);
+  if (!acquired) {
+    return inFlightResult(run.run_id, run.workflow_id, "timer resume in-flight — run owned by another worker");
+  }
+  // belt: run อาจถูก wake ก่อน due (acquire ผ่าน status clause) — ยังไม่ถึงเวลา → re-park
+  if ((acquired.status === "waiting_for_timer" || acquired.status === "waiting_for_reply") &&
+      acquired.resume_at && acquired.resume_at.getTime() > Date.now()) {
+    return { status: "in_flight", detail: "timer not due yet", delivered: [], run_id: acquired.run_id, workflow_id: acquired.workflow_id };
+  }
+  if (acquired.status !== "waiting_for_timer" && acquired.status !== "waiting_for_reply" && acquired.status !== "running") {
+    return { status: "no_match", detail: `run ${run.run_id} is ${acquired.status} — cannot timer-resume`, delivered: [], run_id: run.run_id, workflow_id: acquired.workflow_id };
+  }
+  const workflow = await workflowService.getWorkflow(acquired.workflow_id);
+  if (!workflow) {
+    if (!(await failRun(acquired, "workflow deleted while timer parked"))) {
+      return inFlightResult(acquired.run_id, acquired.workflow_id, "lost run ownership before failRun");
+    }
+    return { status: "error", detail: "workflow not found", delivered: [], recoverable: false, run_id: acquired.run_id, workflow_id: acquired.workflow_id };
+  }
+  const delayNode = workflow.nodes.find((n) => n.node_id === acquired.current_node_id);
+  // ⚡ canonical parks: delay (wait) / wfr (wait) / ai-bot & button-template (action nodes)
+  const parkOk = delayNode && (
+    (delayNode.type === "wait" && (delayNode.subtype === "delay" || delayNode.subtype === "wait_for_reply")) ||
+    (delayNode.type === "action" && (delayNode.subtype === "let_ai_respond" || delayNode.subtype === "send_button_template"))
+  );
+  if (!parkOk) {
+    if (!(await failRun(acquired, `current node ${acquired.current_node_id} is not a timer-parked node`))) {
+      return inFlightResult(acquired.run_id, acquired.workflow_id, "lost run ownership before failRun");
+    }
+    return { status: "error", detail: "cannot timer-resume — not at parked node", delivered: [], recoverable: false, run_id: acquired.run_id, workflow_id: acquired.workflow_id };
+  }
+  const context = acquired.context || {};
+  if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined, resume_at: undefined }))) {
+    return inFlightResult(acquired.run_id, acquired.workflow_id, "lost run ownership at timer resume start");
+  }
+  // ⚡ timer_branch (canonical): wfr-no-respond / ai-chatbot-timeout / btn-template-expired
+  const next = nextNodeIds(workflow, delayNode!.node_id, acquired.timer_branch);
+  if (next.length === 0) {
+    return await completeRun(workflow, acquired, context, [], "actioned", "delay node has no outgoing edge — flow ends", undefined, msg.operation_key);
+  }
+  const result = await walkGraph(workflow, { ...acquired, context }, msg, next[0], msg.operation_key);
+  if (result.status === "actioned") return { ...result, status: "resumed" };
+  return result;
+}
+
+/**
+ * AI escalation — run ที่ park ให้ AI (let_ai_respond canonical) ถูกปลุกผ่าน
+ *   branch "ai-chatbot-escalate" เมื่อ bot-worker ตัดสินว่า AI จัดการไม่ได้
+ * ⚡ caller: bot-worker เมื่อ AI ส่งสัญญาณ escalate/handoff
+ */
+export async function escalateAiRun(conversationId: string, msg: EngineMessage): Promise<EngineResult> {
+  const coll = await getRunsCollection();
+  const run = await coll.findOne({ conversation_id: conversationId, status: "waiting_for_timer", park_kind: "ai_bot" } as never);
+  if (!run) return { status: "no_match", detail: "no ai-parked run", delivered: [] };
+  const acquired = await acquireRun(run.run_id);
+  if (!acquired || acquired.park_kind !== "ai_bot") {
+    return inFlightResult(run.run_id, run.workflow_id, "ai escalate in-flight");
+  }
+  const workflow = await workflowService.getWorkflow(acquired.workflow_id);
+  if (!workflow) {
+    if (!(await failRun(acquired, "workflow deleted while ai-parked"))) {
+      return inFlightResult(acquired.run_id, acquired.workflow_id, "lost run ownership before failRun");
+    }
+    return { status: "error", detail: "workflow not found", delivered: [], recoverable: false, run_id: acquired.run_id };
+  }
+  const node = workflow.nodes.find((n) => n.node_id === acquired.current_node_id);
+  const context = { ...(acquired.context || {}), ai_escalated: true };
+  if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined, resume_at: undefined, park_kind: undefined, context }))) {
+    return inFlightResult(acquired.run_id, acquired.workflow_id, "lost run ownership at ai escalate");
+  }
+  const next = nextNodeIds(workflow, node?.node_id || "", "ai-chatbot-escalate");
+  if (next.length === 0) {
+    return await completeRun(workflow, acquired, context, [], "actioned", "ai escalate branch has no edge — flow ends", undefined, msg.operation_key);
+  }
+  const r = await walkGraph(workflow, { ...acquired, context }, msg, next[0], msg.operation_key);
+  if (r.status === "actioned") return { ...r, status: "resumed" };
+  return r;
+}
+
+/**
+ * Sweeper — หา run ที่ delay ถึงเวลาแล้วปลุก (caller: bot-worker tick / cron)
+ * durable: รอด restart เพราะ resume_at persist ใน run doc; run ที่ owner ตาย
+ *   ถูก acquire ผ่าน parked-status clause เหมือน wfr
+ * scope: pair-exact filter + cutoff เดียวกับ checkWaitTimeouts — timer run ของ
+ *   disabled (platform,shop) ไม่ถูก scan; park ก่อน enable → settle cancelled
+ */
+export async function sweepDueTimerRuns(
+  signal: AbortSignal | undefined, scope: BotworkerCycleScope,
+  now = new Date(), limit = 50,
+): Promise<{ due: number; resumed: number; errors: string[] }> {
+  if (!scope.config.workflow_enabled) return { due: 0, resumed: 0, errors: [] };
+  const coll = await getRunsCollection();
+  const due = await coll.find(withScope({
+    // canonical parks: delay/ai-bot = waiting_for_timer; wfr/button-template = waiting_for_reply + resume_at
+    status: { $in: ["waiting_for_timer", "waiting_for_reply"] },
+    resume_at: { $lte: now },
+  }, scope), { sort: { resume_at: 1 }, limit }).toArray();
+
+  // run ที่ park ก่อน pair enable cutoff → settle cancelled (ไม่ resume เข้า side effects)
+  const pairCutoff = new Map<string, number>();
+  for (const p of scope.pairs) pairCutoff.set(`${p.platform}/${p.shop_id}`, p.cutoff.getTime());
+
+  const errors: string[] = [];
+  let resumed = 0;
+  for (const run of due) {
+    if (signal?.aborted) break;
+    const cutoff = pairCutoff.get(`${run.platform}/${run.shop_id}`);
+    if (cutoff !== undefined && (run.updated_at?.getTime() ?? 0) <= cutoff) {
+      await cancelIfAbandoned(run, {
+        status: "cancelled",
+        outcome: "error",
+        completed_at: now,
+        error: "timer parked before effective enable cutoff — settled without resume",
+      });
+      continue;
+    }
+    try {
+      const msg: EngineMessage = {
+        conversation_id: run.conversation_id,
+        customer_id: run.customer_id,
+        shop_id: run.shop_id,
+        config_shop_key: run.config_shop_key,
+        shopname: run.shopname,
+        platform: run.platform,
+        text: "",
+        testSource: run.test_source,
+        operation_key: `timer_${run.run_id}_${run.resume_at?.getTime() ?? 0}`,
+      } as EngineMessage;
+      const res = await resumeTimerRun(run, msg);
+      if (res.status === "resumed" || res.status === "actioned") resumed++;
+      else if (res.status === "error") errors.push(`${run.run_id}: ${res.detail}`);
+    } catch (e) {
+      errors.push(`${run.run_id}: ${(e as Error).message}`);
+    }
+  }
+  return { due: due.length, resumed, errors };
+}
+
 // ─── Phase 9 — single inbound dispatch owner ──────────────
 
 /** workflow stage ของ fixed inbound pipeline — bot-worker + Test Chat ใช้
@@ -799,6 +1159,11 @@ export async function runInboundWorkflowStage(msg: EngineMessage): Promise<Engin
   }
   const activeRun = await getActiveRun(msg.conversation_id);
   if (activeRun) {
+    // ⚡ delay timer park — inbound ไม่ปลุก timer (Zaapi: delay คงเวลาเดิม);
+    //   run ยัง active → ไม่ spawn run ซ้ำ; sweeper ปลุกตอน resume_at ถึง
+    if (activeRun.waiting_for === "timer") {
+      return { status: "in_flight", detail: "run parked on delay timer — inbound does not resume timers", delivered: [], run_id: activeRun.run_id, workflow_id: activeRun.workflow_id };
+    }
     const res = await resumeFlow(activeRun, msg);
     if (res.status !== "no_match") return res;
   }
@@ -1131,6 +1496,12 @@ async function evalCondition(
   context: Record<string, unknown>
 ): Promise<{ branch: string; error?: string }> {
   try {
+    // ⚡ canonical (Zaapi-import) conditions[] — evaluator แยก owner ใน
+    //   workflowCanonicalEval.ts; branch = condition-index-i / no-match
+    if (hasCanonicalConditions(node.config)) {
+      return await evalCanonicalConditions(node, msg, workflow.workflow_id, workflow.current_version_id);
+    }
+
     // ⚡ multi-branch message_content (Zaapi pattern)
     if (node.subtype === "message_content" && isMultiBranchCondition(node.config)) {
       return evalMultiBranchCondition(node, msg, context);
@@ -1311,6 +1682,29 @@ async function performAction(
 
   switch (node.subtype) {
     case "send_message": {
+      // ⚡ canonical (Zaapi) — action.message{type:text|image,text,variables}
+      //   text → resolve {{var}} แล้ว deliver; image/video → delivery pipeline
+      //   ยังรองรับ text เท่านั้น → error (fail-closed, publish blocker)
+      const zmsg = (cfg.action as { message?: { type?: string; text?: string; imageUrl?: string; videoUrl?: string } } | undefined)?.message;
+      if (zmsg && typeof zmsg === "object") {
+        const ztype = String(zmsg.type || "text");
+        if (ztype !== "text" && ztype !== "image") {
+          throw new Error(`send_message node ${node.node_id}: type "${zmsg.type}" ยังไม่รองรับ — delivery pipeline รับ text/image เท่านั้น`);
+        }
+        const vars = await prepareTemplateVars(msg, context);
+        if (ztype === "image") {
+          const imageUrl = resolveTemplate(String(zmsg.imageUrl || ""), vars);
+          if (!imageUrl) throw new Error(`send_message node ${node.node_id}: image type แต่ไม่มี imageUrl — fail closed`);
+          delivered.push({ text: resolveTemplate(String(zmsg.text || ""), vars), image_url: imageUrl, source: "workflow.send_message", node_id: node.node_id });
+          return {};
+        }
+        const rawText = String(zmsg.text || "");
+        if (rawText) {
+          const resolved = resolveTemplate(rawText, vars);
+          delivered.push({ text: resolved, source: "workflow.send_message", node_id: node.node_id });
+        }
+        return {};
+      }
       // ⚡ Phase 4: resolve {{variable}} ก่อนส่ง
       const rawText = String(cfg.text || "");
       if (rawText) {
@@ -1370,6 +1764,55 @@ async function performAction(
     case "assign_ticket": {
       // จ่ายงาน — ระบุ admin_id → assign ตรง / ไม่ระบุ → handoffService (คนเดิม → round-robin)
       const reason = String(cfg.reason || `workflow ${workflow.name}`);
+
+      // ⚡ canonical (Zaapi chat_assign) — action.assignment: bound users → pool,
+      //   team → all admins, cursor ต่อ node, OOH/last-handler flags
+      if (hasCanonicalAssignment(cfg)) {
+        const pick = await pickCanonicalAssignee(
+          node, msg, workflow.workflow_id, workflow.current_version_id);
+        if ("error" in pick) throw new Error(`assign_ticket node ${node.node_id}: ${pick.error}`);
+        if ("skip" in pick) {
+          await logAdminEvent({
+            action_type: "workflow.assign_ticket",
+            actor: "workflow-engine",
+            conversation_id: msg.conversation_id,
+            metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, skipped: pick.skip },
+          });
+          return {}; // all OOH → ไม่ assign เดิน flow ต่อ
+        }
+        if (!pick.pick) {
+          return { handoff: { agentId: null, reason, state: "queued" } };
+        }
+        if (msg.testSource) {
+          const src = msg.testSource as TestSource;
+          const meta = await testStatusConversationService.getTestStatus(msg.conversation_id, src);
+          const ok = await testStatusConversationService.manualTestAssign(
+            msg.conversation_id, src, pick.pick, meta?.assigned_to,
+            src === "botworker" ? "open" : "handoff");
+          if (!ok) {
+            if (!meta?.assigned_to) return {};
+            return { handoff: { agentId: meta.assigned_to, reason: `${reason} (conflict — already assigned)`, state: "assigned" } };
+          }
+          return { handoff: { agentId: pick.pick, reason, state: "assigned" } };
+        }
+        const outcome = await handoffService.handoffToAdmin({
+          conversationId: msg.conversation_id,
+          shopId: msg.config_shop_key,
+          platform: msg.platform,
+          reason,
+          targetAdminId: pick.pick,
+          actor: "workflow-engine",
+        });
+        if (outcome.state === "failed") return {};
+        await logAdminEvent({
+          action_type: "workflow.assign_ticket",
+          actor: "workflow-engine",
+          conversation_id: msg.conversation_id,
+          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: outcome.assigned_to, mode: pick.mode, outcome_state: outcome.state },
+        });
+        return { handoff: { agentId: outcome.assigned_to, reason, state: outcome.state } };
+      }
+
       const wantAdmin = cfg.admin_id ? String(cfg.admin_id) : null;
 
       // ⚡ botworker parallel — เขียน test_status_conversation[testSource] เท่านั้น
@@ -1459,6 +1902,34 @@ async function performAction(
     }
 
     case "add_label": {
+      // ⚡ canonical (Zaapi add_label) — action.label.labelIds strip → bindings
+      //   → bound local labels; unresolved → fail closed (throw)
+      if (cfg.action && typeof (cfg.action as { label?: unknown }).label === "object") {
+        const bound = await boundLocalIds(
+          workflow.workflow_id, workflow.current_version_id, node.node_id, "action.label.labelIds", "label");
+        if (bound.length === 0) {
+          throw new Error(`add_label node ${node.node_id}: ไม่มี bound labels — resolve bindings ก่อน`);
+        }
+        if (msg.testSource) {
+          await testStatusConversationService.addTestLabels(msg.conversation_id, msg.testSource as TestSource, bound);
+          await dispatchLabelAddedEvents(msg, bound, run.run_id);
+          return {};
+        }
+        const coll = await getCollection<{ labels?: string[] }>(COLLECTIONS.conversations);
+        await coll.updateOne(
+          { conversation_id: msg.conversation_id },
+          { $addToSet: { labels: { $each: bound } }, $set: { updated_at: new Date() } }
+        );
+        await logAdminEvent({
+          action_type: "workflow.add_label",
+          actor: "workflow-engine",
+          conversation_id: msg.conversation_id,
+          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, labels: bound, canonical: true },
+        });
+        await dispatchLabelAddedEvents(msg, bound, run.run_id);
+        return {};
+      }
+
       // ⚡ Phase 3: รองรับทั้ง legacy { label: string } และ { label_ids: string[] }
       const labelsToAdd: string[] = [];
 
@@ -1501,6 +1972,34 @@ async function performAction(
         });
       }
       return {};
+    }
+
+    case "remove_label": {
+      // ⚡ canonical (Zaapi remove_label) — action.label.labelIds → bound labels → $pull
+      if (cfg.action && typeof (cfg.action as { label?: unknown }).label === "object") {
+        const bound = await boundLocalIds(
+          workflow.workflow_id, workflow.current_version_id, node.node_id, "action.label.labelIds", "label");
+        if (bound.length === 0) {
+          throw new Error(`remove_label node ${node.node_id}: ไม่มี bound labels — resolve bindings ก่อน`);
+        }
+        if (msg.testSource) {
+          await testStatusConversationService.removeTestLabels(msg.conversation_id, msg.testSource as TestSource, bound);
+          return {};
+        }
+        const coll = await getCollection<{ labels?: string[] }>(COLLECTIONS.conversations);
+        await coll.updateOne(
+          { conversation_id: msg.conversation_id },
+          { $pull: { labels: { $in: bound } }, $set: { updated_at: new Date() } }
+        );
+        await logAdminEvent({
+          action_type: "workflow.remove_label",
+          actor: "workflow-engine",
+          conversation_id: msg.conversation_id,
+          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, labels: bound },
+        });
+        return {};
+      }
+      throw new Error(`remove_label node ${node.node_id}: legacy remove_label config ไม่รองรับ`);
     }
 
     case "close_ticket": {
@@ -1591,6 +2090,17 @@ async function performAction(
     }
 
     case "jump_to": {
+      // ⚡ canonical (Zaapi action.jumpTo) — target = synthesized edge ตามปกติ;
+      //   นับ jump ต่อ node (maxJumps กัน loop) — เกิน → จบ flow
+      const zj = (cfg.action as { jumpTo?: { maxJumps?: number } } | undefined)?.jumpTo;
+      if (zj) {
+        const key = `_jumps_${node.node_id}`;
+        const n = Number(context[key] || 0) + 1;
+        context[key] = n;
+        const maxJ = Number(zj.maxJumps ?? 3);
+        if (n > maxJ) return { stop: true }; // เกิน maxJumps → จบ (fail-closed กัน infinite loop)
+        return {}; // edge carrier พาไป target อยู่แล้ว
+      }
       // วนกลับ — เปลี่ยน node ถัดไปเป็น target (walkGraph รับ via context hack ด้านล่าง)
       // ⚠️ จริงๆ jump ทำงานใน walkGraph ผ่าน edge ปกติ — jump_to ใช้วิธี set context flag
       const target = String(cfg.target_node_id || "");
@@ -1604,9 +2114,77 @@ async function performAction(
       return {};
     }
 
+    case "unassign_ticket": {
+      // ⚡ canonical (Zaapi chat_unassign) — เอา assignee ออก status เดิม
+      if (msg.testSource) {
+        await testStatusConversationService.unassignTestConversation(msg.conversation_id, msg.testSource as TestSource);
+      } else {
+        const meta = await statusConversationService.getMeta(msg.conversation_id);
+        await statusConversationService.updateStatus(msg.conversation_id, meta?.status || "open", null, "workflow-engine");
+      }
+      return {};
+    }
+
+    case "set_ticket_field": {
+      // ⚡ canonical (Zaapi action.setTicketField) — ticketFieldId → binding → local field
+      const stf = (cfg.action as { setTicketField?: { value?: unknown } } | undefined)?.setTicketField;
+      if (!stf) return {}; // legacy/no canonical config → nothing to set
+      const ids = await boundLocalIds(workflow.workflow_id, workflow.current_version_id, node.node_id, "action.setTicketField.ticketFieldId", "ticket_field");
+      if (ids.length === 0) throw new Error(`set_ticket_field node ${node.node_id}: ticketFieldId binding unresolved — fail closed`);
+      const convColl = await getCollection<{ conversation_id: string }>(COLLECTIONS.conversations);
+      await convColl.updateOne({ conversation_id: msg.conversation_id } as never,
+        { $set: { [`ticket_fields.${ids[0]}`]: stf.value } } as never, { upsert: true } as never);
+      return {};
+    }
+
+    // ⚡ marketplace / review actions — adapter boundary:
+    //   send จริงต้องมี marketplace adapter (Shopee/Lazada API) — inject ผ่าน setMarketplaceAdapter
+    //   ไม่มี adapter → throw (fail-closed = run errored, readiness gate เห็น)
+    case "send_marketplace_order_card":
+    case "reply_to_review":
+    case "mark_review_as_follow_up":
+    case "add_note_to_review": {
+      if (!marketplaceAdapter) {
+        throw new Error(`${node.subtype} node ${node.node_id}: marketplace adapter not configured — fail closed`);
+      }
+      await marketplaceAdapter({ kind: node.subtype, node, msg, config: cfg.action as Record<string, unknown>, run });
+      return {};
+    }
+
     default:
       return {};
   }
+}
+
+// ─── label_added dispatch — workflow ติด label → fire label_added flows ──
+// ⚡ Zaapi cross-flow chains (flows 10-14 ติด label → review flows ยิงต่อ)
+//   hop cap กัน loop: label flow ติด label ที่ trigger ตัวเองอีก
+async function dispatchLabelAddedEvents(msg: EngineMessage, labels: string[], fromRunId: string): Promise<void> {
+  const depth = Number((msg as { _label_event_depth?: number })._label_event_depth || 0);
+  if (depth >= 3) return; // hop cap — label chain ลึกสุด 3 flows
+  for (const label of labels) {
+    try {
+      await matchAndRunEvent({ ...msg, event_label: label, _label_event_depth: depth + 1 } as EngineMessage, "label_added");
+    } catch (err) {
+      await logAdminEvent({
+        action_type: "workflow.label_event_error",
+        actor: "workflow-engine",
+        conversation_id: msg.conversation_id,
+        metadata: { from_run_id: fromRunId, label, error: (err as Error).message },
+      });
+    }
+  }
+}
+
+// ─── marketplace adapter — injectable boundary สำหรับ marketplace actions ──
+//   host (bot-worker/API route) inject ตัวจริงตอน marketplace integration พร้อม
+export type MarketplaceActionCall = (args: {
+  kind: string; node: WorkflowNode; msg: EngineMessage;
+  config: Record<string, unknown> | undefined; run: WorkflowRunDoc;
+}) => Promise<void>;
+let marketplaceAdapter: MarketplaceActionCall | null = null;
+export function setMarketplaceAdapter(fn: MarketplaceActionCall | null): void {
+  marketplaceAdapter = fn;
 }
 
 // ─── Phase 2 — Background timeout checker ─────────────────
@@ -1786,8 +2364,13 @@ export const workflowEngine = {
   cancelActiveRuns,
   matchAndRun,
   resumeFlow,
+  resumeTimerRun,
+  sweepDueTimerRuns,
   checkWaitTimeouts,
   validateWaitAnswer,
   runInboundWorkflowStage,
   runInboundDispatch,
+  escalateAiRun,
+  setMarketplaceAdapter,
+  matchAndRunEvent,
 };

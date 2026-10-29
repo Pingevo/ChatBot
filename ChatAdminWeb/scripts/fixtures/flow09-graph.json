@@ -1,0 +1,263 @@
+{
+  "name": "ประเมินแอดมิน 2 - เก็บคะแนน (KingGadgets)",
+  "nodes": [
+    {
+      "node_id": "zn_r4b9m6",
+      "type": "trigger",
+      "subtype": "message_received",
+      "config": {
+        "label": "ได้รับข้อความ",
+        "triggerOncePerConversation": false,
+        "triggerOncePerOpen": false
+      }
+    },
+    {
+      "node_id": "zn_uki2po",
+      "type": "condition",
+      "subtype": "label",
+      "config": {
+        "label": "กรองลูกค้าจากแท็ก",
+        "conditions": [
+          {
+            "operator": "contains_all"
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_165r0s1",
+      "type": "condition",
+      "subtype": "message_content",
+      "config": {
+        "label": "จับคีย์เวิร์ดในข้อความลูกค้า",
+        "conditions": [
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "5",
+              "ห้า"
+            ]
+          },
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "4",
+              "สี่"
+            ]
+          },
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "3",
+              "สาม"
+            ]
+          },
+          {
+            "operator": "contains_one_of",
+            "msgType": "text",
+            "text": [
+              "1",
+              "2",
+              "หนึ่ง",
+              "สอง"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "node_id": "zn_1d0t1yk",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_1mtl6pj",
+      "type": "action",
+      "subtype": "remove_label",
+      "config": {
+        "label": "ลบแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_1q45iil",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "ขอบพระคุณอย่างยิ่งสำหรับคะแนนและเวลาที่คุณลูกค้ามอบให้นะคะ ทางร้านจะนำไปปรับปรุงการดูแลให้ดียิ่งขึ้นค่ะ หากมีข้อสงสัยเพิ่มเติม ทักเข้ามาได้ตลอดเลยค่ะ",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_13yme6t",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 2",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_1n7p4r0",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 3",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_i7ylyg",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก 4",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_13j05c0",
+      "type": "action",
+      "subtype": "remove_label",
+      "config": {
+        "label": "ลบแท็ก 2",
+        "action": {
+          "label": {}
+        }
+      }
+    },
+    {
+      "node_id": "zn_mxpb76",
+      "type": "action",
+      "subtype": "send_message",
+      "config": {
+        "label": "ส่งข้อความ 2",
+        "action": {
+          "message": {
+            "type": "text",
+            "text": "ขอบพระคุณที่สละเวลาให้คะแนนนะคะ ทางร้านต้องขออภัยอย่างสูงที่การดูแลครั้งนี้ยังทำได้ไม่ดีพอค่ะ ทางร้านขอรับเรื่องไว้ปรับปรุง และจะให้เจ้าหน้าที่ติดต่อกลับเข้ามาดูแลคุณลูกค้าอีกครั้งค่ะ",
+            "variables": []
+          }
+        }
+      }
+    },
+    {
+      "node_id": "zn_1rrix76",
+      "type": "action",
+      "subtype": "assign_ticket",
+      "config": {
+        "label": "มอบหมายให้",
+        "action": {
+          "assignment": {
+            "assignWhenAllOoh": false,
+            "assignToLastTicketHandledBy": true,
+            "lastAssignedUsersIndex": 0
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "ze_1a67r8j",
+      "source_node_id": "zn_r4b9m6",
+      "target_node_id": "zn_uki2po",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_zc9r47",
+      "source_node_id": "zn_uki2po",
+      "target_node_id": "zn_165r0s1",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_1nebki3",
+      "source_node_id": "zn_165r0s1",
+      "target_node_id": "zn_1d0t1yk",
+      "branch": "condition-index-0"
+    },
+    {
+      "edge_id": "ze_1k3q339",
+      "source_node_id": "zn_165r0s1",
+      "target_node_id": "zn_13yme6t",
+      "branch": "condition-index-1"
+    },
+    {
+      "edge_id": "ze_1uag6f9",
+      "source_node_id": "zn_165r0s1",
+      "target_node_id": "zn_1n7p4r0",
+      "branch": "condition-index-2"
+    },
+    {
+      "edge_id": "ze_vcvlam",
+      "source_node_id": "zn_165r0s1",
+      "target_node_id": "zn_i7ylyg",
+      "branch": "condition-index-3"
+    },
+    {
+      "edge_id": "ze_1ifge3e",
+      "source_node_id": "zn_1d0t1yk",
+      "target_node_id": "zn_1mtl6pj",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1u5140v",
+      "source_node_id": "zn_1mtl6pj",
+      "target_node_id": "zn_1q45iil",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_1wwh33",
+      "source_node_id": "zn_13yme6t",
+      "target_node_id": "zn_1mtl6pj",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_jdf37e",
+      "source_node_id": "zn_1n7p4r0",
+      "target_node_id": "zn_1mtl6pj",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_4ihlwj",
+      "source_node_id": "zn_i7ylyg",
+      "target_node_id": "zn_13j05c0",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_y6enrh",
+      "source_node_id": "zn_13j05c0",
+      "target_node_id": "zn_mxpb76",
+      "branch": null
+    },
+    {
+      "edge_id": "ze_6d1iqj",
+      "source_node_id": "zn_mxpb76",
+      "target_node_id": "zn_1rrix76",
+      "branch": null
+    }
+  ]
+}

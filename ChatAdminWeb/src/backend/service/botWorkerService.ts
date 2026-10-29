@@ -585,6 +585,7 @@ async function storeWorkflowDelivered(opts: {
       batch_id: opts.batchId,
       inbound_text: opts.messageText,
       bot_reply_text: d.text,
+      ...(d.image_url ? { bot_reply_image_url: d.image_url } : {}),
       bot_source: d.source,
       ...(opts.outcomeEnvelope ? { outcome_envelope: opts.outcomeEnvelope } : {}),
       rating: "unrated",
@@ -937,6 +938,21 @@ async function processClaimedMessage(msg: {
             platform: msg.platform,
             metadata: { trigger_id: trigger.trigger_id, assigned_to: agentId, delivered_to_platform: false },
           });
+          // ⚡ AI ตัดสินว่าไม่ไหว → ปลุก workflow run ที่ park ai_bot ให้เดินเส้น escalate
+          //   (Zaapi let_ai_respond → ai-chatbot-escalate edge) — ไม่มี run park อยู่ = no_match
+          //   non-fatal: handoff สำเร็จแล้ว workflow error ห้ามทำ outcome พัง
+          try {
+            await workflowEngine.escalateAiRun(msg.conversation_id, msg as never);
+          } catch (e) {
+            await logBotworkerEvent({
+              type: "workflow",
+              actor: "bot-worker",
+              conversation_id: msg.conversation_id,
+              shop_id: msg.shop_id,
+              platform: msg.platform,
+              metadata: { action: "ai_escalate_error", error: e instanceof Error ? e.message : String(e) },
+            });
+          }
           return {
             status: "handed_off",
             detail: `trigger→handoff→${agentId || "no agent"}`,
@@ -1836,6 +1852,20 @@ export const botWorkerService = {
     const run = (async (): Promise<number> => {
       if (signal.aborted || !(await acquireWorkerLeadership(signal))) return 0;
       return workflowEngine.checkWaitTimeouts(signal, scope);
+    })();
+    inFlight.add(run);
+    run.then(() => inFlight.delete(run), () => inFlight.delete(run));
+    return run;
+  },
+  // ⚡ Zaapi delay timer sweep — era/leadership/inFlight contract เดียวกับ
+  //   checkWaitTimeouts (gate ผ่าน service surface — engine ไม่ import กลับมา)
+  sweepDueTimerRuns: (scope: BotworkerCycleScope): Promise<{ due: number; resumed: number; errors: string[] }> => {
+    const signal = eraSignal();
+    const run = (async () => {
+      if (signal.aborted || !(await acquireWorkerLeadership(signal))) {
+        return { due: 0, resumed: 0, errors: [] };
+      }
+      return workflowEngine.sweepDueTimerRuns(signal, scope);
     })();
     inFlight.add(run);
     run.then(() => inFlight.delete(run), () => inFlight.delete(run));

@@ -75,4 +75,7 @@ export const workflowEngine = {
     console.log("EV WAIT_TIMEOUT");
     return 0;
   },
+  async escalateAiRun() {
+    return { status: "no_match", detail: "no ai-parked run", delivered: [] };
+  },
 };

@@ -1,0 +1,34 @@
+{
+  "name": "ข้อความนอกเวลา tiktok",
+  "nodes": [
+    {
+      "node_id": "zn_syraci",
+      "type": "trigger",
+      "subtype": "message_received",
+      "config": {
+        "label": "ได้รับข้อความ",
+        "triggerOncePerConversation": false,
+        "triggerOncePerOpen": true
+      }
+    },
+    {
+      "node_id": "zn_sbtoq3",
+      "type": "action",
+      "subtype": "add_label",
+      "config": {
+        "label": "เพิ่มแท็ก",
+        "action": {
+          "label": {}
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "edge_id": "ze_1fa57j8",
+      "source_node_id": "zn_syraci",
+      "target_node_id": "zn_sbtoq3",
+      "branch": null
+    }
+  ]
+}

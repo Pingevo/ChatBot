@@ -675,6 +675,8 @@ async function main() {
     assert(state.calls.handoffTest === 1, `handoffTest=${state.calls.handoffTest} want 1`);
     assert(Array.isArray(c?.side_effects) && c.side_effects.some((s: any) => s.type === "handoff"),
       `claim must record handoff side-effect for recovery, got ${JSON.stringify(c?.side_effects)}`);
+    assert(state.calls.escalateAiRun === 1,
+      `escalateAiRun=${state.calls.escalateAiRun} want 1 — handoff must signal ai-parked workflow runs`);
   });
 
   await test("E4 assigned/open conversation → outcome no_action + 0 reply ids", async () => {

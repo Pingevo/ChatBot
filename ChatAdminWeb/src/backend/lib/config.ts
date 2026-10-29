@@ -84,6 +84,11 @@ export const serverConfig = {
     // ⚡ workflow engine (แบบ Zaapi Flow Builder)
     workflows: required("ADMIN_MONGO_COLLECTION_WORKFLOWS", "workflows"),
     workflowRuns: required("ADMIN_MONGO_COLLECTION_WORKFLOW_RUNS", "workflow_runs"),
+    // Zaapi import persistence — immutable versions + provenance + bindings
+    workflowVersions: required("ADMIN_MONGO_COLLECTION_WORKFLOW_VERSIONS", "workflow_versions"),
+    workflowImportBatches: required("ADMIN_MONGO_COLLECTION_WORKFLOW_IMPORT_BATCHES", "workflow_import_batches"),
+    workflowRawSnapshots: required("ADMIN_MONGO_COLLECTION_WORKFLOW_RAW_SNAPSHOTS", "workflow_raw_snapshots"),
+    workflowBindings: required("ADMIN_MONGO_COLLECTION_WORKFLOW_BINDINGS", "workflow_bindings"),
     // ⚡ Phase 2J — แยก admin meta ออกจาก conversations ที่ถูก dump ทุก 2 วิ
     //   เก็บ: assigned_to, status, closed_at, closed_by, close_count, assigned_at, assignment_mode_used
     //   ไม่โดน dump ทับ เพราะอยู่ใน collection ของเราเอง

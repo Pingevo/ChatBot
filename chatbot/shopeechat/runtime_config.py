@@ -63,6 +63,40 @@ def web_search_enabled() -> bool:
     return get_runtime_config().get("web_search_enabled") is True
 
 
+_POOL_KEYS = ("kb", "mongo_catalog", "units", "image_text")
+
+
+def pool_sources() -> dict:
+    """central evidence-pool policy — main_config.pool_sources.
+    field absent → ทุก source ON (behavior เดิม); per-key non-bool → ON
+    (ปิดต้องสั่งชัดเจน — สวิตช์นี้ควบคุม evidence admission เท่านั้น)"""
+    raw = get_runtime_config().get("pool_sources")
+    raw = raw if isinstance(raw, dict) else {}
+    return {k: raw[k] if isinstance(raw.get(k), bool) else True
+            for k in _POOL_KEYS}
+
+
+def source_enabled(name: str) -> bool:
+    return pool_sources().get(name, True)
+
+
+def kb_enabled() -> bool:
+    """pool_sources.kb — OFF = ห้าม query KB collection ทุกตัว"""
+    return source_enabled("kb")
+
+
+def kb_source() -> str:
+    """strict selector "legacy"|"zaapi" — absent/invalid → "legacy" (เดิม)"""
+    v = get_runtime_config().get("kb_source")
+    return v if v in ("legacy", "zaapi") else "legacy"
+
+
+def legacy_kb_reads_allowed() -> bool:
+    """อ่าน legacy KB collections ได้ก็ต่อเมื่อ kb ON และเลือก legacy —
+    zaapi backend + importer ทำงานของตัวเอง ไม่อ่าน legacy เด็ดขาด"""
+    return kb_enabled() and kb_source() == "legacy"
+
+
 def sanitize_or_model(model: str) -> str:
     """OpenRouter `:online` policy owner เดียว — web_search_enabled()
     is True เท่านั้นที่คง terminal `:online`; OFF/malformed/read-error
