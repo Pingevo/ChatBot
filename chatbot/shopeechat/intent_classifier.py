@@ -388,7 +388,7 @@ def classify_intent(
             {
                 "system_instruction": _INTENT_PROMPT,
                 "temperature": 0.0,
-                "max_output_tokens": 250,
+                "max_output_tokens": 512,
                 "response_mime_type": "application/json",
             },
             role="intent",
