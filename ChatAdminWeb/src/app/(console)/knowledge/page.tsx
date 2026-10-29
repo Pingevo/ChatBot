@@ -36,7 +36,8 @@ import { ModalSelect } from "@/components/ui/ModalSelect";
 import { FilterPresets } from "@/components/ui/FilterPresets";
 import { ZaapiKbPanel } from "@/components/knowledge/ZaapiKbPanel";
 
-type Tab = "all" | "general_faq" | "product_spec" | "zaapi";
+type Tab = "all" | "general_faq" | "product_spec";
+type Corpus = "legacy" | "zaapi";
 
 interface FormState {
   id?: string;
@@ -81,6 +82,7 @@ export default function KnowledgePage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [tab, setTab] = useState<Tab>("all");
+  const [corpus, setCorpus] = useState<Corpus>("legacy");
   const [showForm, setShowForm] = useState(false);
   const formModalRef = useFocusTrap<HTMLDivElement>(showForm);
   const [form, setForm] = useState<FormState>(emptyForm);
@@ -456,7 +458,7 @@ export default function KnowledgePage() {
         )
       }
       filterBarBelow
-      filterBar={tab === "zaapi" ? undefined :
+      filterBar={corpus === "zaapi" ? undefined :
         <>
         {/* Filter bar — search + platform + active + created by + updated by + sort */}
         <div className="flex items-center gap-2 mt-4 flex-wrap">
@@ -724,13 +726,33 @@ export default function KnowledgePage() {
         </div>
       )}
 
+      {/* Corpus switcher — legacy knowledge_base vs imported zaapi_kb */}
+      <div className="flex gap-1 p-1 mb-4 bg-surface-2 rounded-xl w-fit" role="tablist" aria-label="แหล่งความรู้">
+        {([
+          { v: "legacy", l: "ระบบเดิม" },
+          { v: "zaapi", l: "Zaapi KB" },
+        ] as { v: Corpus; l: string }[]).map((c) => (
+          <button
+            key={c.v}
+            onClick={() => setCorpus(c.v)}
+            role="tab"
+            aria-selected={corpus === c.v ? "true" : "false"}
+            className={`px-4 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+              corpus === c.v ? "bg-surface text-text shadow-sm" : "text-text-muted hover:text-text"
+            }`}
+          >
+            {c.l}
+          </button>
+        ))}
+      </div>
+
       {/* Tabs */}
+      {corpus === "legacy" && (
       <div className="flex gap-1.5 mb-4" role="tablist" aria-label="ประเภทความรู้">
         {([
           { v: "all", l: "ทั้งหมด" },
           { v: "general_faq", l: "FAQ/นโยบาย" },
           { v: "product_spec", l: "สินค้า" },
-          { v: "zaapi", l: "Zaapi KB" },
         ] as { v: Tab; l: string }[]).map((t) => (
           <button
             key={t.v}
@@ -748,9 +770,10 @@ export default function KnowledgePage() {
           </button>
         ))}
       </div>
+      )}
 
-      <div role="tabpanel" id="kb-tabpanel" aria-labelledby={`kb-tab-${tab}`}>
-      {tab === "zaapi" ? (
+      <div role="tabpanel" id="kb-tabpanel" aria-labelledby={corpus === "zaapi" ? undefined : `kb-tab-${tab}`}>
+      {corpus === "zaapi" ? (
         <ZaapiKbPanel />
       ) : loading ? (
         <div className="flex justify-center py-12">

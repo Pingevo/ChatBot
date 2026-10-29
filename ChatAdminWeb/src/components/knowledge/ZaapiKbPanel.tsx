@@ -51,7 +51,7 @@ export function ZaapiKbPanel() {
 
   useEffect(() => {
     api()
-      .get("/api/zaapi-kb", { params: { mode: "sources" } })
+      .get("/zaapi-kb", { params: { mode: "sources" } })
       .then((r) => setSources(r.data.sources || []))
       .catch(() => setSources([]))
       .finally(() => setLoading(false));
@@ -60,7 +60,7 @@ export function ZaapiKbPanel() {
   const loadDocs = useCallback((sourceId: string, page: number) => {
     setDocsLoading(true);
     api()
-      .get("/api/zaapi-kb", {
+      .get("/zaapi-kb", {
         params: { mode: "docs", source_id: sourceId, skip: page * PAGE_SIZE, limit: PAGE_SIZE },
       })
       .then((r) => { setDocs(r.data.docs || []); setDocsTotal(r.data.total || 0); })
