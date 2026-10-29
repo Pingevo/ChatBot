@@ -10138,3 +10138,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 
 - 2026-10-29: pull main ให้เท่ากัน (f8ce657 = origin/main) → สร้าง branch `feature-botlogic-kb-workflow` จาก main
 - ขอบเขต: แก้ bot logic ให้ support KB workflow — รอรายละเอียดเคส/ผลกระทบจากผู้ใช้ก่อนแก้ (ตามกฎข้อ 9: วิเคราะห์ plan + ขออนุญาตก่อนลงมือ)
+
+## ผ่านแล้ว (verified) — /chat 500 ทุก request: `_rc` local import shadow module alias (2026-10-29)
+
+- **error**: `bot call failed [shopee] (500): Internal Server Error` — shadow generate-conversation ล้มทุก Q&A / /chat ตายทุก request
+- **เกิดเพราะ**: commit `9f981b7` (Workstream E P2a) เพิ่ม `from . import runtime_config as _rc` ใน `_chat_impl` (line ~2787) → `_rc` กลายเป็น function-local ทั้งฟังก์ชัน → `_rc.*` ทุกจุดก่อนหน้า (1528/2291/2308 = `route_context`) → `UnboundLocalError` ก่อนถึง import — pattern เดียวกับ `_cp` shadow ที่ comment line ~1999 เคยเจอ
+- **แก้**: rename local alias → `runtime_config as _rcfg` (convention เดิม line 1211/2316) + `_rc.kb_source()` → `_rcfg.kb_source()` — 2 บรรทัด, logic เดิม
+- **ผลกระทบเคสอื่น**: alias rename ล้วน — `_rc` กลับชี้ `route_context` ถูกเดิม, `kb_source()` เหมือนเดิม, ไม่มีเคสอื่นกระทบ
+- **verify**: repro ก่อนแก้ = `UnboundLocalError` at app.py:1528 → หลังแก้ in-process `chat()` คืนคำตอบจริง + HTTP POST /chat → **200** (`--reload` pickup แล้ว) · `py_compile` OK
+- branch `feature-botlogic-kb-workflow`
