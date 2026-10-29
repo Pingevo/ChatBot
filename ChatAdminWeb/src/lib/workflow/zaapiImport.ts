@@ -243,7 +243,15 @@ function convertFlow(flow: Record<string, unknown>, name: string, nameStatus: Na
 
   const srcNodes = Array.isArray(flow.nodes) ? flow.nodes as { id?: string; type?: string; position?: { x?: number; y?: number }; data?: Record<string, unknown> }[] : [];
   const srcEdges = Array.isArray(flow.edges) ? flow.edges as { source?: string; target?: string; sourceHandle?: string | null }[] : [];
-  const srcHandles = (flow.handles && typeof flow.handles === "object" ? flow.handles : {}) as Record<string, Record<string, string>>;
+  // all-flows เก็บ flow.handles; ไฟล์เดี่ยวเก็บ lookups.handles — merge ราย node (flow ชนะต่อ key)
+  const srcHandles: Record<string, Record<string, string>> = {
+    ...((flow.lookups as { handles?: Record<string, Record<string, string>> } | undefined)?.handles || {}),
+  };
+  if (flow.handles && typeof flow.handles === "object") {
+    for (const [nid, hs] of Object.entries(flow.handles as Record<string, Record<string, string>>)) {
+      srcHandles[nid] = { ...srcHandles[nid], ...hs };
+    }
+  }
 
   const idMap = new Map<string, string>();
   for (const n of srcNodes) if (n.id) idMap.set(n.id, "zn_" + shortHash(String(n.id)));

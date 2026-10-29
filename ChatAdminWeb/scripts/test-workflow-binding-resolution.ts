@@ -2952,6 +2952,40 @@ async function main() {
       "usedHandles union — legacy 'out' edge ยังมี handle ข้าง zaapi outputs");
   }
 
+  // ─── §35 single-file lookups.handles — ไฟล์เดี่ยวเก็บ labels ที่ lookups.handles ไม่ใช่ flow.handles
+  {
+    const singleFile = {
+      flow: { workflowId: "workflow_SF1", name: "single file flow" },
+      versions: [],
+      nodes: [
+        { id: "t1", type: "message_received", data: { name: "trig", nodeType: "trigger" } },
+        { id: "c1", type: "business_hours", data: { name: "hours", nodeType: "condition",
+            conditions: [{ operator: "within_office_hours", nextStepId: "a1" }, { operator: "outside_office_hours" }] } },
+        { id: "a1", type: "send_message", data: { name: "send", nodeType: "action",
+            action: { message: { type: "text", text: "hi" } } } },
+      ],
+      edges: [
+        { source: "t1", target: "c1", sourceHandle: null },
+        { source: "c1", target: "a1", sourceHandle: "condition-index-0" },
+      ],
+      lookups: { handles: { c1: { "condition-index-0": "ในเวลาทำการ", "condition-index-1": "นอกเวลาทำการ" } } },
+    };
+    const b = previewZaapiFlows(singleFile as never, {});
+    const d = b.reports[0].draft;
+    const cNode = d.nodes.find((n) => n.subtype === "business_hours")!;
+    eq(d.handleLabels[cNode.node_id]?.["condition-index-0"], "ในเวลาทำการ",
+      "single-file lookups.handles → handleLabels มาครบ");
+    eq(d.handleLabels[cNode.node_id]?.["condition-index-1"], "นอกเวลาทำการ",
+      "single-file lookups.handles → no-condition slot label ด้วย");
+    // flow.handles (all-flows shape) ยังชนะ/merge ถูก
+    const both = previewZaapiFlows({ flows: [{ ...singleFile, handles: { c1: { "condition-index-0": "override" } } }] } as never, {});
+    const c2 = both.reports[0].draft.nodes.find((n) => n.subtype === "business_hours")!;
+    eq(both.reports[0].draft.handleLabels[c2.node_id]?.["condition-index-0"], "override",
+      "flow.handles override lookups.handles เมื่อมีทั้งคู่");
+    eq(both.reports[0].draft.handleLabels[c2.node_id]?.["condition-index-1"], "นอกเวลาทำการ",
+      "merge — lookups labels ที่ไม่ชนกันยังอยู่");
+  }
+
   // ═══ summary ═══
   const countsEnd = await allCounts();
   const totalWfs = (await collDocs(COLLECTIONS.workflows)).length;
