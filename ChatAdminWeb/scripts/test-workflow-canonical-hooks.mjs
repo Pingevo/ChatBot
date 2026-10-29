@@ -2,7 +2,7 @@
 // Redirect leaf modules ที่แตะ Mongo/env ไปยัง mocks — convention เดียวกับ persistence-hooks
 
 const MOCK_URL = new URL("./test-workflow-canonical-mocks.mjs", import.meta.url).href;
-const TARGETS = ["/src/backend/db/mongoClient.", "/src/backend/service/adminLogService."];
+const TARGETS = ["/src/backend/db/mongoClient.", "/src/backend/lib/config.", "/src/backend/service/adminLogService."];
 
 export async function resolve(specifier, context, nextResolve) {
   const resolved = await nextResolve(specifier, context);

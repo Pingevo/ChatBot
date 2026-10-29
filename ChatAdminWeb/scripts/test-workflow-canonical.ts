@@ -161,6 +161,59 @@ async function main() {
     catch (e) { err = (e as Error).message; }
     ok(err.includes("mystery_type"), `unknown subtype → error "${err}"`);
   }
+
+  // ─── 9. delay timer — park → sweep → resume → complete ──
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    await wfs.deleteMany({}); await runs.deleteMany({});
+    // workflow: trigger → delay → (no edge = จบ flow)
+    await wfs.insertOne({
+      workflow_id: "wf_d", name: "delay flow", enabled: true, status: "published",
+      nodes: [
+        { node_id: "t1", type: "trigger", subtype: "message_received", config: {}, position: { x: 0, y: 0 } },
+        { node_id: "d1", type: "wait", subtype: "delay", config: { delay: { unit: "minutes", value: 9 } }, position: { x: 0, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "t1", target_node_id: "d1" },
+      ],
+    });
+    // run park อยู่ที่ delay — due แล้ว
+    const past = new Date(Date.now() - 60_000);
+    await runs.insertOne({
+      run_id: "r_due", workflow_id: "wf_d", conversation_id: "cv_1",
+      status: "waiting_for_timer", current_node_id: "d1", waiting_for: "timer",
+      resume_at: past, context: {}, updated_at: past,
+    });
+    // run ยังไม่ due — ต้องไม่ถูกปลุก
+    await runs.insertOne({
+      run_id: "r_early", workflow_id: "wf_d", conversation_id: "cv_1",
+      status: "waiting_for_timer", current_node_id: "d1", waiting_for: "timer",
+      resume_at: new Date(Date.now() + 600_000), context: {}, updated_at: new Date(),
+    });
+    const res = await eng.sweepDueTimerRuns(new Date());
+    eq(res.due, 1, "sweep เจอเฉพาะ run ที่ due (r_early ไม่ถูกหยิบ)");
+    const rDue = await runs.findOne({ run_id: "r_due" });
+    eq(rDue?.status, "completed", "due run → delay ผ่าน → ไม่มี edge → completed");
+    eq(rDue?.outcome, "actioned", "delay จบด้วย actioned (edge ถัดไปหมด)");
+    const rEarly = await runs.findOne({ run_id: "r_early" });
+    eq(rEarly?.status, "waiting_for_timer", "early run ยัง park อยู่");
+    // sweep ซ้ำ — run จบแล้วไม่มีอะไร due
+    const res2 = await eng.sweepDueTimerRuns(new Date());
+    eq(res2.due, 0, "sweep ซ้ำ idempotent — ไม่มี due ค้าง");
+    // inbound ระหว่าง park → ไม่ resume timer (in_flight)
+    await runs.insertOne({
+      run_id: "r_park", workflow_id: "wf_d", conversation_id: "cv_inb",
+      status: "waiting_for_timer", current_node_id: "d1", waiting_for: "timer",
+      resume_at: new Date(Date.now() + 600_000), context: {}, updated_at: new Date(),
+    });
+    const cfg = await mongo.getCollection(COLLECTIONS.systemConfigs);
+    await cfg.updateOne({ config_key: "main_config" } as never,
+      { $set: { config_key: "main_config", workflow_enabled: true, workflow_run_timeout_ms: 1800000 } }, { upsert: true });
+    const stage = await eng.runInboundWorkflowStage({ conversation_id: "cv_inb", shop_id: "s1", platform: "shopee", text: "hi" } as never);
+    eq(stage.status, "in_flight", "inbound ระหว่าง delay → in_flight (ไม่ resume timer)");
+  }
 }
 
 main().then(() => {

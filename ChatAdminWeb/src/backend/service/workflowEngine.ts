@@ -47,9 +47,10 @@ export interface WorkflowRunDoc extends Document {
   platform: Platform;
   customer_id?: string;
 
-  status: "running" | "waiting_for_reply" | "completed" | "cancelled" | "errored";
+  status: "running" | "waiting_for_reply" | "waiting_for_timer" | "completed" | "cancelled" | "errored";
   current_node_id: string;        // node ที่กำลังอยู่ / รออยู่
-  waiting_for?: "next_message";
+  waiting_for?: "next_message" | "timer";
+  resume_at?: Date;               // ⚡ delay node — เวลาที่ timer ต้องปลุก run (sweep เจอ resume_at<=now)
 
   // ⚡ Phase 2 — wait_for_reply retry/timeout state
   wait_retry_count?: number;      // จำนวนครั้งที่ถามซ้ำ (reset ทุกครั้งที่เข้า wait node ใหม่)
@@ -196,7 +197,7 @@ async function ownedUpdateRun(run: WorkflowRunDoc, fields: Record<string, unknow
         run_id: run.run_id,
         owner_id: botworkerRuntime.ownerId,
         fencing_token: run.fencing_token,
-        status: { $in: ["running", "waiting_for_reply"] }, // ห้าม resurrect run ที่จบ/cancelled แล้ว
+        status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] }, // ห้าม resurrect run ที่จบ/cancelled แล้ว
       },
       { $set: set }
     );
@@ -218,7 +219,7 @@ async function heartbeatRun(run: WorkflowRunDoc): Promise<boolean> {
       run_id: run.run_id,
       owner_id: botworkerRuntime.ownerId,
       fencing_token: run.fencing_token,
-      status: { $in: ["running", "waiting_for_reply"] },
+      status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
     },
     { $set: { lease_expires_at: new Date(Date.now() + botworkerRuntime.claimLeaseMs), updated_at: new Date() } }
   );
@@ -231,9 +232,10 @@ async function acquireRun(runId: string): Promise<WorkflowRunDoc | null> {
   return coll.findOneAndUpdate(
     {
       run_id: runId,
-      status: { $in: ["running", "waiting_for_reply"] },
+      status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
       $or: [
         { status: "waiting_for_reply" },   // parked — CAS ตัวแรก flip เป็น running ก่อนเดิน graph
+        { status: "waiting_for_timer" },   // timer-parked — sweeper flip เหมือนกัน
         { lease_expires_at: { $lt: now } },
         { owner_id: { $exists: false } },
       ],
@@ -260,7 +262,7 @@ async function resolveUnacquiredRun(runId: string, workflowId?: string): Promise
   if (cur?.result) {
     return { ...cur.result, run_id: cur.run_id, workflow_id: cur.workflow_id } as EngineResult;
   }
-  if (cur && (cur.status === "running" || cur.status === "waiting_for_reply")) {
+  if (cur && (cur.status === "running" || cur.status === "waiting_for_reply" || cur.status === "waiting_for_timer")) {
     return inFlightResult(runId, cur.workflow_id, "run in-flight (owned by another worker)");
   }
   return {
@@ -282,7 +284,7 @@ async function cancelIfAbandoned(run: WorkflowRunDoc, fields: Partial<WorkflowRu
   const res = await coll.updateOne(
     {
       run_id: run.run_id,
-      status: { $in: ["running", "waiting_for_reply"] },
+      status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
       $or: [{ owner_id: { $exists: false } }, { lease_expires_at: { $lt: now } }],
     },
     { $set: { ...fields, updated_at: new Date() } }
@@ -301,7 +303,7 @@ export async function getActiveRun(conversationId: string): Promise<WorkflowRunD
   const coll = await getRunsCollection();
   const run = await coll.findOne({
     conversation_id: conversationId,
-    status: { $in: ["running", "waiting_for_reply"] },
+    status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
   });
 
   if (!run) return null;
@@ -337,7 +339,7 @@ export async function cancelActiveRuns(conversationId: string, reason: string): 
   const result = await coll.updateMany(
     {
       conversation_id: conversationId,
-      status: { $in: ["running", "waiting_for_reply"] },
+      status: { $in: ["running", "waiting_for_reply", "waiting_for_timer"] },
     },
     {
       $set: {
@@ -627,6 +629,45 @@ async function walkGraph(
       return await completeRun(workflow, run, context, delivered, "condition_false", `condition branch "${branch}" has no outgoing edge from ${node.node_id}`, undefined, execOpKey);
     }
 
+    // ── delay node (canonical Zaapi) → park จนถึง resume_at; sweeper ปลุก ──
+    if (node.type === "wait" && node.subtype === "delay") {
+      const d = (node.config as { delay?: { unit?: string; value?: number } }).delay;
+      const unitMs = ({ seconds: 1_000, minutes: 60_000, hours: 3_600_000, days: 86_400_000 } as Record<string, number>)[String(d?.unit || "")];
+      const ms = unitMs ? Number(d?.value || 0) * unitMs : NaN;
+      if (Number.isNaN(ms) || ms <= 0) {
+        if (!(await failRun(run, `delay node ${node.node_id}: invalid delay config`))) {
+          return inFlightResult(run.run_id, workflow.workflow_id, "lost run ownership before failRun");
+        }
+        return { status: "error", detail: "invalid delay config", delivered, recoverable: false, run_id: run.run_id, workflow_id: workflow.workflow_id };
+      }
+      const resumeAt = new Date(Date.now() + ms);
+      const isResumeOpD = !!execOpKey && execOpKey !== run.operation_key;
+      const parkedResultD: EngineResult = {
+        status: isResumeOpD ? "resumed" : "actioned",
+        detail: `delay ${d?.value} ${d?.unit} — resume at ${resumeAt.toISOString()}`,
+        delivered,
+        run_id: run.run_id,
+        workflow_id: workflow.workflow_id,
+        ...(handoff ? { handoff } : {}),
+      };
+      const waitWriteD: Record<string, unknown> = {
+        status: "waiting_for_timer",
+        current_node_id: node.node_id,
+        waiting_for: "timer",
+        resume_at: resumeAt,
+        wait_node_id: node.node_id,
+        context,
+      };
+      if (run.operation_key && execOpKey === run.operation_key) {
+        waitWriteD.result = { status: "actioned", detail: parkedResultD.detail, delivered, ...(handoff ? { handoff } : {}) };
+      }
+      if (isResumeOpD) waitWriteD[`resume_results.${execOpKey}`] = parkedResultD;
+      if (!(await ownedUpdateRun(run, waitWriteD))) {
+        return inFlightResult(run.run_id, workflow.workflow_id, `lost run ownership before delay checkpoint at ${node.node_id}`);
+      }
+      return parkedResultD;
+    }
+
     // ── wait node → หยุด รอลูกค้าพิมพ์ต่อ ──
     if (node.type === "wait" && node.subtype === "wait_for_reply") {
       const now = new Date();
@@ -785,6 +826,88 @@ async function doResumeFlow(run: WorkflowRunDoc, msg: EngineMessage): Promise<En
   return result;
 }
 
+// ─── delay timer — park/resume (canonical Zaapi) ──────────
+
+/**
+ * ปลุก run ที่ park อยู่ที่ delay node — sweeper เรียกเมื่อ resume_at <= now
+ * ⚡ ไม่ inject customer_reply (timer ไม่ใช่ข้อความใหม่) — advance ผ่าน delay
+ *   node ไป edge ถัดไปเหมือน wait-resume เดิม; ownership ผ่าน acquireRun เดียวกัน
+ */
+export async function resumeTimerRun(run: WorkflowRunDoc, msg: EngineMessage): Promise<EngineResult> {
+  const acquired = await acquireRun(run.run_id);
+  if (!acquired) {
+    return inFlightResult(run.run_id, run.workflow_id, "timer resume in-flight — run owned by another worker");
+  }
+  // belt: run อาจถูก wake ก่อน due (acquire ผ่าน status clause) — ยังไม่ถึงเวลา → re-park
+  if (acquired.status === "waiting_for_timer" && acquired.resume_at && acquired.resume_at.getTime() > Date.now()) {
+    return { status: "in_flight", detail: "timer not due yet", delivered: [], run_id: acquired.run_id, workflow_id: acquired.workflow_id };
+  }
+  if (acquired.status !== "waiting_for_timer" && acquired.status !== "running") {
+    return { status: "no_match", detail: `run ${run.run_id} is ${acquired.status} — cannot timer-resume`, delivered: [], run_id: run.run_id, workflow_id: acquired.workflow_id };
+  }
+  const workflow = await workflowService.getWorkflow(acquired.workflow_id);
+  if (!workflow) {
+    if (!(await failRun(acquired, "workflow deleted while timer parked"))) {
+      return inFlightResult(acquired.run_id, acquired.workflow_id, "lost run ownership before failRun");
+    }
+    return { status: "error", detail: "workflow not found", delivered: [], recoverable: false, run_id: acquired.run_id, workflow_id: acquired.workflow_id };
+  }
+  const delayNode = workflow.nodes.find((n) => n.node_id === acquired.current_node_id);
+  if (!delayNode || delayNode.type !== "wait" || delayNode.subtype !== "delay") {
+    if (!(await failRun(acquired, `current node ${acquired.current_node_id} is not a delay node`))) {
+      return inFlightResult(acquired.run_id, acquired.workflow_id, "lost run ownership before failRun");
+    }
+    return { status: "error", detail: "cannot timer-resume — not at delay node", delivered: [], recoverable: false, run_id: acquired.run_id, workflow_id: acquired.workflow_id };
+  }
+  const context = acquired.context || {};
+  if (!(await ownedUpdateRun(acquired, { status: "running", waiting_for: undefined, resume_at: undefined }))) {
+    return inFlightResult(acquired.run_id, acquired.workflow_id, "lost run ownership at timer resume start");
+  }
+  const next = nextNodeIds(workflow, delayNode.node_id);
+  if (next.length === 0) {
+    return await completeRun(workflow, acquired, context, [], "actioned", "delay node has no outgoing edge — flow ends", undefined, msg.operation_key);
+  }
+  const result = await walkGraph(workflow, { ...acquired, context }, msg, next[0], msg.operation_key);
+  if (result.status === "actioned") return { ...result, status: "resumed" };
+  return result;
+}
+
+/**
+ * Sweeper — หา run ที่ delay ถึงเวลาแล้วปลุก (caller: bot-worker tick / cron)
+ * durable: รอด restart เพราะ resume_at persist ใน run doc; run ที่ owner ตาย
+ *   ถูก acquire ผ่าน parked-status clause เหมือน wfr
+ */
+export async function sweepDueTimerRuns(now = new Date(), limit = 50): Promise<{ due: number; resumed: number; errors: string[] }> {
+  const coll = await getRunsCollection();
+  const due = await coll.find(
+    { status: "waiting_for_timer", resume_at: { $lte: now } },
+    { sort: { resume_at: 1 }, limit },
+  ).toArray();
+  const errors: string[] = [];
+  let resumed = 0;
+  for (const run of due) {
+    try {
+      const msg: EngineMessage = {
+        conversation_id: run.conversation_id,
+        customer_id: run.customer_id,
+        shop_id: run.shop_id,
+        config_shop_key: run.config_shop_key,
+        shopname: run.shopname,
+        platform: run.platform,
+        text: "",
+        testSource: run.test_source,
+        operation_key: `timer_${run.run_id}_${run.resume_at?.getTime() ?? 0}`,
+      } as EngineMessage;
+      const res = await resumeTimerRun(run, msg);
+      if (res.status === "resumed" || res.status === "actioned") resumed++;
+      else if (res.status === "error") errors.push(`${run.run_id}: ${res.detail}`);
+    } catch (e) {
+      errors.push(`${run.run_id}: ${(e as Error).message}`);
+    }
+  }
+  return { due: due.length, resumed, errors };
+}
+
 // ─── Phase 9 — single inbound dispatch owner ──────────────
 
 /** workflow stage ของ fixed inbound pipeline — bot-worker + Test Chat ใช้
@@ -800,6 +923,11 @@ export async function runInboundWorkflowStage(msg: EngineMessage): Promise<Engin
   }
   const activeRun = await getActiveRun(msg.conversation_id);
   if (activeRun) {
+    // ⚡ delay timer park — inbound ไม่ปลุก timer (Zaapi: delay คงเวลาเดิม);
+    //   run ยัง active → ไม่ spawn run ซ้ำ; sweeper ปลุกตอน resume_at ถึง
+    if (activeRun.waiting_for === "timer") {
+      return { status: "in_flight", detail: "run parked on delay timer — inbound does not resume timers", delivered: [], run_id: activeRun.run_id, workflow_id: activeRun.workflow_id };
+    }
     const res = await resumeFlow(activeRun, msg);
     if (res.status !== "no_match") return res;
   }
@@ -1793,6 +1921,8 @@ export const workflowEngine = {
   cancelActiveRuns,
   matchAndRun,
   resumeFlow,
+  resumeTimerRun,
+  sweepDueTimerRuns,
   checkWaitTimeouts,
   validateWaitAnswer,
   runInboundWorkflowStage,
