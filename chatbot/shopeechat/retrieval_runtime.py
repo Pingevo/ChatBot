@@ -9,6 +9,7 @@ executor→pool→selector ครั้งเดียว แล้วคืน 
 from __future__ import annotations
 
 from . import generation_pointer as _gen
+from . import runtime_config as _rc
 from .route_context import build_retrieval_slots, build_retrieval_relations
 from .retrieval_planner import (
     build_grouped_retrieval_requests, channel_request)
@@ -65,7 +66,7 @@ def run_grouped_selection(
             cards = tuple(compat_cards)
             channels.append((channel_request("compat"),
                              lambda *a, _d=cards, **k: _d))
-        if kb_fetcher is not None:
+        if kb_fetcher is not None and _rc.source_enabled("kb"):
             channels.append((channel_request("kb"), kb_fetcher))
         results = execute_grouped_retrieval_requests(
             requests, message=message, shop=shop, platform=platform,

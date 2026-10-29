@@ -8838,3 +8838,19 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - roster เปลี่ยนเป็น span bars (ลาต่อเนื่อง = แถบเดียวพาดข้ามวัน), partial = ลายทแยง striped + เวลาใน bar/tooltip; month view chip มี dot สี + เวลา
 - ชื่อคนแสดง avatar initial + สถานะวันนี้ (ลาเต็มวัน/ลา xx:xx–xx:xx ปิดรับงานช่วงนี้/รับงานแล้ว)
 - verify: `npx tsc --noEmit` clean
+
+## กำลังจะทำ — Evidence Pool Switches + Strict KB Selector (Workstream E, Stage 3)
+
+- plan: `docs/plans/2026-11-14-evidence-pool-kb-selector-plan.md` (design อนุมัติแล้ว 2026-11-14)
+- P1: pool_sources config + runtime_config readers + admission guards (executor channels, kb_fetcher, KB entry fns, image_text reads)
+- P2: zaapi_kb collection + importer + adapter + atomic selector + readiness gate + /config UI
+- P3: let_ai_respond narrow-only
+
+## ผ่านแล้ว (verified) — Workstream E P1: central pool switches + admission (2026-11-14)
+
+- `runtime_config.py`: `pool_sources()` (absent→ทุก source ON), `source_enabled()`, `kb_enabled()`, `kb_source()` (invalid→legacy), `legacy_kb_reads_allowed()` (kb ON + legacy เท่านั้น)
+- `retrieval_executor.py`: units/mongo_catalog OFF → ไม่สร้าง fetch/SourceAttempt เลย; `retrieval_runtime.py`: kb OFF → ไม่ append kb channel
+- `knowledge_base.py` `_legacy_allowed()` gate ที่ `_search_kb_single`/`get_general_faq`/`_qa_docs`/`_known_brands` + `units.attach_kb_specs` (kb_products) + `attach_image_texts` (image_text OFF) → zero reads
+- `systemConfigService.ts`: `pool_sources`/`kb_source` fields + `pool_sources` whitelist + `setKbSource` CAS (zaapi flip ต้องผ่าน `zaapiKbReady` gate, rollback→legacy ไม่ต้อง)
+- test `docs/test/test_pool_sources_admission.py` **25/25** · tsc clean · SRS §6.34/6.5/6.16/6.29 อัปเดต
+- เหลือ: P2 zaapi_kb collection+importer+adapter+selector wiring+/config UI, P3 let_ai_respond narrow

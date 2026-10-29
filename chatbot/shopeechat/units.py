@@ -387,6 +387,9 @@ def attach_kb_specs(unit_docs: list[dict]) -> list[dict]:
     """spec inheritance — unit ที่ desc ว่าง ยืม canonical_specs จาก kb_products
     ผ่าน model_codes (แก้ "บอกไม่มีข้อมูลทั้งที่ KB มี") — additive, docs เดิม.
     kb_products เป็น live source นอก generation contract — อ่าน admin DB ตรง"""
+    from . import runtime_config as _rc
+    if not _rc.legacy_kb_reads_allowed():
+        return unit_docs
     need = [u for u in unit_docs
             if not u.get("has_description") and u.get("model_codes")]
     if not need:
@@ -437,6 +440,9 @@ def attach_image_texts(unit_docs: list[dict], snap=_gen.SNAP_UNSET) -> list[dict
     warranty_text = text ของรูป kind=banner ที่มีคำเกี่ยวกับประกัน
     (เงื่อนไขประกันเป็น per-listing — ร้านเดียวกันอาจให้ต่างกันตามสินค้า)
     """
+    from . import runtime_config as _rc
+    if not _rc.source_enabled("image_text"):
+        return unit_docs
     iids = sorted({i for u in unit_docs for i in (u.get("image_ids") or [])})
     if not iids:
         return unit_docs

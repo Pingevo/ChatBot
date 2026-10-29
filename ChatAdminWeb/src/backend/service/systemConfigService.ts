@@ -96,6 +96,12 @@ export interface SystemConfigDoc extends Document {
   //   ไม่มี env fallback — OFF = zero external web/provider calls ทุก path
   web_search_enabled: boolean;
 
+  // === Workstream E — central evidence pool + strict KB selector ===
+  // pool_sources: key absent/non-bool → ON (default เดิม); OFF = source ไม่ query
+  // kb_source: strict "legacy"|"zaapi" — flip ผ่าน setKbSource (CAS+readiness) เท่านั้น
+  pool_sources?: { kb?: boolean; mongo_catalog?: boolean; units?: boolean; image_text?: boolean };
+  kb_source?: 'legacy' | 'zaapi';
+
   updated_by: string;
   updated_at: Date;
 }
@@ -348,6 +354,8 @@ export async function updateSystemConfig(
     'grouped_retrieval_selection_enabled',
     // ⚡ Phase 10A — web-search operator gate (dev-only)
     'web_search_enabled',
+    // ⚡ Workstream E — pool source switches (kb_source ไม่อยู่ตรงนี้ — flip ผ่าน setKbSource CAS เท่านั้น)
+    'pool_sources',
   ];
 
   const sanitized: Record<string, unknown> = { updated_by: updatedBy, updated_at: new Date() };
@@ -432,6 +440,78 @@ export async function setBotWorkerPlatformEnabled(
     if ((e as { code?: number }).code !== 11000) throw e;
   }
   // CAS miss → one bounded reread to report persisted truth (no retry)
+  return reportCurrent();
+}
+
+/**
+ * ⚡ Workstream E — zaapi_kb readiness gate (single owner).
+ * flip kb_source=zaapi ได้ก็ต่อเมื่อ zaapi_kb พร้อม: collection มี doc active อย่างน้อย 1
+ * (P2 เพิ่ม: schema/indexes/embeddings + retrieval smoke)
+ */
+export async function zaapiKbReady(): Promise<{ ready: boolean; reason: string }> {
+  try {
+    const coll = await getCollection<Document>('zaapi_kb');
+    const count = await coll.countDocuments({ active: { $ne: false } }, { limit: 1 });
+    return count > 0
+      ? { ready: true, reason: `zaapi_kb active docs >= 1` }
+      : { ready: false, reason: 'zaapi_kb has no active documents' };
+  } catch (e) {
+    return { ready: false, reason: `zaapi_kb unreadable: ${(e as Error).message}` };
+  }
+}
+
+/**
+ * ⚡ Workstream E — kb_source strict selector CAS owner เดียว.
+ *   legacy→zaapi ต้องผ่าน zaapiKbReady() (fail-closed, ไม่มี implicit fallback)
+ *   zaapi→legacy = rollback path ไม่ต้อง readiness (legacy dataset ไม่เคยถูกแตะ)
+ *   expected = caller's expected persisted state → stale → applied:false + current
+ */
+export async function setKbSource(
+  source: 'legacy' | 'zaapi',
+  expected: 'legacy' | 'zaapi',
+  updatedBy = 'admin'
+): Promise<{ applied: true; changed: boolean } | { applied: false; current: 'legacy' | 'zaapi'; reason?: string }> {
+  const coll = await getCollection<SystemConfigDoc>(COLLECTIONS.systemConfigs);
+  const stateFilter: Record<string, unknown> = expected === 'zaapi'
+    ? { kb_source: 'zaapi' }
+    : { $or: [{ kb_source: 'legacy' }, { kb_source: { $exists: false } }] };
+  const reportCurrent = async () => {
+    const cur = await coll.findOne({ config_key: 'main_config' });
+    return { applied: false as const, current: cur?.kb_source === 'zaapi' ? 'zaapi' as const : 'legacy' as const };
+  };
+
+  if (source === expected) {
+    const probe = await coll.findOne({ config_key: 'main_config', ...stateFilter }, { projection: { _id: 1 } });
+    if (probe) return { applied: true, changed: false };
+    return reportCurrent();
+  }
+
+  // readiness gate — zaapi เท่านั้น; rollback → legacy เสมอผ่าน
+  if (source === 'zaapi') {
+    const gate = await zaapiKbReady();
+    if (!gate.ready) return { ...(await reportCurrent()), reason: gate.reason };
+  }
+
+  try {
+    const applied = await coll.updateOne(
+      { config_key: 'main_config', ...stateFilter },
+      {
+        $set: {
+          kb_source: source,
+          kb_source_updated_at: new Date(),
+          updated_by: updatedBy,
+          updated_at: new Date(),
+        } as Record<string, unknown>,
+      },
+      { upsert: expected === 'legacy' }
+    );
+    if (applied.matchedCount === 1 || applied.upsertedCount > 0) {
+      cachedConfig = null;
+      return { applied: true, changed: true };
+    }
+  } catch (e) {
+    if ((e as { code?: number }).code !== 11000) throw e;
+  }
   return reportCurrent();
 }
 
