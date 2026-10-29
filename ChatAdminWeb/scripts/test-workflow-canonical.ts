@@ -970,6 +970,35 @@ async function main() {
       ok(del.some((d) => d.text === "rnd path0"), "randomizer: weight 100 → path-0");
       ok(!del.some((d) => d.text === "chose B"), "button: ไม่ไป edge B");
     }
+
+    // send_message image → image_url passthrough (flow 08 requirement)
+    {
+      const V = "wv_img";
+      await wfs.deleteMany({}); // กัน workflow ก่อนหน้า match trigger ก่อน
+      await wfs.insertOne({
+        workflow_id: "wf_img", name: "img", enabled: true, status: "published",
+        trigger_frequency: "every_time", current_version_id: V,
+        import: { source: "zaapi", source_workflow_id: "WF-i" },
+        shop_ids: [], platforms: [], priority: 0,
+        nodes: [
+          { node_id: "t", type: "trigger", subtype: "message_received", config: {}, position: { x: 0, y: 0 } },
+          { node_id: "im", type: "action", subtype: "send_message",
+            config: { action: { message: { type: "image", imageUrl: "https://cdn.example.com/p.png" } } }, position: { x: 1, y: 0 } },
+        ],
+        edges: [{ edge_id: "e1", source_node_id: "t", target_node_id: "im" }],
+      });
+      const m = { conversation_id: "cv_i1", shop_id: "s1", platform: "shopee", config_shop_key: "s1", text: "hi" };
+      const r = await eng.matchAndRun(m as never);
+      eq(r.status, "actioned", "img: image send_message ไม่ throw");
+      const d0 = (r.delivered || [])[0] as { image_url?: string } | undefined;
+      eq(d0?.image_url, "https://cdn.example.com/p.png", "img: image_url passthrough");
+      // image ไม่มี imageUrl → fail-closed
+      await wfs.updateOne({ workflow_id: "wf_img" } as never, {
+        $set: { "nodes.1.config.action.message.imageUrl": "" } } as never);
+      let threw = false;
+      try { await eng.matchAndRun({ ...m, conversation_id: "cv_i2" } as never); } catch { threw = true; }
+      ok(threw, "img: image ไม่มี URL → fail closed (throw)");
+    }
   }
 }
 

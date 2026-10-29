@@ -26,6 +26,7 @@ export interface ShadowReplyDoc extends Document {
   inbound_message_id: string;     // ข้อความลูกค้าที่ bot ตอบ
   inbound_text: string;            // snapshot ของข้อความลูกค้า
   bot_reply_text: string;          // คำตอบที่ bot ของเรา generate
+  bot_reply_image_url?: string;    // ⚡ workflow send_message type=image — URL รูปที่ต้องส่ง
   bot_source?: string;             // source จาก bot (knowledge_base, general, etc.)
   bot_model?: string;
   bot_elapsed_ms?: number;

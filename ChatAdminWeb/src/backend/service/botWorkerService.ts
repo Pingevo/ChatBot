@@ -585,6 +585,7 @@ async function storeWorkflowDelivered(opts: {
       batch_id: opts.batchId,
       inbound_text: opts.messageText,
       bot_reply_text: d.text,
+      ...(d.image_url ? { bot_reply_image_url: d.image_url } : {}),
       bot_source: d.source,
       ...(opts.outcomeEnvelope ? { outcome_envelope: opts.outcomeEnvelope } : {}),
       rating: "unrated",

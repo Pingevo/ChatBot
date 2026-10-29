@@ -142,6 +142,7 @@ export interface DeliveredMessage {
   text: string;
   source: string;    // "workflow.send_message" | "workflow.let_ai_respond" | "workflow.stay_retry"
   node_id: string;
+  image_url?: string; // ⚡ Zaapi send_message type=image — media passthrough ไป delivery pipeline
 }
 
 export type EngineResult = {
@@ -1684,14 +1685,21 @@ async function performAction(
       // ⚡ canonical (Zaapi) — action.message{type:text|image,text,variables}
       //   text → resolve {{var}} แล้ว deliver; image/video → delivery pipeline
       //   ยังรองรับ text เท่านั้น → error (fail-closed, publish blocker)
-      const zmsg = (cfg.action as { message?: { type?: string; text?: string } } | undefined)?.message;
+      const zmsg = (cfg.action as { message?: { type?: string; text?: string; imageUrl?: string; videoUrl?: string } } | undefined)?.message;
       if (zmsg && typeof zmsg === "object") {
-        if (String(zmsg.type || "text") !== "text") {
-          throw new Error(`send_message node ${node.node_id}: type "${zmsg.type}" ยังไม่รองรับ — delivery pipeline รับ text เท่านั้น`);
+        const ztype = String(zmsg.type || "text");
+        if (ztype !== "text" && ztype !== "image") {
+          throw new Error(`send_message node ${node.node_id}: type "${zmsg.type}" ยังไม่รองรับ — delivery pipeline รับ text/image เท่านั้น`);
+        }
+        const vars = await prepareTemplateVars(msg, context);
+        if (ztype === "image") {
+          const imageUrl = resolveTemplate(String(zmsg.imageUrl || ""), vars);
+          if (!imageUrl) throw new Error(`send_message node ${node.node_id}: image type แต่ไม่มี imageUrl — fail closed`);
+          delivered.push({ text: resolveTemplate(String(zmsg.text || ""), vars), image_url: imageUrl, source: "workflow.send_message", node_id: node.node_id });
+          return {};
         }
         const rawText = String(zmsg.text || "");
         if (rawText) {
-          const vars = await prepareTemplateVars(msg, context);
           const resolved = resolveTemplate(rawText, vars);
           delivered.push({ text: resolved, source: "workflow.send_message", node_id: node.node_id });
         }
