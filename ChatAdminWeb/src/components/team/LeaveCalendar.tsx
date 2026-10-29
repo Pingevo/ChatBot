@@ -76,9 +76,14 @@ function isPartial(l: LeaveRecord) {
 function leaveOn(leaves: LeaveRecord[], adminId: string, key: string): LeaveRecord | undefined {
   return leaves.find((l) => l.adminId === adminId && key >= l.startDate && key <= l.endDate);
 }
-function initialOf(name: string) {
-  return name.trim().charAt(0).toUpperCase() || "?";
+function startOfWeek(d: Date) {
+  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  x.setDate(x.getDate() - x.getDay()); // เริ่มวันอาทิตย์
+  return x;
 }
+
+/** สีประจำตัว agent (header chip) — หมุนตาม index */
+const AGENT_COLORS = ["#0ea5e9", "#f43f5e", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316"];
 
 /** สร้าง mock leave จากรายชื่อ agent จริง — deterministic ตาม index (เปลี่ยนเป็น API ทีหลัง) */
 function buildMockLeaves(agents: LeaveCalendarAgent[], year: number, month: number, todayKeyStr: string): LeaveRecord[] {
@@ -101,36 +106,39 @@ function buildMockLeaves(agents: LeaveCalendarAgent[], year: number, month: numb
   return out;
 }
 
-/** รวมวันลาติดกันเป็น span bar (สำหรับ roster row) */
-interface LeaveSpan { leave: LeaveRecord; startDay: number; endDay: number }
-function spansFor(leaves: LeaveRecord[], adminId: string, year: number, month: number, dim: number): LeaveSpan[] {
-  const first = dateKey(year, month, 1), last = dateKey(year, month, dim);
-  const spans: LeaveSpan[] = [];
-  for (const l of leaves.filter((x) => x.adminId === adminId && x.endDate >= first && x.startDate <= last)) {
-    const s = Math.max(1, Number(l.startDate.slice(8, 10)) || 1);
-    const e = Math.min(dim, Number(l.endDate.slice(8, 10)) || dim);
-    const clampS = l.startDate < first ? 1 : s;
-    spans.push({ leave: l, startDay: clampS, endDay: e });
-  }
-  return spans.sort((a, b) => a.startDay - b.startDay);
-}
-
 export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
   const now = new Date();
   const [cursor, setCursor] = useState({ y: now.getFullYear(), m: now.getMonth() });
   const [mode, setMode] = useState<"roster" | "month">("roster");
+  const [weekStart, setWeekStart] = useState(() => startOfWeek(now));
   const todayKey = dateKey(now.getFullYear(), now.getMonth(), now.getDate());
 
-  const leaves = useMemo(() => buildMockLeaves(agents, cursor.y, cursor.m, todayKey), [agents, cursor.y, cursor.m, todayKey]);
+  const weekDays = useMemo(
+    () => Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart); d.setDate(d.getDate() + i); return d; }),
+    [weekStart],
+  );
+
+  // mock leave ต้องครอบทุกเดือนที่แสดง (สัปดาห์อาจข้ามเดือน)
+  const monthPairs = useMemo(() => {
+    const src = mode === "roster" ? weekDays.map((d) => ({ y: d.getFullYear(), m: d.getMonth() })) : [cursor];
+    const seen = new Map<string, { y: number; m: number }>();
+    for (const p of src) seen.set(`${p.y}-${p.m}`, p);
+    return [...seen.values()];
+  }, [mode, weekDays, cursor]);
+  const leaves = useMemo(
+    () => monthPairs.flatMap(({ y, m }) => buildMockLeaves(agents, y, m, todayKey)),
+    [agents, monthPairs, todayKey],
+  );
+
   const dim = daysInMonth(cursor.y, cursor.m);
   const days = Array.from({ length: dim }, (_, i) => i + 1);
   const firstWeekday = new Date(cursor.y, cursor.m, 1).getDay();
 
   const shift = (n: number) =>
-    setCursor((c) => {
-      const d = new Date(c.y, c.m + n, 1);
-      return { y: d.getFullYear(), m: d.getMonth() };
-    });
+    mode === "roster"
+      ? setWeekStart((w) => { const d = new Date(w); d.setDate(d.getDate() + n * 7); return d; })
+      : setCursor((c) => { const d = new Date(c.y, c.m + n, 1); return { y: d.getFullYear(), m: d.getMonth() }; });
+  const reset = () => (mode === "roster" ? setWeekStart(startOfWeek(now)) : setCursor({ y: now.getFullYear(), m: now.getMonth() }));
 
   const statuses = useMemo(() => {
     const map = new Map<string, LeaveStatusNow>();
@@ -138,9 +146,12 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
     return map;
   }, [agents, leaves]);
   const offCount = [...statuses.values()].filter((s) => s.status !== "working").length;
-  const monthLeaveCount = leaves.length;
 
-  const cellW = 30; // px ต่อวันใน roster
+  const fmtDay = (d: Date) => `${d.getDate()} ${THAI_MONTHS[d.getMonth()]}`;
+  const periodLabel =
+    mode === "roster"
+      ? `${fmtDay(weekDays[0])} – ${fmtDay(weekDays[6])} ${weekDays[6].getFullYear() + 543}`
+      : `${THAI_MONTHS[cursor.m]} ${cursor.y + 543}`;
 
   return (
     <Card className="overflow-hidden">
@@ -150,12 +161,12 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
           <div>
             <div className="flex items-center gap-2">
               <CalendarDays size={16} className="text-brand" />
-              <h2 className="text-base font-bold text-text tracking-tight">{THAI_MONTHS[cursor.m]} {cursor.y + 543}</h2>
+              <h2 className="text-base font-bold text-text tracking-tight">{periodLabel}</h2>
             </div>
             <div className="flex items-center gap-3 mt-1 text-[11px] text-text-muted">
               <span className="flex items-center gap-1"><Clock size={11} /> ทำการ {BUSINESS_HOURS} · {WORKING_DAYS.length === 7 ? "ทุกวัน" : `${WORKING_DAYS.length} วัน/สัปดาห์`}</span>
               {offCount > 0 && <span className="flex items-center gap-1 text-error font-medium"><CircleSlash size={11} /> วันนี้ลา {offCount} คน</span>}
-              <span className="hidden sm:inline text-text-subtle">{monthLeaveCount} รายการลาในเดือนนี้</span>
+              <span className="hidden sm:inline text-text-subtle">{leaves.length} รายการลาในช่วงนี้</span>
             </div>
           </div>
           <div className="flex items-center gap-2 ml-auto">
@@ -168,9 +179,9 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
               </button>
             </div>
             <div className="flex items-center rounded-lg border border-border bg-surface">
-              <button onClick={() => shift(-1)} className="px-2 py-1.5 text-text-muted hover:text-text transition-colors" aria-label="เดือนก่อน"><ChevronLeft size={15} /></button>
-              <button onClick={() => setCursor({ y: now.getFullYear(), m: now.getMonth() })} className="px-2.5 py-1.5 text-[11px] font-medium text-text-muted hover:text-text border-x border-border transition-colors">เดือนนี้</button>
-              <button onClick={() => shift(1)} className="px-2 py-1.5 text-text-muted hover:text-text transition-colors" aria-label="เดือนถัดไป"><ChevronRight size={15} /></button>
+              <button onClick={() => shift(-1)} className="px-2 py-1.5 text-text-muted hover:text-text transition-colors" aria-label="ช่วงก่อน"><ChevronLeft size={15} /></button>
+              <button onClick={reset} className="px-2.5 py-1.5 text-[11px] font-medium text-text-muted hover:text-text border-x border-border transition-colors">{mode === "roster" ? "สัปดาห์นี้" : "เดือนนี้"}</button>
+              <button onClick={() => shift(1)} className="px-2 py-1.5 text-text-muted hover:text-text transition-colors" aria-label="ช่วงถัดไป"><ChevronRight size={15} /></button>
             </div>
           </div>
         </div>
@@ -186,80 +197,68 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
       {agents.length === 0 ? (
         <div className="p-10 text-center text-sm text-text-muted">ยังไม่มี agent</div>
       ) : mode === "roster" ? (
-        /* === Roster: แถว=คน × คอลัมน์=วัน, leave bar เป็น span เดียว === */
+        /* === Week grid: แถว=วัน (7 วัน) × คอลัมน์=คน + หมายเหตุ === */
         <div className="overflow-x-auto">
-          <table className="border-collapse table-fixed text-xs" style={{ minWidth: 200 + dim * cellW }}>
+          <table className="w-full border-collapse text-xs" style={{ minWidth: 90 + agents.length * 140 + 200 }}>
             <thead>
-              <tr>
-                <th className="sticky left-0 z-10 bg-surface px-4 py-2 text-left font-medium text-text-muted min-w-[190px] border-b border-border shadow-[1px_0_0_0_var(--color-border)]">Agent</th>
-                {days.map((d) => {
-                  const wd = new Date(cursor.y, cursor.m, d).getDay();
-                  const isToday = dateKey(cursor.y, cursor.m, d) === todayKey;
-                  const working = WORKING_DAYS.includes(wd);
+              <tr className="border-b border-border">
+                <th className="sticky left-0 z-10 bg-surface w-[64px] min-w-[64px] border-r border-border/60" />
+                {agents.map((a, i) => {
+                  const st = statuses.get(a.admin_id);
+                  const color = AGENT_COLORS[i % AGENT_COLORS.length];
                   return (
-                    <th key={d} style={{ width: cellW }} className={`py-1.5 font-medium border-b border-border ${isToday ? "bg-brand/10" : working ? "" : "bg-surface-2/40"}`}>
-                      <div className={`leading-tight ${isToday ? "text-brand font-bold" : working ? "text-text-muted" : "text-text-subtle/40"}`}>{d}</div>
-                      <div className={`text-[8.5px] font-normal ${isToday ? "text-brand/80" : "text-text-subtle/60"}`}>{THAI_DAYS_SHORT[wd]}</div>
+                    <th key={a.admin_id} className="px-1.5 py-2 align-top min-w-[128px] font-normal">
+                      <div className="rounded-lg px-2.5 py-1.5 text-white text-[11px] font-semibold truncate shadow-sm" style={{ background: color }}>{a.name}</div>
+                      {st && st.status !== "working" ? (
+                        <div className="mt-1 text-[9px] font-medium text-error text-center leading-tight">
+                          {st.status === "off" ? "ลา — ปิดรับงาน" : `ลา ${st.window} นี้`}
+                        </div>
+                      ) : st?.record ? (
+                        <div className="mt-1 text-[9px] text-text-subtle text-center leading-tight">รับงานแล้ว</div>
+                      ) : null}
                     </th>
                   );
                 })}
+                <th className="px-3 py-2 text-left text-[11px] font-medium text-text-muted min-w-[180px]">หมายเหตุ</th>
               </tr>
             </thead>
             <tbody>
-              {agents.map((a) => {
-                const st = statuses.get(a.admin_id);
-                const spans = spansFor(leaves, a.admin_id, cursor.y, cursor.m, dim);
-                const spanByStart = new Map(spans.map((s) => [s.startDay, s]));
-                const covered = new Set<number>();
-                for (const s of spans) for (let d = s.startDay; d <= s.endDay; d++) covered.add(d);
+              {weekDays.map((d) => {
+                const key = dateKey(d.getFullYear(), d.getMonth(), d.getDate());
+                const wd = d.getDay();
+                const working = WORKING_DAYS.includes(wd);
+                const isToday = key === todayKey;
+                const dayLeaves = leaves.filter((l) => key >= l.startDate && key <= l.endDate);
+                const notes = [...new Set(dayLeaves.map((l) => l.note).filter(Boolean))];
                 return (
-                  <tr key={a.admin_id} className="border-b border-border/50 last:border-0 hover:bg-surface-2/30 transition-colors">
-                    <td className="sticky left-0 z-10 bg-surface px-4 py-2 border-r border-border/60 shadow-[1px_0_0_0_var(--color-border)]">
-                      <div className="flex items-center gap-2.5">
-                        <span className="w-7 h-7 rounded-full bg-brand/10 text-brand text-[11px] font-bold flex items-center justify-center shrink-0">{initialOf(a.name)}</span>
-                        <div className="min-w-0">
-                          <div className="font-medium text-text truncate leading-tight">{a.name}</div>
-                          {st && st.status !== "working" ? (
-                            <div className="text-[9.5px] font-medium text-error leading-tight mt-0.5">
-                              {st.status === "off" ? `ลา${LEAVE_META[st.record.type].label} — ปิดรับงาน` : `ลา ${st.window} — ปิดรับงานช่วงนี้`}
-                            </div>
-                          ) : st?.record ? (
-                            <div className="text-[9.5px] text-text-subtle leading-tight mt-0.5">ลา {st.record.startTime}–{st.record.endTime} · รับงานแล้ว</div>
-                          ) : null}
-                        </div>
-                      </div>
+                  <tr key={key} className={`border-b border-border/50 last:border-0 ${isToday ? "bg-brand/5" : ""}`}>
+                    <td className={`sticky left-0 z-10 px-2 py-2 align-top border-r border-border/60 ${isToday ? "bg-brand/10" : "bg-surface"}`}>
+                      <div className={`text-[9px] font-semibold tracking-wider ${isToday ? "text-brand" : working ? "text-text-muted" : "text-text-subtle/50"}`}>{THAI_DAYS_SHORT[wd]}</div>
+                      <div className={`text-lg font-bold leading-tight ${isToday ? "text-brand" : working ? "text-text" : "text-text-subtle/50"}`}>{d.getDate()}</div>
                     </td>
-                    {days.map((d) => {
-                      const key = dateKey(cursor.y, cursor.m, d);
-                      const isToday = key === todayKey;
-                      const wd = new Date(cursor.y, cursor.m, d).getDay();
-                      const working = WORKING_DAYS.includes(wd);
-                      const span = spanByStart.get(d);
+                    {agents.map((a) => {
+                      const ls = dayLeaves.filter((l) => l.adminId === a.admin_id);
                       return (
-                        <td key={d} className={`p-[3px] ${isToday ? "bg-brand/10" : working ? "" : "bg-surface-2/30"}`}>
-                          {span ? (
-                            <div
-                              title={`${LEAVE_META[span.leave.type].label}${isPartial(span.leave) ? ` ${span.leave.startTime}–${span.leave.endTime}` : " เต็มวัน"}${span.leave.note ? ` · ${span.leave.note}` : ""}`}
-                              className="h-6 rounded-md flex items-center justify-center px-1.5 overflow-hidden"
-                              style={{
-                                width: span.endDay - span.startDay + 1 > 1 ? `calc(${(span.endDay - span.startDay + 1) * 100}% + ${(span.endDay - span.startDay) * 6}px)` : "100%",
-                                background: LEAVE_META[span.leave.type].hex,
-                              }}
-                            >
-                              {span.endDay > span.startDay ? (
-                                <span className="text-[9px] font-bold text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.3)] whitespace-nowrap">
-                                  {LEAVE_META[span.leave.type].label}{isPartial(span.leave) ? ` ${span.leave.startTime}–${span.leave.endTime}` : ""}
-                                </span>
-                              ) : isPartial(span.leave) ? (
-                                <Clock size={11} className="text-white" />
-                              ) : null}
-                            </div>
-                          ) : (
-                            <div className="h-6" />
-                          )}
+                        <td key={a.admin_id} className="px-1.5 py-1.5 align-top">
+                          <div className="space-y-1 min-h-[40px]">
+                            {ls.map((l) => (
+                              <div
+                                key={`${l.adminId}-${l.startDate}-${l.type}`}
+                                title={`${LEAVE_META[l.type].label}${isPartial(l) ? ` ${l.startTime}–${l.endTime}` : " เต็มวัน"}${l.note ? ` · ${l.note}` : ""}`}
+                                className="rounded-md px-2 py-1 text-[10px] font-semibold text-white leading-tight shadow-sm"
+                                style={{ background: LEAVE_META[l.type].hex }}
+                              >
+                                {LEAVE_META[l.type].label}
+                                {isPartial(l) && <span className="block font-normal opacity-90">{l.startTime}–{l.endTime}</span>}
+                              </div>
+                            ))}
+                          </div>
                         </td>
                       );
                     })}
+                    <td className="px-3 py-2 align-top text-[10.5px] text-text-muted leading-snug">
+                      {notes.length ? notes.join(" · ") : <span className="text-text-subtle/50">—</span>}
+                    </td>
                   </tr>
                 );
               })}
