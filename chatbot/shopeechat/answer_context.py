@@ -1873,7 +1873,8 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
             unanswered += [
                 UnansweredNeed(t.need_index, t.kind, t.operation,
                                t.subject_refs, t.scope, t.target,
-                               "no_answer")
+                               "no_answer",
+                               capability_asks=t.capability_asks)
                 for t in context.task.tasks
                 if t.need_index not in covered
                 and t.need_index not in present]
@@ -1884,7 +1885,8 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
                 i, n.kind, n.operation, tuple(n.subject_refs or ()),
                 _need_scope(n), None,
                 "deferred" if n.kind in _POLICY_NEED_KINDS
-                else "no_selection")
+                else "no_selection",
+                capability_asks=tuple(n.capability_asks or ()))
             for i, n in enumerate(needs) if i not in covered)
     trace = tuple(context.trace if context else ()) + tuple(
         f"compose {r.domain} needs={list(r.need_indices)}"

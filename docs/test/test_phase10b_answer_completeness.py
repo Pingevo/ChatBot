@@ -971,7 +971,6 @@ def test_no_selection_answer_names_capability_asks():
         f"answer:\n{answer}")
 
 
-@pytest.mark.xfail(strict=False, reason="LOW-1b — awaiting separate approval")
 def test_no_answer_unanswered_keeps_capability_asks():
     """LOW-1b: NeedTask แบก asks (subject evidence มี) + product_text=""
     → synth UnansweredNeed(no_answer) ต้อง carry asks — outcome ต้อง
@@ -1000,7 +999,6 @@ def test_no_answer_unanswered_keeps_capability_asks():
         f"no_answer outcome ต้อง name ask — answer:\n{answer}")
 
 
-@pytest.mark.xfail(strict=False, reason="LOW-1c — awaiting separate approval")
 def test_context_absent_answer_names_capability_asks():
     """LOW-1c: compose_answer(context=None) (reachable ผ่าน app._done()
     — sel is None / artifacts ล้ม / task compile ล้ม) — need แบก asks
