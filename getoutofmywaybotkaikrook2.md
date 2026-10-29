@@ -8780,3 +8780,11 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - commits: `2dcd424` (f03) → `841e537` (f04+bugfix)
 - verify: canonical suite **85/85**, tsc clean
 - เหลือใน corpus: flow 05+ = wfr/chatbot/jump_to/chat_unassign/event_time; flow 06 = marketplace triggers + order card + set_ticket_field; flow 08 = send_button_template
+
+## ผ่านแล้ว (verified) — R2 slices 9-10: ครบทุก node family — 21/21 flows executable (2026-10-29)
+
+- slice 9 `3380d31`: canonical wfr (park waiting_for_reply+resume_at, reply_branch wfr-success / timer_branch wfr-no-respond) · chatbot park ai_bot (inbound ไม่ปลุก + escalateAiRun + ai-chatbot-timeout) · send_button_template (wait_buttons match → index-N / none-selected / expired) · randomizer ตาม weight · jump_to canonical (per-node counter + edge carrier) · unassign_ticket + unassignTestConversation · set_ticket_field (bound) · matchAndRunEvent + canonicalEventMatches (label_added filter ผ่าน binding + marketplace_*) · label chains จาก add_label (hop cap 3) · marketplace adapter boundary (inject ผ่าน setMarketplaceAdapter — ไม่มี = fail-closed throw) · review_rating/ai_review_sentiment จาก event payload
+- slice 10 `7539dbd`: send_message image → DeliveredMessage.image_url → shadow_replies.bot_reply_image_url — ปิด gap สุดท้าย
+- พบระหว่างทำ: canonical action-park blocks แรกวางผิดตำแหน่ง (หลัง generic action dispatch → unreachable) — ย้ายไปก่อน dispatch; doResumeFlow เดิมบังคับ wait node — button template park บน action node → relax เมื่อ reply_branch ตั้ง
+- verify: canonical suite **121/121**, binding 1016, foundation 163, routes 47, tsc clean
+- สถานะ: **ทุก node type ใน corpus มี executor + behavioral test แล้ว** — เหลือ e2e per-flow แบบ flows 01-04 (เดิน graph จริงทุก branch), adapter จริงของ marketplace (Shopee/Lazada API), escalate signal จาก bot-worker → escalateAiRun, business_hours ของร้านจริง + binding resolution บน Mongo dev ก่อน activate ร้านแรก
