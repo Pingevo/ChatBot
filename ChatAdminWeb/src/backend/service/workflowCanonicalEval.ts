@@ -192,14 +192,16 @@ async function evalCanonicalCondition(
       throw new Error(`message_content: unknown operator "${op}"`);
     }
     case "label": {
-      // Zaapi label condition — labelIds strip → binding; equals = conv มี label ครบทุกตัวที่ระบุ
-      if (op !== "equals") throw new Error(`label: unknown operator "${op}"`);
+      // Zaapi label condition — labelIds strip → binding
+      //   contains_one_of = มี label อันใดอันหนึ่ง; equals = มีครบทุกตัวที่ระบุ
       const ids = await boundLocalIds(workflowId, versionId, node.node_id, `conditions[${index}].labelIds`, "label");
       if (ids.length === 0) return false; // binding unresolved → fail closed
       const conv = await getCollection<{ labels?: string[] }>(COLLECTIONS.conversations);
       const doc = await conv.findOne({ conversation_id: msg.conversation_id } as never);
       const have = new Set(doc?.labels || []);
-      return ids.every((l) => have.has(l));
+      if (op === "contains_one_of") return ids.some((l) => have.has(l));
+      if (op === "equals") return ids.every((l) => have.has(l));
+      throw new Error(`label: unknown operator "${op}"`);
     }
     default:
       throw new Error(`canonical condition subtype "${node.subtype}" ยังไม่มี evaluator`);

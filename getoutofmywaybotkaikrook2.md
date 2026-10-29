@@ -8760,3 +8760,14 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - จด gap matrix เต็มไว้ที่ `docs/superpowers/plans/2026-10-29-zaapi-workflow-r2-runtime-gap-matrix.md`
 - สถานะจริง: imported 21 flows = พิมพ์เขียว (disabled drafts) — engine มี executor แค่ ~11 legacy subtypes อ่าน legacy config เท่านั้น; canonical Zaapi shape/branch vocab ยังไม่มี runtime
 - ลำดับเสนอ: lookups.handles fix → edge router → condition adapter+evaluators → action adapter → durable timer → label events → chatbot → marketplace → readiness gates → pilot flow 01
+
+## ผ่านแล้ว (verified) — R2 runtime slices 1-6: Flow 01+02 executable (2026-10-29)
+
+- วิธี: canonical layer แยก owner `workflowCanonicalEval.ts` — ไม่แตะ legacy evaluators/dispatch ตามแผนที่ผู้ใช้อนุมัติ (ไล่ทีละ flow/node)
+- ผู้ใช้ตัดสิน: **Zaapi team = แอดมินทั้งหมดในระบบ** → binding resolver รับ `local_id:"all_admins"` เท่านั้น + `candidates.teams` เสนอตัวเลือกเดียว
+- commits: `a7e92b5` lookups.handles fix → `8daa58c` canonical conditions → `f8e8fe7` delay timer → `a90fef2` chat_assign → `aef18f2` trigger+e2e → `92708e6` sweep wire bot-worker → `750ee80` message_content/labels/send_message
+- Flow 01 (เก็บตกแชทค้าง): trigger message_received (account scope + once flags) → delay 9m (durable waiting_for_timer + resume_at + sweepDueTimerRuns ใน bot-worker tick ผ่าน era/leadership/scope เดียวกับ wait timeouts) → business_hours per-shop → customer_waiting_time → assignee binding → chat_assign team=all_admins + round-robin ต่อ node + OOH/lastHandler flags → e2e เดินครบ graph
+- Flow 02 (ดักคำเสี่ยง): message_content contains_one_of/equals/msgType-media → add_label/remove_label canonical ($addToSet/$pull + bindings) → send_message action.message (text เท่านั้น — image fail-closed เป็น gap)
+- พฤติกรรมจริงที่ test เปิดเผย: re-assign เมื่อ owner ไม่อยู่ใน assignee list = ถูกตาม Zaapi (list ยกเว้นเฉพาะคนที่ระบุ) — test แรกคาด converge ผิด
+- verify: canonical suite **74/74**, binding resolution **1016**, foundation **163**, routes **47**, tsc clean
+- ค้าง: send_message image/video delivery (pipeline รับ text อย่างเดียว) · binding resolution จริงบน Mongo · business_hours ของร้านจริงต้องตั้งก่อน activate

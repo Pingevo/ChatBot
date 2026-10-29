@@ -575,6 +575,92 @@ async function main() {
     const conv2 = await convs.findOne({ conversation_id: "cv_f2b" });
     ok(conv2 == null || !(conv2.labels || []).includes("เคสเสี่ยง-กฎหมาย"), "f02: miss → ไม่มี label ติด");
   }
+
+  // ─── 15. Flow 03 e2e — delay → waiting → label dedupe → send ──
+  //   ลูกค้ารอเกิน 9m → ติด รอตอบเกิน10นาที → ยังไม่มี tag dedupe → ส่งข้อความ
+  //   + ติด tag (ลูกค้าที่มี tag อยู่แล้ว → ไม่ส่งซ้ำ)
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    const binds = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    const convs = await mongo.getCollection(COLLECTIONS.conversations);
+    const msgs = await mongo.getCollection(COLLECTIONS.messages);
+    await Promise.all([wfs, runs, binds, convs, msgs].map((c) => c.deleteMany({}) as Promise<unknown>));
+    const V = "wv_f03";
+    await wfs.insertOne({
+      workflow_id: "wf_f03", name: "รอเกิน 10 นาที", enabled: true, status: "published",
+      trigger_frequency: "every_time", current_version_id: V,
+      import: { source: "zaapi", source_workflow_id: "WF-f03" },
+      shop_ids: [], platforms: [], priority: 0,
+      nodes: [
+        { node_id: "zt", type: "trigger", subtype: "message_received",
+          config: { triggerOncePerConversation: false, triggerOncePerOpen: false }, position: { x: 0, y: 0 } },
+        { node_id: "zd", type: "wait", subtype: "delay",
+          config: { delay: { unit: "minutes", value: 10 } }, position: { x: 100, y: 0 } },
+        { node_id: "zw", type: "condition", subtype: "customer_waiting_time",
+          config: { conditions: [{ operator: "greater_than", customerWaitingTime: { unit: "minutes", value: 9 } }] }, position: { x: 200, y: 0 } },
+        { node_id: "zl1", type: "action", subtype: "add_label",
+          config: { action: { label: {} } }, position: { x: 300, y: 0 } },
+        { node_id: "zlc", type: "condition", subtype: "label",
+          config: { conditions: [{ operator: "contains_one_of" }] }, position: { x: 400, y: 0 } },
+        { node_id: "zm", type: "action", subtype: "send_message",
+          config: { action: { message: { type: "text", text: "ขออภัยที่ให้รอค่ะ" } } }, position: { x: 500, y: 0 } },
+        { node_id: "zl2", type: "action", subtype: "add_label",
+          config: { action: { label: {} } }, position: { x: 600, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "zt", target_node_id: "zd" },
+        { edge_id: "e2", source_node_id: "zd", target_node_id: "zw" },
+        { edge_id: "e3", source_node_id: "zw", target_node_id: "zl1", branch: "condition-index-0" },
+        { edge_id: "e4", source_node_id: "zl1", target_node_id: "zlc" },
+        { edge_id: "e5", source_node_id: "zlc", target_node_id: "zm", branch: "no-match" },
+        { edge_id: "e6", source_node_id: "zm", target_node_id: "zl2" },
+      ],
+    });
+    await binds.insertMany([
+      { binding_id: "wb_f3a", workflow_id: "wf_f03", version_id: V, node_id: "zl1",
+        field_path: "action.label.labelIds", kind: "label", count: 1, source_values: ["x1"],
+        status: "resolved", resolution: { mappings: [{ local_id: "รอตอบเกิน10นาที", state: "valid" }] } },
+      { binding_id: "wb_f3c", workflow_id: "wf_f03", version_id: V, node_id: "zlc",
+        field_path: "conditions[0].labelIds", kind: "label", count: 1, source_values: ["x2"],
+        status: "resolved", resolution: { mappings: [{ local_id: "ได้แค่ข้อความรอ", state: "valid" }] } },
+      { binding_id: "wb_f3b", workflow_id: "wf_f03", version_id: V, node_id: "zl2",
+        field_path: "action.label.labelIds", kind: "label", count: 1, source_values: ["x3"],
+        status: "resolved", resolution: { mappings: [{ local_id: "ได้แค่ข้อความรอ", state: "valid" }] } },
+    ]);
+    // ลูกค้าส่งมา 20 นาที ยังไม่มีคนตอบ
+    await convs.insertOne({ conversation_id: "cv_f3", platform: "shopee", shop_id: "s1", labels: [] });
+    await msgs.insertOne({ conversation_id: "cv_f3", direction: "in", created_timestamp: new Date(Date.now() - 20 * 60_000) });
+    const m3 = { conversation_id: "cv_f3", shop_id: "s1", platform: "shopee",
+      config_shop_key: "s1", text: "ยังไม่ตอบเลย" } as never;
+    const scope3 = { config: { workflow_enabled: true },
+      pairs: [{ platform: "shopee", shop_id: "s1", config_shop_key: "s1", shopname: "shop1", cutoff: new Date(0) }],
+      global_enabled_since: null } as never;
+    const r1 = await eng.matchAndRun(m3);
+    eq(r1.status, "actioned", "f03: inbound → delay park");
+    // ถึงเวลา → sweep → waiting>9m → tag รอตอบ → dedupe miss → send + tag dedupe
+    await runs.updateOne({ conversation_id: "cv_f3" } as never,
+      { $set: { resume_at: new Date(Date.now() - 1000) } });
+    await eng.sweepDueTimerRuns(undefined, scope3, new Date());
+    const runDone = await runs.findOne({ conversation_id: "cv_f3", status: "completed" } as never);
+    ok(runDone != null, "f03: run completed");
+    const convA = await convs.findOne({ conversation_id: "cv_f3" });
+    const labels1 = (convA?.labels || []) as string[];
+    ok(labels1.includes("รอตอบเกิน10นาที"), "f03: tag รอตอบเกิน10นาที");
+    ok(labels1.includes("ได้แค่ข้อความรอ"), "f03: tag dedupe ได้แค่ข้อความรอ (หลัง send)");
+    // รอบสอง — ลูกค้ามี tag dedupe แล้ว → label cond match → ไม่ส่งซ้ำ
+    await msgs.insertOne({ conversation_id: "cv_f3", direction: "in", created_timestamp: new Date(Date.now() - 19 * 60_000) });
+    const r2 = await eng.matchAndRun(m3);
+    eq(r2.status, "actioned", "f03: re-fire → run ใหม่ park");
+    await runs.updateOne({ conversation_id: "cv_f3", status: "waiting_for_timer" } as never,
+      { $set: { resume_at: new Date(Date.now() - 1000) } });
+    const sw2 = await eng.sweepDueTimerRuns(undefined, scope3, new Date());
+    eq(sw2.errors.length, 0, "f03: re-fire sweep ไม่ error");
+    const run2 = await runs.findOne({ conversation_id: "cv_f3", status: "completed", run_id: { $ne: runDone?.run_id } } as never);
+    const del2 = (run2?.result as { delivered?: unknown[] } | undefined)?.delivered;
+    ok(!del2 || del2.length === 0, "f03: dedupe — ลูกค้ามี tag แล้ว → ไม่ส่งซ้ำ (label cond match → cond-0 ไม่มี edge → จบ)");
+  }
 }
 
 main().then(() => {
