@@ -232,19 +232,6 @@ def fetch_units(
     return ranked
 
 
-def pick_desc_sections(unit: dict, route=None) -> str:
-    """เลือก desc sections ตาม route.needs_* — cap ~3000 chars ประหยัด token."""
-    secs = unit.get("desc_sections") or {}
-    generic = route is None or not (route.needs_spec or route.needs_warranty)
-    order = ["specs", "highlights"]
-    if generic or getattr(route, "needs_warranty", False):
-        order.append("warranty")
-    if generic:
-        order += ["intro", "notes", "other"]
-    parts = [secs[k] for k in order if secs.get(k)]
-    return "\n\n".join(parts)[:3000]
-
-
 def _live_availability(unit: dict) -> tuple[str, dict, str]:
     """คืน (item_status, availability, model_status) — availability จาก resolver owner เดียว.
 
@@ -359,14 +346,14 @@ def to_unit_card(unit: dict, route=None) -> dict:
         "has_promotion": _ps._has_active_promotion(lst) if lst else False,
         "is_flash_sale": bool(lst.get("is_flash_sale")),
         "description_excerpt": (
-            (pick_desc_sections(unit, route) or (unit.get("image_text") or "")[:3000])
+            _ps._clean_description(
+                "\n\n".join((unit.get("desc_sections") or {}).values())
+                or (unit.get("image_text") or ""))
             + (f"\n\nเงื่อนไขการรับประกัน (จากรูปสินค้า): {unit['warranty_text']}"
                if unit.get("warranty_text") else "")
         ),
         "image_text": unit.get("image_text"),
         "warranty_text": unit.get("warranty_text"),
-        "raw_description": "\n\n".join(
-            v for v in (unit.get("desc_sections") or {}).values() if v)[:4000],
         "variants": [{
             "name": unit.get("model_name"), "model_id": unit.get("model_id"),
             "tier_index": (_m or {}).get("tier_index"),

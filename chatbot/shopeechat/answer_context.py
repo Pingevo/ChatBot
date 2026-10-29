@@ -239,11 +239,16 @@ class UnansweredNeed:
     subject_refs: tuple[str, ...]
     scope: tuple[str, ...]
     target: str | None
-    reason: Literal["no_selection", "deferred", "no_answer", "no_evidence"]
+    reason: Literal["no_selection", "deferred", "no_answer",
+                    "no_evidence", "clarify"]
     # capability asks ที่ unresolved (typed verbatim จาก TurnNeed —
     #   renderer name ได้ทุกตัวโดยไม่ parse prose); ว่าง = unresolved
     #   ทั้ง need
     capability_asks: tuple[str, ...] = ()
+    # reason="clarify" เท่านั้น — canonical types ของ decided candidates
+    #   ที่ทำให้ scope กว้างเกิน (≥2 types, ไม่มี requested type/subtype) —
+    #   renderer name ผ่าน _type_query_word (ไม่ใช่ prose inference)
+    clarify_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -977,6 +982,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     measured_facts: list[dict] = []
     det_segments: list[dict] = []           # no-match verdict segments
     no_match: set[int] = set()   # need ที่ candidates ทุกใบ proven-fail
+    clarify: set[int] = set()   # need ที่ outcome = typed scope clarify
     note_replace: dict[str, str] = {}  # identity → note แทน role note ทั้งก้อน
     product_verdicts: list[CompatVerdict] = []  # decided proofs บน product needs
     # pass 1 — target ownership: compat need เท่านั้นที่มี external
@@ -1191,18 +1197,23 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 if res["status"] == "fail":
                     # proven-fail = typed diagnostic เท่านั้น — ทุก role
                     #   ออกจาก answer products (ห้าม image/link/CTA);
-                    #   subject/historical เก็บเป็น near-miss metadata สำหรับ
-                    #   deterministic segment (ไม่ใช่ card ที่ model เห็น)
+                    #   ทุก decided-fail candidate เก็บเป็น near-miss
+                    #   metadata + scoped alternative card ของตัวเอง —
+                    #   segment/attachment ใช้ decided verdict เท่านั้น
+                    #   (unknown/unverified ไม่เคยเป็น near-miss)
                     lbl = _constraint_fail_label(res)
                     cnotes.append({
                         "need_index": i,
                         "item": (s.card or {}).get("name") or s.identity,
                         "detail": lbl})
-                    if s.role in ("subject", "historical_evidence"):
-                        failed_refs[s.identity] = {
-                            "identity": s.identity,
-                            "item": (s.card or {}).get("name") or s.identity,
-                            "detail": lbl}
+                    _nm = _scope_card(s.card, n, "alternative")
+                    if _nm:
+                        _nm["need_indices"] = (i,)
+                    failed_refs[s.identity] = {
+                        "identity": s.identity,
+                        "item": (s.card or {}).get("name") or s.identity,
+                        "detail": lbl,
+                        "card": _nm or None}
                     dropped_c += 1
                     trace.append(
                         f"need[{i}] constraint_fail {s.identity}")
@@ -1297,6 +1308,34 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                     capability_asks=tuple(
                         getattr(n, "capability_asks", ()) or ())))
             continue
+        # ── FIX-5 type-ambiguous compat/recommend ask → typed clarify
+        #   outcome (D2): need ไม่ declare product scope — need-level
+        #   fields ว่างตาม contract ของแต่ละ kind + request ที่ attribute
+        #   มาไม่พก type/subtype (compat need ไม่มี scope บนตัวเอง —
+        #   relation scope เป็นของ request) — แต่ candidates ที่ผ่าน gate
+        #   (selection/verdict-decided) กระจาย ≥2 canonical types →
+        #   outcome = ถาม scope กลับ ไม่เลือก type ให้เอง — candidates
+        #   ไม่ emit (scope undecided → cards ห้ามแนบตาม FIX-4); decided
+        #   verdicts ของ need นี้ถูก clarify แทนที่ → pop (เซ็กเมนต์
+        #   verdict ไม่ render เมื่อยังไม่รู้ว่าลูกค้าต้องการ type ไหน)
+        if (n.kind == "compat"
+                or (n.kind == "product" and n.operation == "recommend")):
+            _scope_req = any(
+                r.product_types or r.subtypes for r in reqs_n)
+            if not (n.product_types or n.subtypes or _scope_req):
+                _ctypes = tuple(sorted({
+                    str((s.card or {}).get("canonical_type")
+                        or (s.card or {}).get("product_type") or "")
+                    for s in cands} - {""}))
+                if len(_ctypes) >= 2:
+                    unanswered.append(UnansweredNeed(
+                        i, n.kind, n.operation,
+                        tuple(n.subject_refs or ()), scope, target_of[i],
+                        "clarify", clarify_types=_ctypes))
+                    clarify.add(i)
+                    decided.pop(i, None)
+                    trace.append(f"need[{i}] clarify types={list(_ctypes)}")
+                    continue
         # ── capability asks (typed contract: TurnNeed.capability_asks ←
         #   intent_classifier) — source-grounded spans: exact-subject
         #   attributed evidence มี → asks ride task (model แยก subclaim
@@ -1359,7 +1398,16 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     # ไม่เข้า model context (proof/verdict ถูก consume โดย decision แล้ว) —
     #   no_match = candidates ทุกใบ proven-fail → deterministic constraint
     #   verdict ครอบคลุม (model ไม่ตัดสิน pass/fail เอง)
-    dropped = uncovered | set(decided) | no_match
+    # asks-only needs ที่ typed outcome ครอบคลุมแล้ว (UnansweredNeed
+    # deterministic) ไม่ส่ง model task อีก — task เหลือแต่ framing
+    # (subject/scope/target) → model freestyle hedge ซ้ำกับ segment;
+    # เซ็ตเดิม + field เดิมเท่านั้น (facts/constraints/value/ranking
+    # ที่เหลือ = model work จริง → task ยังอยู่)
+    dropped = (uncovered | set(decided) | no_match | clarify
+               | {t.need_index for t in task.tasks
+                  if t.need_index in _ask_unanswered
+                  and not (t.requested_facts or t.constraints
+                           or t.value_constraints or t.ranking)})
     if dropped or _ask_unanswered:
         task = AnswerTask(
             tasks=tuple(
@@ -1541,23 +1589,39 @@ _DOMAIN_ORDER = {"claim": 0, "compat": 1, "constraint": 2,
 
 def _compat_segment(v: CompatVerdict) -> str:
     """deterministic verdict segment — subject display + target +
-    outcome เท่านั้น (typed fields; ไม่มี proof dict/prose เสริม)"""
+    outcome เท่านั้น (typed fields; ไม่มี proof dict/prose เสริม);
+    wattage reason codes = connector fit แต่กำลังชาร์จยังไม่ครบสเปค →
+    caveat clause ต่อท้าย segment เดิม (ห้าม render bare ใช้ได้):
+    insufficient_wattage = รู้ watt ต่ำกว่า / wattage_variant_unconfirmed
+    = หลาย variant ไม่ยืนยัน / missing_wattage_evidence = ไม่มี watt เลย"""
     if v.decision.outcome == "compatible":
-        return (f"{v.subject_name} ใช้งานร่วมกับ {v.target} ได้ค่ะ")
+        seg = f"{v.subject_name} ใช้งานร่วมกับ {v.target} ได้ค่ะ"
+        _rc = set(v.decision.reason_codes or ())
+        if "insufficient_wattage" in _rc:
+            seg += (" — หัวต่อเข้ากันได้ แต่กำลังไฟที่ยืนยันได้ต่ำกว่า"
+                    "สเปคของอุปกรณ์ จึงอาจชาร์จได้ช้ากว่าค่ะ")
+        elif "wattage_variant_unconfirmed" in _rc:
+            seg += (" — หัวต่อเข้ากันได้ แต่มีหลายตัวเลือกกำลังไฟ ยังไม่"
+                    "ยืนยันตัวเลือกที่จะได้รับ จึงยืนยันเต็มสเปคไม่ได้ค่ะ")
+        elif "missing_wattage_evidence" in _rc:
+            seg += (" — หัวต่อเข้ากันได้ แต่ยังยืนยันไม่ได้ว่าชาร์จ"
+                    "เต็มสเปคตามที่อุปกรณ์ต้องการ อาจชาร์จช้ากว่าปกติค่ะ")
+        return seg
     if v.decision.outcome == "incompatible":
         return f"{v.subject_name} ใช้งานร่วมกับ {v.target} ไม่ได้ค่ะ"
     return ""   # outcome นอก whitelist → ไม่ render compat claim
 
 
 def _constraint_segment(seg: dict) -> str:
-    """deterministic no-match verdict segment — headline + kept
-    subject/historical near-miss lines (evidence-bound labels เท่านั้น);
-    dropped candidates ไม่ถูก name ที่นี่ (ไม่อยู่ใน products → token
-    ไม่ ground — detail ของพวกมันอยู่ใน constraint_notes ให้ model)."""
+    """deterministic no-match verdict segment — headline + labeled
+    near-miss lines ของ decided-fail candidates ทุกใบ (evidence-bound
+    labels เท่านั้น); ห้ามสัญญาแอดมินใน text (handoff = silent typed
+    signal → transport ที่ enforce); ห้าม claim ร้านไม่มีสินค้า."""
     items = [f"- {it.get('item')}: {it.get('detail')}"
              for it in (seg.get("items") or ()) if it.get("item")]
     return "ยังไม่มีสินค้าที่ผ่านเงื่อนไขครบทุกข้อค่ะ" + (
-        "\n" + "\n".join(items) if items else "")
+        "\nใกล้เคียง/ทดแทนที่พิจารณาแล้ว:\n" + "\n".join(items)
+        if items else "")
 
 
 def _unanswered_segment(u: UnansweredNeed) -> str:
@@ -1573,6 +1637,20 @@ def _unanswered_segment(u: UnansweredNeed) -> str:
                  if str(x).strip())
     named = [x for x in refs if not x.isdigit() and ":" not in x]
     target = str(u.target or "").strip()
+    if u.reason == "clarify":
+        # D2 — decided candidates span ≥2 types + no requested scope:
+        #   ถาม type กลับจาก canonical types เท่านั้น (name ผ่าน
+        #   _type_query_word — owner เดิมของ type→Thai word; ไม่เลือก
+        #   คำตอบให้เอง ไม่มี prose inference)
+        from . import product_store as _ps
+        _words = " หรือ ".join(dict.fromkeys(
+            _ps._type_query_word(str(t))
+            for t in (u.clarify_types or ()) if str(t).strip()))
+        if not _words:
+            return ""
+        _pre = (f"สำหรับการใช้งานร่วมกับ {target}" if target
+                else "สำหรับสินค้าที่ถาม")
+        return f"{_pre} — อยากได้{_words}คะ"
     if u.reason == "no_selection":
         topic = named[0] if named else (
             str(u.scope[0]) if u.scope else "")
@@ -1643,7 +1721,10 @@ class AnswerComposition:
     """one typed composition contract ต่อ turn — input เดียวของ finalizer.
     results = needs ที่ domain owner ผลิต result จริง; unanswered_needs =
     needs ที่ไม่มี authoritative result (ห้าม invent); context =
-    AnswerContext เดิม (product evidence boundary ไม่เปลี่ยน)."""
+    AnswerContext เดิม (product evidence boundary ไม่เปลี่ยน);
+    products = decided-support attach set (covered-need cards +
+    decided-compatible verdicts + labeled near-miss) — consumer เดียว
+    app._finalize_answer (resp.products); ไม่ใช่ model context."""
     results: tuple[DomainResult, ...] = ()
     unanswered_needs: tuple[UnansweredNeed, ...] = ()
     products: tuple[dict, ...] = ()
@@ -1705,6 +1786,41 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
                     subject_ids=tuple(
                         str(it.get("identity")) for it in
                         (seg.get("items") or ()) if it.get("identity"))))
+    # attachment follows decisions — comp.products = decided support
+    #   เท่านั้น: cards ของ needs ที่ typed outcome ครอบคลุม (incl.
+    #   product_text coverage) + identities ที่มี decided-compatible
+    #   verdict (partial-compat: item ที่ตัดสินแล้วยังเป็นคำตอบ) +
+    #   labeled near-miss cards จาก constraint segments; emitted-only
+    #   cards ของ unresolved needs ไม่แนบ/ไม่ bubble — card = outcome
+    #   evidence, ยังไม่ตัดสิน = ยังไม่มีสิทธิ์แสดง
+    _support: list[dict] = []
+    _near: list[dict] = []
+    if context is not None:
+        from . import candidate_pool as _cpool
+        _cov = set(covered) | (
+            ({t.need_index for t in context.task.tasks} - unans_idx)
+            if product_text else set())
+        _cov = {i for i in _cov
+                if needs[i].kind in PRODUCTISH_NEED_KINDS}
+        _vok = {v.subject_id for v in (context.compat_verdicts or ())
+                if v.decision.outcome == "compatible"}
+        _seen: set[str] = set()
+        for _p in context.products:
+            _pid = _cpool._identity_key(_p)[0] or ""
+            if _pid and _pid not in _seen and (
+                    _pid in _vok
+                    or set(_p.get("need_indices") or ()) & _cov):
+                _support.append(_p)
+                _seen.add(_pid)
+        for _seg in context.constraint_segments or ():
+            for _it in _seg.get("items") or ():
+                _c = _it.get("card")
+                if not _c:
+                    continue
+                _pid = _cpool._identity_key(_c)[0] or ""
+                if _pid and _pid not in _seen:
+                    _near.append(_c)
+                    _seen.add(_pid)
     if product_text and context is not None:
         idxs = tuple(sorted(
             {t.need_index for t in context.task.tasks} - unans_idx))
@@ -1718,15 +1834,30 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
         #   ช่องทางของ model — claim mutation ไม่เคยอยู่ใน markup);
         #   deterministic segments ไม่ผ่าน normalization นี้ —
         #   model-emitted prose อื่น (รวม leading particle) เป็น
-        #   model-output residual ไม่ใช่ compose concern
+        #   model-output residual ไม่ใช่ compose concern;
+        #   H1: bubble ที่ co-mention (subject_name,target) ของ decided
+        #   compat verdict = model พูดซ้ำ/ขัด domain ที่ typed owner
+        #   ตัดสินแล้ว → drop เหมือน name-echo rule (typed fields เท่านั้น
+        #   — co-mention อย่างเดียว ไม่ต้องอ่าน polarity; verdict segment
+        #   render truth เดียวกันอยู่แล้ว)
         _names = {re.sub(r"\s+", " ", str(p.get("name") or "")).strip()
                   for p in context.products}
         _names.discard("")
+        _pairs = tuple(
+            (re.sub(r"\s+", " ", str(v.subject_name or "")).strip()
+             .casefold(),
+             re.sub(r"\s+", " ", str(v.target or "")).strip().casefold())
+            for v in (context.compat_verdicts or ())
+            if v.decision.outcome in ("compatible", "incompatible"))
         _out = []
         for _b in product_text.split("|||"):
             if "](" in _b:
                 continue
             _b = re.sub(r"\s+", " ", _b.replace("**", "")).strip()
+            _bl = _b.casefold()
+            if any(_s and _t and _s in _bl and _t in _bl
+                   for _s, _t in _pairs):
+                continue
             if _b and _b not in _names:
                 _out.append(_b)
         _ptext = " ||| ".join(_out)
@@ -1737,8 +1868,7 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
         #   validation ไม่เคยแตะ card spans (origin=deterministic +
         #   provenance identities); card ไม่ cover need เพิ่ม — ติดตาม
         #   product result (owner = card's own need_indices)
-        from . import candidate_pool as _cpool
-        for _p in context.products:
+        for _p in _support:
             _pn = str(_p.get("name") or "").strip()
             _img = str(_p.get("image_url") or "").strip()
             _lnk = str(_p.get("short_link") or "").strip()
@@ -1773,7 +1903,8 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
             unanswered += [
                 UnansweredNeed(t.need_index, t.kind, t.operation,
                                t.subject_refs, t.scope, t.target,
-                               "no_answer")
+                               "no_answer",
+                               capability_asks=t.capability_asks)
                 for t in context.task.tasks
                 if t.need_index not in covered
                 and t.need_index not in present]
@@ -1784,14 +1915,15 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
                 i, n.kind, n.operation, tuple(n.subject_refs or ()),
                 _need_scope(n), None,
                 "deferred" if n.kind in _POLICY_NEED_KINDS
-                else "no_selection")
+                else "no_selection",
+                capability_asks=tuple(n.capability_asks or ()))
             for i, n in enumerate(needs) if i not in covered)
     trace = tuple(context.trace if context else ()) + tuple(
         f"compose {r.domain} needs={list(r.need_indices)}"
         for r in results)
     return AnswerComposition(
         results=tuple(results), unanswered_needs=unanswered,
-        products=context.products if context else (),
+        products=tuple(_support + _near),
         usage=dict(usage or {}), answer_calls=answer_calls,
         web_used=web_used, admission=admission, context=context,
         trace=trace)

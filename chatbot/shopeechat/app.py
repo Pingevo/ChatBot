@@ -759,8 +759,29 @@ def _render_composition(comp) -> str:
             parts.append(text)
     # unresolved productish needs = explicit outcome ของตัวเอง — render
     #   ท้ายหลัง grounded segments (deterministic จาก typed fields —
-    #   deferred needs เป็นของ domain owner อื่น ไม่ render ตรงนี้)
+    #   deferred needs เป็นของ domain owner อื่น ไม่ render ตรงนี้);
+    #   needs ชนิดเดียวกัน (reason+compat-class+subject_refs) รวมเป็น
+    #   cannot-confirm segment เดียวผ่าน renderer เดิม — หลาย ask ต่อ
+    #   subject เดียวกันไม่ให้เกิด repetitive paragraphs (per-need
+    #   granularity ยังอยู่ใน composition marker)
+    _groups: dict[tuple, list] = {}
     for u in comp.unanswered_needs:
+        _groups.setdefault(
+            (u.reason, u.operation == "compat", u.subject_refs),
+            []).append(u)
+    for us in _groups.values():
+        u = us[0]
+        if len(us) > 1:
+            u = _acx.UnansweredNeed(
+                u.need_index, u.kind, u.operation, u.subject_refs,
+                tuple(dict.fromkeys(x for w in us for x in w.scope)),
+                " / ".join(dict.fromkeys(
+                    str(w.target) for w in us if w.target)) or u.target,
+                u.reason,
+                tuple(dict.fromkeys(
+                    a for w in us for a in w.capability_asks)),
+                clarify_types=tuple(dict.fromkeys(
+                    t for w in us for t in (w.clarify_types or ()))))
         seg = _acx._unanswered_segment(u)
         if seg and seg not in seen:
             seen.add(seg)
@@ -2806,8 +2827,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                             web_search_fn=_ws.search_and_extract,
                             policy_decision=_pdec,
                             claim_guidance=_mixed_claim_carry)
-                        merged_products = list(
-                            _tb.context.products) if _tb.context else []
+                        # FIX-4 — attachment follows decisions:
+                        #   resp.products = comp.products (decided
+                        #   support เท่านั้น — covered-need cards +
+                        #   verdicted + labeled near-miss)
+                        merged_products = list(_tb.products)
                     if _grouped_sel:
                         _steps.append({
                             "name": "GroupedRetrievalSelection",
@@ -5056,8 +5080,10 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 model=model_name, web_search_fn=_ws.search_and_extract,
                 policy_decision=_pdec,
                 claim_guidance=_mixed_claim_carry)
-            products = list(
-                _tb.context.products) if _tb.context else []
+            # FIX-4 — attachment follows decisions: resp.products =
+            #   comp.products (decided support เท่านั้น — covered-need
+            #   cards + verdicted + labeled near-miss)
+            products = list(_tb.products)
         if _grouped_sel:
             _steps.append({"name": "GroupedRetrievalSelection",
                            "input": {"path": "main"},

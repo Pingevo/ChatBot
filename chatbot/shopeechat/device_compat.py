@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 import sys
 from typing import TYPE_CHECKING
@@ -144,19 +145,52 @@ def spec_rank_key(field: str):
     return _SPEC_RANK_EXTRACTORS.get(field)
 
 
+def _structured_watts(p: dict) -> tuple[float, ...]:
+    """structured wattage proof เท่านั้น — set ของค่าที่ verify ได้จาก
+    typed field: card.output_power_w + canonical_specs/specs.
+    output_power_w + variants[].output_power_w
+
+    ค่าที่รับ: numeric จริง (ไม่ใช่ bool — bool เป็น int subtype),
+    finite (กัน NaN/±Inf), > 0 — name/title/description ไม่ใช่
+    full-speed proof (ใช้ได้แค่ relevance ผ่าน _extract_max_wattage);
+    canonical owner ของ structured-watt set — consumers: compat verdict
+    (output_w_structured fact), _wattage_asc_key (adequate tier),
+    retrieval_selection context note
+    """
+    out: set[float] = set()
+    specs = p.get("canonical_specs") or p.get("specs") or {}
+    vals = [v.get("output_power_w") for v in (p.get("variants") or ())]
+    vals.append(p.get("output_power_w"))
+    vals.append(specs.get("output_power_w")
+                if isinstance(specs, dict) else None)
+    for w in vals:
+        if (isinstance(w, (int, float)) and not isinstance(w, bool)
+                and math.isfinite(w) and w > 0):
+            out.add(float(w))
+    return tuple(sorted(out))
+
+
 def _wattage_asc_key(p: dict, min_watt: float | None = None) -> tuple:
     """sort key สำหรับเรียง wattage ascending แบบ "adequate first".
 
-    ถ้ารู้ min_watt (spec ของอุปกรณ์เป้าหมาย): สินค้าที่จ่ายไฟพอ spec (watt ≥ min_watt)
-    ขึ้นก่อนเรียง asc — ตำแหน่ง "baseline" ของ dual-tier จึงเป็นสินค้าที่ spec ผ่านจริง
-    ไม่ใช่ตัว watt ต่ำสุดใน pool (เช่น สาย 60W สำหรับเครื่อง 90W)
+    ถ้ารู้ min_watt ที่ valid (numeric/finite/>0): สินค้าที่ structured
+    watt ทุกค่า ≥ min_watt = adequate tier ก่อน (เรียงตัวพอ spec ที่
+    เล็กสุดก่อน — baseline ของ dual-tier) — tier adequacy ต้องพิสูจน์
+    จาก structured set เท่านั้น ไม่ใช่ max หรือชื่อสินค้า (name-derived
+    watt ใช้ relevance ได้ ไม่ใช่ adequacy proof); below/mixed/unknown
+    อยู่ tier ถัดไป เรียงตาม structured watt สูงสุดที่ยืนยันได้
 
-    ถ้าไม่รู้ min_watt → asc ล้วน (พฤติกรรมเดิม)
+    ถ้าไม่รู้ min_watt ที่ valid → asc ล้วนด้วย watt ที่ดึงได้
+    (พฤติกรรมเดิม — sort hint ไม่ใช่ proof)
     """
-    w = _extract_max_wattage(p)
-    if min_watt and min_watt > 0:
-        return (0 if w >= min_watt else 1, w)
-    return (0, w)
+    if (isinstance(min_watt, (int, float))
+            and not isinstance(min_watt, bool)
+            and math.isfinite(min_watt) and min_watt > 0):
+        sw = _structured_watts(p)
+        if sw and all(v >= min_watt for v in sw):
+            return (0, min(sw))
+        return (1, max(sw) if sw else 0.0)
+    return (0, _extract_max_wattage(p))
 
 
 # ⚡ generic device-token extraction — ไม่ hardcode ชื่อรุ่น (แทน list เดิมที่ต้องอัปเดตทุกรุ่นใหม่)

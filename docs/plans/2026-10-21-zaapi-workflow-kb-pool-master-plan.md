@@ -1,6 +1,6 @@
 # Zaapi Workflow, KB Source, And Evidence Pool Master Plan
 
-**Status:** Approved design backlog; implementation has not started.
+**Status:** Approved design backlog, rebaselined against the complete Zaapi export on 2026-10-22; implementation has not started.
 
 **Start gate:** Close and commit Phase 10 first. Do not mix this program with the current Phase 10 working tree.
 
@@ -18,6 +18,21 @@
 8. Node behavior must be real: config schema, validation, branches, executor, persisted state where needed, idempotency, execution events, and tests.
 9. A node whose platform connector does not exist or is not ready must be visibly unavailable and must block publish. Do not simulate success.
 10. Reuse `@xyflow/react`, existing workflow persistence, existing assignment/domain services, and existing retrieval owners. Do not add another graph library or duplicate domain logic inside node components.
+
+### 1.1 Raw + Canonical ownership (approved 2026-10-27)
+
+Zaapi input uses a two-layer contract:
+
+```text
+Zaapi export -> immutable raw snapshot -> validated canonical records -> runtime
+```
+
+- Raw snapshots preserve the imported payload, source IDs, source revision, content fingerprint, and fields that cannot yet be normalized. They are audit/import/export evidence and never become executable authority.
+- Canonical workflow, node, edge, binding, and KB records are the only runtime authority.
+- Import generates local IDs. Zaapi account, shop, workflow, version, user, team, label, and ticket-field IDs remain source metadata until explicitly mapped.
+- Unsupported nodes and unknown KB shapes remain inspectable with their raw provenance, but stay disabled/unready and cannot publish silently.
+- Export supports a canonical portable package, a sanitized raw-source package, and a Zaapi-compatible projection for fields that have a proven reverse mapping. Export never includes credentials or secrets.
+- Import and export are versioned, fingerprinted, dry-run capable, and covered by round-trip tests. Canonical export is the lossless application backup; Zaapi-compatible export is not allowed to claim lossless round-trip for unsupported fields.
 
 ## 2. Scope
 
@@ -47,6 +62,27 @@ Implement every applicable node from the supplied Zaapi catalogue in these famil
 - Utility nodes: delay, wait for reply, search conversation, randomizer.
 
 The catalogue is a capability target, not permission to claim unsupported behavior. Each platform/node pair requires a tested event or action adapter before it can be published.
+
+### 2.3 Verified Zaapi package baseline
+
+The implementation scope is based on the read-only export at `/Users/itdev4/Downloads/zaapi`, not on a single example flow. The verified baseline is:
+
+| Export area | Verified contents | Planning consequence |
+|---|---:|---|
+| Active custom flows | 21 | Import every flow as a disabled local draft |
+| Flow graph | 218 nodes / 225 edges | Preserve graph shape, positions, handles, and branch order |
+| Node types used by those flows | 31 | First executable node wave; all are exercised by real exported graphs |
+| Applicable five-platform catalogue | approximately 56 node types | Capability target after the 31 used types; unsupported pairs stay unavailable |
+| Basic Automations | 4 total / 1 active | Import separately as disabled draft and report overlap with custom flows |
+| Active KB sources | 118 (113 XLSX / 5 TXT) | Import through one new Zaapi KB backend; do not mix with legacy KB |
+| KB source-account bindings | 899 | Convert to unresolved local bindings; never copy account IDs as authority |
+| Active Scenario Handling records | 53 / 1,882 account links | Import as inert instruction drafts and map to an existing behavior owner |
+| Active AI personalities | 11 / 86 account links | Map to the existing persona owner after account/shop binding |
+| Lookup records | 92 accounts, 21 labels, 2 teams, 6 users, 3 ticket fields | Use only for mapping UI and import audit; regenerate local identities |
+
+All 31 node types present in the node-type lookup are used by at least one exported flow. The export also contains overlapping triggers, label-trigger chains, small-channel exceptions, and flows whose names contain wording such as "ยังไม่ใช้" despite being active. Import and publish decisions must use structured status fields and validation, never names.
+
+The package contains external account IDs, people/team references, and public object URLs. Raw exports are migration input, not application source; do not commit the package wholesale or log its identifiers.
 
 ## 3. Canonical Node Registry
 
@@ -80,16 +116,7 @@ Required graph validation:
 
 ## 4. Zaapi Flow Import Without External Bindings
 
-The supplied flow contains six nodes and five edges:
-
-```text
-message received
--> delay 9 minutes
--> business hours
--> customer waiting time greater than 8 minutes
--> conversation assignee exclusion
--> round-robin team assignment
-```
+Import all 21 active custom flows and the one active Basic Automation. Every imported artifact starts as a disabled local draft, even when the Zaapi source says it is active. Import preserves portable behavior but does not grant executable local identity or provider capability.
 
 Import process:
 
@@ -100,7 +127,8 @@ upload JSON
 -> generate local workflow/node/edge IDs
 -> retain original IDs only in import audit metadata
 -> remove account, shop, user, and team bindings from executable config
--> save as draft with unresolved bindings
+-> save as disabled draft with unresolved bindings
+-> detect trigger overlap, label-trigger chains, and Basic Automation conflicts
 -> validate mappings later
 -> dry-run/replay
 -> publish
@@ -123,7 +151,47 @@ External data that must become unresolved bindings:
 - team IDs;
 - external URLs and credentials.
 
-The imported draft must be viewable and editable before any shop or platform is assigned. It must not execute or publish while required bindings are unresolved.
+Import audit metadata must preserve source workflow/version IDs, source revision, content fingerprint, import batch, imported timestamp, and structural warnings. It must not treat those values as local executable IDs.
+
+The imported draft must be viewable and editable before any shop or platform is assigned. It must not execute or publish while required bindings are unresolved, required nodes are unavailable, graph validation fails, or a trigger conflict is unreviewed.
+
+### 4.1 Canonical workflow persistence and export
+
+Use the existing workflow persistence as the runtime owner and add only the import/version/binding records required by the approved Raw + Canonical contract:
+
+| Record | Responsibility |
+|---|---|
+| `workflows` | Local workflow identity, name, lifecycle state, current draft/published version |
+| `workflow_versions` | Canonical nodes, edges, handles, layout, schema version, immutable version fingerprint |
+| `workflow_runs` | Runtime state, wait/resume checkpoint, lease/fencing, terminal result |
+| `workflow_events` | Node start/result/error/branch/idempotency trace |
+| `workflow_bindings` | Explicit local platform/shop/account/team/user/label/ticket-field mappings |
+| `workflow_import_batches` | Import source, counts, warnings, errors, fingerprint, actor, timestamps |
+| `workflow_raw_snapshots` | Sanitized original Zaapi payload/reference; audit and raw re-export only |
+
+Workflow import/export requirements:
+
+- `dry-run import` validates package shape, graph integrity, node support, conflicts, and unresolved bindings without writes;
+- `apply import` is idempotent by source identity + revision + content fingerprint and creates disabled local drafts;
+- canonical export includes schema version, workflow/version metadata, nodes, edges, positions, handles, portable config, and unresolved binding requirements;
+- Zaapi-compatible export includes only fields with a tested reverse mapping and reports omitted/unsupported fields explicitly;
+- raw export returns the sanitized original snapshot and manifest without credentials;
+- re-importing an unchanged canonical export produces no duplicate workflow/version/node/edge records.
+
+### 4.2 Export data ownership
+
+Do not place every Zaapi export into KB or append it wholesale to the system prompt. Route each data family to one owner:
+
+| Zaapi data | Local owner | Initial state |
+|---|---|---|
+| 21 custom flows | Existing `workflows` persistence and `workflowEngine` | Disabled drafts |
+| 1 active Basic Automation | Existing workflow model with import-kind metadata | Disabled draft with overlap warning |
+| 118 knowledge sources | New Zaapi KB collection and adapter | Imported but inactive while `kb_source=legacy` |
+| 53 Scenario Handling records | Inert scenario-instruction records | Unbound drafts; each must map to policy, workflow, handoff, or typed answer-task owner before activation |
+| 11 AI personalities | Existing persona owner | Unbound drafts until shop/account mapping is complete |
+| Accounts, labels, teams, users, ticket fields | Binding registry/import audit | Unresolved mappings; never direct local authority |
+
+"Import all" means preserve every supplied record with provenance and report unsupported or unresolved items. It does not mean enable all records, execute all flows, or inject all instructions into every prompt.
 
 ## 5. Workflow Editor UX
 
@@ -218,7 +286,84 @@ Use one dedicated collection with a canonical document contract covering at leas
 
 The importer must be dry-run first, idempotent by stable source identity and fingerprint, versioned, reversible, count additions/updates/deactivations, and never delete legacy KB collections.
 
-### 8.2 Atomic switching and readiness
+The 118 source files do not share one spreadsheet schema. The verified export contains at least 17 header signatures across product detail, Q&A, stock, links, warranty, promotion, and wide model-spec workbooks. All 113 XLSX files pass ZIP integrity, but the installed `openpyxl` parser cannot load 65 files because of OOXML compatibility differences. Therefore the existing legacy workbook importer must not be reused unchanged and the Zaapi importer must not assume one fixed header layout.
+
+Required import pipeline:
+
+```text
+manifest/hash verification
+-> robust XLSX/TXT extraction into raw source rows
+-> preserve source ID, sheet, row, column labels, and import provenance
+-> classify supported record shape without filename keyword authority
+-> normalize only fields proven by that source shape
+-> validate canonical Zaapi KB documents
+-> dry-run additions/updates/deactivations/errors
+-> write idempotently by stable source ID + revision + fingerprint
+-> build required indexes/embeddings/readiness evidence
+-> allow audited backend switch
+```
+
+The importer must retain an inspectable raw representation for fields that cannot be normalized safely. A malformed or unsupported workbook is an import error for that source, not permission to discard it silently or infer values from the filename.
+
+### 8.2 Canonical KB persistence and import/export
+
+Use separate Raw + Canonical records:
+
+| Record | Responsibility |
+|---|---|
+| `zaapi_kb_import_batches` | Package/source hashes, dry-run/apply counts, additions, updates, deactivations, unsupported rows, errors, actor, timestamps |
+| `zaapi_kb_raw_sources` | Source file identity, sheet/row/header provenance, raw extracted values, source revision/fingerprint |
+| `zaapi_kb_records` | Validated canonical records queried by the Zaapi KB adapter |
+| `zaapi_kb_embedding_generations` | Immutable semantic-retrieval generation, artifact digest, readiness and active pointer |
+
+Canonical `zaapi_kb_records` must cover:
+
+```yaml
+record_id: local stable ID
+source:
+  system: zaapi
+  source_id: stable external source ID
+  revision: source revision
+  import_batch_id: local import batch
+  file_name: audit display only
+  sheet: optional sheet name
+  row: optional source row
+  fingerprint: normalized content hash
+content:
+  record_type: qa | product_fact | policy | troubleshooting | promotion | link | free_text
+  title: optional title/question
+  body: canonical answer/content
+  structured: validated type-specific values only
+scope:
+  platforms: []
+  shops: []
+  products: []
+  language: th | en | mixed | unknown
+  tags: []
+status:
+  active: boolean
+  readiness: ready | unsupported | invalid | disabled
+  error_codes: []
+embedding:
+  generation_id: optional immutable generation
+timestamps:
+  source_updated_at: optional source timestamp
+  imported_at: import timestamp
+  updated_at: local update timestamp
+```
+
+The schema stores source filenames for audit only; filenames, free-text keywords, or guessed IDs never determine record type, shop, platform, product identity, or policy semantics. Shape classification must come from validated source structure or an explicit import mapping.
+
+KB import/export requirements:
+
+- dry-run first, then idempotent apply by source ID + revision + fingerprint;
+- preserve every source as imported, unchanged, unsupported, or failed with a reason;
+- canonical export supports JSONL/JSON plus a standard XLSX projection and manifest;
+- raw export preserves the sanitized source package and provenance;
+- rollback deactivates/reverts one import batch without deleting legacy KB;
+- switching `kb_source` is separate from import and requires readiness/index/embedding/retrieval-smoke evidence.
+
+### 8.3 Atomic switching and readiness
 
 - Default existing installations to `legacy` so current behavior does not change during migration.
 - Import and validate Zaapi KB while `legacy` remains active.
@@ -235,6 +380,7 @@ The importer must be dry-run first, idempotent by stable source identity and fin
 - Inventory existing workflow nodes, events, platform connectors, domain services, and KB readers.
 - Map every in-scope Zaapi node to each platform as supported, unavailable, or requiring a new adapter.
 - Define node registry, graph schema version, binding model, operation keys, and execution events.
+- Freeze import-audit, unresolved-binding, scenario/persona ownership, and KB-record contracts.
 - Produce executable contract tests before runtime changes.
 
 ### Workstream B: Registry, compiler, and runtime
@@ -249,8 +395,8 @@ The importer must be dry-run first, idempotent by stable source identity and fin
 
 - Redesign the existing editor around the registry.
 - Add binding/readiness validation and CAS saves.
-- Build the Zaapi JSON preview/import path.
-- Import the supplied six-node flow as an unresolved draft.
+- Build the Zaapi JSON preview/import path with import batches and structural conflict reports.
+- Import all 21 custom flows and the active Basic Automation as disabled unresolved drafts.
 - Add dry-run/replay and publish gates.
 
 ### Workstream D: Platform adapters and real nodes
@@ -266,17 +412,28 @@ The importer must be dry-run first, idempotent by stable source identity and fin
 - Add central pool source policy to the existing config owner and admin UI.
 - Apply source admission before each adapter fetch.
 - Wrap legacy KB behind one adapter without changing its internals.
-- Add the new Zaapi KB collection, indexes, importer, readiness check, and adapter.
+- Add the new Zaapi KB collection, indexes, multi-shape XLSX/TXT importer, readiness check, and adapter.
 - Add strict `legacy | zaapi` selection with no `both` and no implicit fallback.
 - Allow `let_ai_respond` to narrow, never widen, source policy.
 
-### Workstream F: Verification and rollout
+### Workstream F: Scenario, persona, and binding migration
+
+- Import Scenario Handling records as inert drafts with source provenance.
+- Classify each scenario into an existing authoritative owner: policy, workflow, handoff, or typed answer task.
+- Reject activation when a scenario has no owner or would introduce a parallel prose/keyword decision path.
+- Import personalities into the existing persona owner with unresolved account/shop bindings.
+- Map accounts, shops, labels, teams, users, and ticket fields explicitly; never infer identity from display names alone.
+- Produce a completeness report for imported, mapped, unsupported, and unresolved records.
+
+### Workstream G: Verification and rollout
 
 - Contract tests for every node and branch.
 - Graph import round-trip and unresolved-binding tests.
 - Runtime retry/idempotency, crash-resume, delay, timeout, randomizer, and loop-ceiling tests.
 - Per-platform connector tests with provider leaves mocked, followed by authorized sandbox tests.
 - Pool truth-table and strict KB-selection tests, including proof that the inactive backend receives zero reads.
+- Import completeness tests for 21 flows, 218 nodes, 225 edges, 118 KB sources, 53 scenarios, 11 personalities, and one active Basic Automation.
+- Conflict tests for overlapping message triggers, label-trigger chains, duplicated side effects, and source-active flows whose names imply otherwise.
 - Editor interaction and responsive visual tests.
 - One-shop/one-platform canary before broader activation.
 
@@ -285,17 +442,23 @@ The importer must be dry-run first, idempotent by stable source identity and fin
 The program is complete only when:
 
 1. Every in-scope node is either executable on a platform with tests or explicitly unavailable and unpublishable for that platform.
-2. The supplied Zaapi flow imports with the same graph and behavior, but no external account/user/team ID becomes an executable local identity.
-3. The imported flow can remain an unbound draft and cannot publish until mappings are complete.
-4. Existing workflows continue to execute through the same engine and dispatch owner.
-5. Every pool switch proves the disabled source receives zero reads.
-6. `kb_source=legacy` proves zero reads to the Zaapi collection.
-7. `kb_source=zaapi` proves zero reads to all legacy KB collections.
-8. Switching KB does not delete, rewrite, or merge either dataset.
-9. A failed Zaapi KB readiness check cannot activate Zaapi and cannot silently fall back to legacy.
-10. Workflow side effects are idempotent across retry, worker restart, lease recovery, and duplicate inbound events.
-11. UI save conflicts are visible and cannot silently overwrite another admin's graph.
-12. Logs identify workflow/run/node/branch/source without recording credentials or customer secrets unnecessarily.
+2. All 21 active custom flows import with 218 nodes and 225 edges preserved, while every imported workflow/node/edge receives a local ID.
+3. The one active Basic Automation imports separately and overlapping trigger/side-effect behavior is reported before publish.
+4. No external account/shop/user/team/label/ticket-field ID becomes an executable local identity without an explicit local mapping.
+5. Every imported flow can remain an unbound disabled draft and cannot publish until mappings, capabilities, conflicts, and graph validation pass.
+6. All 118 KB sources appear in an import report as imported, unchanged, unsupported, or failed with a reason; none disappear silently.
+7. Every Scenario Handling record has provenance and remains inert until assigned to exactly one existing authoritative behavior owner.
+8. Every personality remains inactive until its local shop/account binding is resolved through the existing persona owner.
+9. Existing workflows continue to execute through the same engine and dispatch owner.
+10. Every pool switch proves the disabled source receives zero reads.
+11. `kb_source=legacy` proves zero reads to the Zaapi collection.
+12. `kb_source=zaapi` proves zero reads to all legacy KB collections.
+13. Switching KB does not delete, rewrite, or merge either dataset.
+14. A failed Zaapi KB readiness check cannot activate Zaapi and cannot silently fall back to legacy.
+15. Workflow side effects are idempotent across retry, worker restart, lease recovery, and duplicate inbound events.
+16. UI save conflicts are visible and cannot silently overwrite another admin's graph.
+17. Logs identify workflow/run/node/branch/source/import batch without recording credentials or customer secrets unnecessarily.
+18. The 31 node types used by imported flows pass contract/replay tests before any imported workflow can publish; remaining applicable catalogue nodes may follow only as verified capability increments.
 
 ## 11. Estimated Schedule
 
@@ -303,20 +466,34 @@ Assumptions: one experienced engineer, existing APIs and test credentials are av
 
 | Milestone | Estimated elapsed work |
 |---|---:|
-| Contracts, inventory, capability matrix | 3-5 working days |
-| Registry, graph validation, runtime foundations | 7-12 working days |
-| Editor redesign and Zaapi graph import | 7-12 working days |
+| Export intake, contracts, capability and conflict matrix | 4-6 working days |
 | Central pool switches and strict KB selector | 4-7 working days |
-| Zaapi KB collection/import/readiness/adapter | 5-8 working days after receiving the KB export |
-| Shared messaging/ticket/utility nodes | 7-12 working days |
+| Zaapi KB collection, multi-shape importer, readiness, adapter | 8-15 working days |
+| Workflow importer for 21 flows + Basic Automation | 5-8 working days |
+| Registry, graph validation, runtime foundations | 8-14 working days |
+| First 31 used node types and shared messaging/ticket/utility behavior | 10-18 working days |
+| Editor redesign, bindings, trace, CAS, dry-run/publish gates | 8-14 working days |
+| Scenario/persona migration and binding reconciliation | 5-10 working days |
+| Remaining applicable catalogue nodes | 8-15 working days |
 | Five-platform real connector/event/action coverage | 20-40 working days, strongly dependent on API access |
 | Regression, security review, sandbox tests, canary | 5-10 working days |
 
-**Sequential total:** approximately 10-16 working weeks for the full five-platform, real-node scope.
+**Sequential total:** approximately 14-22 working weeks for the complete export, full applicable catalogue, and truthful five-platform adapter scope.
 
-**With three isolated teams/worktrees after contracts freeze:** approximately 6-9 weeks, split into workflow runtime/editor, platform adapters, and KB/pool. Shared schema, roadmap, and waythrough edits must remain owned by one integration track.
+**With isolated teams/worktrees after contracts freeze:** approximately 9-14 weeks, split into workflow runtime/editor, platform adapters, and KB/pool. Shared schema, roadmap, SRS, config owners, and waythrough edits must remain owned by one integration track. The user has currently chosen sequential work, so this is planning information rather than authorization to parallelize.
 
-**First useful delivery:** approximately 2-3 weeks for the supplied six-node flow working as a draft/sandbox flow plus the central pool switches, assuming it initially targets capabilities already present in the repository.
+**First useful delivery:** approximately 3-5 weeks after Phase 10 closes for pool switches, strict legacy/Zaapi KB selection, a dry-run import report for all 118 KB sources, and all 21 workflows visible as disabled unresolved drafts. This delivery does not imply five-platform execution is ready.
+
+### Delivery horizons (scope must not be conflated)
+
+| Horizon | Honest deliverable | Estimate |
+|---|---|---:|
+| Emergency foundation | Freeze Raw + Canonical schemas, Web Search default-OFF contract, pool/KB switch contract, import/export manifests, and run a no-write census/dry-run against the supplied package | 2 working days |
+| First usable KB delivery | New Zaapi KB Raw + Canonical import, strict `legacy | zaapi` switch, pool admission, import/export, readiness checks, and local canary; workflows remain imported disabled drafts | 2-4 working weeks |
+| First useful workflow delivery | All 21 flows imported/editable, registry/runtime/editor ready for the 31 used node types that have real supported adapters, unresolved pairs visibly blocked | 6-10 working weeks |
+| Complete approved program | Approximately 56 applicable node types, truthful five-platform connectors, full import/export, scenario/persona migration, security/regression/canary | 14-22 working weeks sequentially |
+
+The two-day horizon does not include importing all 118 heterogeneous KB sources into production-ready canonical records, implementing the 31 used workflow nodes, completing the editor, or enabling five-platform actions. Claiming those outcomes in two days would require silent data loss, simulated node success, or unverified platform behavior and is therefore outside the approved design.
 
 The largest uncertainty is not the editor. It is real event and action access for Facebook, LINE, TikTok, Shopee, and Lazada. Missing credentials, webhook subscriptions, review/order APIs, or send permissions block a truthful executable node regardless of UI completion.
 
@@ -324,49 +501,64 @@ The largest uncertainty is not the editor. It is real event and action access fo
 
 This program is part of a larger ordered backlog. The order below is authoritative for sequencing unless the user explicitly changes it.
 
-### Stage 1: Close the current rebaseline safely
+### Stage 0: Finish and isolate the current work
 
-1. Final independent review of Phase 10A.
-2. Commit Phase 10A runtime/tests/docs separately from its active-log closeout.
-3. Keep this Zaapi master plan and its active-log pointer out of the Phase 10A implementation commit.
-4. Run the one-shop grouped-pipeline canary with grouped flags controlled and web search OFF by default.
-   - **Phase 10B live-canary finding (corrected):** the first real SuperITMall turn (`รุ่น IMILAB W01 เชื่อมต่อกับ Strava ได้ไหม`) hit `NameError: snap` inside `search_qa` (call path `qa_context → search_qa → _known_brands(snap)`; commit `6d47ad3` had updated the callsite in `search_qa`'s body but not its signature). Correction: keyword-only `snap` on `search_qa` forwarded from both owning wrappers — `qa_context`, `qa_troubleshoot_tips` — with no second resolution. Companion Test Chat boundary correction: local no-session reject, `res.ok` transport handling, and terminal-only user-turn history/persist commit. Evidence: `docs/test/test_qa_snapshot_propagation.py` + `ChatAdminWeb/scripts/test-testchat-client-boundary.ts`.
-5. Close remaining Phase 8 activation work: unmigrated item-tag/spec/web-enriched boundaries, shared finalizer responsibilities, evidence-scoped numeric/unit/certificate checks, and the residual-prose blocker.
-6. Remove the legacy fallback and obsolete wrappers only after canary acceptance; retain rollback notes and an accepted baseline.
-7. Distill the system prompt after the typed boundary/finalizer is authoritative; measure exact payload, answer-call count, median/p95 tokens, latency, and cost before and after.
+1. Finish Phase 10B r12 root-cause work, complete its focused and regression verification, review it independently, and commit runtime/tests/docs separately from the active-log closeout.
+2. Do not stage, commit, or merge this Zaapi plan update with the Phase 10B implementation commit. The Zaapi program starts from a clean reviewed state.
 
-### Stage 2: Complete operational readiness
+### Stage 1: Freeze shared contracts
 
-8. Finish Phase 4B operator setup: first manual refresh, generation verification, timing/cost evidence, then the 09:00 schedule and old-generation cleanup policy.
-9. Supply and validate the production structured policy records required by Phase 5 before policy activation.
-10. Implement Logging and Analytics Truth in order:
+3. Freeze the node registry, graph schema/version, import audit metadata, unresolved binding types, deterministic operation keys, execution-event shape, Zaapi KB document shape, central pool policy, and strict `legacy | zaapi` selector.
+4. Produce a capability matrix for the 31 node types used by the 21 flows, then the remaining applicable five-platform catalogue. Each platform/node pair is `supported`, `unavailable`, or `requires_adapter`; there is no implicit support.
+5. Produce import conflict rules for overlapping message triggers, label-trigger chains, Basic Automation overlap, timezone preservation, duplicate side effects, and source-active flows with misleading names.
+
+### Stage 2: Add central pool controls and Zaapi KB safely
+
+6. Add source-admission switches for `kb`, `mongo_catalog`, `units`, and `image_text` before any source fetch, with zero-read tests for disabled sources.
+7. Wrap the current multi-collection KB behavior behind the unchanged legacy adapter and add the atomic `kb_source: legacy | zaapi` setting with no `both` and no silent fallback.
+8. Build the Zaapi KB dry-run importer for all 118 sources: verify hashes, extract XLSX/TXT robustly, retain raw provenance, normalize only supported shapes, and report additions/updates/deactivations/errors.
+9. Create the new Zaapi KB collection/index/readiness contract, import all valid sources idempotently, and build required embedding/readiness artifacts while `kb_source=legacy` remains active.
+10. Verify retrieval parity and prove the inactive KB backend receives zero reads. Do not switch production traffic yet.
+
+### Stage 3: Import workflows before enabling behavior
+
+11. Build the workflow/Basic Automation importer and import all 21 active flows plus the one active Basic Automation as disabled local drafts with regenerated local IDs.
+12. Preserve 218 nodes, 225 edges, positions, handles, branch ordering, and portable config; store external IDs only as audit metadata and unresolved bindings.
+13. Generate completeness and conflict reports. A count mismatch, unsupported shape, unresolved required binding, or unreviewed conflict blocks publish but does not discard the draft.
+
+### Stage 4: Make the imported graphs executable
+
+14. Implement/migrate the 31 node types actually used by the imported flows through the single registry and existing `workflowEngine`; retain `runInboundDispatch` as the sole inbound ordering owner.
+15. Add persisted waits, deterministic operation keys, crash/retry idempotency, randomizer branch persistence, jump/step ceilings, and execution events.
+16. Extend the existing `@xyflow/react` editor with registry-driven palette/configuration, unresolved-binding UI, capability status, validation, CAS save, dry-run, publish gates, and execution trace.
+17. Map local shops/platforms/admins/teams/labels/ticket fields explicitly and replay imported flows against the export to prove branch equivalence.
+18. Import Scenario Handling records as inert drafts and map each record to exactly one existing policy/workflow/handoff/typed-answer owner. Import personalities through the existing persona owner. Nothing activates from text/name matching alone.
+19. Implement the remaining applicable catalogue node types after the 31 used types are stable; each node/platform pair remains unavailable until its executor and adapter tests pass.
+
+### Stage 5: Real platform capability and canaries
+
+20. Implement real shared messaging/ticket capabilities, then verified Facebook and LINE adapters, followed by Shopee, Lazada, and TikTok marketplace capabilities allowed by available APIs.
+21. Run offline contracts, import round-trip, crash/retry, and UI tests; then authorized provider sandbox tests and one-shop/one-platform canaries.
+22. Canary `kb_source=zaapi` only after readiness, retrieval truth, inactive-backend zero-read, and rollback-switch tests pass. Roll back by audited selector change, never by deleting data.
+23. Activate flows incrementally only after mappings and conflict reviews pass. Import completion is not activation approval.
+
+### Stage 6: Remaining ordered backlog
+
+24. Distill the system prompt after the typed answer boundary/finalizer and Phase 10 activation behavior are authoritative; measure exact payload size, answer-call count, median/p95 tokens, latency, and cost before and after.
+25. Finish Phase 4B operator setup: first manual image-text/embedding refresh, generation verification, timing/cost evidence, 09:00 schedule, atomic generation switch, and old-generation cleanup policy.
+26. Supply and validate the production structured policy records required by Phase 5 before policy activation.
+27. Complete Botworker production canary gates: enforced cost stop, concurrency 1, one-shop admission, forced stop, restart/recovery evidence, and deployment approval.
+28. Schedule database/writer maintenance separately: external writer corrections, duplicate cleanup, uniqueness/index verification, and inbound-lifecycle wiring. No production cleanup runs merely because application code is ready.
+29. Implement Logging and Analytics Truth last, as explicitly prioritized by the user:
    - Analytics Truth for the three pages with one window/timezone contract and authoritative queries;
    - Audit Event Correctness with one action vocabulary and idempotent command events;
-   - Provider/Cost Observability with actual provider/model, safe key reference, tokens, cost, latency, attempt, outcome, and turn correlation.
-11. Complete the Botworker production canary gates: enforced cost stop, concurrency 1, one-shop admission, forced stop, restart/recovery evidence, and deployment approval.
-12. Schedule database/writer maintenance separately: external writer corrections, duplicate cleanup, uniqueness/index verification, and inbound-lifecycle wiring. No production cleanup runs merely because application code is ready.
-
-### Stage 3: Add the Zaapi KB and pool controls
-
-13. Freeze the central source-policy and strict KB-selection contracts from this plan.
-14. Add pool admission switches for `kb`, `mongo_catalog`, `units`, and `image_text` before source fetch.
-15. Wrap the existing multi-collection legacy KB pipeline behind the unchanged legacy adapter.
-16. Add the new Zaapi KB collection, dry-run importer, indexes, readiness checks, and canonical adapter after receiving the actual KB export.
-17. Add the atomic `kb_source: legacy | zaapi` switch, prove zero reads to the inactive backend, and canary the Zaapi dataset before wider use.
-
-### Stage 4: Expand workflow capability
-
-18. Freeze the node capability matrix for Facebook, LINE, TikTok, Shopee, and Lazada.
-19. Implement the canonical node registry, graph validation, runtime contracts, persisted waits, idempotency, and execution events.
-20. Redesign the existing `@xyflow/react` editor and add import preview, unresolved bindings, CAS save, dry-run, and publish gates.
-21. Import the supplied six-node Zaapi flow as a local unbound draft, then map shops/platforms/admins/teams and verify equivalent replay behavior.
-22. Implement shared messaging, ticket, utility, AI, and flow-control nodes.
-23. Implement real platform adapters and marketplace event/action nodes by verified API capability; unavailable platform/node pairs remain unpublishable.
-24. Run per-platform sandbox tests, then one-shop canaries, then final integration and activation review.
+   - Provider/Cost Observability with actual provider/model, safe key reference, tokens, cost, latency, attempt, outcome, and turn correlation;
+   - Workflow/import observability from the execution and import events defined earlier, without creating a second behavior owner.
 
 ### Parallelism rule
 
 - Do not parallelize Phase 10/Phase 8 chatbot-flow edits against the same working tree.
-- After contracts freeze, Logging/Analytics UI/query work, Zaapi KB import work, and workflow editor work may run in isolated branches/worktrees when they do not modify the same schema/config owners.
+- The current user decision is sequential execution; do not start parallel work without a new explicit approval.
+- If parallelism is later approved, it starts only after shared contracts freeze and uses isolated branches/worktrees with disjoint ownership.
 - Platform adapters may run in separate worktrees per platform after the node registry contract is frozen.
 - One integration owner controls shared schema, system-config fields, canonical roadmap, SRS, and active waythrough updates.

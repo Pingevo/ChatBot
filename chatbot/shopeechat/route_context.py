@@ -186,15 +186,16 @@ def intent_product_scope(intent_result: dict | None
 def intent_fact_scope(intent_result: dict | None
                       ) -> tuple[tuple[str, ...], tuple[str, ...],
                                  tuple[tuple[str, str, float], ...],
-                                 tuple[str, ...]]:
+                                 tuple[str, ...], tuple[str, ...]]:
     """intent → (requested_facts, required_features, spec_constraints,
-    capability_asks) — typed fact/spec/capability contract accessor เดียว
-    (consumer ห้ามอ่าน raw keys ตรง); closed enums อยู่ที่ producer
-    (intent_classifier) — accessor re-validate shape แล้ว drop ค่านอก
-    contract (fail closed); capability_asks = open labels — shape check
-    เท่านั้น (non-empty str), ไม่มี vocabulary gate"""
+    capability_asks, intrinsic_asks) — typed fact/spec/capability contract
+    accessor เดียว (consumer ห้ามอ่าน raw keys ตรง); closed enums อยู่ที่
+    producer (intent_classifier) — accessor re-validate shape แล้ว drop
+    ค่านอก contract (fail closed); capability_asks/intrinsic_asks = open
+    labels — shape check เท่านั้น; intrinsic_asks ต้อง ⊂ capability_asks
+    (normalized key — semantic scope ตัดสินที่ producer เท่านั้น)"""
     if not intent_result:
-        return (), (), (), ()
+        return (), (), (), (), ()
     from . import intent_classifier as _ic
     rf = intent_result.get("requested_facts")
     facts = tuple(dict.fromkeys(
@@ -209,8 +210,14 @@ def intent_fact_scope(intent_result: dict | None
         s for s in (str(x).strip() for x in
                     (ca if isinstance(ca, (list, tuple)) else ()))
         if s))
+    _ask_keys = {"".join(s.split()).casefold() for s in asks}
+    ia = intent_result.get("intrinsic_asks")
+    intrinsic = tuple(dict.fromkeys(
+        s for s in (str(x).strip() for x in
+                    (ia if isinstance(ia, (list, tuple)) else ()))
+        if s and "".join(s.split()).casefold() in _ask_keys))
     return facts, feats, _ic.norm_spec_constraints(
-        intent_result.get("spec_constraints")), asks
+        intent_result.get("spec_constraints")), asks, intrinsic
 
 
 def resolve_route(message: str, intent_result: dict | None = None) -> RouteContext:
@@ -545,7 +552,7 @@ def build_retrieval_profile(
     # typed spec contract (closed enums — accessor เดียว; conf gate เดียว
     #   กับ product scope)
     if confidence >= 0.7:
-        _rf, req_features, spec_constraints, _ = intent_fact_scope(
+        _rf, req_features, spec_constraints, _, _ = intent_fact_scope(
             intent_result)
     else:
         req_features, spec_constraints = (), ()

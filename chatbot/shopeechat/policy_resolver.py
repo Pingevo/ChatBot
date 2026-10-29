@@ -21,6 +21,7 @@ source ใน production (Phase 5 blocker). active_policy_rules() คืน ()
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime as _dt
@@ -482,6 +483,16 @@ def extract_field_facts(card: dict, *, subject_id: str = "",
     add("connector", conns, "card_text", "connector extract")
     add("output_w", device_compat._extract_max_wattage(card) or None,
         "card", "output_power_w|variants|name")
+    # structured-only watt values สำหรับ compat verdict — name/title/
+    #   description ไม่ใช่ wattage proof (parse fallback ของ
+    #   _extract_max_wattage ใช้ได้แค่ retrieval/ranking ไม่ใช่ verdict);
+    #   canonical owner = device_compat._structured_watts (set ครบทุก
+    #   structured value: card-level + specs + ทุก variant, numeric/
+    #   finite/>0 เท่านั้น) — resolve_compat ประเมินความสัมพันธ์ทั้ง
+    #   set กับ min_watt
+    add("output_w_structured",
+        device_compat._structured_watts(card) or None,
+        "card", "output_power_w|variants (structured only)")
     # canonical numeric/feature facts (extractor owner เดียวกัน — ไม่มี
     #   evidence → ไม่ emit row = unknown ไม่ใช่ negative)
     add("data_transfer_mbps",
@@ -807,8 +818,46 @@ def resolve_compat(*, subject_id: str, target: str, relation: str,
             proof = CompatProof(
                 subject_id, target, relation, "compatible",
                 (f"connector:{sorted(hit)[0]}",), src)
-            return CompatDecision("compatible", (proof,),
-                                  ("connector_match",))
+            # wattage truth — connector fit พิสูจน์การเชื่อมต่อเท่านั้น:
+            #   target มี structured min_watt → ประเมิน structured watt
+            #   ทุกค่าที่เป็นไปได้เทียบ min (verdict คง compatible — ห้าม
+            #   ตี unknown เป็น full-speed หรือตัดเป็น incompatible):
+            #   ไม่มี structured watt → missing_wattage_evidence ·
+            #   ทุกค่า < min → insufficient_wattage (known-below) ·
+            #   ทุกค่า ≥ min → adequate (variant ใดก็พอ — clean) ·
+            #   mixed → wattage_variant_unconfirmed (ห้ามใช้ max
+            #   เป็นหลักฐาน — ยังไม่รู้ selected variant)
+            _rc = ["connector_match"]
+            if relation == "charges":
+                _req_w = 0.0
+                for _v in _fact_vals(target_facts, target, "min_watt"):
+                    try:
+                        _fv = float(_v)
+                    except (TypeError, ValueError):
+                        continue
+                    # NaN/Inf/negative ไม่ใช่ requirement ที่ valid —
+                    #   watt ไม่ควรกลายเป็น adequacy claim จาก target ที่
+                    #   malformed
+                    if math.isfinite(_fv):
+                        _req_w = max(_req_w, _fv)
+                _ws = []
+                for _v in _fact_vals(
+                        subject_facts, subject_id,
+                        "output_w_structured"):
+                    try:
+                        _fw = float(_v)
+                    except (TypeError, ValueError):
+                        continue
+                    if math.isfinite(_fw):
+                        _ws.append(_fw)
+                if _req_w > 0:
+                    if not _ws:
+                        _rc.append("missing_wattage_evidence")
+                    elif all(_w < _req_w for _w in _ws):
+                        _rc.append("insufficient_wattage")
+                    elif any(_w < _req_w for _w in _ws):
+                        _rc.append("wattage_variant_unconfirmed")
+            return CompatDecision("compatible", (proof,), tuple(_rc))
         if "usb-a" in sub and "usb-c" in dev:
             return _unk("adapter_bridge_possible")
         proof = CompatProof(

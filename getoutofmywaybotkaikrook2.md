@@ -7771,3 +7771,181 @@ D. `decide_turn`: `_subj_scope=='explicit'` + `not _subject_refs` + need มี 
 - artifacts: `docs/test/results/phase10b/closeout_live_1793179849.{json,md}` · runner ad-hoc `/tmp/phase10b_live.py` (ไม่ commit)
 
 **Verdict: `PHASE_10B_CLOSE_WITH_DOCUMENTED_GAPS`** — core verified (frozen state, zero regressions, FIX A+B live-verified, attribution ตรงเป๊ะ) แต่เหลือ documented gaps: 8 intentional xfails (S/S/M/M/L per item — next-phase) + 2 live turns provider-blocked (Strava outcome + constraint path ต้อง re-verify เมื่อ provider ปกติ) + MED counterpart-self duplication + LOW card-drift observation · plan DoD [~] deletion + canary + fallback removal = operator-gated release steps ไม่ใช่ code-closeout blocker · ไม่มี commit/push/deploy · production/shared Mongo ไม่ถูกแตะ (27018 disposable เท่านั้น เขียน=0 digest คงเดิม)
+
+## Phase 11 — ROOT-CAUSE RESTRUCTURING (กำลังจะทำ)
+
+Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty เฉพาะ Zaapi plan — ไม่แตะ) · offline only · FIX-1+2 เท่านั้นแล้วหยุดที่ checkpoint (FIX-3 เปลี่ยน answer shape ต้อง owner review)
+
+### FIX-1 — dead-key skip in rotation (owner: `llm._next_api_key`/`_client`/`_generate`)
+
+**Audit/root:** `_KEY_INDEX` modulo บน `_active_keys()` — key ตายที่ index 6 → call #6,15,24… 401 UNAUTHENTICATED ทุก worker (live-proven 2 turns ใน closeout: W01 Q3 + wattaka Q3) · ไม่มี mark dead → key ตัวเดิมถูกหมุนกลับมาใช้ตลอด process · `_KEY_CYCLE`+`itertools` = dead code ค้างจาก cycle→index refactor เดิม
+**Fix (ที่ owner เดิม ไม่มี mechanism ใหม่):** `_DEAD_KEYS: set[str]` per-process — mark credential (string) ที่ตอบ 401/UNAUTHENTICATED; `_next_api_key` ข้าม dead bounded ≤len(keys), dead หมด → RuntimeError เดิม (= empty pool path); `_client(api_key=None)` รับ key ที่เลือกแล้ว (param เดียว typed, callers เดิมไม่แตะ); `_generate` loop: 401 → mark+next key ใน call เดียว bounded ≤len(keys), attempt สุดท้าย 401 → error path เดิม (ClientError propagate) · 429→model-fallback path คงเดิม (call ที่ 2 ก็ผ่าน dead-aware `_next_api_key`, 401 ตรงนั้น mark แล้ว raise เหมือนเดิม) · ลบ `_KEY_CYCLE`+`import itertools` (dead −1)
+**ผลกระทบ:** key ตายกลาง pool → call สำเร็จด้วยตัวถัดไปทันที (~1/9 degraded turns หาย) · all-dead → error path เดิม (ClientError→_error_reply→handoff / RuntimeError→ข้อความ canned) fail-closed คงเดิม · non-auth errors คงเดิม (500 raise ทันที, 429 fallback เดิม) · mark เป็น per-process ตาม spec · index→string marking: credential เดียวกัน (index เปลี่ยนได้เมื่อ pool reload — string ไม่ kill key ผิดตัว) · **mechanism delta:** helpers+0 guards+0 regex+0 kw+0 owners+0 fallbacks+0 flags+0 deps+0 provider+0 · dead-code −1 · state var +1 · typed param +1 → **net −1**
+**RED:** fake pool 3 keys ตัวกลางตอบ 401 → `_generate` สำเร็จด้วย key ถัดไป + dead ไม่ถูก issue ซ้ำ + all-dead → error path เดิม
+
+### FIX-2 — kill keyword description gate (owner: `product_store._clean_description` + card field contract; admission คง `_scope_card`)
+
+**Audit/root:** `_clean_description` คืน "" เมื่อ message ไม่มี keyword ~40 คำ (warranty/spec/shipping/claim kw ×4 tables + model-code regex + `_PRODUCT_MENTION_KWS` use) และ section-select ผ่าน section_markers table — question vocab ไม่จำกัด แต่ตารางปิด → spec fact ที่มีใน desc จริงไม่ถึง context → bot ตอบ cannot-confirm ทั้งที่มีหลักฐาน (verified root cause) · BUG-O `raw_description`[:4000] = patch channel ซ้อน
+**Fix (per D4):** `_clean_description` → question-independent normalizer (promo-line strip + \n\n\n collapse + cap 3000) — ลบ kw tables ×4 + model-code regex + section_markers + want_* flags ×6 + section-selection + empty fallbacks · `to_product_card` ออก `description_excerpt` เดียว ลบ `raw_description` key · `to_unit_card` excerpt = `_ps._clean_description` บน join desc_sections (หรือ image_text fallback) + warranty_text suffix เดิม — ลบ `raw_description` + ลบ `pick_desc_sections` (route-gated picker = defect class เดียวกัน, dead หลังเปลี่ยน) · `llm._build_context` ลบ elif raw_description branch (dead channel) — "(ไม่มีรายละเอียด)" fire เฉพาะ desc ว่างจริง · admission/reader contracts ไม่แตะ (`_scope_card`/`_FACT_DESC_FIELDS`/guards/compat/policy_resolver tuples/conversation cap — read-if-present)
+**ผลกระทบ:** spec ask ไร้ keyword (อายุแบต, app, sensor) → evidence ไหลเข้า context เสมอ → ตอบได้จริง · generic turn: excerpt มีค่าบน card แต่ admission คงเดิม → prompt โตเฉพาะ desc-need turns (คาด delta เล็กกว่า raw4000 channel เดิม — จะวัดจริง) · desc ว่างจริงใน DB → "(ไม่มีรายละเอียด)" marker คงเดิม · unit cards ได้ desc เต็ม (cap เดียวกัน) · readers อ่าน field เดิม ไม่ต้องแก้ · legacy `answer()` include_desc gate = context-admission อีกชั้น อยู่นอก D4 scope — ไม่แตะ · **mechanism delta:** kw tables −5 (warranty/spec/shipping/claim/product-use — `_PRODUCT_MENTION_KWS` คงอยู่เพราะ app.py:5155 attach gate ใช้) · marker table −1 · regex −1 · flags −6 · section-selection −1 · fallbacks −3 · emitted field −1 · helper −1 (`pick_desc_sections`) · owners+0 → **net ลบมาก**
+**RED:** product turn ที่ message ไม่มี spec_kw แต่ desc มี fact (แบตอยู่ได้ 7 วัน) → `to_product_card`+`_scope_card` ต้องส่ง evidence — pre-fix excerpt="" · + single-field contract (`raw_description` ต้องไม่อยู่ใน card)
+
+### FIX-1 — ผ่านแล้ว ✓
+
+**error → cause → fix → impact:** ~1/9 turns ตอบ ClientError 401 (W01 Q3/wattaka Q3 ใน closeout) ← rotation index-modulo หมุน key ตายกลับมาใช้ทุกครั้ง ไม่มี mark ← `_DEAD_KEYS` per-process + `_next_api_key` ข้าม dead bounded ≤len(keys) + `_generate` retry key ถัดไปใน call เดียว ≤len(pool), all-dead → error path เดิม (RuntimeError/ClientError) + ลบ `_KEY_CYCLE`/itertools (dead code) ← 401 กลาง pool ไม่กระทบลูกค้าแล้ว; non-auth/429 paths คงเดิม
+**RED→GREEN:** `test_phase11_key_rotation.py` RED 3 (call เดียว 401, k1 reissued, all-dead ลองแค่ 1 key) → GREEN 5/5 · **regression:** 189 (canary/web_boundary/refresh/token_accounting) + 87 (answer_context/composition) + 57+8xf (exact_item/answer_completeness) + 79 (compat_decision/boundary_review) = 412 passed 0 fail · py_compile OK
+**mechanism delta จริง:** helpers+0 guards+0 regex+0 kw+0 owners+0 fallbacks+0 flags+0 deps+0 provider+0 · dead-code −1 (`_KEY_CYCLE`+itertools import) · state var +1 (`_DEAD_KEYS`) · typed param +1 (`_client.api_key`) → **net −1** · index→string marking เพราะ credential = string identity (index เปลี่ยนเมื่อ pool reload — string ไม่ kill key ผิดตัว)
+**SRS §6:** `_next_api_key`/`_client`/`_generate` อัปเดตครบ
+
+### FIX-2 — ผ่านแล้ว ✓
+
+**error → cause → fix → impact:** spec fact ที่มีใน description จริงไม่ถึง context → bot ตอบ cannot-confirm ← `_clean_description` คืน "" เมื่อ message ขาด keyword ~40 คำ (kw tables ×4 + model-code regex + section_markers table; question vocab ไม่จำกัด ตารางปิด) + `raw_description`[:4000] เป็น patch channel ซ้อน ← collapse เป็น normalized field เดียว (promo-strip + cap 3000) ไม่ gate ตามคำถาม — ลบ kw tables×4+model-code regex+marker table+want_* flags+section-selection+fallbacks; `to_product_card`/`to_unit_card` ออก `description_excerpt` เดียว ลบ `raw_description` + ลบ `pick_desc_sections` (route-gated picker defect class เดียวกัน); `llm._build_context` ลบ elif raw branch; admission/reader contracts ไม่แตะ ← spec ask ไร้ keyword (อายุแบต/แอป/sensor) ตอบได้จาก evidence จริง
+**RED→GREEN:** `test_phase11_description_gate.py` RED 6 (excerpt="" ทั้งที่ desc มี fact, raw_description ยังอยู่บนทั้ง 2 card types) → GREEN 6/6 · **regression:** 87 + 283 + 75 + 169(19sk,4xf) + 424(1sk,8xf) + 114(1sk,1xf) = **1152 passed 0 failed** (13 xfailed intentional เดิม, 21 skipped) · py_compile 3 files OK
+**prompt-token delta (fixed fixture desc 2940B, admitted context per card):** desc-op kw-hit old 425B → new 2604B = **+726 tok** (evidence ครบกว่าเดิมตาม D4) · desc-op kw-free old 0B → 2604B = **+868 tok** (fix — evidence ที่เคยหาย) · fact-op kw-hit old 3365B → 2604B = **−254 tok** · fact-op kw-free old 2940B → 2604B = **−112 tok** (raw channel ตาย)
+**mechanism delta จริง:** kw tables −5 (warranty/spec/shipping/claim/product-use — `_PRODUCT_MENTION_KWS` คงอยู่ app.py:5155 attach gate ใช้) · marker table −1 · regex −1 · flags −6 · section-selection −1 · fallbacks −3 (positions-empty + want_spec + raw elif) · emitted field −1 (`raw_description` — 0 writers เหลือ) · helpers −1 (`pick_desc_sections`) · owners+0 guards+0 deps+0 provider+0 → **net ลบมาก (ตาม D4)**
+**SRS §6:** `_clean_description`/`to_product_card`/`to_unit_card`/`_build_context` อัปเดต + ลบแถว `pick_desc_sections`
+
+### FIX-3 — answer-shape composition (owner: `compile_answer_context` dropped-set + `app._render_composition`) — กำลังทำ (owner approved 2026-10-28 session ต่อ)
+
+**Audit/root:** need ที่ typed layer ตัดสินแล้วยังเลี้ยง task entry → model เขียน hedge ซ้ำกับ deterministic segment (W01 Q2: UnansweredNeed(GPS) มีอยู่แล้วแต่ task["งานที่ 2"] ยังอยู่ → model เขียน "ยังไม่มีระบุ GPS" ซ้ำเอง + segment เดิมท้าย) · หลาย UnansweredNeed → cannot-confirm ซ้ำหลาย paragraph · ordering/cards/suppression machinery มีอยู่แล้ว (`_DOMAIN_ORDER` deterministic<product, card normalization ใน compose, `_SYS_TYPED_CARD_NOTE`, `dropped=uncovered|decided|no_match` task filter, `not ctx.task.tasks` → 0-call path)
+**Plan (owner เดิม, mechanism +0):**
+- (b) `compile_answer_context`: `dropped` += need ใน `_ask_unanswered` ที่ task เหลือแต่ framing (ไม่มี requested_facts/constraints/value_constraints/ranking) — เซ็ตเดิม+field เดิม ไม่มี classifier ใหม่; task tasks ว่าง → `not ctx.task.tasks` → skip LLM (path เดิม)
+- (c) `app._render_composition`: group unanswered ตาม (reason, compat?, subject_refs) → merged UnansweredNeed → `_unanswered_segment` ครั้งเดียวต่อ group (renderer เดิม verbatim; per-need audit อยู่ใน composition marker)
+- (a)/(d) = contract pins (เครื่องจักรมีแล้ว — compat/constraint/claim render ก่อน product prose เสมอ, model card markup ถูก drop ที่ compose แล้ว)
+- LLM ยังทำงานเดิม: prose/เลือกข้อมูล grounded สำหรับ needs ที่เหลือ (describe/recommend/compare ปกติ) — ตัดเฉพาะ hedge ซ้ำของ need ที่ตัดสินแล้ว
+**RED:** (1) Strava-shape ask-only need → boundary 0-call + segment เดียว (pre-fix: LLM ถูกเรียก); (2) W01Q2-shape describe+asks → task เหลือ need จริงเท่านั้น ไม่มี "งานที่ 2"; (3) 2 ask-needs same subject → cannot-confirm clause เดียว (pre-fix: 2 clauses); pins: det-before-prose ordering, card-markdown suppression
+**Delta forecast:** helpers+0 guards+0 regex+0 kw+0 owners+0 flags+0 deps+0 provider-calls −1/turn (deterministic-only) · set-union +1 condition · render-grouping +1 block
+
+### FIX-3 — ผ่านแล้ว ✓
+
+**error → cause → fix → impact:** need ที่ typed outcome ครอบคลุมแล้ว (asks ไร้ subject evidence → `UnansweredNeed` deterministic) ยังเลี้ยง task entry → model เขียน hedge ซ้ำกับ segment (W01 Q2 class) + หลาย UnansweredNeed → cannot-confirm ซ้ำหลาย paragraph ← `_ask_unanswered` strip asks จาก NeedTask แต่ task ยังอยู่ (framing อยู่ → model freestyle) + `_render_composition` render per-need ← (b) `compile_answer_context` `dropped` += asks-only needs ที่เหลือแต่ framing (ไม่มี requested_facts/constraints/value_constraints/ranking — set union เดิม field เดิม) → ออกจาก task+model evidence; tasks ว่าง → boundary `not ctx.task.tasks` → 0-call deterministic เดิม (c) `_render_composition` group (reason+compat-class+subject_refs) → merged UnansweredNeed → `_unanswered_segment` เดิมครั้งเดียว/group ← ask-only turn ตอบ deterministic cannot-confirm เดียว 0 provider call; mixed turn model prose(affirmed) ก่อน + clause เดียวท้าย; ordering/card-suppression machinery เดิม pin ผ่าน tests
+**RED→GREEN:** `test_phase11_answer_shape.py` RED 3 (`answer_calls==1`/`tasks==[0,1]`/2 clauses) → GREEN 5/5 (+2 contract pins: det-before-prose ordering, `](`/`**`/name-echo drop) · rendered shapes verify: `สำหรับW01 — GPS / Strava — ไม่มีข้อมูลยืนยัน…ค่ะ` clause เดียว / mixed `prose\n\nสำหรับstrap — GPS — …ค่ะ`
+**regression:** 320+708+183+156 = **1367 passed 0 failed** (13 xfailed intentional เดิม, ~20 skipped) — composition/boundary/compat/exact_item/r12/incident_replay/subject_set/turn_decision/guards/spec_grounding/token_accounting/claim/availability/units/retrieval/compare/cert/qa/web_boundary · py_compile OK · handoff_transport script-style excluded (SystemExit:0 เดิม)
+**mechanism delta จริง:** helpers+0 guards+0 regex+0 kw+0 owners+0 flags+0 deps+0 fallbacks+0 · moved-func 0 · repeated-calls 0 · typed fields +0 (merged UnansweredNeed = dataclass เดิม) · drop-predicate +1 (existing fields บน set เดิม) · render-grouping +1 block · **provider calls −1/ask-only turn** → net ≈ 0 (reuses `_ask_unanswered`/`dropped`/`not ctx.task.tasks`/`_unanswered_segment`/`_DOMAIN_ORDER`/compose normalization เดิมทั้งหมด)
+**SRS §6:** `compile_answer_context` (FIX-3 dropped extension) + `_render_composition` (same-class merge) อัปเดต
+**LLM role preserved:** prose/เกลาประโยค/เลือกข้อมูล grounded ทำงานเต็มบน needs ที่เหลือ — ตัดเฉพาะ need ที่ typed outcome จบแล้ว (ไม่มี hedge ซ้ำ); affirmed claims ยังมาจาก model บน mixed turns
+
+### FIX-4 — attachment follows decisions (owner: `compose_answer` comp.products + `compile_answer_context` near-miss + `guards.enforce` transport + app callsites) — ผ่านแล้ว ✓
+
+**error → cause → fix → impact:** constraint-fail turn แนบ card ที่ไม่มี verdict + Strava/no_answer/unresolved turns แนบ emitted cards ทั้งหมด (W01 4 ใบ; wattaka artifacts) ← `resp.products`/`comp.products` = `ctx.products` ทั้งก้อน — emission outcome-agnostic (asks-path emit candidate ควบ `UnansweredNeed`; no_answer เก็บทุก card) + bubble loop render ทุก card ที่ emit ← (a) `compose_answer`: `comp.products` = decided support เท่านั้น — `need_indices` ∩ covered-productish + decided-`compatible` verdict identities + labeled near-miss จาก `constraint_segments[].items[].card`; bubble loop เหลือ `_support` (b) `compile_answer_context`: `failed_refs` ขยายทุก decided-fail role + `_scope_card(…,"alternative")` card (ทดแทน label + `need_indices`) — unknown/unverified ไม่เคยเป็น near-miss (c) `_constraint_segment`: + `ใกล้เคียง/ทดแทนที่พิจารณาแล้ว:` label ใต้ headline เดิม — ไม่สัญญาแอดมินใน text (d) `guards.enforce`: valid marker มี `constraint` domain → `_send_handoff` (`constraint_no_match`) ครั้งเดียวก่อน escalate tier — flag = transport outcome เท่านั้น, fail-open (exception/ล้ม → flow เดิม, ไม่มี outcome-swap เพราะ text ไม่เคยสัญญาแอดมิน), success → return resp (e) app 2 callsites `_tb.context.products` → `_tb.products` ← card แนบเฉพาะเมื่อ outcome ตัดสินแล้ว: unresolved asks/no_answer = 0 cards, partial-compat = verdicted เท่านั้น, no_match = labeled near-miss + real handoff
+**RED→GREEN:** `test_phase11_answer_shape.py` +7 tests — RED 5 (no-match segment ไม่ name near-miss/ไม่มี label, handoff ไม่ถูกยิง, unresolved emitted cards แนบ, mixed-turn unresolved card แนบ+bubble) → GREEN 12/12 (รวม 2 regression pins: verdicted attach + covered-need attach ไม่เปลี่ยน)
+**regression:** phase7 + phase8 + r12 + 10b_completeness + phase11 = **300 passed 0 failed** (8 xfailed intentional) · handoff_transport script **47/47** · incident_replay **123 passed** (19 skipped, 4 xfailed) · pingevox/turn_decision/field_policy/action_switch/claim_state = **243 passed** (1 skipped, 1 xfailed) · **total 713+47 passed 0 failed** · py_compile 3 files OK · จับ regression จริง 1 จุด: `_send_handoff` raise บน req ไร้ conversation_id → enforce abort ก่อน rewrite tiers → แก้ด้วย fail-open try/except ใน branch (mutated-segment fail-closed test กลับมาผ่าน)
+**mechanism delta จริง:** helpers+0 guards +1 typed-domain branch (ใน `enforce` owner เดิม ไม่มี regex/keyword) · regexes+0 kw-tables+0 owners+0 flags+0 fallbacks+0 deps+0 · provider calls +1 (`_send_handoff` site ใน enforce — D3 กำหนด) · typed contracts: segment items +1 key (`card`), `comp.products` semantics narrowed ctx→decided-support, `need_indices` consumed เป็น attach authority · **net ≈ +2 (ทั้งหมดใน existing owners ไม่มี mechanism ใหม่)**
+**SRS §6:** `compile_answer_context` (near-miss ทุก decided-fail role + alt card) · `AnswerContext.constraint_segments` (+`card` key) · `AnswerComposition.products` (decided-support contract) · `compose_answer` (attach rule) · `_constraint_segment` (ใกล้เคียง/ทดแทน label, no-admin pin) · `enforce` (constraint-domain transport branch) — ครบ
+**หมายเหตุ:** `_send_handoff` return None เมื่อ `req.conversation_id` falsy (existing contract) → flag False อัตโนมัติ · `_pdec_active` (return_exchange) precedence เดิม — mixed policy+constraint turn: policy path ชนะก่อน (typed precedence contract ไม่แตะ) · near-miss bubble ห้าม (no CTA ใน text — แนบผ่าน comp.products/resp.products channel เท่านั้น)
+
+### FIX-5 — type-ambiguous compat/recommend → typed clarify outcome (owner: `compile_answer_context` + `UnansweredNeed`/`_unanswered_segment` + `_render_composition` merge) — ผ่านแล้ว ✓
+
+**error → cause → fix → impact:** "ของใช้กับ <phone>" ไร้ requested type แต่ decided candidates กระจายหลาย type → bot เลือก type ให้เองโดยไม่ถาม (D2) ← ไม่มี typed outcome สำหรับ scope-ambiguous need — compile เลี้ยง need เป็น task ปกติ cards emit+attach เหมือน decided ← (a) `compile_answer_context` หลัง gates: `kind=="compat"` หรือ `product/recommend` + `need.product_types/subtypes` ว่าง + attributed requests ไม่พก product_types/subtypes (compat need ไม่มี scope บนตัวเองตาม contract — scope อยู่บน request) + post-gate `cands` กระจาย ≥2 `canonical_type` → `UnansweredNeed(reason="clarify", clarify_types=types)` + `clarify` เข้า `dropped` + `decided.pop(i)` (clarify แทน verdict enumeration; candidates ไม่ emit → cards ไม่แนบตาม FIX-4) (b) `UnansweredNeed.reason` Literal +`"clarify"` + field `clarify_types` (c) `_unanswered_segment` branch → "สำหรับการใช้งานร่วมกับ {target} — อยากได้{type words}คะ" name ผ่าน `_type_query_word` (owner เดิม type→Thai word ไม่สร้างตารางใหม่) (d) `_render_composition` merge union `clarify_types` ← scope-ambiguous turn ตอบถาม type กลับ deterministic (เช่น `อยากได้เคส หรือ หัวชาร์จ หรือ หูฟังคะ`) — products=(), answer_calls=0; single-type/requested-scope/zero-candidates ไม่เปลี่ยน
+**RED→GREEN:** `test_phase11_answer_shape.py` +5 tests — RED 2 (ไม่มี "clarify" reason) → GREEN 17/17 (+3 pins: single-type/requested-scope/zero-candidates เดิมถูกอยู่แล้ว)
+**regression:** phase7+8+r12+10b+phase11 = **305 passed** (8 xfailed) · compat/turn/boundary/action/claim = **416 passed** (1 skipped, 1 xfailed) · replay+fail_closed+spec_grounding+unit_card = **169 passed** (19 skipped, 4 xfailed) · compat_mode_filter script **144/144** · handoff_transport **47/47** → **890 pytest + 191 script, 0 failed**
+**mechanism delta จริง:** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 fallbacks+0 deps+0 provider+0 · reason Literal +1 ค่า · typed field +1 (`clarify_types`) · need-outcome set +1 (`clarify`) · renderer branch +1 · merge arg +1 → **net ≈ +3 (ทั้งหมดใน existing owner contracts เดิม)**
+**SRS §6:** `UnansweredNeed` (reason+field) · `compile_answer_context` (FIX-5 condition) · `_unanswered_segment` (clarify render + `_type_query_word` call) · `_render_composition` (merge union) — ครบ
+**หมายเหตุ:** "decided candidates" = post-gate `cands` (products-for-device asks verdict pass skip ตาม contract เดิม "selection คือคำตอบอยู่แล้ว" → decided = selection-decided; verdicted asks = incompatible dropped แล้วจาก compat filter → span นับเฉพาะ servable types) · partial-undecided compat need (uncovered) → no_evidence path เดิม clarify ไม่ไหล · `primary_action` คง `execute_needs` — clarify เป็น per-need typed outcome (เลือก A — mixed turn ตอบ need อื่นต่อได้; literal action จะตัด coverage ของ need อื่น)
+
+### Phase 10B residual defects — กำลังจะทำ (mandate รอบใหม่ ห้าม commit)
+
+- **PART 1 (implement):** LOW-1b/1c — `compose_answer` synth `UnansweredNeed` 2 จุด (no_answer line ~1873, no_selection/context=None line ~1882) ไม่ส่ง `capability_asks` → populate field เดิมด้วย keyword arg; unxfail 2 tests
+- **PART 2 (implement):** LOW-3a/3b — wattage truth: connector-match `compatible` ≠ full-speed เมื่อ target มี `min_watt` แต่ subject ไม่มี `output_w`; trace canonical path (reason_codes → verdict segment vs `_context_note` → LLM context) ก่อนเลือก owner; ห้าม caveat ซ้ำ 2 ย่อหน้าใน final answer
+- **PART 3 (design gate เท่านั้น ห้าม runtime):** LOW-2 (subject-ref intent contract: current_subject/new_discovery/explicit_subject/unknown — ห้ามขยาย carrier เดิม), LOW-4c (relation ask vs intrinsic capability ask typed distinction)
+- **PART 4-5:** bounded verification + SRS + report; ห้าม stage/commit/push
+
+### LOW-1b/1c + LOW-3a/3b — ผ่านแล้ว ✓ (uncommitted, mandate ห้าม commit)
+
+**error → cause → fix → impact:**
+- LOW-1b/1c: capability ask หายเงียบเมื่อ task need แต่ answer ว่าง หรือ context ล้ม ← `compose_answer` synth `UnansweredNeed` 2 path (no_answer ~1873, ctx=None no_selection ~1882) ไม่ส่ง `capability_asks` ← populate keyword arg เดิมจาก NeedTask/TurnNeed (field+renderer มีอยู่แล้ว) ← outcome name ask verbatim ทุก path; asks ว่าง → render เดิม
+- LOW-3a: pick ไม่มี watt evidence เลยถูกเสนอเงียบๆ เมื่อ device มี min_watt ← `_minw` block ใน `select_for_llm_context` มี note เฉพาะ known-below + mixed-variant ← `elif not _vw:` → `_context_note` "ไม่ระบุกำลังไฟ — ยืนยันไม่ได้ว่าชาร์จเต็มสเปคได้" (model-facing เดิม) ← unknown ≠ below-target
+- LOW-3b: "ชาร์จ X ได้ไหม" connector match → "ใช้ได้" เปล่า แม้ไม่มีหลักฐาน watt ถึง min_watt ← `resolve_compat` ไม่ consult min_watt; `_compat_segment` render แค่ outcome ← charges + target `min_watt` fact + subject ไม่มี `output_w` ที่พิสูจน์ถึง → append `missing_wattage_evidence` (reason_codes เดิม) → `_compat_segment` append caveat clause เดียว (canonical customer path; verdict คง compatible) ← customer เห็น "หัวต่อเข้ากันได้ แต่ยังยืนยันไม่ได้ว่าชาร์จเต็มสเปคตามที่อุปกรณ์ต้องการ อาจชาร์จช้ากว่าปกติค่ะ"
+**RED→GREEN:** unxfail 4 + truth-table tests 4 ใหม่ — RED 4 (caveat/note ไม่มี) → GREEN 8/8 (+4 control: adequate-watt/no-min-watt/mixed-variant/dup-guard)
+**regression:** 10b+compat_decision+target_ownership+turn_decision+retrieval_selection×2+phase7 = **272 passed, 4 xfailed** (LOW-2abc+LOW-4c คง design gate) · phase8+phase11×2+phase5+r12+issue5f = **374 passed** · compat_mode_filter **144/144** · handoff_transport **47/47** · py_compile+diff --check clean
+**mechanism delta จริง:** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 fallbacks+0 deps+0 provider+0 · reason_codes +1 ค่า (`missing_wattage_evidence`) · elif branch +1 (unknown-watt note) · field populate +0 (มีอยู่แล้ว) → **net ≈ +2 ใน contract เดิม**
+**SRS §6:** `compose_answer` (LOW-1 synth carry) · `resolve_compat` (wattage caveat reason) · `_compat_segment` (caveat clause) · `select_for_llm_context` (unknown-watt note) — ครบ
+**หมายเหตุ:** `missing_wattage_evidence` semantics = "ไม่มีหลักฐานพิสูจน์กำลังชาร์จถึง min_watt" (absent หรือ below รวมกัน — caveat wording เดียว จริงทั้งสองเคส); `_context_note` = model-facing ไม่ซ้ำกับ segment ใน final answer; LOW-2/LOW-4c = design proposals รอ approval
+
+### Wattage semantics correction — กำลังจะทำ (mandate: 4 states, ห้าม commit)
+
+- **root cause (verified):** `resolve_compat` (policy_resolver.py ~807) collapse 2 truth states — `output_w` ขาด กับ `output_w=65<90` ได้ `missing_wattage_evidence` เดียวกัน; และ `_have_w=max(output_w)` — `output_w` fact มาจาก `_extract_max_wattage` = max รวม variants → listing 65/100/140W ที่ยังไม่ยืนยัน variant ถูกตี adequate จาก max=140
+- **fix:** (a) `extract_field_facts` emit `output_w_variants` fact เมื่อ distinct structured variant watts >1 (extract owner เดิม) (b) `resolve_compat` แยก 3 codes: `wattage_variant_unconfirmed` (หลาย variant ไม่ยืนยัน — ก่อน adequacy check) / `missing_wattage_evidence` (ไม่มี watt เลย) / `insufficient_wattage` (รู้ watt แต่ต่ำกว่า min) (c) `_compat_segment` render 3 clause ตาม code — verdict คง compatible ทุกเคส
+- **tests:** strengthen case2 (ต้อง "ต่ำกว่าสเปค" ไม่ใช่ unknown phrasing) + verdict-level ambiguous-variant + controls เดิม
+
+### Wattage semantics correction — ผ่านแล้ว ✓ (uncommitted, mandate ห้าม commit)
+
+**error → cause → fix → impact:**
+- 2 truth states collapse: `output_w` ขาด vs `65<90` ได้ `missing_wattage_evidence`+wording เดียว ← resolve_compat มี code เดียวครอบทั้ง absent/below ← แยก `missing_wattage_evidence` (ไม่มี watt) / `insufficient_wattage` (รู้ watt ต่ำกว่า min) → segment render clause ต่างกัน
+- listing 65/100/140W ไม่มี selected variant ถูกตี adequate ← `output_w` fact = `_extract_max_wattage` = max รวม variants (140) ≥ 90 → ไม่มี caveat ← `extract_field_facts` emit `output_w_variants` (distinct structured variant watts เมื่อ >1) → `wattage_variant_unconfirmed` ก่อน adequacy check → "มีหลายตัวเลือกกำลังไฟ ยังไม่ยืนยันตัวเลือกที่จะได้รับ"
+**RED→GREEN:** case2 (insufficient wording) + ambiguous-variant verdict → RED 2 → GREEN 9/9 wattage suite (+single-variant control +ทุกเคสเดิม)
+**regression:** 10b+compat_decision+target_ownership+retrieval_selection×2+phase7 = **163 passed, 4 xfailed** · phase8+phase11+turn_decision+phase5+r12 = **462 passed** · py_compile+diff --check clean · LOW-2abc+LOW-4c ยัง xfail + turn_decision zero diff
+**mechanism delta จริง:** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 · reason_codes +2 (`insufficient_wattage`, `wattage_variant_unconfirmed`) · FieldEvidence fact_key +1 (`output_w_variants`) · segment branches +2 → **net ≈ +3 ใน contract เดิม**
+**SRS §6:** `resolve_compat` (3 states) · `_compat_segment` (3 clauses) · `extract_field_facts` (fact emit) · `FieldEvidence` (key list) — ครบ
+**หมายเหตุ:** ไม่มี selected-variant contract ใน FieldEvidence → >1 distinct = unconfirmed เสมอ (fail-closed, แม้ทุก variant ≥ min ก็ยังไม่รู้ว่าได้ใบไหน); wording เดียวต่อ state, ไม่มีตัวเลข (typed fields ไม่พก watt ถึง segment — ไม่เพิ่ม field ใหม่)
+
+### Wattage evidence contract correction — กำลังจะทำ (mandate: ห้าม commit)
+
+- **Defect A:** `output_w` fact = `_extract_max_wattage` fallback ไปอ่าน "100W" จากชื่อสินค้า → name-derived watt กลายเป็น full-speed proof (ชื่อมี 100W + min 90 → adequate ผิด); `output_w` มี consumer อื่น (claim_supported grounding) → ห้ามเปลี่ยน semantics ← emit `output_w_structured` (structured fields เท่านั้น: card/specs `output_power_w` + variants) แทน `output_w_variants`; resolve_compat อ่านเฉพาะมัน
+- **Defect B:** `output_w_variants` len>1 → unconfirmed เสมอ แม้ทุก variant ≥min ← truth table บน structured set ทั้งหมด: ว่าง→missing / ทุกค่า<min→insufficient / ทุกค่า≥min→adequate-clean / mixed→unconfirmed (single value = confirmed compare ปกติ)
+
+### Wattage evidence contract correction — ผ่านแล้ว ✓ (uncommitted)
+
+**error → cause → fix → impact:**
+- Defect A: ชื่อมี "100W" + ไม่มี structured watt + min=90 → adequate ผิด ← `output_w` fact = `_extract_max_wattage` fallback ไป parse ชื่อ; `output_w` มี consumer อื่น (claim grounding) ห้ามเปลี่ยน ← emit `output_w_structured` (card/specs `output_power_w` + variants เท่านั้น) แทน `output_w_variants`; resolve_compat อ่านเฉพาะมัน ← name-derived watt ไม่ใช่ proof อีก → missing_wattage_evidence + caveat
+- Defect B: variants >1 → unconfirmed เสมอ ← len>1 check อย่างเดียว ไม่ประเมินค่า ← truth table บน structured set: ทุกค่า <min → insufficient (known-below ไม่ใช่ ambiguous) / ทุกค่า ≥min → adequate clean / mixed → unconfirmed / ว่าง → missing ← [100,140] clean, [45,65] insufficient, [65,100,140] unconfirmed, name-only → missing
+**RED→GREEN:** name-watt + 3 variant-set cases → RED 4 → GREEN 13/13 wattage suite
+**regression:** mandated list = **167 passed, 4 xfailed** · related = **479 passed** · py_compile+diff --check clean · turn_decision zero diff
+**mechanism delta จริง (สุทธิ vs committed):** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 · fact_key net +1 (`output_w_structured` แทน `output_w_variants` — แก้ในรอบเดียวกัน ยังไม่ commit) · reason_codes +2 (insufficient/unconfirmed; missing อยู่แล้ว) · segment branches +2 → **net ≈ +3**
+**SRS §6:** `extract_field_facts` + `FieldEvidence` (output_w_structured) + `resolve_compat` (set truth table) — `_compat_segment`/`select_for_llm_context` ไม่แตะรอบนี้
+
+### Wattage proof unify (verdict+selection+ranking) — กำลังจะทำ (mandate: ห้าม commit)
+
+- **gap A (verified):** `retrieval_selection` sort ใช้ `_wattage_asc_key` → `_extract_max_wattage` (name-fallback) → ชื่อ "100W" ไร้ structured watt ถูกจัด tier adequate (retrieval_selection.py ~296-322, device_compat.py:836/1216)
+- **gap B:** numeric validation ขาด — `True`/`False`/`NaN`/`Inf` ผ่าน extraction ได้ (bool=int subtype, inf>0)
+- **fix:** canonical `device_compat._structured_watts(card)` (numeric จริง/ไม่ใช่ bool/finite/>0 — card+specs+variants เท่านั้น; name คง `_extract_max_wattage` สำหรับ relevance เดิม) — consumers: `extract_field_facts` (output_w_structured emit), `_wattage_asc_key` (tier adequate = ทุก structured ≥min), `_minw` note block (ว่าง→unknown/ทุก<→below/mixed→unconfirmed/ทุก≥→clean), `resolve_compat` +finite guard บน min_watt — verdict semantics เดิมทุกประการ
+
+### Wattage proof unify (verdict+selection+ranking) — ผ่านแล้ว ✓ (uncommitted)
+
+**error → cause → fix → impact:**
+- title "100W" ไร้ structured watt ถูกจัด adequate tier + เลี่ยง unknown note ← `_wattage_asc_key`/note ใช้ `_extract_max_wattage` (name-fallback) ← canonical `device_compat._structured_watts` (structured-only set: canonical_specs/specs/card output_power_w + variants — numericจริง/ไม่ใช่bool/finite/>0) ใช้ร่วมกันทั้ง verdict fact, sort tier, note ← adequate = ทุกค่า≥min เท่านั้น; title watt คงใช้ relevance (`output_w` fact, no-min sort) ได้
+- bool/NaN/Inf/0/neg ผ่านเป็น watt proof / inf min_watt → insufficient ผิด ← ไม่มี numeric validation ← predicate เดียวใน `_structured_watts` + finite guards บน `_req_w`(verdict)/`_minw`(selection) — invalid target → ไม่มี wattage claim
+**RED→GREEN:** title-tier + note-state + invalid-verdict + invalid-min + invalid-note → RED 5 → GREEN 14/14 wattage suite
+**regression:** mandated = **172 passed, 4 xfailed** · related = **572 passed** · py_compile+diff --check clean · turn_decision zero diff · `_structured_watts` ไม่มี name/regex
+**mechanism delta (สุทธิ vs committed):** helpers +1 (`_structured_watts` — mandate อนุญาต canonical owner เดียว แทน extraction ซ้ำ 2 จุดใน extract_field_facts+selection) · guards +0 · regex +0 · kw-tables +0 · owners +0 · imports +2 (math×2)
+
+### H1 residual — decided compat pair co-mention ใน model prose → drop ที่ compose normalization (owner: `compose_answer`) — ผ่านแล้ว ✓ (uncommitted)
+
+**error → cause → fix → impact:** decided compat verdict (subject×target) มี deterministic segment เป็น owner ของ truth แล้ว แต่ model bubble ที่ co-mention pair เดียวกันยังผ่านถึงลูกค้า — echo (redundant) หรือ contradiction (โกหก เช่น verdict ว่าได้แต่ prose ว่าไม่ได้) ← normalization block เดิมของ `compose_answer` drop เฉพาะ `](`/name-echo/`**` — ไม่มีเงื่อนไขสำหรับ decided-pair scope ← เพิ่มเงื่อนไขใน block เดิม: `_pairs` = (subject_name, target) ของ verdict ที่ outcome ∈ {compatible,incompatible} (typed fields เท่านั้น — ไม่เช็ค polarity เพราะ verdict render truth อยู่แล้ว) → bubble co-mention → `continue` ตาม name-echo rule เดิม ← contradiction/echo ไม่ถึงลูกค้า; bubble ที่ไม่เกี่ยว + partial mention (subject อย่างเดียว) คงอยู่
+**RED→GREEN:** `test_phase11_answer_shape.py` +4 tests — RED 2 (contradiction + echo ผ่านถึง answer) → GREEN 3/3 + 1 xfail (B2: compat claim ที่ไม่มี verdict counterpart — invented claim ยัง verify ไม่ได้ = residual ที่เหลือ; root fix = structured model claims contract)
+**regression:** 10b group = 198 passed/4 xfailed · phase7+8+r12+typed-subject+pingevox+11+compat_decision = 389 passed/1 xfailed · turn_decision = 111 · field_policy+replay = 247/19 skipped/4 xfailed · compat_mode_filter script 144/144 → **945 pytest + 144 script, 0 failed** · py_compile + diff --check clean
+**mechanism delta จริง:** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 fallbacks+0 deps+0 provider+0 · normalization condition +1 (ใน block เดิม — class เดียวกับ name-echo rule) · typed fields consume +0 (compat_verdicts มีอยู่แล้ว) → **net ≈ +1 ใน owner เดิม**
+**SRS §6:** `compose_answer` (H1 co-mention clause) — ครบ
+**หมายเหตุ:** undecided outcome (unknown/admin_review) ไม่เข้าเงื่อนไข — ไม่มี verdict owner ของ truth นั้น · B2 residual (invented claim ไม่มี verdict) ยังเปิด — prose-side detection ต้อง semantic matching (forbidden) → root fix = structured model output claims (contract change แยก — รอ design approval); constraint-segment co-mention เป็น surface ที่เกี่ยวข้องแต่ต่าง shape — ยังไม่แตะ
+
+
+## กำลังทำ — LOW-2 + LOW-4c audit (RED tests เขียนแล้ว รออนุมัติแก้)
+
+- audit: heuristic repair เดิม (`explicit + facts + no refs → current_single`)
+  ครอบแค่ facts carrier — spec/feats/asks หลุด; ask-ownership move ที่
+  turn_decision ใช้ containment เท่านั้น → intrinsic ask ถูกกลืนโดย compat verdict
+- RED tests (test_phase10b_answer_completeness.py): 6 failed / 3 passed
+  - ref_kind=current_subject ×3 carriers → explicit (field ยังไม่มี)
+  - ref_kind verbatim map + no_ref_kind_no_repair → RED (พิสูจน์ heuristic
+    ยังอยู่)
+  - intrinsic_asks typed → ask โดน move ไป compat (ยังไม่ consume field)
+- เสนอ contract: classifier emit `ref_kind` + `intrinsic_asks` (semantic owner)
+  consumer ทำ typed→typed map เท่านั้น + ลบ carrier heuristic — รออนุมัติ
+
+
+## ผ่านแล้ว — LOW-2 + LOW-4c: typed ref_kind + intrinsic_asks contract
+
+- error: (a) follow-up ถาม spec/feature/ask ของตัวที่คุยอยู่ → classifier emit
+  explicit ไร้ refs → resolver ไม่ผูก current subject → ตอบผิดตัว;
+  (b) intrinsic capability ask ("แสดง X บนหน้าจอ") ถูก move ไป compat need
+  → verdict ตอบ relation → คำถามจริงหายเงียบ
+- เพราะ: semantic การอ้างอิงถูกเดาที่ consumer (carrier-presence heuristic
+  ครอบแค่ facts) + containment move เดา ask scope เอง
+- แก้: classifier emit `ref_kind` (closed enum) + `intrinsic_asks` (⊂
+  capability_asks) → decide_turn map typed→typed ที่ scope-read จุดเดียว +
+  ลบ carrier heuristic ทั้ง merge/new-need path → move loop ข้าม typed
+  intrinsic asks → intrinsic ask ride model task บน product need
+- ผลกระทบ: mechanism net: heuristic −1, typed fields +2, consume +2;
+  test เดิมที่ pin heuristic migrate เป็น inject ref_kind;
+  ref_kind ผิด → unknown/verbatim fallback = พฤติกรรมเดิม
+- verify: RED 6→GREEN 13/13 · regression 550 passed + 89 passed, 0 failed

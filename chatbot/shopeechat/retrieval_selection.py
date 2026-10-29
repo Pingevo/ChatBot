@@ -6,6 +6,7 @@ source กิน quota) + constraint-aware ranking (soft_hints เป็น evid
 """
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 
@@ -315,7 +316,15 @@ def select_for_llm_context(
                         reverse=(rank[1] == "max"))
             if _dev:
                 _spec = _dc._lookup_spec_db(_dev)
-                _minw = (_spec or {}).get("min_watt") if _spec else None
+                _mw = (_spec or {}).get("min_watt") if _spec else None
+                # malformed min_watt (bool/NaN/Inf/≤0) ไม่ใช่ spec
+                #   requirement ที่ valid — ไม่ sort/note ด้วย watt เลย
+                #   (fail closed เหมือนไม่มี min_watt)
+                _minw = (_mw
+                         if (isinstance(_mw, (int, float))
+                             and not isinstance(_mw, bool)
+                             and math.isfinite(_mw) and _mw > 0)
+                         else None)
                 if _minw:
                     ranked = sorted(
                         ranked,
@@ -358,31 +367,33 @@ def select_for_llm_context(
         picked = tuple(sorted(
             picked, key=lambda s: 0 if s.role == "subject" else 1))
         if _minw:
-            # below-target อาจอยู่เป็นตัวเลือก — แต่ต้องติด label ช้ากว่า
-            #   ปกติ (_context_note เดิม); mixed-variant listing ที่ไม่มี
-            #   typed power เดี่ยว ห้ามเสนอเป็น full-speed primary
+            # note ต้องตาม typed state เดียวกับ compat verdict — ประเมิน
+            #   structured set ทั้งหมดกับ min_watt (canonical owner:
+            #   _structured_watts): ว่าง=unknown / ทุกค่า<min=below /
+            #   mixed=variant-unconfirmed / ทุกค่า≥min=clean — name/title
+            #   watt ไม่ใช่ proof และไม่ suppress note (model-facing
+            #   เท่านั้น ไม่ซ้ำกับ deterministic compat caveat ของ
+            #   _compat_segment)
             _devname = (_spec or {}).get("device") or _dev
             for s in picked:
-                _w = _dc._extract_max_wattage(s.card)
-                if _w and _w < _minw:
+                _sw = _dc._structured_watts(s.card)
+                if not _sw:
+                    # unknown-watt pick — ไม่มี watt evidence เลย
+                    #   (unknown ≠ proven-below-target: เตือนว่ายืนยัน
+                    #   เต็มสเปคไม่ได้ ไม่ใช่บอกว่าช้ากว่า)
                     s.card["_context_note"] = (
-                        f"จ่ายไฟ {_w:g}W ต่ำกว่าสเปค {_devname} "
+                        "ไม่ระบุกำลังไฟ — ยืนยันไม่ได้ว่าชาร์จ "
+                        f"{_devname} เต็มสเปค ({_minw:g}W) ได้")
+                elif all(w < _minw for w in _sw):
+                    s.card["_context_note"] = (
+                        f"จ่ายไฟ {max(_sw):g}W ต่ำกว่าสเปค {_devname} "
                         f"({_minw:g}W) — ชาร์จได้แต่ช้ากว่าปกติ")
-                elif not (
-                        s.card.get("output_power_w")
-                        or (s.card.get("specs") or {}).get(
-                            "output_power_w")):
-                    _vw = sorted({
-                        float(v["output_power_w"])
-                        for v in (s.card.get("variants") or ())
-                        if isinstance(v.get("output_power_w"), (int, float))
-                        and v["output_power_w"] > 0})
-                    if len(_vw) > 1:
-                        s.card["_context_note"] = (
-                            "มีหลายตัวเลือกกำลังไฟ "
-                            f"({'/'.join(f'{v:g}W' for v in _vw)}) — "
-                            "ยืนยันตัวเลือกที่ลูกค้าต้องการก่อน ห้ามสรุป"
-                            "ว่าชาร์จเต็มสเปคเมื่อยังไม่ได้เลือกรุ่น")
+                elif any(w < _minw for w in _sw):
+                    s.card["_context_note"] = (
+                        "มีหลายตัวเลือกกำลังไฟ "
+                        f"({'/'.join(f'{v:g}W' for v in _sw)}) — "
+                        "ยืนยันตัวเลือกที่ลูกค้าต้องการก่อน ห้ามสรุป"
+                        "ว่าชาร์จเต็มสเปคเมื่อยังไม่ได้เลือกรุ่น")
         selected.extend(picked)
         by_req.append((req.request_id, picked))
         trace.append(f"{req.request_id}: elig={len(cands)} "

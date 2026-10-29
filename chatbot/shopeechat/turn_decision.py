@@ -116,6 +116,14 @@ TurnSubjectScope = Literal[
 _TURN_SUBJECT_SCOPES = frozenset(
     {"none", "explicit", "current_single", "current_set"})
 
+# ref_kind (semantic owner: intent_classifier) → subject_scope —
+#   mechanical typed→typed map; "unknown"/absent/invalid → คง verbatim
+_REF_KIND_SCOPE = {
+    "current_subject": "current_single",
+    "explicit_subject": "explicit",
+    "new_discovery": "none",
+}
+
 # kinds ที่ selector ต้องเลือก evidence ให้ — แบก product scope/ranking
 # productish kind domain (typed TurnNeedKind contract owner — consumer:
 # selector attribution, reversed-relation eligibility ฯลฯ)
@@ -294,6 +302,9 @@ def decide_turn(
     _subj_scope = intent.get("subject_scope")
     if _subj_scope not in _TURN_SUBJECT_SCOPES:
         _subj_scope = "none"
+    # ref_kind คือ semantic classification ของการอ้างอิง — semantic owner
+    #   (classifier) ตัดสิน; ที่นี่ map typed→typed เท่านั้น ห้าม infer
+    _subj_scope = _REF_KIND_SCOPE.get(intent.get("ref_kind"), _subj_scope)
     try:
         _subj_count = intent.get("subject_count")
         _subj_count = None if _subj_count is None else int(_subj_count)
@@ -419,12 +430,7 @@ def decide_turn(
                     target_refs=merged_trefs,
                     confidence=max(existing.confidence, conf),
                     provenance=merged_prov,
-                    subject_scope=("current_single"
-                                   if (_scope == "explicit"
-                                       and (facts
-                                            or existing.requested_facts)
-                                       and not merged_refs)
-                                   else _scope),
+                    subject_scope=_scope,
                     subject_count=_count,
                     product_types=_ptypes | existing.product_types,
                     subtypes=_subs | existing.subtypes,
@@ -446,9 +452,7 @@ def decide_turn(
             target_refs=trefs,
             confidence=conf,
             provenance=full_prov,
-            subject_scope=("current_single"
-                           if (_scope == "explicit" and facts and not refs)
-                           else _scope),
+            subject_scope=_scope,
             subject_count=_count,
             product_types=_ptypes,
             subtypes=_subs,
@@ -607,6 +611,7 @@ def decide_turn(
     _req_features: tuple[str, ...] = ()
     _req_specs: tuple[tuple[str, str, float], ...] = ()
     _cap_asks: tuple[str, ...] = ()
+    _intrinsic: tuple[str, ...] = ()
     if intent_conf >= 0.7:
         _ipt, _ist = _rc.intent_product_scope(intent)
         if _ipt:
@@ -615,7 +620,7 @@ def decide_turn(
             _intent_subtypes = frozenset({_ist})
         # typed fact/spec/capability contract — same conf gate กับ
         #   product scope
-        _req_facts, _req_features, _req_specs, _cap_asks = \
+        _req_facts, _req_features, _req_specs, _cap_asks, _intrinsic = \
             _rc.intent_fact_scope(intent)
 
     # 6.5 cert standards (มอก./CE/...)
@@ -817,6 +822,8 @@ def decide_turn(
     #   ที่มี typed compat target = outcome ของ compat need ตัวนั้น → move
     #   ครั้งเดียว คง span ต้นฉบับ; ask ที่ไม่มี compat target → คง need
     #   เดิม (product-side capability outcome)
+    _intrinsic_norm = {"".join(str(_a).split()).casefold()
+                       for _a in _intrinsic}
     for _j in range(len(needs)):
         _n = needs[_j]
         if not _n.capability_asks:
@@ -824,6 +831,12 @@ def decide_turn(
         _kept: list = []
         for _a in _n.capability_asks:
             _an = "".join(str(_a).split()).casefold()
+            # intrinsic ask (typed scope จาก semantic owner) = outcome ของ
+            #   product need ที่ถามถึงตัวสินค้าเอง — ห้าม move ไป compat
+            #   แม้ span จะมีชื่อ compat target
+            if _an in _intrinsic_norm:
+                _kept.append(_a)
+                continue
             _owner = next(
                 (_i for _i, _m in enumerate(needs)
                  if _m.kind == "compat" and any(

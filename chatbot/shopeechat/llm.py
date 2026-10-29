@@ -662,8 +662,6 @@ TYPED_SYSTEM_INSTRUCTION = _SYS_CORE_A + _SYS_CORE_B + _SYS_TYPED_CARD_NOTE
 # อ่าน GEMINI_API_KEY_1 .. GEMINI_API_KEY_9 (หรือ GEMINI_API_KEY ตัวเดียวก็ได้)
 # วนรอบทุกครั้งที่เรียก _client()
 
-import itertools as _itertools
-
 def _load_api_keys() -> list[str]:
     """โหลด API keys ทั้งหมดจาก env (GEMINI_API_KEY_1 .. _9, และ GEMINI_API_KEY)."""
     keys: list[str] = []
@@ -681,8 +679,10 @@ def _load_api_keys() -> list[str]:
 
 
 _API_KEYS: list[str] = _load_api_keys()   # env keys — fallback เมื่อ DB ไม่มี llm_config
-_KEY_CYCLE = _itertools.cycle(_API_KEYS) if _API_KEYS else None
 _KEY_INDEX = 0
+# key ที่ตอบ 401/UNAUTHENTICATED ใน process นี้ — rotation ข้ามถาวร
+# (credential ตายแล้วจะตายเหมือนกันทุก worker — ไม่หมุนกลับมา 401 ซ้ำ)
+_DEAD_KEYS: set[str] = set()
 
 # ---- runtime LLM config (Mongo systemConfigs.llm_config) -----------------------
 # UI /llm (dev-only) เขียน doc นี้ → bot หยิบไปใช้ใน ≤10s ไม่ต้อง restart
@@ -811,19 +811,24 @@ for i, k in enumerate(_API_KEYS):
 
 
 def _next_api_key() -> str:
-    """หา key ถัดไปแบบ round-robin บน active pool (config DB ก่อน → env fallback)."""
+    """หา key ถัดไปแบบ round-robin บน active pool (config DB ก่อน → env fallback).
+
+    ข้าม key ที่ mark dead (401/UNAUTHENTICATED) ใน process นี้ — bounded
+    ≤ len(keys); dead หมด/ไม่มี key → RuntimeError เดียวกับ pool ว่าง."""
     global _KEY_INDEX
     keys = _active_keys()
     if not keys:
         raise RuntimeError("ไม่พบ GEMINI_API_KEY หรือ GEMINI_API_KEY_1..9 หรือ llm_config.keys")
-    key = keys[_KEY_INDEX % len(keys)]
-    _KEY_INDEX = (_KEY_INDEX + 1) % len(keys)
-    return key
+    for _ in range(len(keys)):
+        key = keys[_KEY_INDEX % len(keys)]
+        _KEY_INDEX = (_KEY_INDEX + 1) % len(keys)
+        if key not in _DEAD_KEYS:
+            return key
+    raise RuntimeError("ไม่พบ GEMINI_API_KEY หรือ GEMINI_API_KEY_1..9 หรือ llm_config.keys")
 
 
-def _client() -> genai.Client:
-    api_key = _next_api_key()
-    return genai.Client(api_key=api_key)
+def _client(api_key: str | None = None) -> genai.Client:
+    return genai.Client(api_key=api_key or _next_api_key())
 
 
 # ---- single-key quota manager -------------------------------------------------
@@ -1016,22 +1021,39 @@ def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
         except Exception:
             est_tokens = 2000
     m = _acquire(model, est_tokens)
-    try:
-        client = _client()   # ต้องเก็บ reference — GC client กลาง call จะปิด shared httpx
-        resp = client.models.generate_content(model=m, contents=contents, config=config)
-        _record_tokens(m, resp)
-        return resp
-    except genai_errors.ClientError as exc:
-        fb = _MODEL_FALLBACK.get(m)
-        is_429 = getattr(exc, "code", None) == 429 or "429" in str(exc)
-        if not (is_429 and fb):
-            raise
-        print(f"[QUOTA] {m} 429 → fallback {fb}", file=_sys.stderr)
-        m2 = _acquire(fb, est_tokens)
-        client = _client()
-        resp = client.models.generate_content(model=m2, contents=contents, config=config)
-        _record_tokens(m2, resp)
-        return resp
+    tried = 0
+    while True:
+        key = _next_api_key()   # ข้าม dead keys ใน owner เดียว — RuntimeError เมื่อ pool ว่าง/dead หมด
+        client = _client(key)   # ต้องเก็บ reference — GC client กลาง call จะปิด shared httpx
+        try:
+            resp = client.models.generate_content(model=m, contents=contents, config=config)
+            _record_tokens(m, resp)
+            return resp
+        except genai_errors.ClientError as exc:
+            tried += 1
+            is_auth = getattr(exc, "code", None) == 401 or "UNAUTHENTICATED" in str(exc)
+            if is_auth:
+                _DEAD_KEYS.add(key)
+                if tried < max(len(_active_keys()), 1):
+                    print(f"[KEYS] key 401/UNAUTHENTICATED → dead ใน process นี้, retry ตัวถัดไป",
+                          file=_sys.stderr)
+                    continue
+            fb = _MODEL_FALLBACK.get(m)
+            is_429 = getattr(exc, "code", None) == 429 or "429" in str(exc)
+            if not (is_429 and fb):
+                raise
+            print(f"[QUOTA] {m} 429 → fallback {fb}", file=_sys.stderr)
+            m2 = _acquire(fb, est_tokens)
+            key2 = _next_api_key()
+            client = _client(key2)
+            try:
+                resp = client.models.generate_content(model=m2, contents=contents, config=config)
+            except genai_errors.ClientError as exc2:
+                if getattr(exc2, "code", None) == 401 or "UNAUTHENTICATED" in str(exc2):
+                    _DEAD_KEYS.add(key2)
+                raise
+            _record_tokens(m2, resp)
+            return resp
 
 
 # ---- multi-bubble segment splitter (Phase 1) --------------------------------
@@ -1107,10 +1129,6 @@ def _build_context(products: list[dict], shop_hint: str | None = None,
                     desc = p["description_excerpt"]
                     if desc and desc.strip():
                         card["description_excerpt"] = desc
-                    elif "raw_description" in p and p["raw_description"]:
-                        # ⚡ BUG-O fix — fallback ใช้ raw_description ถ้า excerpt ว่าง
-                        #   กรณี keyword ไม่ match แต่ข้อมูลจริงมีใน description
-                        card["description_excerpt"] = p["raw_description"][:3000]
                     else:
                         card["description_excerpt"] = "(ไม่มีรายละเอียดสินค้าเพิ่มเติม)"
                         # เพิ่ม context_note ชัดๆ ว่าห้ามเอา desc สินค้าอื่นมาตอบ

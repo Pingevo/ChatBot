@@ -551,186 +551,24 @@ _PRODUCT_MENTION_KWS = (
 )
 
 
-def _clean_description(desc: str, message: str = "") -> str:
-    """กรอง description ของ Shopee ตามคำถาม — เอาเฉพาะส่วนที่เกี่ยวข้อง.
+def _clean_description(desc: str) -> str:
+    """normalize description — question-independent (Phase 11 FIX-2 / D4).
 
-    แบ่ง description เป็น sections แล้วเลือกส่งเฉพาะส่วนที่ลูกค้าถาม:
-    - ถามรับประกัน/เคลม → เงื่อนไขรับประกัน + นโยบายคืน
-    - ถามสเปก/รายละเอียด/จอ/กล้อง/แบต → สเปกเครื่อง
-    - ถามการจัดส่ง/เวลาทำการ → เงื่อนไขจัดส่ง + บริการแชท
-    - ถามทั่วไป (ราคา/มีไหม) → ไม่ส่ง description เลย (คืน "")
-
-    กรองออกเสมอ: โค้ดโปรโมชั่นที่หมดอายุ
-    จำกัด 3000 ตัวอักษร
-    """
+    ตัด promo/boilerplate lines + collapse blank runs + cap 3000 เท่านั้น;
+    field admission เป็น owner ของ answer_context._scope_card (typed rules)."""
     if not desc:
         return ""
-
-    msg_lower = (message or "").lower()
-
-    # แมปคำถาม → sections ที่เกี่ยวข้อง
-    warranty_kw = ("รับประกัน", "ประกัน", "เคลม", "warranty", "claim",
-                   "ศูนย์", "ซ่อม", "เปลี่ยน", "รับคืน", "คืนสินค้า")
-    spec_kw = ("สเปก", "สเปค", "spec", "specification", "รายละเอียด", "detail",
-               "ข้อมูลสินค้า", "จอ", "กล้อง", "แบตเตอรี่", "cpu", "ram", "rom",
-               "ความจุ", "หน่วยความจำ", "ระบบปฏิบัติการ", "เชื่อมต่อ", "เครือข่าย",
-               "สี", "ขนาด", "น้ำหนัก", "อุปกรณ์ในกล่อง", "ในกล่อง", "box",
-               "ข้อมูลตัวเครื่อง", "มัลติมีเดีย", "เซ็นเซอร์",
-               "เปรียบเทียบ", " vs ", "เทียบ", "compare", "เทียบกับ",
-               "ของแถม", "แถม", "gift", "free", "โปรโมชัน", "promotion",
-               "อุปกรณ์", "accessories", "ฟรี", "คู่มือ", "แท่นชาร์จ", "สายชาร์จ",
-               # มอก. (TISI standard) — ลูกค้าถามเรื่อง มอก. ต้องเห็น description ที่มี มอก.
-               "มอก.", "มอก", "tisi", "มาตรฐาน",
-               # ⚡ BUG-O fix — เพิ่ม keyword ที่ QA พบว่าไม่ match (ทำให้ description ไม่ถึง LLM)
-               "ai", "gpt", "shark gpt", "ecg", "สื่อสาร", "ฟังก์ชัน",
-               "smart assistant", "ผู้ช่วย", "chatbot", "voice", "เสียง",
-               "nfc", "bluetooth", "gps", "wifi", "5g", "4g",)
-    shipping_kw = ("จัดส่ง", "ส่งสินค้า", "เวลาทำการ", "บริการแชท",
-                   "shipping", "delivery", "เปิดทำการ", "ตัดรอบ")
-
-    want_warranty = any(kw in msg_lower for kw in warranty_kw)
-    want_spec = any(kw in msg_lower for kw in spec_kw)
-    want_shipping = any(kw in msg_lower for kw in shipping_kw)
-
-    # ถ้าเป็นคำถามเกี่ยวกับสินค้า (มี product keyword ใดๆ) → ส่ง spec เสมอ
-    # เพราะลูกค้าถาม "สายชาร์จ 65w" หรือ "หัวชาร์จ 100w" ก็ต้องเห็นสเปก
-    # จะได้ตอบได้ว่าสินค้าไหนรองรับ 65w/100w บ้าง
-    product_kw = _PRODUCT_MENTION_KWS
-    want_product = any(kw in msg_lower for kw in product_kw)
-    if want_product:
-        want_spec = True
-
-    # ⚡ Model code detection — ถ้า message มี alphanumeric token (เช่น "ctl301", "biokoop")
-    #   ที่ดูเหมือนชื่อรุ่นสินค้า → ถือว่าเป็น want_spec=True
-    #   กัน case: ลูกค้าพิมพ์ "ctl301" → _clean_description กรอง desc ออก → LLM2 ไม่เห็น desc
-    #   → พ่น "ไม่มีรายละเอียดเพิ่มเติม" → trigger web search cascade พัง
-    _model_code_tokens = re.findall(r"[A-Za-z]+\d+[A-Za-z]*", msg_lower)
-    _model_code_tokens = [t for t in _model_code_tokens if len(t) >= 4]
-    if _model_code_tokens:
-        want_spec = True
-
-    # ถาม "รับประกันกี่ปี" → ข้อมูลอยู่ใน warranty field ของ product card อยู่แล้ว
-    # ไม่ต้องส่งเงื่อนไขรับประกันเบื้องต้น (warranty section) เพราะ LLM ตอบจาก field ได้
-    # ส่ง warranty section เฉพาะเมื่อถามเรื่องเคลม/ซ่อม/เปลี่ยน เท่านั้น
-    warranty_claim_kw = ("เคลม", "claim", "ซ่อม", "เปลี่ยน", "เสีย", "พัง", "ไม่ทำงาน", "ส่งเคลม")
-    want_warranty_claim = any(kw in msg_lower for kw in warranty_claim_kw)
-    if not want_warranty_claim:
-        want_warranty = False  # ไม่ส่ง warranty section ถ้าไม่ใช่คำถามเคลม
-
-    # ถ้าไม่ได้ถามอะไรเฉพาะเจาะจง → คืน "" (ประหยัด token)
-    if not (want_warranty or want_spec or want_shipping):
-        return ""
-
-    # แบ่ง description เป็น sections ตาม header markers
-    # แต่ละ section มี (header, content)
-    section_markers = [
-        # (marker, section_type)
-        ("เงื่อนไขการจัดส่ง", "shipping"),
-        ("โปรดอ่าน", "shipping"),  # มักมีเวลาทำการ + เงื่อนไขร้าน
-        ("บริการแชท", "shipping"),
-        ("เงื่อนไขการรับประกัน", "warranty"),  # เงื่อนไขรับประกันเฉพาะสินค้า
-        ("เงื่อนไขรับประกัน", "warranty"),
-        ("นโยบายการรับคืน", "warranty"),
-        ("ข้อมูลตัวเครื่อง", "spec"),
-        ("ข้อมูลเครือข่าย", "spec"),
-        ("ระบบปฏิบัติการ", "spec"),
-        ("ระบบเชื่อมต่อ", "spec"),
-        ("ฟังก์ชั่นมัลติมีเดีย", "spec"),
-        ("แบตเตอรี่", "spec"),
-        ("Specification", "spec"),
-        ("SPECIFICATION", "spec"),
-        ("สเปก", "spec"),
-        ("● สมาร์ทโฟน", "spec"),
-        ("● จอแสดงผล", "spec"),
-        ("● ระบบปฏิบัติการ", "spec"),
-        ("● หน่วยประมวลผล", "spec"),
-        ("● กล้อง", "spec"),
-        ("● แบตเตอรี่", "spec"),
-        ("● ระบบเชื่อมต่อ", "spec"),
-        # English spec headers (เช่น Xiaomi 12 Pro)
-        ("Performance", "spec"),
-        ("Camera", "spec"),
-        ("Display", "spec"),
-        ("Battery", "spec"),
-        ("Connectivity", "spec"),
-        ("Memory", "spec"),
-        ("Storage", "spec"),
-        ("Processor", "spec"),
-        ("Design", "spec"),
-        ("Audio", "spec"),
-        ("Network", "spec"),
-        ("Sensors", "spec"),
-        ("Box Contents", "spec"),
-        ("In the box", "spec"),
-    ]
-
-    # หาตำแหน่งทั้งหมดของแต่ละ marker
-    positions = []
-    for marker, sec_type in section_markers:
-        idx = desc.find(marker)
-        if idx != -1:
-            positions.append((idx, marker, sec_type))
-    positions.sort(key=lambda x: x[0])
-
-    # ถ้าไม่เจอ section ใดเลย → คืน desc เต็ม (จำกัด 3000)
-    if not positions:
-        return desc[:3000]
-
-    # สร้าง sections: แต่ละ section เริ่มที่ marker ปัจจุบัน จบที่ marker ถัดไป
-    sections: list[tuple[str, str]] = []  # (section_type, content)
-    for i, (idx, marker, sec_type) in enumerate(positions):
-        end = positions[i + 1][0] if i + 1 < len(positions) else len(desc)
-        content = desc[idx:end]
-        sections.append((sec_type, content))
-
-    # ส่วนก่อน marker แรก — มักเป็นโค้ดโปรโมชั่น ข้ามไป
-
-    # เลือก sections ตามคำถาม
-    wanted_types: set[str] = set()
-    if want_warranty:
-        wanted_types.add("warranty")
-        # warranty มักอยู่ใน "โปรดอ่าน" ด้วย (เงื่อนไขเคลม)
-        wanted_types.add("shipping")  # เพราะ "โปรดอ่าน" มีทั้งเวลา + เงื่อนไขรับประกัน
-    if want_spec:
-        wanted_types.add("spec")
-    if want_shipping:
-        wanted_types.add("shipping")
-
-    # รวม sections ที่ต้องการ (ถอดซ้ำตามตำแหน่ง)
-    seen_starts: set[int] = set()
-    parts: list[str] = []
-    for sec_type, content in sections:
-        if sec_type not in wanted_types:
-            continue
-        # ใช้เนื้อหาเป็น key ถอดซ้ำ
-        if content in seen_starts:
-            continue
-        seen_starts.add(content)
-        parts.append(content)
-
-    result = "\n".join(parts)
-
-    # fallback: ถ้า want_spec แต่ไม่เจอ spec section เลย → คืน desc เต็ม (จำกัด 3000)
-    # เพราะบางสินค้าใช้ format ที่ไม่ตรง marker ใดเลย
-    if not result and want_spec:
-        return desc[:3000]
-
-    # กรองบรรทัดโค้ดโปรโมชั่นที่ค้างอยู่
-    lines = result.split("\n")
     promo_patterns = [
         "ใช้โค้ด", "โค้ดสำหรับลูกค้าใหม่", "โค้ดลูกค้าใหม่",
         "ลดเพิ่ม", "ลดทันที", "ลดเพิ่มอีก",
         "NEWTHAI", "GADJUN", "9EE7R46Z",
         "โค้ดมีจำนวนจำกัด",
     ]
-    cleaned_lines = [ln for ln in lines
-                     if not any(p in ln.strip() for p in promo_patterns)]
-    result = "\n".join(cleaned_lines)
-
-    # กรองบรรทัดว่างติดๆ กัน
+    cleaned = [ln for ln in desc.split("\n")
+               if not any(p in ln.strip() for p in promo_patterns)]
+    result = "\n".join(cleaned)
     while "\n\n\n" in result:
         result = result.replace("\n\n\n", "\n\n")
-
     return result[:3000]
 
 
@@ -904,7 +742,7 @@ def to_product_card(doc: dict, message: str = "") -> dict:
 
     Args:
         doc: MongoDB document
-        message: คำถามลูกค้า (ใช้กรอง description ตาม intent)
+        message: คำถามลูกค้า (call-site compat — desc normalize ไม่ gate ตามคำถามแล้ว)
     """
     doc = _to_serializable(doc)
     brand = (doc.get("brand") or {}).get("original_brand_name", "")
@@ -938,13 +776,9 @@ def to_product_card(doc: dict, message: str = "") -> dict:
         # ข้อมูลโปรโมชั่น (ใช้ตอน re-rank และให้ LLM บอกลูกค้าได้)
         "has_promotion": _has_active_promotion(doc),
         "is_flash_sale": bool(doc.get("is_flash_sale")),
-        # description กรองตามคำถาม — เก็บเฉพาะส่วนที่เกี่ยวข้อง (สเปก/รับประกัน/จัดส่ง)
-        # จำกัด 3000 ตัวอักษร ประหยัด token
-        "description_excerpt": _clean_description(doc.get("description") or "", message),
-        # ⚡ BUG-O fix — เก็บ raw description (truncate 4000) เป็น fallback
-        #   กรณี _clean_description คืน "" เพราะ keyword ไม่ match แต่ข้อมูลจริงมีใน description
-        #   LLM จะได้เห็นข้อมูลแม้ตอน keyword ไม่ตรง (เช่น "มี AI ไหม", "รองรับ ECG")
-        "raw_description": (doc.get("description") or "")[:4000],
+        # description normalized field เดียว (promo strip + cap) — ไม่ gate ตามคำถาม
+        #   admission อยู่ที่ answer_context._scope_card / llm._build_context
+        "description_excerpt": _clean_description(doc.get("description") or ""),
         "variants": [
             {
                 "name": m.get("model_name"),
