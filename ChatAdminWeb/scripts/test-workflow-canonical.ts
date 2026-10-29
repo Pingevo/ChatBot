@@ -214,6 +214,82 @@ async function main() {
     const stage = await eng.runInboundWorkflowStage({ conversation_id: "cv_inb", shop_id: "s1", platform: "shopee", text: "hi" } as never);
     eq(stage.status, "in_flight", "inbound ระหว่าง delay → in_flight (ไม่ resume timer)");
   }
+
+  // ─── 10. canonical chat_assign — pool/round-robin/OOH/lastHandler ──
+  {
+    const binds = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    const admins = await mongo.getCollection(COLLECTIONS.admins);
+    const cursors = await mongo.getCollection(COLLECTIONS.assignmentCursors);
+    const msgs2 = await mongo.getCollection(COLLECTIONS.messages);
+    await binds.deleteMany({}); await admins.deleteMany({});
+    await cursors.deleteMany({}); await msgs2.deleteMany({});
+    await admins.insertMany([
+      { admin_id: "adm_a", role: "admin", active: true },
+      { admin_id: "adm_b", role: "admin", active: true },
+      { admin_id: "adm_c", role: "admin", active: true },
+      { admin_id: "adm_dead", role: "admin", active: false },
+      { admin_id: "dev_1", role: "dev", active: true },
+    ]);
+    const assignNode = node("assign_ticket", {
+      action: { assignment: { teamIds: [], userIds: [], assignWhenAllOoh: true, assignToLastTicketHandledBy: false, lastAssignedUsersIndex: 2 } },
+    });
+    // 10.1 team=all_admins (resolved) — global pool round-robin, per-node cursor
+    await binds.insertOne({
+      binding_id: "wb_t1", workflow_id: "wf_x", version_id: "wv_1", node_id: "zn_t",
+      field_path: "action.assignment.teamIds", kind: "team", count: 1,
+      source_values: ["ext_team1"], status: "resolved",
+      resolution: { mappings: [{ local_id: "all_admins", state: "valid" }] },
+    });
+    const p1 = await ce.pickCanonicalAssignee(assignNode, msg(), "wf_x", "wv_1");
+    eq("pick" in p1 ? p1.pick : null, "adm_a", "team=all_admins → pick แรก adm_a");
+    const p2 = await ce.pickCanonicalAssignee(assignNode, msg(), "wf_x", "wv_1");
+    eq("pick" in p2 ? p2.pick : null, "adm_b", "round-robin หมุน → adm_b");
+    const p3 = await ce.pickCanonicalAssignee(assignNode, msg(), "wf_x", "wv_1");
+    eq("pick" in p3 ? p3.pick : null, "adm_c", "→ adm_c (adm_dead/dev_1 ถูกข้าม)");
+    const p4 = await ce.pickCanonicalAssignee(assignNode, msg(), "wf_x", "wv_1");
+    eq("pick" in p4 ? p4.pick : null, "adm_a", "วนกลับ adm_a");
+    eq("mode" in p4 ? p4.mode : null, "all_admins", "mode = all_admins");
+    // 10.2 bound userIds — subset pool แชร์ cursor node เดิม (last=adm_a → next adm_b)
+    await binds.deleteMany({});
+    await binds.insertOne({
+      binding_id: "wb_u1", workflow_id: "wf_x", version_id: "wv_1", node_id: "zn_t",
+      field_path: "action.assignment.userIds", kind: "user", count: 2,
+      source_values: ["u1", "u2"], status: "resolved",
+      resolution: { mappings: [{ local_id: "adm_b", state: "valid" }, { local_id: "adm_c", state: "valid" }] },
+    });
+    const p5 = await ce.pickCanonicalAssignee(assignNode, msg(), "wf_x", "wv_1");
+    eq("pick" in p5 ? p5.pick : null, "adm_b", "user pool [b,c] cursor เดิม adm_a → next adm_b");
+    eq("mode" in p5 ? p5.mode : null, "user_pool", "mode = user_pool");
+    // 10.3 assignWhenAllOoh:false + ร้าน OOH → skip (Sunday 10:00 BKK)
+    const oohNode = node("assign_ticket", {
+      action: { assignment: { teamIds: [], userIds: [], assignWhenAllOoh: false } },
+    });
+    const ooh = await ce.pickCanonicalAssignee(oohNode, msg(), "wf_x", "wv_1", new Date("2026-10-25T03:00:00Z"));
+    eq("skip" in ooh ? ooh.skip : null, "all_out_of_hours", "assignWhenAllOoh:false + OOH → skip");
+    const inHours = await ce.pickCanonicalAssignee(oohNode, msg(), "wf_x", "wv_1", new Date("2026-10-26T03:00:00Z"));
+    ok("pick" in inHours || "error" in inHours, "ในเวลา → ไม่ skip (เข้า pick path)");
+    // 10.4 assignToLastTicketHandledBy → last replier ใน pool
+    await binds.deleteMany({});
+    await binds.insertOne({
+      binding_id: "wb_t2", workflow_id: "wf_x", version_id: "wv_1", node_id: "zn_t",
+      field_path: "action.assignment.teamIds", kind: "team", count: 1,
+      source_values: ["ext_team1"], status: "resolved",
+      resolution: { mappings: [{ local_id: "all_admins", state: "valid" }] },
+    });
+    await msgs2.insertOne({ conversation_id: "cv_1", sender: "admin", admin_id: "adm_c", timestamp: new Date() });
+    const lhNode = node("assign_ticket", {
+      action: { assignment: { teamIds: [], userIds: [], assignWhenAllOoh: true, assignToLastTicketHandledBy: true } },
+    });
+    const p6 = await ce.pickCanonicalAssignee(lhNode, msg(), "wf_x", "wv_1");
+    eq("pick" in p6 ? p6.pick : null, "adm_c", "lastTicketHandledBy → adm_c (last replier ใน pool)");
+    eq("mode" in p6 ? p6.mode : null, "last_ticket_handler", "mode = last_ticket_handler");
+    // 10.5 unresolved binding → error (fail-closed)
+    await binds.deleteMany({});
+    const p7 = await ce.pickCanonicalAssignee(assignNode, msg(), "wf_x", "wv_1");
+    ok("error" in p7, "ไม่มี binding resolve → error (fail-closed)");
+    const p8 = await ce.pickCanonicalAssignee(assignNode, msg(), "wf_x", undefined);
+    ok("error" in p8, "ไม่มี version_id → error (fail-closed)");
+  }
 }
 
 main().then(() => {

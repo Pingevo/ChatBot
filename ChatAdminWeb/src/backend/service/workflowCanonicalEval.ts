@@ -8,6 +8,8 @@ import { getCollection } from "../db/mongoClient";
 import { COLLECTIONS } from "../db/mongoClient";
 import { getShop } from "./shopService";
 import * as statusConversationService from "./statusConversationService";
+import { assignmentService } from "./assignmentService";
+import { handoffService } from "./handoffService";
 import type { WorkflowNode } from "./workflowService";
 
 // ─── types ────────────────────────────────────────────────
@@ -183,4 +185,72 @@ export async function evalCanonicalConditions(
     }
   }
   return { branch: "no-match" };
+}
+
+// ─── canonical assign — Zaapi chat_assign (config.action.assignment) ────
+// pool: bound userIds → กลุ่ม admin ที่ bind ไว้; teamIds → แอดมินทั้งหมดในระบบ
+//   (user ยืนยัน semantics: Zaapi team = all admins — ใช้ global pool เดิม)
+// round-robin: cursor แยกต่อ node (`zaapi:<wf>:<node>`) = lastAssignedUsersIndex
+//   ของ Zaapi — cursor ของระบบเก่าไม่ย้ายมา เริ่มนับใหม่ในระบบเรา
+export function hasCanonicalAssignment(config: unknown): boolean {
+  const a = (config as { action?: { assignment?: unknown } } | undefined)?.action?.assignment;
+  return !!a && typeof a === "object";
+}
+
+export type CanonicalAssignPick =
+  | { pick: string; mode: "user_pool" | "all_admins" | "last_ticket_handler" }
+  | { pick: null; mode: "no_eligible_agent" }
+  | { skip: "all_out_of_hours" }
+  | { error: string };
+
+export async function pickCanonicalAssignee(
+  node: WorkflowNode, msg: EvalMessage,
+  workflowId: string, versionId: string | undefined,
+  now = new Date(),
+): Promise<CanonicalAssignPick> {
+  const asg = (node.config as {
+    action?: { assignment?: {
+      assignWhenAllOoh?: boolean; assignToLastTicketHandledBy?: boolean;
+      teamIds?: unknown[]; userIds?: unknown[];
+    } };
+  }).action?.assignment || {};
+
+  // assignWhenAllOoh === false → ร้านนอกเวลาทำการ → ไม่ assign แต่เดิน flow ต่อ
+  //   (business_hours missing → isWithinOfficeHours throw → fail closed เหมือน evaluator)
+  if (asg.assignWhenAllOoh === false && !(await isWithinOfficeHours(msg, now))) {
+    return { skip: "all_out_of_hours" };
+  }
+
+  const userIds = await boundLocalIds(
+    workflowId, versionId, node.node_id, "action.assignment.userIds", "user");
+  const teamIds = await boundLocalIds(
+    workflowId, versionId, node.node_id, "action.assignment.teamIds", "team");
+
+  let pool: string[];
+  let mode: "user_pool" | "all_admins";
+  if (userIds.length > 0) {
+    pool = userIds; mode = "user_pool";
+  } else if (teamIds.length > 0) {
+    // Zaapi team = แอดมินทั้งหมด — binding resolve เป็น "all_admins" แล้วเท่านั้น
+    //   (fail-closed เหมือน userIds — unresolved → error ไม่ใช่เดา pool)
+    //   buildPool equal_global คืน ordered admin ids ชุดเดียวกัน
+    //   (poolKey ของ buildPool ไม่ใช้ — cursor ต้องแยกต่อ node ไม่แชร์กับ source อื่น)
+    const built = await assignmentService.buildPool(
+      "equal_global", { shop_id: msg.shop_id, platform: msg.platform || "" }, "zaapi");
+    pool = built.orderedAgentIds; mode = "all_admins";
+  } else {
+    return { error: `assign node ${node.node_id}: ไม่มี bound userIds/teamIds — resolve bindings ก่อน` };
+  }
+  if (pool.length === 0) return { pick: null, mode: "no_eligible_agent" };
+
+  // assignToLastTicketHandledBy → คนที่เคยตอบ ticket นี้ล่าสุด ถ้ายังอยู่ใน pool
+  if (asg.assignToLastTicketHandledBy === true) {
+    const last = await handoffService.getLastReplyAdmin(msg.conversation_id);
+    if (last && pool.includes(last)) return { pick: last, mode: "last_ticket_handler" };
+  }
+
+  const sel = await assignmentService.reserveNextAgent(`zaapi:${workflowId}:${node.node_id}`, pool);
+  if (sel.result === "reserved") return { pick: sel.agentId, mode };
+  if (sel.result === "contention") return { error: "reservation_contention" };
+  return { pick: null, mode: "no_eligible_agent" };
 }

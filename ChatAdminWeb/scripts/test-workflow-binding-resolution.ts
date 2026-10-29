@@ -1302,8 +1302,15 @@ async function main() {
       { workflow_id: R2.wfId, expected_version: R2.wfDoc.version, version_id: R2.verDoc.version_id,
         proposed: [{ binding_id: R2.bT1().binding_id, repeat: true, mappings: [
           { source_index: 0, local_id: "team_any" } ] }] },
-      (r) => ok(typeof r.validation === "string" && r.validation.includes("unresolvable"),
-        "team repeat → unresolvable typed reject"));
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("all_admins"),
+        "team repeat → ต้องเป็น all_admins เท่านั้น typed reject"));
+
+    // team → all_admins (Zaapi team = แอดมินทั้งหมด) resolve สำเร็จ
+    const resTeam = await callResolve(R2.wfId,
+      { workflow_id: R2.wfId, expected_version: R2.wfDoc.version, version_id: R2.verDoc.version_id,
+        proposed: [{ binding_id: R2.bT1().binding_id, repeat: true, mappings: [
+          { source_index: 0, local_id: "all_admins" } ] }] });
+    ok(resTeam?.ok === true, `team → all_admins resolve ok (${JSON.stringify(resTeam)?.slice(0, 140)})`);
 
     // H — repeat omitted → no expansion at all
     const R3 = await setupRepeat("workflow_RPT_H");
@@ -2293,7 +2300,8 @@ async function main() {
       "candidates.users = active admins only (inactive excluded), sorted");
     ok(usrs.every((u) => typeof u.display === "string" && !("password_hash" in u) && !("email" in u)),
       "candidates.users display = safe fields only (no secrets)");
-    eq(JSON.stringify(vCand?.teams), "[]", "candidates.teams = empty (unresolvable kind)");
+    eq(JSON.stringify(vCand?.teams), JSON.stringify([{ local_id: "all_admins", display: "แอดมินทั้งหมด" }]),
+      "candidates.teams = all_admins เท่านั้น (Zaapi team = แอดมินทั้งหมด)");
     eq(JSON.stringify(vCand?.ticket_fields), "[]", "candidates.ticket_fields = empty (unresolvable kind)");
     eq(JSON.stringify(vCand?.urls), "[]", "candidates.urls = empty (unresolvable kind)");
 

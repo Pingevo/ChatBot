@@ -19,6 +19,7 @@ export const COLLECTIONS = {
   testStatusConversation: "test_status_conversation",
   systemConfigs: "system_configs",
   triggers: "triggers",
+  assignmentCursors: "assignment_cursors",
 };
 
 export async function getCollection(name) { return mongo.getCollection(name); }

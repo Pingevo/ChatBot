@@ -31,7 +31,7 @@ import { testStatusConversationService, type TestSource } from "./testStatusConv
 import { statusConversationService } from "./statusConversationService";
 import { logBotworkerEvent } from "./botworkerEventService";
 import { isSafeFetchUrl } from "../lib/urlSafety";
-import { hasCanonicalConditions, evalCanonicalConditions } from "./workflowCanonicalEval";
+import { hasCanonicalConditions, evalCanonicalConditions, hasCanonicalAssignment, pickCanonicalAssignee } from "./workflowCanonicalEval";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -1505,6 +1505,55 @@ async function performAction(
     case "assign_ticket": {
       // จ่ายงาน — ระบุ admin_id → assign ตรง / ไม่ระบุ → handoffService (คนเดิม → round-robin)
       const reason = String(cfg.reason || `workflow ${workflow.name}`);
+
+      // ⚡ canonical (Zaapi chat_assign) — action.assignment: bound users → pool,
+      //   team → all admins, cursor ต่อ node, OOH/last-handler flags
+      if (hasCanonicalAssignment(cfg)) {
+        const pick = await pickCanonicalAssignee(
+          node, msg, workflow.workflow_id, workflow.current_version_id);
+        if ("error" in pick) throw new Error(`assign_ticket node ${node.node_id}: ${pick.error}`);
+        if ("skip" in pick) {
+          await logAdminEvent({
+            action_type: "workflow.assign_ticket",
+            actor: "workflow-engine",
+            conversation_id: msg.conversation_id,
+            metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, skipped: pick.skip },
+          });
+          return {}; // all OOH → ไม่ assign เดิน flow ต่อ
+        }
+        if (!pick.pick) {
+          return { handoff: { agentId: null, reason, state: "queued" } };
+        }
+        if (msg.testSource) {
+          const src = msg.testSource as TestSource;
+          const meta = await testStatusConversationService.getTestStatus(msg.conversation_id, src);
+          const ok = await testStatusConversationService.manualTestAssign(
+            msg.conversation_id, src, pick.pick, meta?.assigned_to,
+            src === "botworker" ? "open" : "handoff");
+          if (!ok) {
+            if (!meta?.assigned_to) return {};
+            return { handoff: { agentId: meta.assigned_to, reason: `${reason} (conflict — already assigned)`, state: "assigned" } };
+          }
+          return { handoff: { agentId: pick.pick, reason, state: "assigned" } };
+        }
+        const outcome = await handoffService.handoffToAdmin({
+          conversationId: msg.conversation_id,
+          shopId: msg.config_shop_key,
+          platform: msg.platform,
+          reason,
+          targetAdminId: pick.pick,
+          actor: "workflow-engine",
+        });
+        if (outcome.state === "failed") return {};
+        await logAdminEvent({
+          action_type: "workflow.assign_ticket",
+          actor: "workflow-engine",
+          conversation_id: msg.conversation_id,
+          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, assigned_to: outcome.assigned_to, mode: pick.mode, outcome_state: outcome.state },
+        });
+        return { handoff: { agentId: outcome.assigned_to, reason, state: outcome.state } };
+      }
+
       const wantAdmin = cfg.admin_id ? String(cfg.admin_id) : null;
 
       // ⚡ botworker parallel — เขียน test_status_conversation[testSource] เท่านั้น

@@ -1275,7 +1275,7 @@ export interface BindingResolutionView {
     accounts: { platform: Platform; shop_id: string; shopname: string }[];
     labels: string[];
     users: { admin_id: string; display: string }[];
-    teams: [];
+    teams: { local_id: string; display: string }[];
     ticket_fields: [];
     urls: [];
   };
@@ -1546,7 +1546,10 @@ export async function saveBindingResolutionBatch(
         break;
       }
       case "team":
-        targetErr = `binding ${w.b.binding_id}: unresolvable — team has no local identity in R1`;
+        // Zaapi team = แอดมินทั้งหมดในระบบ — local target เดียวที่ถูกต้องคือ
+        //   sentinel "all_admins" (global assignment pool ของ assignmentService)
+        targetOk = w.m.local_id === "all_admins";
+        if (!targetOk) targetErr = `binding ${w.b.binding_id}: team resolves to local_id "all_admins" only`;
         break;
       case "ticket_field":
       case "url":
@@ -2070,7 +2073,8 @@ export async function getBindingResolutionView(workflowId: string): Promise<Bind
       }),
       ...(b.resolution ? { resolution: b.resolution } : {}),
     })),
-    candidates: { accounts, labels, users, teams: [], ticket_fields: [], urls: [] },
+    // team — Zaapi team = แอดมินทั้งหมดในระบบ → ตัวเลือกเดียว "all_admins" (global pool)
+    candidates: { accounts, labels, users, teams: [{ local_id: "all_admins", display: "แอดมินทั้งหมด" }], ticket_fields: [], urls: [] },
     unresolved: binds.filter((b) => b.status === "unresolved").length,
     invalid: binds.filter((b) => b.status === "invalid").length,
     publish_blockers: detail.publish_blockers,
