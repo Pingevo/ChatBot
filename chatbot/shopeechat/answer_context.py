@@ -239,11 +239,16 @@ class UnansweredNeed:
     subject_refs: tuple[str, ...]
     scope: tuple[str, ...]
     target: str | None
-    reason: Literal["no_selection", "deferred", "no_answer", "no_evidence"]
+    reason: Literal["no_selection", "deferred", "no_answer",
+                    "no_evidence", "clarify"]
     # capability asks ที่ unresolved (typed verbatim จาก TurnNeed —
     #   renderer name ได้ทุกตัวโดยไม่ parse prose); ว่าง = unresolved
     #   ทั้ง need
     capability_asks: tuple[str, ...] = ()
+    # reason="clarify" เท่านั้น — canonical types ของ decided candidates
+    #   ที่ทำให้ scope กว้างเกิน (≥2 types, ไม่มี requested type/subtype) —
+    #   renderer name ผ่าน _type_query_word (ไม่ใช่ prose inference)
+    clarify_types: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -977,6 +982,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     measured_facts: list[dict] = []
     det_segments: list[dict] = []           # no-match verdict segments
     no_match: set[int] = set()   # need ที่ candidates ทุกใบ proven-fail
+    clarify: set[int] = set()   # need ที่ outcome = typed scope clarify
     note_replace: dict[str, str] = {}  # identity → note แทน role note ทั้งก้อน
     product_verdicts: list[CompatVerdict] = []  # decided proofs บน product needs
     # pass 1 — target ownership: compat need เท่านั้นที่มี external
@@ -1302,6 +1308,34 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                     capability_asks=tuple(
                         getattr(n, "capability_asks", ()) or ())))
             continue
+        # ── FIX-5 type-ambiguous compat/recommend ask → typed clarify
+        #   outcome (D2): need ไม่ declare product scope — need-level
+        #   fields ว่างตาม contract ของแต่ละ kind + request ที่ attribute
+        #   มาไม่พก type/subtype (compat need ไม่มี scope บนตัวเอง —
+        #   relation scope เป็นของ request) — แต่ candidates ที่ผ่าน gate
+        #   (selection/verdict-decided) กระจาย ≥2 canonical types →
+        #   outcome = ถาม scope กลับ ไม่เลือก type ให้เอง — candidates
+        #   ไม่ emit (scope undecided → cards ห้ามแนบตาม FIX-4); decided
+        #   verdicts ของ need นี้ถูก clarify แทนที่ → pop (เซ็กเมนต์
+        #   verdict ไม่ render เมื่อยังไม่รู้ว่าลูกค้าต้องการ type ไหน)
+        if (n.kind == "compat"
+                or (n.kind == "product" and n.operation == "recommend")):
+            _scope_req = any(
+                r.product_types or r.subtypes for r in reqs_n)
+            if not (n.product_types or n.subtypes or _scope_req):
+                _ctypes = tuple(sorted({
+                    str((s.card or {}).get("canonical_type")
+                        or (s.card or {}).get("product_type") or "")
+                    for s in cands} - {""}))
+                if len(_ctypes) >= 2:
+                    unanswered.append(UnansweredNeed(
+                        i, n.kind, n.operation,
+                        tuple(n.subject_refs or ()), scope, target_of[i],
+                        "clarify", clarify_types=_ctypes))
+                    clarify.add(i)
+                    decided.pop(i, None)
+                    trace.append(f"need[{i}] clarify types={list(_ctypes)}")
+                    continue
         # ── capability asks (typed contract: TurnNeed.capability_asks ←
         #   intent_classifier) — source-grounded spans: exact-subject
         #   attributed evidence มี → asks ride task (model แยก subclaim
@@ -1369,7 +1403,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     # (subject/scope/target) → model freestyle hedge ซ้ำกับ segment;
     # เซ็ตเดิม + field เดิมเท่านั้น (facts/constraints/value/ranking
     # ที่เหลือ = model work จริง → task ยังอยู่)
-    dropped = (uncovered | set(decided) | no_match
+    dropped = (uncovered | set(decided) | no_match | clarify
                | {t.need_index for t in task.tasks
                   if t.need_index in _ask_unanswered
                   and not (t.requested_facts or t.constraints
@@ -1588,6 +1622,20 @@ def _unanswered_segment(u: UnansweredNeed) -> str:
                  if str(x).strip())
     named = [x for x in refs if not x.isdigit() and ":" not in x]
     target = str(u.target or "").strip()
+    if u.reason == "clarify":
+        # D2 — decided candidates span ≥2 types + no requested scope:
+        #   ถาม type กลับจาก canonical types เท่านั้น (name ผ่าน
+        #   _type_query_word — owner เดิมของ type→Thai word; ไม่เลือก
+        #   คำตอบให้เอง ไม่มี prose inference)
+        from . import product_store as _ps
+        _words = " หรือ ".join(dict.fromkeys(
+            _ps._type_query_word(str(t))
+            for t in (u.clarify_types or ()) if str(t).strip()))
+        if not _words:
+            return ""
+        _pre = (f"สำหรับการใช้งานร่วมกับ {target}" if target
+                else "สำหรับสินค้าที่ถาม")
+        return f"{_pre} — อยากได้{_words}คะ"
     if u.reason == "no_selection":
         topic = named[0] if named else (
             str(u.scope[0]) if u.scope else "")

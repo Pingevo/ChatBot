@@ -779,7 +779,9 @@ def _render_composition(comp) -> str:
                     str(w.target) for w in us if w.target)) or u.target,
                 u.reason,
                 tuple(dict.fromkeys(
-                    a for w in us for a in w.capability_asks)))
+                    a for w in us for a in w.capability_asks)),
+                clarify_types=tuple(dict.fromkeys(
+                    t for w in us for t in (w.clarify_types or ()))))
         seg = _acx._unanswered_segment(u)
         if seg and seg not in seen:
             seen.add(seg)

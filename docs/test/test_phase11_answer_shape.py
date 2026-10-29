@@ -417,3 +417,113 @@ def test_covered_need_cards_attach_unchanged():
     comp = acx.compose_answer(needs=needs, context=ctx,
                               product_text="ตอบค่ะ")
     assert [str(p.get("item_id")) for p in comp.products] == ["1"]
+
+
+# ── FIX-5: type-ambiguous compat/recommend → typed clarify outcome ──────────
+
+def _need_compat(target="iphone 15"):
+    """products-for-device compat ask — no requested type/subtype."""
+    return TurnNeed(kind="compat", operation="compat",
+                    target_refs=(target,))
+
+
+def _need_recommend():
+    return TurnNeed(kind="product", operation="recommend")
+
+
+def _ambig_fixture(types=("charger", "case"), *, req_types=(), rid="r",
+                   source="compat", target="iphone 15"):
+    """decided candidates ของ compat ask ที่กระจายหลาย canonical_type —
+    request เป็น products-for-device channel (source=compat, target
+    อยู่บน request — verdict pass skip: selection คือ decision)."""
+    cards = [("charger", "Cable X"), ("case", "Case Y"),
+             ("earphone", "Buds Z"), ("smartwatch", "Watch W")]
+    picked = [c for c in cards if c[0] in types]
+    req = _req(rid=rid, source=source, types=req_types, target=target)
+    sel = _selection(*(
+        (_sel_card(f"i:{k+1}", "candidate", rid, nm,
+                   canonical_type=tp), rid)
+        for k, (tp, nm) in enumerate(picked)))
+    pool = _pool(tuple(_pooled(f"i:{k+1}", str(k + 1), name=nm)
+                       for k, (tp, nm) in enumerate(picked)))
+    return req, sel, pool
+
+
+def test_type_ambiguous_compat_ask_clarifies_naming_types(monkeypatch):
+    """D2 — "ของใช้กับ <phone>" scope ว่าง + decided candidates กระจาย
+    ≥2 types → typed clarify outcome ชื่อทุก type; need uncovered →
+    0 cards (FIX-4) + 0 model call (task drop — FIX-3 mechanism)."""
+    need = _need_compat()
+    req, sel, pool = _ambig_fixture(("charger", "case"))
+    ctx = _compile((need,), sel, pool, (req,), _profile())
+    un = [u for u in ctx.unanswered_needs if u.reason == "clarify"]
+    assert len(un) == 1, [u.reason for u in ctx.unanswered_needs]
+    assert set(un[0].clarify_types) == {"charger", "case"}
+    captured = _answer_spy(monkeypatch)
+    comp = _artifact((need,), sel, pool, (req,))
+    assert comp.answer_calls == 0
+    assert not captured
+    assert comp.products == ()
+    answer = app._render_composition(comp)
+    assert "อยากได้" in answer
+    assert "หัวชาร์จ" in answer and "เคส" in answer
+    assert "](" not in answer
+
+
+def test_single_type_decided_candidates_do_not_clarify(monkeypatch):
+    """decided candidates type เดียว → ไม่ใช่ scope ambiguity — need
+    ผ่าน flow ปกติ (task อยู่ + model compose)."""
+    need = _need_compat()
+    req = _req(rid="r", source="compat", types=(), target="iphone 15")
+    sel = _selection(
+        (_sel_card("i:1", "candidate", "r", "Cable X",
+                   canonical_type="charger"), "r"),
+        (_sel_card("i:2", "candidate", "r", "Cable Y",
+                   canonical_type="charger"), "r"))
+    pool = _pool((_pooled("i:1", "1", name="Cable X"),
+                  _pooled("i:2", "2", name="Cable Y")))
+    ctx = _compile((need,), sel, pool, (req,), _profile())
+    assert not [u for u in ctx.unanswered_needs if u.reason == "clarify"]
+    captured = _answer_spy(monkeypatch)
+    comp = _artifact((need,), sel, pool, (req,))
+    assert comp.answer_calls == 1 and captured
+
+
+def test_requested_type_scope_suppresses_clarify(monkeypatch):
+    """user ระบุ type ไว้แล้ว (request product_types) → ไม่ clarify
+    แม้ decided candidates กระจายหลาย type."""
+    need = _need_compat()
+    req, sel, pool = _ambig_fixture(
+        ("charger", "case"), req_types=("charger",))
+    ctx = _compile((need,), sel, pool, (req,), _profile())
+    assert not [u for u in ctx.unanswered_needs if u.reason == "clarify"]
+    captured = _answer_spy(monkeypatch)
+    comp = _artifact((need,), sel, pool, (req,))
+    assert comp.answer_calls == 1 and captured
+
+
+def test_type_ambiguous_recommend_ask_clarifies(monkeypatch):
+    """recommend need scope ว่าง + decided candidates ≥2 types →
+    clarify outcome เดียวกัน (owner เดียวกับ compat path)."""
+    need = _need_recommend()
+    req, sel, pool = _ambig_fixture(
+        ("charger", "earphone"), source="slot", target=None)
+    ctx = _compile((need,), sel, pool, (req,), _profile())
+    un = [u for u in ctx.unanswered_needs if u.reason == "clarify"]
+    assert len(un) == 1
+    assert set(un[0].clarify_types) == {"charger", "earphone"}
+    captured = _answer_spy(monkeypatch)
+    comp = _artifact((need,), sel, pool, (req,))
+    assert comp.answer_calls == 0
+    assert comp.products == ()
+
+
+def test_zero_decided_candidates_is_not_clarify_path():
+    """0 decided candidates → unresolved/no_selection owner เดิม —
+    clarify ไม่ใช่ path ของ empty evidence (constraint-fail owns)."""
+    need = _need_compat()
+    req = _req(rid="r", source="compat", types=(), target="iphone 15")
+    sel = _selection()
+    pool = _pool()
+    ctx = _compile((need,), sel, pool, (req,), _profile())
+    assert not [u for u in ctx.unanswered_needs if u.reason == "clarify"]
