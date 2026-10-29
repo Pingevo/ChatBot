@@ -1834,15 +1834,30 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
         #   ช่องทางของ model — claim mutation ไม่เคยอยู่ใน markup);
         #   deterministic segments ไม่ผ่าน normalization นี้ —
         #   model-emitted prose อื่น (รวม leading particle) เป็น
-        #   model-output residual ไม่ใช่ compose concern
+        #   model-output residual ไม่ใช่ compose concern;
+        #   H1: bubble ที่ co-mention (subject_name,target) ของ decided
+        #   compat verdict = model พูดซ้ำ/ขัด domain ที่ typed owner
+        #   ตัดสินแล้ว → drop เหมือน name-echo rule (typed fields เท่านั้น
+        #   — co-mention อย่างเดียว ไม่ต้องอ่าน polarity; verdict segment
+        #   render truth เดียวกันอยู่แล้ว)
         _names = {re.sub(r"\s+", " ", str(p.get("name") or "")).strip()
                   for p in context.products}
         _names.discard("")
+        _pairs = tuple(
+            (re.sub(r"\s+", " ", str(v.subject_name or "")).strip()
+             .casefold(),
+             re.sub(r"\s+", " ", str(v.target or "")).strip().casefold())
+            for v in (context.compat_verdicts or ())
+            if v.decision.outcome in ("compatible", "incompatible"))
         _out = []
         for _b in product_text.split("|||"):
             if "](" in _b:
                 continue
             _b = re.sub(r"\s+", " ", _b.replace("**", "")).strip()
+            _bl = _b.casefold()
+            if any(_s and _t and _s in _bl and _t in _bl
+                   for _s, _t in _pairs):
+                continue
             if _b and _b not in _names:
                 _out.append(_b)
         _ptext = " ||| ".join(_out)

@@ -527,3 +527,102 @@ def test_zero_decided_candidates_is_not_clarify_path():
     pool = _pool()
     ctx = _compile((need,), sel, pool, (req,), _profile())
     assert not [u for u in ctx.unanswered_needs if u.reason == "clarify"]
+
+
+# ── H1 residual: model prose ไม่เป็นเจ้าของ decided compat truth ────────────
+
+def _decided_pair_ctx():
+    """mixed turn — decided compat verdict (subject×target) + product
+    need (task มี model work → product_text channel เปิดจริง)."""
+    needs = (
+        TurnNeed(kind="compat", operation="compat",
+                 subject_refs=("AC65B",), target_refs=("example dock",)),
+        TurnNeed(kind="product", operation="describe",
+                 subject_refs=("AC65B",)))
+    # source="slot" (carrier ไม่ใช่ products-for-device channel) → verdict
+    #   pass ทำงาน (source="compat" = selection คือคำตอบอยู่แล้ว ไม่มี verdict)
+    req0 = _req(rid="req-0", source="slot", types=("cable",),
+                codes=("AC65B",), target="example dock",
+                cm="connector_required")
+    req1 = _req(rid="req-1", source="subjects", codes=("AC65B",))
+    # connector ของ subject มาจาก card name ("C to C" → usb-c เหมือน
+    #   target spec) — extract owner = _extract_product_connectors
+    sel = _selection(
+        (_sel_card("i:1", "subject", "req-0", "Generic Cable A C to C 1m",
+                   model_codes=["AC65B"]), "req-0"),
+        (_sel_card("i:1", "subject", "req-1", "Generic Cable A C to C 1m",
+                   model_codes=["AC65B"]), "req-1"))
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "example dock",
+         "data": {"connector": "usb-c", "source": "spec-db"},
+         "subject_refs": ("i:1",)},))
+    ctx = _compile(needs, sel, pool, (req0, req1), _profile())
+    return needs, ctx
+
+
+def test_model_prose_cannot_contradict_decided_compat_verdict():
+    """H1 — decided verdict (subject×target) เป็น owner เดียวของ compat
+    truth; model bubble ที่ co-mention pair เดียวกัน = out-of-scope
+    output (echo=redundant / contradiction=โกหก) → normalize drop
+    เหมือน model-echo rule เดิม (typed fields เท่านั้น ไม่ใช่ polarity)"""
+    needs, ctx = _decided_pair_ctx()
+    v = [x for x in ctx.compat_verdicts]
+    assert v and v[0].decision.outcome == "compatible", (
+        f"premise: connector match → decided — {ctx.compat_verdicts}")
+    seg = f"{v[0].subject_name} ใช้งานร่วมกับ {v[0].target} ได้ค่ะ"
+    comp = acx.compose_answer(
+        needs=needs, context=ctx,
+        product_text=(f"{v[0].subject_name} ใช้งานร่วมกับ {v[0].target}"
+                      " ไม่ได้นะคะ|||สเปคของตัวนี้ดีมากค่ะ"))
+    answer = app._render_composition(comp)
+    assert seg in answer, f"verdict เดิมต้องอยู่ — answer:\n{answer}"
+    assert "ไม่ได้นะคะ" not in answer, (
+        f"contradiction ห้ามถึงลูกค้า — answer:\n{answer}")
+    assert "สเปคของตัวนี้ดีมากค่ะ" in answer, (
+        f"bubble ที่ไม่เกี่ยวต้องอยู่ — answer:\n{answer}")
+
+
+def test_model_prose_decided_pair_echo_dropped_too():
+    """co-mention ไม่เช็ค polarity — verdict segment render truth อยู่
+    แล้ว → model echo ของ pair เดียวกันก็ redundant drop เหมือนกัน."""
+    needs, ctx = _decided_pair_ctx()
+    v = ctx.compat_verdicts[0]
+    comp = acx.compose_answer(
+        needs=needs, context=ctx,
+        product_text=(f"{v.subject_name} ใช้งานร่วมกับ {v.target} ได้ด้วยค่ะ"
+                      "|||รายละเอียดอื่นของสินค้าค่ะ"))
+    answer = app._render_composition(comp)
+    assert "ได้ด้วยค่ะ" not in answer, (
+        f"echo ของ decided pair = redundant → drop — answer:\n{answer}")
+    assert "รายละเอียดอื่นของสินค้าค่ะ" in answer
+
+
+def test_model_prose_partial_mention_untouched():
+    """co-mention ต้องครบ subject+target — พูดถึง subject อย่างเดียว =
+    product prose ปกติ ไม่แตะ."""
+    needs, ctx = _decided_pair_ctx()
+    v = ctx.compat_verdicts[0]
+    comp = acx.compose_answer(
+        needs=needs, context=ctx,
+        product_text=f"{v.subject_name} สเปคดีมากค่ะ")
+    answer = app._render_composition(comp)
+    assert f"{v.subject_name} สเปคดีมากค่ะ" in answer, (
+        f"partial mention ห้ามโดน drop — answer:\n{answer}")
+
+
+@pytest.mark.xfail(strict=False,
+                  reason="B2 residual — compat claim ที่ไม่มี decided verdict "
+                         "counterpart ยัง verify ไม่ได้; root fix = structured "
+                         "model claims (typed output contract — deferred)")
+def test_invented_compat_claim_no_verdict_is_residual():
+    """B2 — model assert compat กับ target ที่ไม่มี verdict เลย =
+    ungrounded claim ที่ co-mention check จับไม่ได้ → ยังผ่านถึงลูกค้า
+    (documented residual — structured claims คือ root fix ที่เหลือ)."""
+    needs, ctx = _decided_pair_ctx()
+    v = ctx.compat_verdicts[0]
+    comp = acx.compose_answer(
+        needs=needs, context=ctx,
+        product_text=f"{v.subject_name} ใช้งานร่วมกับ garmin connect ได้ค่ะ")
+    answer = app._render_composition(comp)
+    assert "garmin" not in answer, (
+        f"invented compat claim ห้ามถึงลูกค้า — answer:\n{answer}")
