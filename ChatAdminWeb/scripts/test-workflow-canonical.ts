@@ -466,6 +466,115 @@ async function main() {
     eq(r5, false, "accountIds binding unresolved → no match (fail-closed)");
     void eng;
   }
+
+  // ─── 13. message_content + label conditions ──────────────
+  {
+    const kw = node("message_content", {
+      conditions: [
+        { operator: "contains_one_of", msgType: "text", text: ["สคบ", "แจ้งความ", "ฟ้องร้อง"] },
+        { operator: "equals", msgType: "text", text: ["5"] },
+        { operator: "equals", msgType: "image" },
+      ],
+    });
+    const r1 = await ce.evalCanonicalConditions(kw, msg({ text: "จะไปแจ้งความแล้วนะ" }), "wf_x", undefined);
+    eq(r1.branch, "condition-index-0", "contains_one_of hit → cond-0");
+    const r2 = await ce.evalCanonicalConditions(kw, msg({ text: "5" }), "wf_x", undefined);
+    eq(r2.branch, "condition-index-1", "equals ตรง '5' → cond-1");
+    const r3 = await ce.evalCanonicalConditions(kw, msg({ text: "55" }), "wf_x", undefined);
+    eq(r3.branch, "no-match", "equals '55' ≠ '5' → no-match");
+    const r4 = await ce.evalCanonicalConditions(kw, msg({ text: "", images: ["https://x/y.jpg"] }), "wf_x", undefined);
+    eq(r4.branch, "condition-index-2", "image msgType → cond-2");
+    const r5 = await ce.evalCanonicalConditions(kw, msg({ text: "", images: ["https://x/y.mp4"] }), "wf_x", undefined);
+    eq(r5.branch, "no-match", "video-only ≠ image → no-match");
+    // label condition — bound labels ต้องมีครบใน conv
+    const binds3 = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    const convs2 = await mongo.getCollection(COLLECTIONS.conversations);
+    await binds3.deleteMany({}); await convs2.deleteMany({ conversation_id: "cv_1" } as never);
+    await binds3.insertOne({ binding_id: "wb_l", workflow_id: "wf_x", version_id: "wv_1", node_id: "zn_t",
+      field_path: "conditions[0].labelIds", kind: "label", count: 2, source_values: ["l1", "l2"],
+      status: "resolved", resolution: { mappings: [{ local_id: "เคสเสี่ยง-กฎหมาย", state: "valid" }, { local_id: "รอให้คะแนน", state: "valid" }] } });
+    await convs2.updateOne({ conversation_id: "cv_1" } as never,
+      { $set: { conversation_id: "cv_1", labels: ["เคสเสี่ยง-กฎหมาย", "รอให้คะแนน"] } }, { upsert: true });
+    const lab = node("label", { conditions: [{ operator: "equals" }] });
+    const r6 = await ce.evalCanonicalConditions(lab, msg(), "wf_x", "wv_1");
+    eq(r6.branch, "condition-index-0", "conv มีครบ 2 bound labels → cond-0");
+    await convs2.updateOne({ conversation_id: "cv_1" } as never, { $set: { labels: ["เคสเสี่ยง-กฎหมาย"] } });
+    const r7 = await ce.evalCanonicalConditions(lab, msg(), "wf_x", "wv_1");
+    eq(r7.branch, "no-match", "labels ขาด 1 → no-match");
+    await binds3.updateOne({ binding_id: "wb_l" } as never, { $set: { status: "unresolved", resolution: null } });
+    const r8 = await ce.evalCanonicalConditions(lab, msg(), "wf_x", "wv_1");
+    eq(r8.branch, "no-match", "label binding unresolved → no-match (fail-closed)");
+  }
+
+  // ─── 14. Flow 02 e2e — keyword → label → assign → send ──
+  {
+    const eng = await import("../src/backend/service/workflowEngine");
+    const wfs = await mongo.getCollection(COLLECTIONS.workflows);
+    const runs = await mongo.getCollection(COLLECTIONS.workflowRuns);
+    const binds = await mongo.getCollection(COLLECTIONS.workflowBindings);
+    const admins = await mongo.getCollection(COLLECTIONS.admins);
+    const convs = await mongo.getCollection(COLLECTIONS.conversations);
+    const status = await mongo.getCollection(COLLECTIONS.statusConversation);
+    const cursors = await mongo.getCollection(COLLECTIONS.assignmentCursors);
+    await Promise.all([wfs, runs, binds, admins, convs, status, cursors]
+      .map((c) => c.deleteMany({}) as Promise<unknown>));
+    await admins.insertMany([
+      { admin_id: "adm_a", role: "admin", active: true },
+      { admin_id: "adm_b", role: "admin", active: true },
+    ]);
+    const V = "wv_f02";
+    await wfs.insertOne({
+      workflow_id: "wf_f02", name: "ดักคำเสี่ยง", enabled: true, status: "published",
+      trigger_frequency: "every_time", current_version_id: V,
+      import: { source: "zaapi", source_workflow_id: "WF-f02" },
+      shop_ids: [], platforms: [], priority: 0,
+      nodes: [
+        { node_id: "zt", type: "trigger", subtype: "message_received",
+          config: { triggerOncePerConversation: false, triggerOncePerOpen: false }, position: { x: 0, y: 0 } },
+        { node_id: "zk", type: "condition", subtype: "message_content",
+          config: { label: "คำเสี่ยง", conditions: [
+            { operator: "contains_one_of", msgType: "text", text: ["สคบ", "แจ้งความ", "ไฟช็อต"] }] }, position: { x: 100, y: 0 } },
+        { node_id: "zl", type: "action", subtype: "add_label",
+          config: { action: { label: {} } }, position: { x: 200, y: 0 } },
+        { node_id: "zs", type: "action", subtype: "assign_ticket",
+          config: { action: { assignment: { teamIds: [], userIds: [], assignWhenAllOoh: true, assignToLastTicketHandledBy: false } } }, position: { x: 300, y: 0 } },
+        { node_id: "zm", type: "action", subtype: "send_message",
+          config: { action: { message: { type: "text", text: "รับเรื่องแล้วค่ะ เจ้าหน้าที่จะติดต่อกลับ" } } }, position: { x: 400, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "zt", target_node_id: "zk" },
+        { edge_id: "e2", source_node_id: "zk", target_node_id: "zl", branch: "condition-index-0" },
+        { edge_id: "e3", source_node_id: "zl", target_node_id: "zs" },
+        { edge_id: "e4", source_node_id: "zs", target_node_id: "zm" },
+      ],
+    });
+    await binds.insertMany([
+      { binding_id: "wb_f2l", workflow_id: "wf_f02", version_id: V, node_id: "zl",
+        field_path: "action.label.labelIds", kind: "label", count: 1, source_values: ["za_l"],
+        status: "resolved", resolution: { mappings: [{ local_id: "เคสเสี่ยง-กฎหมาย", state: "valid" }] } },
+      { binding_id: "wb_f2t", workflow_id: "wf_f02", version_id: V, node_id: "zs",
+        field_path: "action.assignment.teamIds", kind: "team", count: 1, source_values: ["za_t"],
+        status: "resolved", resolution: { mappings: [{ local_id: "all_admins", state: "valid" }] } },
+    ]);
+    await convs.insertOne({ conversation_id: "cv_f2", platform: "shopee", shop_id: "s1", labels: [] });
+    await status.insertOne({ conversation_id: "cv_f2", status: "bot", assigned_to: null });
+    const m: Record<string, unknown> = { conversation_id: "cv_f2", shop_id: "s1", platform: "shopee",
+      config_shop_key: "s1", text: "ของไฟช็อตมือเลย จะแจ้งความ" };
+    // keyword hit → label + assign + send
+    const r1 = await eng.matchAndRun(m as never);
+    eq(r1.status, "actioned", "f02: keyword hit → actioned");
+    eq(r1.delivered?.[0]?.text, "รับเรื่องแล้วค่ะ เจ้าหน้าที่จะติดต่อกลับ", "f02: send_message delivered");
+    const convAfter = await convs.findOne({ conversation_id: "cv_f2" });
+    ok((convAfter?.labels || []).includes("เคสเสี่ยง-กฎหมาย"), "f02: label เคสเสี่ยง-กฎหมาย ถูกเพิ่ม");
+    const meta = await status.findOne({ conversation_id: "cv_f2" });
+    eq(meta?.assigned_to, "adm_a", "f02: assigned adm_a (team pool)");
+    // keyword miss → no-match → flow จบ ไม่มี side effect
+    await convs.updateOne({ conversation_id: "cv_f2" } as never, { $set: { labels: [] } });
+    const r2 = await eng.matchAndRun({ ...m, conversation_id: "cv_f2b", text: "สวัสดีครับ" } as never);
+    eq(r2.status, "actioned", "f02: keyword miss → run ยังทำ (walk จบที่ no-match)");
+    const conv2 = await convs.findOne({ conversation_id: "cv_f2b" });
+    ok(conv2 == null || !(conv2.labels || []).includes("เคสเสี่ยง-กฎหมาย"), "f02: miss → ไม่มี label ติด");
+  }
 }
 
 main().then(() => {

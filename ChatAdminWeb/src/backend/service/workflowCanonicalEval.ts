@@ -24,6 +24,7 @@ export interface EvalMessage {
   config_shop_key?: string;
   platform?: string;
   text?: string;
+  images?: string[];
   testSource?: string;
 }
 
@@ -167,6 +168,38 @@ async function evalCanonicalCondition(
       if (ids.length === 0) return false; // binding ยังไม่ resolve → fail closed (ไม่ match)
       const meta = await statusConversationService.getMeta(msg.conversation_id);
       return !!meta?.assigned_to && ids.includes(meta.assigned_to);
+    }
+    case "message_content": {
+      // Zaapi msgType: text → text operators; image/video → media-type check (equals เท่านั้น)
+      const mt = String(cond.msgType || "text");
+      const texts = Array.isArray(cond.text) ? (cond.text as unknown[]).map(String) : [];
+      if (mt === "image" || mt === "video") {
+        if (op !== "equals") throw new Error(`message_content ${mt}: unknown operator "${op}"`);
+        const imgs = msg.images || [];
+        const isVideo = (u: string) => /\.(mp4|mov|webm|m4v|avi)([?#]|$)/i.test(u);
+        return mt === "video" ? imgs.some(isVideo) : imgs.length > 0 && !imgs.every(isVideo);
+      }
+      if (mt !== "text") throw new Error(`message_content: unknown msgType "${mt}"`);
+      const body = String(msg.text || "");
+      if (op === "contains_one_of") {
+        const lower = body.toLowerCase();
+        return texts.some((k) => k.trim().length > 0 && lower.includes(k.toLowerCase()));
+      }
+      if (op === "equals") {
+        const trimmed = body.trim().toLowerCase();
+        return texts.some((k) => trimmed === k.trim().toLowerCase());
+      }
+      throw new Error(`message_content: unknown operator "${op}"`);
+    }
+    case "label": {
+      // Zaapi label condition — labelIds strip → binding; equals = conv มี label ครบทุกตัวที่ระบุ
+      if (op !== "equals") throw new Error(`label: unknown operator "${op}"`);
+      const ids = await boundLocalIds(workflowId, versionId, node.node_id, `conditions[${index}].labelIds`, "label");
+      if (ids.length === 0) return false; // binding unresolved → fail closed
+      const conv = await getCollection<{ labels?: string[] }>(COLLECTIONS.conversations);
+      const doc = await conv.findOne({ conversation_id: msg.conversation_id } as never);
+      const have = new Set(doc?.labels || []);
+      return ids.every((l) => have.has(l));
     }
     default:
       throw new Error(`canonical condition subtype "${node.subtype}" ยังไม่มี evaluator`);

@@ -31,7 +31,7 @@ import { testStatusConversationService, type TestSource } from "./testStatusConv
 import { statusConversationService } from "./statusConversationService";
 import { logBotworkerEvent } from "./botworkerEventService";
 import { isSafeFetchUrl } from "../lib/urlSafety";
-import { hasCanonicalConditions, evalCanonicalConditions, hasCanonicalAssignment, pickCanonicalAssignee, canonicalTriggerMatches } from "./workflowCanonicalEval";
+import { hasCanonicalConditions, evalCanonicalConditions, hasCanonicalAssignment, pickCanonicalAssignee, canonicalTriggerMatches, boundLocalIds } from "./workflowCanonicalEval";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -1473,6 +1473,22 @@ async function performAction(
 
   switch (node.subtype) {
     case "send_message": {
+      // ⚡ canonical (Zaapi) — action.message{type:text|image,text,variables}
+      //   text → resolve {{var}} แล้ว deliver; image/video → delivery pipeline
+      //   ยังรองรับ text เท่านั้น → error (fail-closed, publish blocker)
+      const zmsg = (cfg.action as { message?: { type?: string; text?: string } } | undefined)?.message;
+      if (zmsg && typeof zmsg === "object") {
+        if (String(zmsg.type || "text") !== "text") {
+          throw new Error(`send_message node ${node.node_id}: type "${zmsg.type}" ยังไม่รองรับ — delivery pipeline รับ text เท่านั้น`);
+        }
+        const rawText = String(zmsg.text || "");
+        if (rawText) {
+          const vars = await prepareTemplateVars(msg, context);
+          const resolved = resolveTemplate(rawText, vars);
+          delivered.push({ text: resolved, source: "workflow.send_message", node_id: node.node_id });
+        }
+        return {};
+      }
       // ⚡ Phase 4: resolve {{variable}} ก่อนส่ง
       const rawText = String(cfg.text || "");
       if (rawText) {
@@ -1670,6 +1686,32 @@ async function performAction(
     }
 
     case "add_label": {
+      // ⚡ canonical (Zaapi add_label) — action.label.labelIds strip → bindings
+      //   → bound local labels; unresolved → fail closed (throw)
+      if (cfg.action && typeof (cfg.action as { label?: unknown }).label === "object") {
+        const bound = await boundLocalIds(
+          workflow.workflow_id, workflow.current_version_id, node.node_id, "action.label.labelIds", "label");
+        if (bound.length === 0) {
+          throw new Error(`add_label node ${node.node_id}: ไม่มี bound labels — resolve bindings ก่อน`);
+        }
+        if (msg.testSource) {
+          await testStatusConversationService.addTestLabels(msg.conversation_id, msg.testSource as TestSource, bound);
+          return {};
+        }
+        const coll = await getCollection<{ labels?: string[] }>(COLLECTIONS.conversations);
+        await coll.updateOne(
+          { conversation_id: msg.conversation_id },
+          { $addToSet: { labels: { $each: bound } }, $set: { updated_at: new Date() } }
+        );
+        await logAdminEvent({
+          action_type: "workflow.add_label",
+          actor: "workflow-engine",
+          conversation_id: msg.conversation_id,
+          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, labels: bound, canonical: true },
+        });
+        return {};
+      }
+
       // ⚡ Phase 3: รองรับทั้ง legacy { label: string } และ { label_ids: string[] }
       const labelsToAdd: string[] = [];
 
@@ -1712,6 +1754,34 @@ async function performAction(
         });
       }
       return {};
+    }
+
+    case "remove_label": {
+      // ⚡ canonical (Zaapi remove_label) — action.label.labelIds → bound labels → $pull
+      if (cfg.action && typeof (cfg.action as { label?: unknown }).label === "object") {
+        const bound = await boundLocalIds(
+          workflow.workflow_id, workflow.current_version_id, node.node_id, "action.label.labelIds", "label");
+        if (bound.length === 0) {
+          throw new Error(`remove_label node ${node.node_id}: ไม่มี bound labels — resolve bindings ก่อน`);
+        }
+        if (msg.testSource) {
+          await testStatusConversationService.removeTestLabels(msg.conversation_id, msg.testSource as TestSource, bound);
+          return {};
+        }
+        const coll = await getCollection<{ labels?: string[] }>(COLLECTIONS.conversations);
+        await coll.updateOne(
+          { conversation_id: msg.conversation_id },
+          { $pull: { labels: { $in: bound } }, $set: { updated_at: new Date() } }
+        );
+        await logAdminEvent({
+          action_type: "workflow.remove_label",
+          actor: "workflow-engine",
+          conversation_id: msg.conversation_id,
+          metadata: { run_id: run.run_id, workflow_id: workflow.workflow_id, labels: bound },
+        });
+        return {};
+      }
+      throw new Error(`remove_label node ${node.node_id}: legacy remove_label config ไม่รองรับ`);
     }
 
     case "close_ticket": {

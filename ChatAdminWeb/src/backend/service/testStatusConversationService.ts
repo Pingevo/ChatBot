@@ -213,6 +213,19 @@ export async function addTestLabels(
   );
 }
 
+export async function removeTestLabels(
+  conversationId: string,
+  source: TestSource,
+  labels: string[]
+): Promise<void> {
+  if (labels.length === 0) return;
+  const c = await coll();
+  await c.updateOne(
+    { conversation_id: conversationId, source },
+    { $pull: { labels: { $in: labels } }, $set: { updated_at: new Date() } }
+  );
+}
+
 /** atomic assign — กัน race condition (test) */
 export async function tryTestAssign(
   conversationId: string,
@@ -300,6 +313,7 @@ export const testStatusConversationService = {
   setTestPendingAssignment,
   pushTestCloseHistory,
   addTestLabels,
+  removeTestLabels,
   closeTestConversation,
   reopenTestConversation,
   setTestTopic,

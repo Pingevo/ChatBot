@@ -66,6 +66,7 @@ export type AdminActionType =
   | "workflow.run_cancelled"
   | "workflow.assign_ticket"
   | "workflow.add_label"
+  | "workflow.remove_label"
   | "workflow.add_note"
   | "workflow.send_http_blocked"
   | "workflow.resume"
