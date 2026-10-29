@@ -2825,8 +2825,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                             web_search_fn=_ws.search_and_extract,
                             policy_decision=_pdec,
                             claim_guidance=_mixed_claim_carry)
-                        merged_products = list(
-                            _tb.context.products) if _tb.context else []
+                        # FIX-4 — attachment follows decisions:
+                        #   resp.products = comp.products (decided
+                        #   support เท่านั้น — covered-need cards +
+                        #   verdicted + labeled near-miss)
+                        merged_products = list(_tb.products)
                     if _grouped_sel:
                         _steps.append({
                             "name": "GroupedRetrievalSelection",
@@ -5075,8 +5078,10 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 model=model_name, web_search_fn=_ws.search_and_extract,
                 policy_decision=_pdec,
                 claim_guidance=_mixed_claim_carry)
-            products = list(
-                _tb.context.products) if _tb.context else []
+            # FIX-4 — attachment follows decisions: resp.products =
+            #   comp.products (decided support เท่านั้น — covered-need
+            #   cards + verdicted + labeled near-miss)
+            products = list(_tb.products)
         if _grouped_sel:
             _steps.append({"name": "GroupedRetrievalSelection",
                            "input": {"path": "main"},

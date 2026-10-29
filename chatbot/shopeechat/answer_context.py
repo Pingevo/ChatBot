@@ -1191,18 +1191,23 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 if res["status"] == "fail":
                     # proven-fail = typed diagnostic เท่านั้น — ทุก role
                     #   ออกจาก answer products (ห้าม image/link/CTA);
-                    #   subject/historical เก็บเป็น near-miss metadata สำหรับ
-                    #   deterministic segment (ไม่ใช่ card ที่ model เห็น)
+                    #   ทุก decided-fail candidate เก็บเป็น near-miss
+                    #   metadata + scoped alternative card ของตัวเอง —
+                    #   segment/attachment ใช้ decided verdict เท่านั้น
+                    #   (unknown/unverified ไม่เคยเป็น near-miss)
                     lbl = _constraint_fail_label(res)
                     cnotes.append({
                         "need_index": i,
                         "item": (s.card or {}).get("name") or s.identity,
                         "detail": lbl})
-                    if s.role in ("subject", "historical_evidence"):
-                        failed_refs[s.identity] = {
-                            "identity": s.identity,
-                            "item": (s.card or {}).get("name") or s.identity,
-                            "detail": lbl}
+                    _nm = _scope_card(s.card, n, "alternative")
+                    if _nm:
+                        _nm["need_indices"] = (i,)
+                    failed_refs[s.identity] = {
+                        "identity": s.identity,
+                        "item": (s.card or {}).get("name") or s.identity,
+                        "detail": lbl,
+                        "card": _nm or None}
                     dropped_c += 1
                     trace.append(
                         f"need[{i}] constraint_fail {s.identity}")
@@ -1559,14 +1564,15 @@ def _compat_segment(v: CompatVerdict) -> str:
 
 
 def _constraint_segment(seg: dict) -> str:
-    """deterministic no-match verdict segment — headline + kept
-    subject/historical near-miss lines (evidence-bound labels เท่านั้น);
-    dropped candidates ไม่ถูก name ที่นี่ (ไม่อยู่ใน products → token
-    ไม่ ground — detail ของพวกมันอยู่ใน constraint_notes ให้ model)."""
+    """deterministic no-match verdict segment — headline + labeled
+    near-miss lines ของ decided-fail candidates ทุกใบ (evidence-bound
+    labels เท่านั้น); ห้ามสัญญาแอดมินใน text (handoff = silent typed
+    signal → transport ที่ enforce); ห้าม claim ร้านไม่มีสินค้า."""
     items = [f"- {it.get('item')}: {it.get('detail')}"
              for it in (seg.get("items") or ()) if it.get("item")]
     return "ยังไม่มีสินค้าที่ผ่านเงื่อนไขครบทุกข้อค่ะ" + (
-        "\n" + "\n".join(items) if items else "")
+        "\nใกล้เคียง/ทดแทนที่พิจารณาแล้ว:\n" + "\n".join(items)
+        if items else "")
 
 
 def _unanswered_segment(u: UnansweredNeed) -> str:
@@ -1652,7 +1658,10 @@ class AnswerComposition:
     """one typed composition contract ต่อ turn — input เดียวของ finalizer.
     results = needs ที่ domain owner ผลิต result จริง; unanswered_needs =
     needs ที่ไม่มี authoritative result (ห้าม invent); context =
-    AnswerContext เดิม (product evidence boundary ไม่เปลี่ยน)."""
+    AnswerContext เดิม (product evidence boundary ไม่เปลี่ยน);
+    products = decided-support attach set (covered-need cards +
+    decided-compatible verdicts + labeled near-miss) — consumer เดียว
+    app._finalize_answer (resp.products); ไม่ใช่ model context."""
     results: tuple[DomainResult, ...] = ()
     unanswered_needs: tuple[UnansweredNeed, ...] = ()
     products: tuple[dict, ...] = ()
@@ -1714,6 +1723,41 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
                     subject_ids=tuple(
                         str(it.get("identity")) for it in
                         (seg.get("items") or ()) if it.get("identity"))))
+    # attachment follows decisions — comp.products = decided support
+    #   เท่านั้น: cards ของ needs ที่ typed outcome ครอบคลุม (incl.
+    #   product_text coverage) + identities ที่มี decided-compatible
+    #   verdict (partial-compat: item ที่ตัดสินแล้วยังเป็นคำตอบ) +
+    #   labeled near-miss cards จาก constraint segments; emitted-only
+    #   cards ของ unresolved needs ไม่แนบ/ไม่ bubble — card = outcome
+    #   evidence, ยังไม่ตัดสิน = ยังไม่มีสิทธิ์แสดง
+    _support: list[dict] = []
+    _near: list[dict] = []
+    if context is not None:
+        from . import candidate_pool as _cpool
+        _cov = set(covered) | (
+            ({t.need_index for t in context.task.tasks} - unans_idx)
+            if product_text else set())
+        _cov = {i for i in _cov
+                if needs[i].kind in PRODUCTISH_NEED_KINDS}
+        _vok = {v.subject_id for v in (context.compat_verdicts or ())
+                if v.decision.outcome == "compatible"}
+        _seen: set[str] = set()
+        for _p in context.products:
+            _pid = _cpool._identity_key(_p)[0] or ""
+            if _pid and _pid not in _seen and (
+                    _pid in _vok
+                    or set(_p.get("need_indices") or ()) & _cov):
+                _support.append(_p)
+                _seen.add(_pid)
+        for _seg in context.constraint_segments or ():
+            for _it in _seg.get("items") or ():
+                _c = _it.get("card")
+                if not _c:
+                    continue
+                _pid = _cpool._identity_key(_c)[0] or ""
+                if _pid and _pid not in _seen:
+                    _near.append(_c)
+                    _seen.add(_pid)
     if product_text and context is not None:
         idxs = tuple(sorted(
             {t.need_index for t in context.task.tasks} - unans_idx))
@@ -1746,8 +1790,7 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
         #   validation ไม่เคยแตะ card spans (origin=deterministic +
         #   provenance identities); card ไม่ cover need เพิ่ม — ติดตาม
         #   product result (owner = card's own need_indices)
-        from . import candidate_pool as _cpool
-        for _p in context.products:
+        for _p in _support:
             _pn = str(_p.get("name") or "").strip()
             _img = str(_p.get("image_url") or "").strip()
             _lnk = str(_p.get("short_link") or "").strip()
@@ -1800,7 +1843,7 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
         for r in results)
     return AnswerComposition(
         results=tuple(results), unanswered_needs=unanswered,
-        products=context.products if context else (),
+        products=tuple(_support + _near),
         usage=dict(usage or {}), answer_calls=answer_calls,
         web_used=web_used, admission=admission, context=context,
         trace=trace)

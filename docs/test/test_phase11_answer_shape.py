@@ -1,4 +1,4 @@
-"""Phase 11 FIX-3 — answer-shape composition at existing typed owners.
+"""Phase 11 FIX-3/FIX-4 — answer-shape composition at existing typed owners.
 
 contract:
 - need ที่ typed outcome ครอบคลุมแล้ว (capability asks ไร้ subject
@@ -10,6 +10,11 @@ contract:
   confirm clause เดียวต่อ class — ไม่มี repetitive paragraphs
 - model-emitted card markup (`](`/`**`/name-echo) drop ที่ compose
   contract เดิม — การ์ดแสดงผ่าน deterministic product results เท่านั้น
+- FIX-4 attachment follows decisions: comp.products = decided support
+  เท่านั้น (cards ของ covered needs + decided-compatible verdicts +
+  labeled near-miss จาก constraint segments); emitted-only cards ของ
+  unresolved needs ไม่แนบ/ไม่ bubble; handoff_to_admin เกิดจาก real
+  transport ที่ enforce เท่านั้น — ห้าม set ล่วงหน้า (bug#14)
 """
 from __future__ import annotations
 
@@ -39,9 +44,16 @@ os.environ.update({k: v for k, v in _env_before_replay_import.items()
                    if os.environ.get(k) != v})
 del _env_before_replay_import
 
+from dataclasses import replace as _dc_replace  # noqa: E402
+from types import SimpleNamespace as _NS  # noqa: E402
+
 import shopeechat.app as app  # noqa: E402
 from shopeechat import answer_context as acx  # noqa: E402
+from shopeechat import guards as _guards  # noqa: E402
 from shopeechat import llm  # noqa: E402
+from shopeechat import policy_resolver as _pr  # noqa: E402
+from shopeechat import responses as _resp_mod  # noqa: E402
+from shopeechat import retrieval_planner as _rpl  # noqa: E402
 from shopeechat import turn_decision as td  # noqa: E402
 
 TurnNeed = td.TurnNeed
@@ -206,3 +218,202 @@ def test_model_emitted_card_markup_dropped_at_compose():
     assert "รุ่นนี้ดีมากค่ะ" in answer
     assert "](" not in answer
     assert "**" not in answer
+
+
+# ── FIX-4: attachment follows decisions ─────────────────────────────────────
+
+def _req_cons(rid="req-0", types=("charger",), subs=("cable",),
+              spec_constraints=(), required_features=()):
+    """retrieval request ที่มี typed spec contract (phase7 `_req` ยังไม่
+    รับพารามิเตอร์นี้ — fields เดิมของ RetrievalRequest เท่านั้น)."""
+    return _rpl.RetrievalRequest(
+        request_id=rid, slot_id="slot-a", source="slot",
+        product_types=frozenset(types), subtypes=frozenset(subs),
+        model_codes=(), target_device=None,
+        availability_mode="sellable_first", compat_mode="none",
+        spec_constraints=tuple(spec_constraints),
+        required_features=tuple(required_features))
+
+
+def _constraint_fixture():
+    """wattaka-Q3 shape — decided candidates ทุกใบ proven-fail typed
+    spec constraints (measured 480Mbps < 10000Mbps) → no_match segment."""
+    need = TurnNeed(
+        kind="product", operation="recommend",
+        product_types=frozenset({"charger"}),
+        subtypes=frozenset({"cable"}),
+        spec_constraints=(("data_transfer_mbps", "gte", 10000.0),),
+        required_features=("magnetic",))
+    req = _req_cons(
+        spec_constraints=(("data_transfer_mbps", "gte", 10000.0),),
+        required_features=("magnetic",))
+    sel = _selection(
+        (_sel_card("i:1", "slot", "req-0",
+                   "CUKTECH CMC615P สายชาร์จแม่เหล็ก",
+                   raw_description="สายชาร์จแม่เหล็ก 480Mbps",
+                   canonical_type="charger",
+                   canonical_roles=["cable"]), "req-0"),
+        (_sel_card("i:2", "slot", "req-0",
+                   "CUKTECH CTC615W สายชาร์จเร็ว",
+                   raw_description="สายชาร์จเร็ว 480Mbps",
+                   canonical_type="charger",
+                   canonical_roles=["cable"]), "req-0"))
+    pool = _pool((_pooled("i:1", "1", name="CUKTECH CMC615P"),
+                  _pooled("i:2", "2", name="CUKTECH CTC615W")))
+    return (need,), sel, pool, (req,)
+
+
+def _finalize(comp, products):
+    """minimal ChatResponse ผ่าน production finalizer — flag ต้องยังไม่ถูก
+    set ล่วงหน้า (bug#14 pin: เกิดจาก transport ที่ enforce เท่านั้น)."""
+    return app._finalize_answer(
+        comp, message="มีสายชาร์จ 10Gbps ไหม", limit=5,
+        products=products, source="test", shop="s", model="m",
+        elapsed=0.0, cost=0.0, intent={}, timing={}, steps=[],
+        routing_decision={})
+
+
+def _req_stub():
+    return _NS(message="มีสายชาร์จ 10Gbps ไหม", history=[],
+               conversation_id="c-test")
+
+
+def test_no_match_names_labeled_near_miss_never_promises_admin():
+    """D3 — ทุก decided candidate proven-fail: deterministic segment
+    แจ้งตรงว่าไม่มีสินค้าผ่านเงื่อนไข + name near-miss ใกล้เคียง/ทดแทน;
+    comp.products = near-miss ที่ตัดสินแล้วเท่านั้น (alternative label,
+    no CTA ใน text); text ไม่เคยสัญญาแอดมิน — flag = transport outcome."""
+    needs, sel, pool, reqs = _constraint_fixture()
+    ctx = _compile(needs, sel, pool, reqs, _profile())
+    assert ctx.constraint_segments, ctx.trace
+    comp = acx.compose_answer(needs=needs, context=ctx)
+    answer = app._render_composition(comp)
+    assert "ไม่มีสินค้าที่ผ่านเงื่อนไขครบทุกข้อ" in answer
+    assert "ใกล้เคียง" in answer or "ทดแทน" in answer
+    assert "CMC615P" in answer and "CTC615W" in answer
+    assert "แอดมิน" not in answer
+    assert "สั่งซื้อ" not in answer and "http" not in answer
+    ids = sorted(str(p.get("item_id")) for p in comp.products)
+    assert ids == ["1", "2"]
+    for p in comp.products:
+        assert "ทดแทน" in str(p.get("_context_note") or ""), \
+            f"near-miss card ต้องแนบ alternative label: {p}"
+
+
+def test_no_match_handoff_flag_is_transport_truth_at_enforce(monkeypatch):
+    """bug#14 pin — handoff_to_admin ต้อง False ก่อน enforce (ห้าม set
+    ล่วงหน้า); enforce ยิง _send_handoff จริงครั้งเดียวแล้ว flag =
+    outcome จริง; answer ไม่ถูกแตะ (ไม่เคยสัญญาแอดมิน → ไม่มี swap)."""
+    needs, sel, pool, reqs = _constraint_fixture()
+    ctx = _compile(needs, sel, pool, reqs, _profile())
+    comp = acx.compose_answer(needs=needs, context=ctx)
+    resp = _finalize(comp, comp.products)
+    assert resp.handoff_to_admin is False
+    calls = []
+
+    def _ok(*a, **k):
+        calls.append(k.get("reason"))
+        return {"state": "queued"}
+    monkeypatch.setattr(_resp_mod, "_send_handoff", _ok)
+    out = _guards.enforce(resp, _req_stub())
+    assert calls == ["constraint_no_match"]
+    assert out.handoff_to_admin is True
+    assert out.handoff_reason == "constraint_no_match"
+    assert out.answer == resp.answer
+
+
+def test_no_match_transport_failure_keeps_truthful_answer(monkeypatch):
+    """transport ล้มเหลว → flag False + reason None + answer เดิม
+    (near-miss + ไม่มีสินค้าผ่านเงื่อนไข — ไม่เคยบอกว่าแอดมินจะมา)."""
+    needs, sel, pool, reqs = _constraint_fixture()
+    ctx = _compile(needs, sel, pool, reqs, _profile())
+    comp = acx.compose_answer(needs=needs, context=ctx)
+    resp = _finalize(comp, comp.products)
+    calls = []
+
+    def _fail(*a, **k):
+        calls.append(k.get("reason"))
+        return None
+    monkeypatch.setattr(_resp_mod, "_send_handoff", _fail)
+    out = _guards.enforce(resp, _req_stub())
+    assert calls == ["constraint_no_match"]
+    assert out.handoff_to_admin is False
+    assert out.handoff_reason is None
+    assert out.answer == resp.answer
+    assert "แอดมิน" not in out.answer
+
+
+def test_unresolved_need_emitted_cards_do_not_attach():
+    """Strava shape — asks-need emit candidate เข้า ctx.products แต่ need
+    unresolved (no_evidence): card ไม่แนบ comp.products และไม่ bubble."""
+    need = _need_asks()
+    req, sel, pool = _ask_fixture(need)
+    ctx = _compile((need,), sel, pool, (req,), _profile())
+    assert ctx.products          # emitted แต่ยังไม่ตัดสิน
+    comp = acx.compose_answer(needs=(need,), context=ctx)
+    assert comp.products == ()
+    answer = app._render_composition(comp)
+    assert "](" not in answer
+
+
+def test_mixed_turn_unresolved_need_cards_do_not_attach():
+    """W01-Q2 shape — covered describe card แนบ; card ของ unresolved
+    asks-need (emitted จริง มี link) ไม่แนบ/ไม่ bubble."""
+    n0 = _need_describe()
+    n1 = _need_asks(refs=(), asks=("เชื่อมต่อ GPS จากมือถือ",),
+                    types=("strap",))
+    reqs = (_req(rid="a", types=("smartwatch",)),
+            _req(rid="b", types=("strap",)))
+    sel = _selection(
+        (_sel_card("i:1", "subject", "a", "IMILAB W01",
+                   short_link="https://s/1"), "a"),
+        (_sel_card("i:2", "candidate", "b", "Strap S",
+                   short_link="https://s/2"), "b"))
+    pool = _pool((_pooled("i:1", "1", name="IMILAB W01"),
+                  _pooled("i:2", "2", name="Strap S")))
+    ctx = _compile((n0, n1), sel, pool, reqs, _profile())
+    comp = acx.compose_answer(needs=(n0, n1), context=ctx,
+                              product_text="ตอบเรื่องนาฬิกาค่ะ")
+    assert [str(p.get("item_id")) for p in comp.products] == ["1"]
+    answer = app._render_composition(comp)
+    assert "สั่งซื้อ IMILAB W01" in answer
+    assert "Strap S" not in answer
+
+
+def test_decided_verdict_card_attaches_under_unresolved_emitter():
+    """decided-compatible verdict = decided support — card แนบแม้ need
+    ที่ emit มัน unresolved (partial-compat: verdicted alternative ยัง
+    เป็นคำตอบที่ตัดสินแล้ว); กฎเดียวกันครอบ arbitrary identity."""
+    n0 = _need_describe()
+    n1 = _need_asks(refs=(), asks=("เชื่อมกับ Strava",), types=("strap",))
+    reqs = (_req(rid="a", types=("smartwatch",)),
+            _req(rid="b", types=("strap",)))
+    sel = _selection(
+        (_sel_card("i:1", "subject", "a", "IMILAB W01"), "a"),
+        (_sel_card("i:2", "candidate", "b", "Strap S"), "b"))
+    pool = _pool((_pooled("i:1", "1", name="IMILAB W01"),
+                  _pooled("i:2", "2", name="Strap S")))
+    ctx = _compile((n0, n1), sel, pool, reqs, _profile())
+    v = acx.CompatVerdict(
+        need_index=0, subject_id="i:2", subject_name="Strap S",
+        target="xiaomi 17 ultra", relation="connects",
+        decision=_pr.CompatDecision(
+            outcome="compatible", proofs=(), reason_codes=()))
+    ctx = _dc_replace(ctx, compat_verdicts=(v,))
+    comp = acx.compose_answer(needs=(n0, n1), context=ctx,
+                              product_text="ตอบค่ะ")
+    ids = sorted(str(p.get("item_id")) for p in comp.products)
+    assert ids == ["1", "2"]
+
+
+def test_covered_need_cards_attach_unchanged():
+    """resolved describe turn — subject card แนบตามเดิม (decided support
+    ไม่ตัด cards ของ needs ที่ typed outcome ครอบคลุมแล้ว)."""
+    needs = (_need_describe(),)
+    req = _req(rid="r", types=("smartwatch",))
+    sel = _selection((_sel_card("i:1", "subject", "r", "IMILAB W01"), "r"))
+    pool = _pool((_pooled("i:1", "1", name="IMILAB W01"),))
+    ctx = _compile(needs, sel, pool, (req,), _profile())
+    comp = acx.compose_answer(needs=needs, context=ctx,
+                              product_text="ตอบค่ะ")
+    assert [str(p.get("item_id")) for p in comp.products] == ["1"]

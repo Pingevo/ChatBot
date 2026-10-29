@@ -438,6 +438,25 @@ def enforce(resp, req):
             return resp
         if not answer:
             return resp
+        # Phase 11 D3 — valid composition marker มี constraint domain
+        #   (typed no-match verdict: candidates ทุกใบ proven-fail) →
+        #   แอดมินอาจรู้เพิ่มเติม: ยิง transport จริงครั้งเดียวที่
+        #   escalation boundary นี้; flag = transport outcome เท่านั้น
+        #   (ห้าม set ล่วงหน้า) — segment text ไม่เคยสัญญาแอดมิน →
+        #   transport ล้มเหลว/exception ก็ไม่ต้อง outcome-swap, answer
+        #   ยังจริง และ policy tiers ทำงานต่อได้ตามปกติ (fail-open)
+        if _m_ok and "constraint" in _doms:
+            try:
+                _hok = bool(_resp_mod._send_handoff(
+                    req, None, reason="constraint_no_match",
+                    claim={"topic": "guard:constraint_no_match"},
+                    log_tag="GUARD-ENFORCE"))
+            except Exception:
+                _hok = False
+            resp.handoff_to_admin = _hok
+            resp.handoff_reason = "constraint_no_match" if _hok else None
+            if _hok:
+                return resp
         for _name, _rx, _repl in _ESCALATE_RULES:
             if _rx.search(answer):
                 _escalate(resp, req, reason="guard_" + _name, rule_name=_name,
