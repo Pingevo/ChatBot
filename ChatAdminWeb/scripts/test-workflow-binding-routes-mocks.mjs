@@ -34,6 +34,11 @@ export const workflowService = {
     if (state.svcThrow) throw state.svcThrow;
     return state.svcResult;
   },
+  async getWorkflowCanonicalExport(...args) {
+    state.svcCalls.push({ method: "getWorkflowCanonicalExport", args });
+    if (state.svcThrow) throw state.svcThrow;
+    return state.svcResult;
+  },
 };
 
 // mongoClient boundary — ทุก entry throw: route เรียก Mongo ตรง = test fail

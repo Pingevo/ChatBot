@@ -89,6 +89,14 @@ async function main() {
     GET = route.GET; POST = route.POST;
   } catch (e) { routeImportErr = e as Error; }
 
+  // export route — module เดียวกัน pattern (thin read delegate)
+  let XGET: RouteModule["GET"];
+  let exportImportErr: Error | null = null;
+  try {
+    const xroute: RouteModule = await import("../src/app/api/workflows/[workflowId]/export/route");
+    XGET = xroute.GET;
+  } catch (e) { exportImportErr = e as Error; }
+
   const reset = () => {
     state.auth = { ok: true, ctx: { admin: { admin_id: "adm_actor" }, safeAdmin: {}, ip: "127.0.0.1" } };
     state.svcResult = undefined;
@@ -194,6 +202,46 @@ async function main() {
     eq(r403.status, 403, "POST auth fail → 403 preserved");
     ok(r403.res === denied, "POST auth fail → middleware response verbatim");
     eq(state.svcCalls.length, 0, "POST auth fail → service stub never called");
+  }
+
+  // ═══ 2.5 GET /export — canonical export delegation + 404 ═══
+  {
+    const PKG = { schema: "canonical-workflow/1", fingerprint: "fp_x", workflow: { name: "wf" } };
+    const callExport = async (id = "wf_v1") => {
+      if (!XGET) return { __missing: true } as Record<string, unknown>;
+      const res = await XGET(new NextRequest(`http://localhost/api/workflows/${id}/export`), ctx(id));
+      return { status: res.status, body: await res.json(), res } as Record<string, unknown>;
+    };
+
+    reset(); state.svcResult = PKG;
+    const r = await callExport();
+    eq(r.status, 200, "GET /export → 200 when package exists");
+    eq(JSON.stringify(r.body), JSON.stringify(PKG), "GET /export → json(pkg) verbatim");
+    const c = state.svcCalls[0];
+    eq(c?.method, "getWorkflowCanonicalExport", "GET /export → delegates getWorkflowCanonicalExport");
+    eq(c?.args?.[0], "wf_v1", "GET /export → workflowId จาก params");
+    eq(state.svcCalls.length, 1, "GET /export → service call เดียว");
+
+    reset(); state.svcResult = null;
+    const r404 = await callExport();
+    eq(r404.status, 404, "GET /export → 404 when workflow absent");
+
+    reset();
+    const denied = NextResponse.json({ detail: "forbidden" }, { status: 403 });
+    state.auth = { ok: false, response: denied } as never;
+    const r403 = await callExport();
+    eq(r403.status, 403, "GET /export auth fail → 403 preserved");
+    ok(r403.res === denied, "GET /export auth fail → middleware response verbatim");
+    eq(state.svcCalls.length, 0, "GET /export auth fail → service stub never called");
+    ok(exportImportErr == null, `export route module imports cleanly (${exportImportErr?.message ?? "ok"})`);
+
+    let xsrc = "";
+    try {
+      xsrc = readFileSync(new URL("../src/app/api/workflows/[workflowId]/export/route.ts", import.meta.url), "utf8");
+    } catch { /* absent — RED */ }
+    ok(xsrc.length > 0, "export route source readable");
+    ok(!/mongoClient|getCollection|getDb|ensureIndexes|\.findOne|\.find\(|\.distinct|\.insertOne|\.updateOne|\.aggregate|\.countDocuments/.test(xsrc),
+      "export route source → zero Mongo imports/calls");
   }
 
   // ═══ 3. zero-Mongo pins — boundary throw + route source scan ═══

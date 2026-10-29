@@ -290,6 +290,11 @@ if (typeof zi.parseZaapiImportInputs === "function") {
   let pthrew = false;
   try { zi.parseZaapiImportInputs("{broken"); } catch { pthrew = true; }
   ok(pthrew, "malformed flows JSON throws a catchable error");
+  // single flow file ({workflowId,versions,nodes,edges} — ไม่ใช่ {flows:[]}) ต้อง wrap เป็น batch ของ 1
+  const single = zi.parseZaapiImportInputs(JSON.stringify(SRC_FLOW));
+  eq(single.batch?.reports?.length, 1, "single flow file object accepted via UI path (batch of 1)");
+  const singleDirect = previewZaapiFlows(SRC_FLOW);
+  eq(singleDirect.reports.length, 1, "single flow object accepted via API path (previewZaapiFlows)");
 }
 
 // ═══ 4. Export + round-trip (เทียบกับ source จริง ไม่ใช่ canonical กับตัวเอง) ═══

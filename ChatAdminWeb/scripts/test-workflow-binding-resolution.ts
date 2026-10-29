@@ -2583,6 +2583,375 @@ async function main() {
       "mixed-kind view → resolvable kinds still show picker + repeat + resolve");
   }
 
+  // ═══ 32. Task 9 — §9 acceptance-matrix gap fills (persisted docs + boundary seams) ═══
+  // rows ที่ asserts เดิมยังไม่ครอบคลุมตรงๆ: scope-fields-on-non-account reject,
+  // one-$set commit shape, unique-violation (E11000) matching-artifact seams,
+  // explicit engine-invisibility fixture, persisted credential-absence sweep
+  console.log("\n=== 32. Task 9 — acceptance matrix gap fills ===");
+  {
+    // 32.1 §9 row "wrong target kind" — non-account binding carrying
+    //     platform/shop_id → reject (service switch: scope fields valid on
+    //     account kind เท่านั้น — เช็คก่อน kind-lookup ทุกกรณี)
+    const fxK = await setupImported("workflow_T9_KIND");
+    await expectReject("label binding + platform/shop_id fields", fxK.wfId,
+      { workflow_id: fxK.wfId, expected_version: fxK.wfDoc.version as number, version_id: fxK.verDoc.version_id,
+        proposed: [{ binding_id: fxK.byKind("label").binding_id, mappings: [
+          { source_index: 0, local_id: "vip", platform: "shopee", shop_id: "shop_s1" } ] }] },
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("account"),
+        "label + scope fields → scope-fields reject"));
+    await expectReject("user binding + platform field", fxK.wfId,
+      { workflow_id: fxK.wfId, expected_version: fxK.wfDoc.version as number, version_id: fxK.verDoc.version_id,
+        proposed: [{ binding_id: fxK.byKind("user").binding_id, mappings: [
+          { source_index: 0, local_id: "adm_u1", platform: "shopee" } ] }] },
+      (r) => ok(typeof r.validation === "string" && r.validation.includes("account"),
+        "user + platform → scope-fields reject"));
+    await expectReject("team binding + shop_id field", fxK.wfId,
+      { workflow_id: fxK.wfId, expected_version: fxK.wfDoc.version as number, version_id: fxK.verDoc.version_id,
+        proposed: [{ binding_id: fxK.byKind("team").binding_id, mappings: [
+          { source_index: 0, local_id: "team_any", shop_id: "shop_s1" } ] }] });
+
+    // 32.2 §9 row "pointer + derived scope = one $set" — capture ทุก updateOne บน
+    //     workflows ระหว่าง resolve: call เดียว + $set เดียวครบ pointer+scope+state
+    const fxS = await setupImported("workflow_T9_ONESET");
+    const commitSets: Record<string, unknown>[] = [];
+    st.updateOneHook = async (coll: string, filter?: unknown, update?: unknown) => {
+      if (coll === COLLECTIONS.workflows) {
+        commitSets.push((update as { $set?: Record<string, unknown> })?.$set ?? {});
+      }
+    };
+    const rS = await callResolve(fxS.wfId, fxS.req());
+    disarm();
+    eq(rS?.ok, true, "one-$set fixture → resolve ok");
+    eq(commitSets.length, 1, "resolve → exactly ONE workflows updateOne (no split writes)");
+    const cs = commitSets[0] ?? {};
+    ok(cs.current_version_id === rS?.version_id && cs.version === rS?.version
+      && cs.enabled === false && cs.status === "draft"
+      && Array.isArray(cs.platforms) && Array.isArray(cs.shop_ids),
+      "single $set carries current_version_id + version + enabled:false + status:draft + derived scope atomically");
+
+    // 32.3 unique-violation seam @version insert — E11000 + matching artifact →
+    //     reread → identical canonical payload → reuse → commit (happy branch ของ
+    //     verify-or-fail-closed; mismatch/phantom branches covered §5/§12)
+    const fxE1 = await setupImported("workflow_T9_E1");
+    let e1Seeded = false;
+    st.insertOneHook = async (coll: string, doc?: unknown) => {
+      if (coll === COLLECTIONS.workflowVersions && !e1Seeded) {
+        e1Seeded = true;
+        const h = st.insertOneHook; st.insertOneHook = undefined;
+        await (await mongo.getCollection(COLLECTIONS.workflowVersions)).insertOne(doc as Record<string, unknown>);
+        st.insertOneHook = h;
+      }
+    };
+    const rE1 = await callResolve(fxE1.wfId, fxE1.req());
+    disarm();
+    eq(rE1?.ok, true, "E11000@version-insert matching artifact → verify+continue (no throw)");
+    eq((await collDocs(COLLECTIONS.workflowVersions)).filter((v) => v.workflow_id === fxE1.wfId).length, 2,
+      "E11000@version → seeded artifact reused — no duplicate version doc");
+    eq((await svc.getWorkflow(fxE1.wfId))?.current_version_id, rE1?.version_id,
+      "E11000@version → pointer lands on the verified artifact");
+
+    // 32.4 unique-violation seam @binding insert — E11000 + matching artifact →
+    //     reread → identical payload → skip → commit
+    const fxE2 = await setupImported("workflow_T9_E2");
+    let e2Seeded = false;
+    st.insertOneHook = async (coll: string, doc?: unknown) => {
+      if (coll === COLLECTIONS.workflowBindings && !e2Seeded) {
+        e2Seeded = true;
+        const h = st.insertOneHook; st.insertOneHook = undefined;
+        await (await mongo.getCollection(COLLECTIONS.workflowBindings)).insertOne(doc as Record<string, unknown>);
+        st.insertOneHook = h;
+      }
+    };
+    const rE2 = await callResolve(fxE2.wfId, fxE2.req());
+    disarm();
+    eq(rE2?.ok, true, "E11000@binding-insert matching artifact → verify+continue (no throw)");
+    const bindsE2 = (await collDocs(COLLECTIONS.workflowBindings)).filter((b) => b.version_id === rE2?.version_id);
+    eq(bindsE2.length, 6, "E11000@binding → exact set still 6 (seeded row counted once)");
+    eq(new Set(bindsE2.map((b) => b.binding_id as string)).size, 6, "E11000@binding → zero duplicate binding_ids");
+
+    // 32.5 §9 row "imported engine-invisible" — explicit non-vacuous fixture:
+    //     imported docs อยู่ใน collection จริง (resolved แล้วก็ยัง disabled/draft)
+    //     + legacy enabled+published control → list ต้องคืนเฉพาะ non-imported
+    const fxInv = await setupImported("workflow_T9_INV");
+    const rInv = await callResolve(fxInv.wfId, fxInv.req());
+    eq(rInv?.ok, true, "engine-invisibility fixture → resolve commits");
+    const legCtrl = await svc.createWorkflow({ name: "t9-leg-control", createdBy: "admin_t",
+      nodes: [
+        { node_id: "lt1", type: "trigger", subtype: "message", config: {}, position: { x: 0, y: 0 } },
+        { node_id: "lt2", type: "action", subtype: "send_text", config: {}, position: { x: 100, y: 0 } },
+      ],
+      edges: [{ edge_id: "le_t9", source_node_id: "lt1", target_node_id: "lt2" }],
+      platforms: [], shopIds: [], enabled: true, status: "published" });
+    const wfDocsAll = await collDocs(COLLECTIONS.workflows);
+    const importedDocs = wfDocsAll.filter((w) => w.import != null);
+    ok(importedDocs.length > 0 && importedDocs.every((w) => w.enabled === false && w.status === "draft"),
+      `engine-invisible fixture → ${importedDocs.length} imported docs exist, all enabled:false + draft`);
+    const engineList = await svc.listWorkflows({ enabledOnly: true, publishedOnly: true });
+    ok(engineList.length > 0, "engine-visible list non-empty (legacy control present — assert non-vacuous)");
+    ok(engineList.some((w) => w.workflow_id === legCtrl.workflow_id), "engine list → legacy control returned");
+    ok(engineList.every((w) => (w as unknown as Record<string, unknown>).import == null),
+      "engine list → zero imported workflows (every returned doc lacks import provenance)");
+    ok(!engineList.some((w) => w.workflow_id === fxInv.wfId), "engine list → resolved imported workflow absent");
+
+    // 32.6 credential-absence sweep — persisted binding/version/snapshot docs +
+    //     audit events. sentinels: imageUrl carries "sekret-br" credential +
+    //     "img.example.com" host (REDACT_VALUE key → mask ก่อน persist);
+    //     "zacc_token_x" = external account id (persist โดยตั้งใจ — rebind
+    //     identity, display mask ที่ view §30.3) — pin ความต่างไว้ชัดเจน
+    const SRC_T9 = {
+      workflowId: "workflow_T9_CRED", loadedVersionId: "wv-src-T9",
+      versions: [{ workflowVersionId: "wv-src-T9", status: "active" }],
+      nodes: [
+        { id: "t1", type: "message_received", position: { x: 0, y: 0 },
+          data: { name: "trig", nodeType: "trigger",
+                  accountIds: ["zacc_token_x", "zacc_ok"], nextStepId: "a1" } },
+        { id: "a1", type: "send_message", position: { x: 100, y: 0 },
+          data: { name: "reply", nodeType: "action", action: { message: { text: "hi" } },
+                  imageUrl: "https://img.example.com/x.png?token=sekret-br" } },
+      ],
+      edges: [{ source: "t1", target: "a1", sourceHandle: null }],
+    };
+    const srcT9Json = JSON.stringify(SRC_T9);
+    ok(srcT9Json.includes("sekret-br") && srcT9Json.includes("img.example.com") && srcT9Json.includes("zacc_token_x"),
+      "credential fixture → sentinel credential + host + token-id actually seeded (non-vacuous)");
+    const batchT9 = previewZaapiFlows({ flows: [SRC_T9] }, { indexRows: [{ wid: "workflow_T9_CRED", name: "t9 cred" }] });
+    await svcAny.applyImportBatch(batchT9, "admin_t");
+    const wfIdT9 = "wf_imp_" + _sh("workflow_T9_CRED");
+    const wfT9 = (await svc.getWorkflow(wfIdT9)) as Record<string, unknown>;
+    const accT9 = (await collDocs(COLLECTIONS.workflowBindings))
+      .find((b) => b.workflow_id === wfIdT9 && b.version_id === wfT9.current_version_id && b.kind === "account");
+    const rT9 = await callResolve(wfIdT9, { workflow_id: wfIdT9,
+      expected_version: wfT9.version, version_id: wfT9.current_version_id,
+      proposed: [{ binding_id: accT9?.binding_id, mappings: [
+        { source_index: 0, local_id: "shop_s1", platform: "shopee", shop_id: "shop_s1" },
+        { source_index: 1, local_id: "shop_s2", platform: "tiktok", shop_id: "shop_s2" } ] }] });
+    eq(rT9?.ok, true, "credential fixture → resolve commits");
+    const secBinds = (await collDocs(COLLECTIONS.workflowBindings)).filter((b) => b.workflow_id === wfIdT9);
+    ok(secBinds.length > 0, "credential fixture → persisted binding docs exist (all versions)");
+    ok(secBinds.every((b) => !JSON.stringify(b).includes("sekret-br") && !JSON.stringify(b).includes("img.example.com")),
+      "persisted binding docs → zero raw credential/URL material");
+    const secUrl = secBinds.filter((b) => b.kind === "url");
+    ok(secUrl.length > 0 && secUrl.every((b) => canonicalJson(b.source_values) === canonicalJson(["[redacted]"])),
+      "persisted url binding → source_values === [\"[redacted]\"] (mask IS the stored value)");
+    const secAcc = secBinds.find((b) => b.version_id === rT9?.version_id && b.kind === "account");
+    eq(canonicalJson(secAcc?.source_values), canonicalJson(["zacc_token_x", "zacc_ok"]),
+      "external account ids persist verbatim in source_values (rebind identity — deliberate, display masks)");
+    const secVers = (await collDocs(COLLECTIONS.workflowVersions)).filter((v) => v.workflow_id === wfIdT9);
+    eq(secVers.length, 2, "credential fixture → v1+v2 version docs exist");
+    ok(secVers.every((v) => !JSON.stringify(v).includes("sekret-br") && !JSON.stringify(v).includes("img.example.com")),
+      "persisted version docs → zero raw credential/URL material");
+    const v1Nodes = (secVers.find((v) => v.version_seq === 1)?.nodes ?? []) as { config?: Record<string, unknown> }[];
+    const v1UrlNode = v1Nodes.find((n) => n.config != null && "imageUrl" in n.config);
+    eq(v1UrlNode?.config?.imageUrl, "[redacted]", "version graph → imageUrl stored as \"[redacted]\" mask");
+    const secSnap = (await collDocs(COLLECTIONS.workflowRawSnapshots)).find((s) => s.workflow_id === wfIdT9);
+    ok(secSnap != null && !JSON.stringify(secSnap).includes("sekret-br") && !JSON.stringify(secSnap).includes("img.example.com"),
+      "persisted raw snapshot → credential masked at provenance layer");
+    const snapUrlNode = ((secSnap?.raw as { nodes?: { data?: Record<string, unknown> }[] } | undefined)?.nodes ?? [])
+      .find((n) => n.data != null && "imageUrl" in n.data);
+    eq(snapUrlNode?.data?.imageUrl, "[redacted]", "raw snapshot → imageUrl stored as \"[redacted]\" mask");
+    const secAudit = JSON.stringify(state.adminEvents
+      .filter((e) => (e as { metadata?: { workflow_id?: string } }).metadata?.workflow_id === wfIdT9));
+    ok(!secAudit.includes("sekret-br") && !secAudit.includes("img.example.com")
+      && !secAudit.includes("zacc_token_x") && !secAudit.includes("zacc_ok"),
+      "audit events → zero credential material + zero source values (metadata = ids/counts/scope only)");
+    ok(!canonicalJson(await svc.getWorkflow(wfIdT9)).includes("sekret-br"),
+      "workflow doc → zero credential material");
+  }
+
+  // ═══ 33. UX restructure — shared ZaapiImportDialog SSR + wiring pins ═══
+  // dialog = shared component (list page + editor) — render props contract เท่านั้น
+  {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { createElement: h } = await import("react");
+    const { readFileSync } = await import("node:fs");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let Dialog: any = undefined;
+    try {
+      Dialog = (await import("../src/components/workflow/ZaapiImportDialog")).ZaapiImportDialog;
+    } catch { /* RED — module absent */ }
+    const noop = () => {};
+    const ssrDlg = (extra?: Record<string, unknown>) => {
+      if (!Dialog) return "";
+      try {
+        return renderToStaticMarkup(h(Dialog as never, { open: true, onClose: noop, ...extra }));
+      } catch (e) { return `__ssr_throw:${(e as Error).message}`; }
+    };
+    ok(Dialog != null, "ZaapiImportDialog export exists (shared component)");
+    const mk = ssrDlg();
+    ok(mk.length > 0 && !mk.startsWith("__ssr_throw"), `dialog SSR produces markup (len=${mk.length})`);
+    ok(mk.includes("Zaapi Import Preview") && mk.includes("Preview import"),
+      "dialog markup → preview title + preview button");
+    ok(mk.includes("flows JSON file") && mk.includes("index JSON file"),
+      "dialog markup → 2 file pickers (flows + index)");
+    ok(!mk.includes("Apply as disabled drafts") && !mk.includes("โหลดลง canvas"),
+      "dialog markup → no apply/canvas buttons before preview batch");
+    const closed = ssrDlg({ open: false });
+    eq(closed, "", "dialog closed → renders nothing");
+
+    // wiring pins — source-level (editor import .css → tsx SSR throw เหมือน §31)
+    const dlgSrc = readFileSync(new URL("../src/components/workflow/ZaapiImportDialog.tsx", import.meta.url), "utf8");
+    ok(!/workflowService|mongoClient|getCollection|adminLog/i.test(dlgSrc),
+      "dialog imports no service/db owner (client dialog เท่านั้น)");
+    ok(dlgSrc.includes("onLoadReportToCanvas") && dlgSrc.includes("onApplied"),
+      "dialog exposes onLoadReportToCanvas (editor) + onApplied (list refresh) props");
+    const edSrc = readFileSync(new URL("../src/components/workflow/WorkflowEditor.tsx", import.meta.url), "utf8");
+    ok(edSrc.includes("ZaapiImportDialog") && edSrc.includes("onLoadReportToCanvas={loadReportToCanvas}"),
+      "editor wires shared dialog with load-to-canvas callback");
+    const pgSrc = readFileSync(new URL("../src/app/(console)/workflows/page.tsx", import.meta.url), "utf8");
+    ok(pgSrc.includes("ZaapiImportDialog") && pgSrc.includes("onApplied={() => load()}"),
+      "list page wires shared dialog + refresh-after-apply");
+    ok(pgSrc.includes('wf.import?.source === "zaapi"'), "list page → Zaapi badge on imported rows");
+    ok(pgSrc.includes("/export") && pgSrc.includes("Download"),
+      "list page → export canonical button on card");
+    const expRouteSrc = readFileSync(new URL("../src/app/api/workflows/[workflowId]/export/route.ts", import.meta.url), "utf8");
+    ok(expRouteSrc.includes("getWorkflowCanonicalExport") && !/getCollection|mongoClient/.test(expRouteSrc),
+      "export route → thin delegate to service owner (zero Mongo)");
+  }
+
+  // ═══ 33.5 export service owner — canonical compose จาก persisted docs ═══
+  {
+    const EXP = await setupImported("workflow_EXP");
+    const pkg = await svcAny.getWorkflowCanonicalExport(EXP.wfId) as Record<string, unknown> | null;
+    ok(pkg != null && pkg.schema === "canonical-workflow/1", "export service → canonical-workflow/1 package");
+    const w = pkg?.workflow as Record<string, unknown> | undefined;
+    eq(w?.source, "zaapi", "export → source zaapi (import provenance)");
+    eq((w?.bindings as unknown[] | undefined)?.length, EXP.binds.length,
+      "export → bindings count = persisted binding rows");
+    eq((w?.sourceRef as Record<string, unknown> | undefined)?.workflowId, "workflow_EXP",
+      "export → sourceRef.workflowId = source identity");
+    ok((w?.raw as { nodes?: unknown[] } | undefined)?.nodes != null,
+      "export → raw snapshot from workflowRawSnapshots");
+    eq((w?.nodes as unknown[] | undefined)?.length, (EXP.verDoc.nodes as unknown[]).length,
+      "export → nodes from current version (immutable artifact)");
+    const legPkg = await svcAny.getWorkflowCanonicalExport(legacyWf.workflow_id) as Record<string, unknown> | null;
+    const lw = legPkg?.workflow as Record<string, unknown> | undefined;
+    eq(lw?.source, "local", "legacy workflow → export source local (no import provenance)");
+    eq((lw?.nodes as unknown[] | undefined)?.length, legacyWf.nodes.length, "legacy workflow → nodes จาก doc ตรงๆ");
+    const none = await svcAny.getWorkflowCanonicalExport("wf_nonexistent");
+    eq(none, null, "export → null for unknown workflow (route → 404)");
+  }
+
+  // ═══ 34. node-card fidelity — ทุก edge branch มี handle ที่ card render + summaries อ่าน zaapi shape ═══
+  //   regression ของ defect ที่ user เจอ: imported node โชว์ (ว่าง)/มี""/→? และ edge ดูหาย
+  //   เพราะ card render legacy handles (true/false) แต่ edge ใช้ condition-index-N/no-match
+  {
+    const Nodes = await import("../src/components/workflow/nodes");
+    const { resolveCardHandles, configSummary } = Nodes;
+    ok(typeof resolveCardHandles === "function" && typeof configSummary === "function",
+      "nodes.tsx exports resolveCardHandles + configSummary (pure, testable)");
+
+    // zaapi fixture ครอบทุก branch family: condition-index+no-match, chatbot escalate/timeout,
+    // wfr success/no-respond, btn-template-*, randomizer-path-*, jump fan-in
+    const SRC_HD = {
+      loadedVersionId: "wv-src-HD",
+      versions: [{ workflowVersionId: "wv-src-HD", status: "active" }],
+      nodes: [
+        { id: "t1", type: "message_received", position: { x: 0, y: 0 },
+          data: { name: "ตอบปกติ", nodeType: "trigger", nextStepId: "c1" } },
+        { id: "c1", type: "message_content", position: { x: 100, y: 0 },
+          data: { name: "จับคีย์เวิร์ด", nodeType: "condition",
+                  conditions: [
+                    { operator: "contains_text", msgType: "all", text: ["ราคา", "เท่าไหร่"], nextStepId: "a1" },
+                    { operator: "contains_text", msgType: "all", text: ["โปร"], nextStepId: "w1" } ],
+                  noMatchNextStepId: "a2" } },
+        { id: "a1", type: "chatbot", position: { x: 200, y: 0 },
+          data: { name: "ให้ AI ตอบ", nodeType: "action",
+                  action: { chatbot: { timeout: { value: 1, unit: "days" },
+                                       escalationStepId: "a2", timeoutStepId: "w1" } } } },
+        { id: "a2", type: "send_message", position: { x: 300, y: 0 },
+          data: { name: "ส่งข้อความ", nodeType: "action",
+                  action: { message: { text: "ให้เจ้าหน้าที่ช่วยนะคะ" } }, nextStepId: "w1" } },
+        { id: "w1", type: "wfr", position: { x: 400, y: 0 },
+          data: { name: "รอตอบ", nodeType: "wait",
+                  waitForReply: { replyType: "any", numberOfRetries: 2,
+                                  expiresIn: { value: 1, unit: "days" },
+                                  validReplyStepId: "bt1", retriesExpiredStepId: "rz1" } } },
+        { id: "bt1", type: "send_button_template", position: { x: 500, y: 0 },
+          data: { name: "ปุ่ม", nodeType: "action",
+                  action: { buttonTemplate: {
+                    text: "เลือก", buttons: [
+                      { text: "ใช่", nextStepId: "rz1" },
+                      { text: "ไม่", nextStepId: "j1" } ],
+                    timeExpiredStepId: "rz1", noButtonClickStepId: "j1" } } } },
+        { id: "rz1", type: "randomizer", position: { x: 600, y: 0 },
+          data: { name: "สุ่ม", nodeType: "utility",
+                  randomizer: { paths: [ { weight: 50, nextStepId: "j1" },
+                                         { weight: 50, nextStepId: "j1" } ] } } },
+        { id: "j1", type: "jump_to", position: { x: 700, y: 0 },
+          data: { name: "กลับ", nodeType: "action",
+                  action: { jumpTo: { maxJumps: 5 } }, nextStepId: "c1" } },
+      ],
+      edges: [
+        { source: "t1", target: "c1", sourceHandle: null },
+        { source: "c1", target: "a1", sourceHandle: "condition-index-0" },
+        { source: "bt1", target: "j1", sourceHandle: "btn-template-condition-index-1" },
+      ],
+    };
+    const srcHd = { ...SRC_HD, workflowId: "workflow_HD" };
+    const batchHd = previewZaapiFlows({ flows: [srcHd] }, { indexRows: [{ wid: "workflow_HD", name: "hd" }] });
+    const draftHd = batchHd.reports[0].draft;
+    const nodeById = new Map(draftHd.nodes.map((n) => [n.node_id, n] as const));
+
+    // THE defect check — ทุก edge (explicit + synthesized) ต้องมี handle ที่ card render จริง
+    const misses: string[] = [];
+    for (const e of draftHd.edges) {
+      const src = nodeById.get(e.source_node_id)!;
+      const ids = resolveCardHandles(src.subtype, src.config).map((h) => h.id);
+      const want = e.branch || "out";
+      if (!ids.includes(want)) misses.push(`${src.subtype}:${want}`);
+    }
+    eq(misses.length, 0, `ทุก edge branch → handle ที่ card render (missing: ${misses.join(",") || "-"})`);
+
+    // per-family handle sets ตรง spec
+    const idsOf = (subtype: string) => {
+      const n = draftHd.nodes.find((x) => x.subtype === subtype)!;
+      return resolveCardHandles(n.subtype, n.config).map((h) => h.id);
+    };
+    eq(idsOf("message_content").join(), "condition-index-0,condition-index-1,no-match",
+      "message_content(2 conds) → condition-index-0/1 + no-match handles");
+    eq(idsOf("let_ai_respond").join(), "ai-chatbot-escalate,ai-chatbot-timeout",
+      "chatbot → escalate + timeout handles");
+    eq(idsOf("wait_for_reply").join(), "wfr-success,wfr-no-respond",
+      "wfr → success + no-respond handles");
+    eq(idsOf("send_button_template").join(),
+      "btn-template-condition-index-0,btn-template-condition-index-1,btn-template-expired,btn-template-none-selected",
+      "button template → per-button + expired + none-selected handles");
+    eq(idsOf("randomizer").join(), "randomizer-path-0,randomizer-path-1",
+      "randomizer → per-path handles");
+    eq(idsOf("jump_to").join(), "out", "jump_to → default out handle");
+
+    // fan-in convergence — edges เข้าหลายเส้นใน node เดียว (c1 รับ t1+j1, rz1 รับ w1+bt1×2)
+    const inCount = (nid: string) => draftHd.edges.filter((e) => e.target_node_id === nid).length;
+    const c1Id = draftHd.nodes.find((n) => n.subtype === "message_content")!.node_id;
+    const rzId = draftHd.nodes.find((n) => n.subtype === "randomizer")!.node_id;
+    ok(inCount(c1Id) >= 2, `fan-in: message_content รับ ${inCount(c1Id)} edges เข้า (trigger + jump back)`);
+    ok(inCount(rzId) >= 3, `fan-in: randomizer รับ ${inCount(rzId)} edges เข้า (wfr + bt×2)`);
+
+    // summaries อ่าน zaapi shape จริง — ไม่ใช่ placeholder ว่าง
+    ok(configSummary("send_message", { action: { message: { text: "ให้เจ้าหน้าที่ช่วยนะคะ" } } }).includes("ให้เจ้าหน้าที่"),
+      "summary send_message → ข้อความจริงจาก action.message.text");
+    const mcSum = configSummary("message_content", { conditions: [{ text: ["ราคา"] }, { text: ["โปร"] }] });
+    ok(mcSum.includes("2 เงื่อนไข") && mcSum.includes("ราคา"), `summary message_content → "2 เงื่อนไข: ราคา" (got "${mcSum}")`);
+    ok(configSummary("jump_to", { action: { jumpTo: { maxJumps: 5 } } }).includes("5"),
+      "summary jump_to → max jumps จาก action.jumpTo");
+    const wfrSum = configSummary("wait_for_reply", { waitForReply: { replyType: "any", numberOfRetries: 2, expiresIn: { value: 1, unit: "days" } } });
+    ok(wfrSum.includes("retry 2") && wfrSum.includes("1 days"), `summary wfr → retry+expires จาก waitForReply (got "${wfrSum}")`);
+    ok(configSummary("business_hours", { conditions: [{ operator: "within_office_hours" }, { operator: "outside_office_hours" }] }).includes("นอกเวลา"),
+      "summary business_hours → ใน/นอกเวลา จาก conditions");
+
+    // regression: legacy local shapes ยังเหมือนเดิม
+    eq(configSummary("send_message", { text: "legacy text" }), "legacy text", "summary legacy config.text เหมือนเดิม");
+    eq(resolveCardHandles("message_content", { mode: "contains", text: "x" }).map((h) => h.id).join(),
+      "true,false", "legacy binary condition → true/false handles เหมือนเดิม");
+    const multi = { branches: [{ branch_id: "vip", label: "VIP" }], fallback_branch_id: "other" };
+    eq(resolveCardHandles("message_content", multi).map((h) => h.id).join(), "vip,other",
+      "local multi-branch → branch_ids + fallback เหมือนเดิม");
+    // union: edge เดิมที่ใช้ handle นอก resolved set (local let_ai_respond → "out") ไม่ลอย
+    const union = resolveCardHandles("let_ai_respond", {}, ["out"]).map((h) => h.id);
+    ok(union.includes("out") && union.includes("ai-chatbot-escalate"),
+      "usedHandles union — legacy 'out' edge ยังมี handle ข้าง zaapi outputs");
+  }
+
   // ═══ summary ═══
   const countsEnd = await allCounts();
   const totalWfs = (await collDocs(COLLECTIONS.workflows)).length;

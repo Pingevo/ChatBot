@@ -315,7 +315,9 @@ export function resolveOutputHandles(d: CanonicalNodeDefinition, config: Record<
         out.push({ id: "true" }, { id: "false" });
       }
     } else if (h.dynamic === "buttons") {
-      const btns = Array.isArray(config.buttons) ? config.buttons : [];
+      // local: config.buttons · zaapi: config.action.buttonTemplate.buttons
+      const btns = Array.isArray(config.buttons) ? config.buttons
+        : ((config.action as { buttonTemplate?: { buttons?: unknown[] } } | undefined)?.buttonTemplate?.buttons ?? []);
       btns.forEach((_, i) => out.push({ id: `btn-template-condition-index-${i}` }));
     } else if (h.dynamic === "paths") {
       const paths = Array.isArray(config.paths) ? config.paths
