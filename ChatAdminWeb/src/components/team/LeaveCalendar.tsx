@@ -76,12 +76,6 @@ function isPartial(l: LeaveRecord) {
 function leaveOn(leaves: LeaveRecord[], adminId: string, key: string): LeaveRecord | undefined {
   return leaves.find((l) => l.adminId === adminId && key >= l.startDate && key <= l.endDate);
 }
-function startOfWeek(d: Date) {
-  const x = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-  x.setDate(x.getDate() - x.getDay()); // เริ่มวันอาทิตย์
-  return x;
-}
-
 /** สีประจำตัว agent (header chip) — หมุนตาม index */
 const AGENT_COLORS = ["#0ea5e9", "#f43f5e", "#10b981", "#f59e0b", "#8b5cf6", "#ec4899", "#14b8a6", "#f97316"];
 
@@ -110,35 +104,17 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
   const now = new Date();
   const [cursor, setCursor] = useState({ y: now.getFullYear(), m: now.getMonth() });
   const [mode, setMode] = useState<"roster" | "month">("roster");
-  const [weekStart, setWeekStart] = useState(() => startOfWeek(now));
   const todayKey = dateKey(now.getFullYear(), now.getMonth(), now.getDate());
 
-  const weekDays = useMemo(
-    () => Array.from({ length: 7 }, (_, i) => { const d = new Date(weekStart); d.setDate(d.getDate() + i); return d; }),
-    [weekStart],
-  );
-
-  // mock leave ต้องครอบทุกเดือนที่แสดง (สัปดาห์อาจข้ามเดือน)
-  const monthPairs = useMemo(() => {
-    const src = mode === "roster" ? weekDays.map((d) => ({ y: d.getFullYear(), m: d.getMonth() })) : [cursor];
-    const seen = new Map<string, { y: number; m: number }>();
-    for (const p of src) seen.set(`${p.y}-${p.m}`, p);
-    return [...seen.values()];
-  }, [mode, weekDays, cursor]);
-  const leaves = useMemo(
-    () => monthPairs.flatMap(({ y, m }) => buildMockLeaves(agents, y, m, todayKey)),
-    [agents, monthPairs, todayKey],
-  );
+  const leaves = useMemo(() => buildMockLeaves(agents, cursor.y, cursor.m, todayKey), [agents, cursor.y, cursor.m, todayKey]);
 
   const dim = daysInMonth(cursor.y, cursor.m);
   const days = Array.from({ length: dim }, (_, i) => i + 1);
   const firstWeekday = new Date(cursor.y, cursor.m, 1).getDay();
 
   const shift = (n: number) =>
-    mode === "roster"
-      ? setWeekStart((w) => { const d = new Date(w); d.setDate(d.getDate() + n * 7); return d; })
-      : setCursor((c) => { const d = new Date(c.y, c.m + n, 1); return { y: d.getFullYear(), m: d.getMonth() }; });
-  const reset = () => (mode === "roster" ? setWeekStart(startOfWeek(now)) : setCursor({ y: now.getFullYear(), m: now.getMonth() }));
+    setCursor((c) => { const d = new Date(c.y, c.m + n, 1); return { y: d.getFullYear(), m: d.getMonth() }; });
+  const reset = () => setCursor({ y: now.getFullYear(), m: now.getMonth() });
 
   const statuses = useMemo(() => {
     const map = new Map<string, LeaveStatusNow>();
@@ -147,11 +123,7 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
   }, [agents, leaves]);
   const offCount = [...statuses.values()].filter((s) => s.status !== "working").length;
 
-  const fmtDay = (d: Date) => `${d.getDate()} ${THAI_MONTHS[d.getMonth()]}`;
-  const periodLabel =
-    mode === "roster"
-      ? `${fmtDay(weekDays[0])} – ${fmtDay(weekDays[6])} ${weekDays[6].getFullYear() + 543}`
-      : `${THAI_MONTHS[cursor.m]} ${cursor.y + 543}`;
+  const periodLabel = `${THAI_MONTHS[cursor.m]} ${cursor.y + 543}`;
 
   return (
     <Card className="overflow-hidden">
@@ -180,7 +152,7 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
             </div>
             <div className="flex items-center rounded-lg border border-border bg-surface">
               <button onClick={() => shift(-1)} className="px-2 py-1.5 text-text-muted hover:text-text transition-colors" aria-label="ช่วงก่อน"><ChevronLeft size={15} /></button>
-              <button onClick={reset} className="px-2.5 py-1.5 text-[11px] font-medium text-text-muted hover:text-text border-x border-border transition-colors">{mode === "roster" ? "สัปดาห์นี้" : "เดือนนี้"}</button>
+              <button onClick={reset} className="px-2.5 py-1.5 text-[11px] font-medium text-text-muted hover:text-text border-x border-border transition-colors">เดือนนี้</button>
               <button onClick={() => shift(1)} className="px-2 py-1.5 text-text-muted hover:text-text transition-colors" aria-label="ช่วงถัดไป"><ChevronRight size={15} /></button>
             </div>
           </div>
@@ -197,8 +169,8 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
       {agents.length === 0 ? (
         <div className="p-10 text-center text-sm text-text-muted">ยังไม่มี agent</div>
       ) : mode === "roster" ? (
-        /* === Week grid: แถว=วัน (7 วัน) × คอลัมน์=คน + หมายเหตุ — scroll แนวตั้งได้ header ติดบน === */
-        <div className="overflow-auto max-h-[72vh]">
+        /* === Month roster: แถว=วันทั้งเดือน × คอลัมน์=คน + หมายเหตุ — เลื่อนแนวตั้ง header ติดบน === */
+        <div className="overflow-auto" style={{ maxHeight: "calc(100vh - 240px)" }}>
           <table className="w-full border-collapse text-xs" style={{ minWidth: 90 + agents.length * 140 + 200 }}>
             <thead>
               <tr className="border-b border-border">
@@ -223,8 +195,9 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
               </tr>
             </thead>
             <tbody>
-              {weekDays.map((d) => {
-                const key = dateKey(d.getFullYear(), d.getMonth(), d.getDate());
+              {days.map((dayNum) => {
+                const d = new Date(cursor.y, cursor.m, dayNum);
+                const key = dateKey(cursor.y, cursor.m, dayNum);
                 const wd = d.getDay();
                 const working = WORKING_DAYS.includes(wd);
                 const isToday = key === todayKey;
@@ -266,8 +239,8 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
           </table>
         </div>
       ) : (
-        /* === Month calendar: chip ชื่อคนที่ลาในแต่ละวัน — scroll แนวตั้งได้ === */
-        <div className="p-3 sm:p-4 overflow-y-auto max-h-[72vh]">
+        /* === Month calendar: chip ชื่อคนที่ลาในแต่ละวัน — เลื่อนแนวตั้งได้เต็มจอ === */
+        <div className="p-3 sm:p-4 overflow-y-auto" style={{ maxHeight: "calc(100vh - 240px)" }}>
           <div className="grid grid-cols-7 gap-1.5">
             {THAI_DAYS_SHORT.map((d, i) => (
               <div key={i} className={`text-center text-[10.5px] font-semibold py-1 ${WORKING_DAYS.includes(i) ? "text-text-muted" : "text-text-subtle/50"}`}>{d}</div>
