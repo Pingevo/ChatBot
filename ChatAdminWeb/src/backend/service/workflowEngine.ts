@@ -881,16 +881,38 @@ export async function resumeTimerRun(run: WorkflowRunDoc, msg: EngineMessage): P
  * Sweeper — หา run ที่ delay ถึงเวลาแล้วปลุก (caller: bot-worker tick / cron)
  * durable: รอด restart เพราะ resume_at persist ใน run doc; run ที่ owner ตาย
  *   ถูก acquire ผ่าน parked-status clause เหมือน wfr
+ * scope: pair-exact filter + cutoff เดียวกับ checkWaitTimeouts — timer run ของ
+ *   disabled (platform,shop) ไม่ถูก scan; park ก่อน enable → settle cancelled
  */
-export async function sweepDueTimerRuns(now = new Date(), limit = 50): Promise<{ due: number; resumed: number; errors: string[] }> {
+export async function sweepDueTimerRuns(
+  signal: AbortSignal | undefined, scope: BotworkerCycleScope,
+  now = new Date(), limit = 50,
+): Promise<{ due: number; resumed: number; errors: string[] }> {
+  if (!scope.config.workflow_enabled) return { due: 0, resumed: 0, errors: [] };
   const coll = await getRunsCollection();
-  const due = await coll.find(
-    { status: "waiting_for_timer", resume_at: { $lte: now } },
-    { sort: { resume_at: 1 }, limit },
-  ).toArray();
+  const due = await coll.find(withScope({
+    status: "waiting_for_timer",
+    resume_at: { $lte: now },
+  }, scope), { sort: { resume_at: 1 }, limit }).toArray();
+
+  // run ที่ park ก่อน pair enable cutoff → settle cancelled (ไม่ resume เข้า side effects)
+  const pairCutoff = new Map<string, number>();
+  for (const p of scope.pairs) pairCutoff.set(`${p.platform}/${p.shop_id}`, p.cutoff.getTime());
+
   const errors: string[] = [];
   let resumed = 0;
   for (const run of due) {
+    if (signal?.aborted) break;
+    const cutoff = pairCutoff.get(`${run.platform}/${run.shop_id}`);
+    if (cutoff !== undefined && (run.updated_at?.getTime() ?? 0) <= cutoff) {
+      await cancelIfAbandoned(run, {
+        status: "cancelled",
+        outcome: "error",
+        completed_at: now,
+        error: "timer parked before effective enable cutoff — settled without resume",
+      });
+      continue;
+    }
     try {
       const msg: EngineMessage = {
         conversation_id: run.conversation_id,

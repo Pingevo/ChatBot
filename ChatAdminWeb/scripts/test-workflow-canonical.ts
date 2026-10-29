@@ -179,20 +179,25 @@ async function main() {
         { edge_id: "e1", source_node_id: "t1", target_node_id: "d1" },
       ],
     });
-    // run park อยู่ที่ delay — due แล้ว
+    // run park อยู่ที่ delay — due แล้ว (scope fields สำหรับ worker-scope filter)
+    const scope = { config: { workflow_enabled: true },
+      pairs: [{ platform: "shopee", shop_id: "s1", config_shop_key: "s1", shopname: "shop1", cutoff: new Date(0) }],
+      global_enabled_since: null } as never;
     const past = new Date(Date.now() - 60_000);
     await runs.insertOne({
       run_id: "r_due", workflow_id: "wf_d", conversation_id: "cv_1",
+      shop_id: "s1", platform: "shopee",
       status: "waiting_for_timer", current_node_id: "d1", waiting_for: "timer",
       resume_at: past, context: {}, updated_at: past,
     });
     // run ยังไม่ due — ต้องไม่ถูกปลุก
     await runs.insertOne({
       run_id: "r_early", workflow_id: "wf_d", conversation_id: "cv_1",
+      shop_id: "s1", platform: "shopee",
       status: "waiting_for_timer", current_node_id: "d1", waiting_for: "timer",
       resume_at: new Date(Date.now() + 600_000), context: {}, updated_at: new Date(),
     });
-    const res = await eng.sweepDueTimerRuns(new Date());
+    const res = await eng.sweepDueTimerRuns(undefined, scope, new Date());
     eq(res.due, 1, "sweep เจอเฉพาะ run ที่ due (r_early ไม่ถูกหยิบ)");
     const rDue = await runs.findOne({ run_id: "r_due" });
     eq(rDue?.status, "completed", "due run → delay ผ่าน → ไม่มี edge → completed");
@@ -200,7 +205,7 @@ async function main() {
     const rEarly = await runs.findOne({ run_id: "r_early" });
     eq(rEarly?.status, "waiting_for_timer", "early run ยัง park อยู่");
     // sweep ซ้ำ — run จบแล้วไม่มีอะไร due
-    const res2 = await eng.sweepDueTimerRuns(new Date());
+    const res2 = await eng.sweepDueTimerRuns(undefined, scope, new Date());
     eq(res2.due, 0, "sweep ซ้ำ idempotent — ไม่มี due ค้าง");
     // inbound ระหว่าง park → ไม่ resume timer (in_flight)
     await runs.insertOne({
@@ -388,9 +393,12 @@ async function main() {
     eq(r2.status, "no_match", "account scope: shop ไม่อยู่ใน bound accounts → no_match");
 
     // 3) ถึงเวลา → sweep → resume → conditions ผ่าน → assign → handoff persisted
+    const scope2 = { config: { workflow_enabled: true },
+      pairs: [{ platform: "shopee", shop_id: "s1", config_shop_key: "s1", shopname: "shop1", cutoff: new Date(0) }],
+      global_enabled_since: null } as never;
     await runs.updateOne({ conversation_id: "cv_e1" } as never,
       { $set: { resume_at: new Date(Date.now() - 1000) } });
-    const swept = await eng.sweepDueTimerRuns(new Date());
+    const swept = await eng.sweepDueTimerRuns(undefined, scope2, new Date());
     eq(swept.due, 1, "sweep เจอ run due");
     const runDone = await runs.findOne({ conversation_id: "cv_e1" });
     eq(runDone?.status, "completed", "e2e: run เดินครบ graph → completed");
@@ -408,7 +416,7 @@ async function main() {
     eq(runCount, 2, "run ที่สองถูกสร้าง (triggerOnce flags=false)");
     await runs.updateOne({ conversation_id: "cv_e1", status: "waiting_for_timer" } as never,
       { $set: { resume_at: new Date(Date.now() - 1000) } });
-    await eng.sweepDueTimerRuns(new Date());
+    await eng.sweepDueTimerRuns(undefined, scope2, new Date());
     const meta2 = await status.findOne({ conversation_id: "cv_e1" });
     eq(meta2?.assigned_to, "adm_b", "re-assign → round-robin หมุน adm_b (adm_a ไม่อยู่ใน assignee list)");
   }

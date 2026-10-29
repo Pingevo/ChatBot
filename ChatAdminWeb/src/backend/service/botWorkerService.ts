@@ -1841,6 +1841,20 @@ export const botWorkerService = {
     run.then(() => inFlight.delete(run), () => inFlight.delete(run));
     return run;
   },
+  // ⚡ Zaapi delay timer sweep — era/leadership/inFlight contract เดียวกับ
+  //   checkWaitTimeouts (gate ผ่าน service surface — engine ไม่ import กลับมา)
+  sweepDueTimerRuns: (scope: BotworkerCycleScope): Promise<{ due: number; resumed: number; errors: string[] }> => {
+    const signal = eraSignal();
+    const run = (async () => {
+      if (signal.aborted || !(await acquireWorkerLeadership(signal))) {
+        return { due: 0, resumed: 0, errors: [] };
+      }
+      return workflowEngine.sweepDueTimerRuns(signal, scope);
+    })();
+    inFlight.add(run);
+    run.then(() => inFlight.delete(run), () => inFlight.delete(run));
+    return run;
+  },
   clearAllBufferTimers: bufferService.clearAllBufferTimers,
   // ⚡ falling edge — ยกเลิก pending work ทั้งหมด: abort active recovery pass +
   //   buffer debounce + flush retry + deferred recovery timers
