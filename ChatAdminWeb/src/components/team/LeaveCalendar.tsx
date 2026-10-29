@@ -197,17 +197,17 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
       {agents.length === 0 ? (
         <div className="p-10 text-center text-sm text-text-muted">ยังไม่มี agent</div>
       ) : mode === "roster" ? (
-        /* === Week grid: แถว=วัน (7 วัน) × คอลัมน์=คน + หมายเหตุ === */
-        <div className="overflow-x-auto">
+        /* === Week grid: แถว=วัน (7 วัน) × คอลัมน์=คน + หมายเหตุ — scroll แนวตั้งได้ header ติดบน === */
+        <div className="overflow-auto max-h-[72vh]">
           <table className="w-full border-collapse text-xs" style={{ minWidth: 90 + agents.length * 140 + 200 }}>
             <thead>
               <tr className="border-b border-border">
-                <th className="sticky left-0 z-10 bg-surface w-[64px] min-w-[64px] border-r border-border/60" />
+                <th className="sticky left-0 top-0 z-30 bg-surface w-[64px] min-w-[64px] border-r border-border/60 shadow-[0_1px_0_0_var(--color-border)]" />
                 {agents.map((a, i) => {
                   const st = statuses.get(a.admin_id);
                   const color = AGENT_COLORS[i % AGENT_COLORS.length];
                   return (
-                    <th key={a.admin_id} className="px-1.5 py-2 align-top min-w-[128px] font-normal">
+                    <th key={a.admin_id} className="sticky top-0 z-20 bg-surface px-1.5 py-2 align-top min-w-[130px] font-normal shadow-[0_1px_0_0_var(--color-border)]">
                       <div className="rounded-lg px-2.5 py-1.5 text-white text-[11px] font-semibold truncate shadow-sm" style={{ background: color }}>{a.name}</div>
                       {st && st.status !== "working" ? (
                         <div className="mt-1 text-[9px] font-medium text-error text-center leading-tight">
@@ -219,7 +219,7 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
                     </th>
                   );
                 })}
-                <th className="px-3 py-2 text-left text-[11px] font-medium text-text-muted min-w-[180px]">หมายเหตุ</th>
+                <th className="sticky top-0 z-20 bg-surface px-3 py-2 text-left text-[11px] font-medium text-text-muted min-w-[180px] shadow-[0_1px_0_0_var(--color-border)]">หมายเหตุ</th>
               </tr>
             </thead>
             <tbody>
@@ -266,8 +266,8 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
           </table>
         </div>
       ) : (
-        /* === Month calendar: chip ชื่อคนที่ลาในแต่ละวัน === */
-        <div className="p-3 sm:p-4">
+        /* === Month calendar: chip ชื่อคนที่ลาในแต่ละวัน — scroll แนวตั้งได้ === */
+        <div className="p-3 sm:p-4 overflow-y-auto max-h-[72vh]">
           <div className="grid grid-cols-7 gap-1.5">
             {THAI_DAYS_SHORT.map((d, i) => (
               <div key={i} className={`text-center text-[10.5px] font-semibold py-1 ${WORKING_DAYS.includes(i) ? "text-text-muted" : "text-text-subtle/50"}`}>{d}</div>
@@ -282,7 +282,7 @@ export function LeaveCalendar({ agents }: { agents: LeaveCalendarAgent[] }) {
                 .filter((x) => x.l);
               const isToday = key === todayKey;
               return (
-                <div key={d} className={`min-h-[76px] rounded-xl border p-1.5 transition-colors ${isToday ? "border-brand/60 bg-brand/5 shadow-[0_0_0_3px_var(--color-accent-soft)]" : working ? "border-border/70 bg-surface hover:border-border" : "border-border/40 bg-surface-2/40"}`}>
+                <div key={d} className={`min-h-[92px] rounded-xl border p-1.5 transition-colors ${isToday ? "border-brand/60 bg-brand/5 shadow-[0_0_0_3px_var(--color-accent-soft)]" : working ? "border-border/70 bg-surface hover:border-border" : "border-border/40 bg-surface-2/40"}`}>
                   <div className={`w-5 h-5 mb-1 flex items-center justify-center rounded-full text-[11px] font-semibold ${isToday ? "bg-brand text-white" : working ? "text-text" : "text-text-subtle/50"}`}>{d}</div>
                   <div className="space-y-1">
                     {onLeave.slice(0, 3).map(({ a, l }) => (
