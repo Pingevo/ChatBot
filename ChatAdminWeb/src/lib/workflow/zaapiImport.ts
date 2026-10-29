@@ -289,6 +289,18 @@ function convertFlow(flow: Record<string, unknown>, name: string, nameStatus: Na
   const stepReport: StepRefReport = { resolved: 0, synthesized: 0, provenance: 0, mismatched: 0 };
   const unresolvedStepRefs: UnresolvedStepRef[] = [];
   const mismatchedStepRefs: UnresolvedStepRef[] = [];
+  // claims ต่อ (source,target) — ref หลายตัวชี้ pair เดียวกันถูกต้องใน multi-branch
+  // (button[i] + timeExpired → node เดียว): edge ของ sibling ref ไม่ใช่ conflict ของ ref นี้
+  const pairClaims = new Map<string, Set<string | null>>();
+  for (const r2 of stepRefs) {
+    const s2 = idMap.get(r2.srcNodeId) || "";
+    const t2 = idMap.get(r2.target) || "";
+    const e2 = expectedHandleFor(r2.key, r2.field_path);
+    if (e2 === undefined || !s2 || !t2) continue;
+    const k = `${s2}|${t2}`;
+    if (!pairClaims.has(k)) pairClaims.set(k, new Set());
+    pairClaims.get(k)!.add(e2);
+  }
   for (const r of stepRefs) {
     const nid = idMap.get(r.srcNodeId) || "zn_" + shortHash(r.srcNodeId);
     const localTarget = idMap.get(r.target);
@@ -298,8 +310,10 @@ function convertFlow(flow: Record<string, unknown>, name: string, nameStatus: Na
     const match = edges.find((e) => e.source_node_id === nid && e.target_node_id === localTarget && (e.branch ?? null) === expected);
     if (match) { stepReport.resolved++; continue; }
     const anyEdge = edges.find((e) => e.source_node_id === nid && e.target_node_id === localTarget);
-    if (anyEdge) {
-      // link มีอยู่ แต่ handle ขัดกัน — ไม่ใช่ clean resolve: นับ mismatched + เตือนชัด + fail closed
+    // conflict จริงเฉพาะเมื่อ pair นี้ claim branch เดียวแต่ edge ใช้อีก branch —
+    // ถ้า ref อื่นในกลุ่ม claim branch ต่างกัน → edge นั้นเป็นของ sibling ref → synthesize แยก
+    const claims = pairClaims.get(`${nid}|${localTarget}`);
+    if (anyEdge && (!claims || claims.size <= 1)) {
       warnings.push(`node ${nid}: step ref ${r.field_path} คาด branch "${expected ?? "default"}" แต่ edge ใช้ "${anyEdge.branch ?? "default"}"`);
       mismatchedStepRefs.push({ node_id: nid, field_path: r.field_path });
       stepReport.mismatched++;
@@ -370,7 +384,8 @@ export function previewZaapiFlow(flowJson: unknown, opts: { name?: string; index
 
 /** import preview สำหรับ all-flows.json ({source,count,flows:[]}) หรือ array */
 export function previewZaapiFlows(input: unknown, opts: { indexRows?: IndexRow[]; activeBasicAutomations?: string[] } = {}): BatchImportReport {
-  const flows = Array.isArray(input) ? input
+  const flows = isFlowObj(input) ? [input]
+    : Array.isArray(input) ? input
     : (input && typeof input === "object" && Array.isArray((input as { flows?: unknown }).flows))
       ? (input as { flows: unknown[] }).flows : [];
   if (flows.length === 0) throw new Error("invalid zaapi export: no flows found");

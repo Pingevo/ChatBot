@@ -21,7 +21,8 @@ import {
   availabilityBadge, validateCanonicalDraft, publishReadiness,
   type WorkflowPlatform, type NodeFamily,
 } from "@/lib/workflow/nodeRegistry";
-import { parseZaapiImportInputs, type CanonicalDraft, type ImportPreviewReport, type BindingRequirement } from "@/lib/workflow/zaapiImport";
+import { type CanonicalDraft, type ImportPreviewReport, type BindingRequirement } from "@/lib/workflow/zaapiImport";
+import { ZaapiImportDialog } from "./ZaapiImportDialog";
 import { exportCanonical, exportZaapi, exportRawSource } from "@/lib/workflow/workflowExport";
 import { validateWorkflowGraph, type WorkflowNode } from "@/lib/workflow/graph";
 import { BindingResolutionPanel, DerivedScopeFields, type BindingPick } from "./BindingResolutionPanel";
@@ -60,6 +61,7 @@ interface WorkflowDocDTO {
   edges: { edge_id: string; source_node_id: string; target_node_id: string; branch?: string }[];
   priority: number;
   status: string;
+  import?: { source?: string };
 }
 
 interface ShopOption {
@@ -173,7 +175,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           id: n.node_id,
           type: toXYFlowType(n.type as FlowNodeType),
           position: n.position,
-          data: { subtype: n.subtype, config: n.config || {} },
+          data: { subtype: n.subtype, config: n.config || {}, imported: Boolean(wf.import) },
         })));
         setEdges(wf.edges.map((e) => ({
           id: e.edge_id,
@@ -200,6 +202,21 @@ function EditorInner({ workflowId }: { workflowId: string }) {
   const selectedNode = useMemo(
     () => nodes.find((n) => n.id === selectedNodeId) || null,
     [nodes, selectedNodeId]
+  );
+
+  // inject data.selected → card ไฮไลท์ตาม selectedNodeId (click + new node)
+  // + data.usedHandles → node card render handle ครบตาม edge ที่ใช้จริง
+  const displayNodes = useMemo(
+    () => nodes.map((n) => {
+      const usedHandles = [...new Set(
+        edges.filter((e) => e.source === n.id).map((e) => e.sourceHandle || "out")
+      )];
+      const sel = n.id === selectedNodeId || undefined;
+      const prev = (n.data.usedHandles as string[] | undefined) || [];
+      if (!sel && prev.join() === usedHandles.join()) return n;
+      return { ...n, data: { ...n.data, selected: sel, usedHandles } };
+    }),
+    [nodes, edges, selectedNodeId]
   );
 
   // ── Node CRUD ──
@@ -463,14 +480,8 @@ function EditorInner({ workflowId }: { workflowId: string }) {
 
   // ── Foundation: registry-driven import/export/validate state ──
   const [importedDraft, setImportedDraft] = useState<CanonicalDraft | null>(null);
-  const [importReport, setImportReport] = useState<ImportPreviewReport | null>(null);
   const [importBindings, setImportBindings] = useState<BindingRequirement[]>([]);
   const [importOpen, setImportOpen] = useState(false);
-  const [importFlowsText, setImportFlowsText] = useState("");
-  const [importIndexText, setImportIndexText] = useState("");
-  const [importFlowsFileName, setImportFlowsFileName] = useState("");
-  const [importIndexFileName, setImportIndexFileName] = useState("");
-  const [importBatch, setImportBatch] = useState<ImportPreviewReport[]>([]);
   const [exportOpen, setExportOpen] = useState(false);
   const [paletteSearch, setPaletteSearch] = useState("");
   const [platformFilter, setPlatformFilter] = useState<WorkflowPlatform | "">("");
@@ -514,22 +525,9 @@ function EditorInner({ workflowId }: { workflowId: string }) {
     else toast.error([...structural.errors, ...capability.errors].join(" · ") || "validation failed");
   }, [canvasToDraft]);
 
-  const doImport = useCallback(() => {
-    if (!importFlowsText.trim()) { toast.error("เลือกไฟล์ flows JSON ก่อน (all-flows.json หรือ flow file)"); return; }
-    try {
-      const { batch } = parseZaapiImportInputs(importFlowsText, importIndexText || undefined);
-      setImportBatch(batch.reports);
-      const nameIssues = batch.reports.filter((r) => r.nameStatus !== "ok" && r.nameStatus !== "provided").length;
-      toast.success(`import preview: ${batch.flowCount} flows / ${batch.nodeCount} nodes / ${batch.edgeCount} edges${nameIssues ? ` — ${nameIssues} flow(s) ไม่มีชื่อจริง` : ""}`);
-    } catch (err) {
-      toast.error(`import ไม่สำเร็จ: ${(err as Error).message}`);
-    }
-  }, [importFlowsText, importIndexText]);
-
   /** โหลด draft จาก import report ลง canvas — draft-only, ไม่เขียน Mongo */
   const loadReportToCanvas = useCallback((report: ImportPreviewReport) => {
     setImportedDraft(report.draft);
-    setImportReport(report);
     setImportBindings(report.bindings);
     setSettings((s) => ({ ...s, name: report.name, status: "draft", enabled: false }));
     setNodes(report.draft.nodes.map((n) => ({
@@ -547,7 +545,6 @@ function EditorInner({ workflowId }: { workflowId: string }) {
       ...(e.branch ? { label: report.draft.handleLabels[e.source_node_id]?.[e.branch] || e.branch } : {}),
       markerEnd: { type: MarkerType.ArrowClosed },
     })));
-    setImportOpen(false);
     setWfVersion((v) => v + 1);
     toast.success(`โหลด draft "${report.name}" (${report.nodeCount} nodes) — source zaapi, bindings ยังไม่ resolve`);
   }, [setNodes, setEdges]);
@@ -855,7 +852,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         {/* ── Canvas กลาง ── */}
         <div className="flex-1 min-w-0 relative">
           <ReactFlow
-            nodes={nodes}
+            nodes={displayNodes}
             edges={edges}
             nodeTypes={nodeTypes}
             onNodesChange={(c: NodeChange<Node<WFNodeData>>[]) => { onNodesChange(c); setWfVersion((v) => (c.some((x) => x.type === "position" || x.type === "remove") ? v + 1 : v)); }}
@@ -913,98 +910,12 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           </>
         )}
 
-        {/* ── Import preview modal — dry-run zaapi JSON (ไม่เขียน DB) ── */}
-        {importOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-            <div className="bg-surface border border-border rounded-xl shadow-xl w-full max-w-xl max-h-[85vh] overflow-y-auto p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div className="text-sm font-bold">Zaapi Import Preview (dry-run)</div>
-                <button onClick={() => { setImportOpen(false); setImportBatch([]); }} aria-label="ปิด import preview" title="ปิด" className="w-8 h-8 rounded-lg hover:bg-surface-2 flex items-center justify-center">
-                  <X size={16} className="text-text-muted" />
-                </button>
-              </div>
-              <div className="text-[11px] text-text-muted mb-2">
-                เลือก 2 ไฟล์: <b>all-flows.json</b> (หรือ flow file เดียว) + <b>_index_data.json</b> (ชื่อ flow จริง — ไม่ส่ง = ชื่อ generic + warning)
-              </div>
-              <label className="block text-[11px] font-semibold text-text-muted mb-1">flows JSON</label>
-              <input
-                type="file" accept=".json,application/json" aria-label="flows JSON file"
-                onChange={async (e) => {
-                  const f = e.target.files?.[0];
-                  if (f) { setImportFlowsText(await f.text()); setImportFlowsFileName(f.name); }
-                }}
-                className="w-full text-xs mb-2"
-              />
-              {importFlowsFileName && <div className="text-[10px] text-text-subtle mb-1">เลือกแล้ว: {importFlowsFileName}</div>}
-              <label className="block text-[11px] font-semibold text-text-muted mb-1">index JSON (optional — ชื่อ flow จาก _index_data.json)</label>
-              <input
-                type="file" accept=".json,application/json" aria-label="index JSON file"
-                onChange={async (e) => {
-                  const f = e.target.files?.[0];
-                  if (f) { setImportIndexText(await f.text()); setImportIndexFileName(f.name); }
-                }}
-                className="w-full text-xs"
-              />
-              {importIndexFileName && <div className="text-[10px] text-text-subtle mt-1">เลือกแล้ว: {importIndexFileName}</div>}
-              <button onClick={doImport} className="mt-2 px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90">
-                Preview import
-              </button>
-              {importBatch.length > 0 && (
-                <button
-                  onClick={async () => {
-                    try {
-                      const flows = JSON.parse(importFlowsText);
-                      const idx = importIndexText.trim() ? JSON.parse(importIndexText) : undefined;
-                      const r = await fetch("/api/workflows/import", {
-                        method: "POST", headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ flows, indexRows: idx?.rows ?? (Array.isArray(idx) ? idx : undefined) }),
-                      });
-                      const d = await r.json().catch(() => ({}));
-                      if (!r.ok) { toast.error(`apply ไม่สำเร็จ: ${d.detail || d.error || `HTTP ${r.status}`}`); return; }
-                      toast.success(`apply: ${d.flow_count} flows → ${d.workflow_ids?.length ?? 0} disabled drafts (batch ${d.batch_id})${d.already_applied ? " — already applied" : ""} · ${d.bindings_total} unresolved bindings`);
-                    } catch (err) { toast.error(`apply ผิดพลาด: ${(err as Error).message}`); }
-                  }}
-                  className="mt-2 ml-2 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:opacity-90"
-                >
-                  Apply as disabled drafts
-                </button>
-              )}
-              {importBatch.length > 0 && (
-                <div className="mt-3 border border-border rounded-lg divide-y divide-border">
-                  {importBatch.map((r) => (
-                    <div key={r.flowKeyHash} className="p-2.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="text-xs font-semibold truncate">{r.name}</div>
-                        <button onClick={() => loadReportToCanvas(r)} className="shrink-0 px-2 py-1 text-[11px] font-medium rounded-md border border-border hover:bg-surface-2">
-                          โหลดลง canvas
-                        </button>
-                      </div>
-                      <div className="text-[10px] text-text-muted mt-1">
-                        {r.nodeCount} nodes · {r.edgeCount} edges · {r.bindings.length} bindings ·{" "}
-                        {r.unsupportedTypes.length > 0 ? `${r.unsupportedTypes.length} unsupported` : "types ครบ"} ·{" "}
-                        {r.structural.ok ? "graph ok" : `graph error: ${r.structural.errors[0] || ""}`}
-                        {r.stepRefs.synthesized > 0 && ` · ${r.stepRefs.synthesized} jump edges synthesized`}
-                        {r.unresolvedStepRefs.length > 0 && ` · ${r.unresolvedStepRefs.length} dangling step refs (blocks publish)`}
-                        {r.stepRefs.mismatched > 0 && ` · ${r.stepRefs.mismatched} handle mismatch (blocks publish)`}
-                      </div>
-                      {r.nameStatus !== "ok" && r.nameStatus !== "provided" && (
-                        <div className="text-[10px] text-warning mt-0.5">⚠ {r.warnings.find((w) => /index|name/i.test(w)) || `name ${r.nameStatus}`}</div>
-                      )}
-                      {r.conflicts.length > 0 && (
-                        <div className="text-[10px] text-warning mt-0.5">{r.conflicts.length} conflict(s)</div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {importReport && (
-                <div className="mt-3 text-[11px] text-text-muted">
-                  โหลดแล้ว: {importReport.name} — fingerprint {importReport.fingerprint.slice(0, 20)}…
-                </div>
-              )}
-            </div>
-          </div>
-        )}
+        {/* ── Import preview modal — shared dialog (list page ใช้ตัวเดียวกัน) ── */}
+        <ZaapiImportDialog
+          open={importOpen}
+          onClose={() => setImportOpen(false)}
+          onLoadReportToCanvas={loadReportToCanvas}
+        />
       </div>
     </div>
   );

@@ -19,8 +19,9 @@ import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { toast } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import {
-  GitBranch, Plus, Trash2, Pencil, RefreshCw, Search, Check, X, Info,
+  GitBranch, Plus, Trash2, Pencil, RefreshCw, Search, Check, X, Info, Upload, Download,
 } from "lucide-react";
+import { ZaapiImportDialog } from "@/components/workflow/ZaapiImportDialog";
 import { useSearchShortcut, useEscToClear } from "@/lib/useKeyboardShortcuts";
 import { FilterSelect } from "@/components/ui/FilterSelect";
 import { Tooltip } from "@/components/ui/Tooltip";
@@ -40,6 +41,7 @@ interface WorkflowRow {
   nodes: unknown[];
   edges: unknown[];
   updated_at: string;
+  import?: { source?: string };
 }
 
 type Platform = "shopee" | "tiktok" | "lazada";
@@ -97,6 +99,9 @@ export default function WorkflowsPage() {
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [saving, setSaving] = useState(false);
+
+  // ⚡ Zaapi import — สร้าง disabled drafts จาก export file (ไม่ต้องสร้างเปลือกก่อน)
+  const [importOpen, setImportOpen] = useState(false);
 
   // ⚡ Create modal — เลือก name/description/platform→ร้าน ก่อนเข้า editor
   const [showCreate, setShowCreate] = useState(false);
@@ -315,6 +320,23 @@ export default function WorkflowsPage() {
     }
   };
 
+  // ⚡ Export canonical JSON — server composes จาก current version (imported) หรือ doc (legacy)
+  const exportWf = async (wf: WorkflowRow) => {
+    try {
+      const r = await fetch(`/api/workflows/${wf.workflow_id}/export`);
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.detail || d.error || `HTTP ${r.status}`);
+      const blob = new Blob([JSON.stringify(d, null, 2)], { type: "application/json" });
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = `${wf.name || "workflow"}.canonical.json`;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } catch (err) {
+      toast.error(`export ไม่สำเร็จ: ${(err as Error).message}`);
+    }
+  };
+
   // ⚡ Inline rename — กด pencil → ช่อง input → Enter = PATCH / Esc = cancel
   const startRename = (wf: WorkflowRow) => {
     setRenamingId(wf.workflow_id);
@@ -356,6 +378,9 @@ export default function WorkflowsPage() {
         <>
           <Button size="sm" variant="outline" onClick={load}>
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
+          </Button>
+          <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
+            <Upload size={14} /> Import Zaapi
           </Button>
           <Button size="sm" onClick={openCreate}>
             <Plus size={14} /> สร้างเวิร์กโฟลว์
@@ -502,6 +527,7 @@ export default function WorkflowsPage() {
                         <Badge tone={wf.status === "published" ? "brand" : "neutral"}>
                           {wf.status === "published" ? "เผยแพร่" : "ฉบับร่าง"}
                         </Badge>
+                        {wf.import?.source === "zaapi" && <Badge tone="info">Zaapi</Badge>}
                         {wf.priority !== 0 && (
                           <span className="inline-flex items-center gap-0.5">
                             <Badge tone="deep">P{wf.priority}</Badge>
@@ -547,6 +573,14 @@ export default function WorkflowsPage() {
                       aria-label="แก้ไข"
                     >
                       <Pencil size={13} className="text-text-muted" />
+                    </button>
+                    <button
+                      onClick={() => exportWf(wf)}
+                      className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center"
+                      title="Export canonical JSON"
+                      aria-label="Export canonical JSON"
+                    >
+                      <Download size={13} className="text-text-muted" />
                     </button>
                     <button
                       onClick={() => remove(wf)}
@@ -698,6 +732,12 @@ export default function WorkflowsPage() {
           </div>
         </div>
       )}
+      {/* ⚡ Zaapi import — dry-run preview → apply เป็น disabled drafts → refresh list */}
+      <ZaapiImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onApplied={() => load()}
+      />
     </PageShell>
   );
 }

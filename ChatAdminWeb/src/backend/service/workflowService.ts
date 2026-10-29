@@ -20,6 +20,7 @@ import {
 import type { ShopDoc } from "./shopService";
 import type { AdminDoc } from "./authService";
 import { validateCanonicalDraft, publishReadiness, LOCAL_ENGINE_PLATFORMS } from "../../lib/workflow/nodeRegistry";
+import { exportCanonical } from "../../lib/workflow/workflowExport";
 import type {
   WorkflowTriggerFrequency, WorkflowFalseBranchPolicy, WorkflowStatus,
   WorkflowNode, WorkflowEdge,
@@ -1977,6 +1978,44 @@ export async function getWorkflowImportDetail(workflowId: string, versionId?: st
   };
 }
 
+// GET /export read-model — compose current version doc (authoritative สำหรับ
+// imported — nodes/edges/handle_labels/source_ref ครบ) หรือ doc fields ตรงๆ
+// (legacy — ไม่มี version) เป็น CanonicalDraft แล้ว exportCanonical เจนเดียว
+// กับ editor — bindings อ่านจาก persisted rows (ไม่ re-derive)
+export async function getWorkflowCanonicalExport(
+  workflowId: string,
+): Promise<ReturnType<typeof exportCanonical> | null> {
+  const wf = await getWorkflow(workflowId);
+  if (!wf) return null;
+  const versions = await getCollection<WorkflowVersionDoc>(COLLECTIONS.workflowVersions);
+  const version = wf.current_version_id
+    ? await versions.findOne({ version_id: wf.current_version_id }) : null;
+  const snapshots = await getCollection<WorkflowRawSnapshotDoc>(COLLECTIONS.workflowRawSnapshots);
+  const snapshot = version
+    ? await snapshots.findOne({ workflow_id: workflowId, version_id: version.version_id }) : null;
+  const bindings = await getCollection<WorkflowBindingDoc>(COLLECTIONS.workflowBindings);
+  const binds = version
+    ? await bindings.find({ workflow_id: workflowId, version_id: version.version_id }).toArray() : [];
+  const draft: CanonicalDraft = {
+    name: wf.name,
+    source: wf.import?.source ?? "local",
+    status: "draft", enabled: false,
+    platforms: version?.platforms ?? wf.platforms ?? [],
+    nodes: version?.nodes ?? wf.nodes ?? [],
+    edges: version?.edges ?? wf.edges ?? [],
+    handleLabels: version?.handle_labels ?? {},
+    bindings: binds.map((b) => ({
+      node_id: b.node_id, field_path: b.field_path, kind: b.kind,
+      count: b.count, source_ref: b.source_ref,
+    })),
+    sourceRef: version?.source_ref ?? {
+      workflowId: "", loadedVersionId: "", versionStatuses: [], sourceStatus: "", fingerprint: "",
+    },
+    raw: snapshot?.raw,
+  };
+  return exportCanonical(draft);
+}
+
 // GET /bindings read-view (R1 Task 7) — compose getWorkflowImportDetail +
 // version-scoped bindings + candidate reads ทั้งหมดใน owner นี้ (ไม่มี read owner ที่สอง)
 // display_value = server-produced เท่านั้น: "[redacted]" หรือค่าที่ match
@@ -2052,5 +2091,6 @@ export const workflowService = {
   saveBindingResolutionBatch,
   getBindingResolutionView,
   getWorkflowImportDetail,
+  getWorkflowCanonicalExport,
   validateWorkflowGraph,
 };
