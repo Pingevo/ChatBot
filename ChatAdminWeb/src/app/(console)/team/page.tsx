@@ -10,7 +10,7 @@ import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import {
   Users, RefreshCw, Settings,
   MessageSquare, AlertCircle, Activity, Store, Globe,
-  Clock, PauseCircle, PlayCircle, ChevronDown,
+  Clock, PauseCircle, PlayCircle, ChevronDown, CalendarDays,
   TrendingUp, CheckCircle, Inbox, Send, Check, LayoutGrid,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
@@ -19,6 +19,7 @@ import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
+import { LeaveCalendar } from "@/components/team/LeaveCalendar";
 import type { Platform } from "@/lib/types";
 
 interface AgentShopDetail {
@@ -115,7 +116,7 @@ const platforms: { value: Platform; label: string; color: string }[] = [
   { value: "lazada", label: "Lazada", color: "#1a2e8c" },
 ];
 
-type Tab = "overview" | "shop-team" | "platform-team";
+type Tab = "overview" | "shop-team" | "platform-team" | "calendar";
 type TeamFilter = "all" | "in" | "out";
 
 const roleTone = (role: string): "brand" | "pale" | "neutral" =>
@@ -462,10 +463,11 @@ export default function TeamPage() {
       )}
 
       {/* Tabs — segmented control */}
-      <div role="tablist" aria-label="มุมมองทีม" className="grid grid-cols-3 gap-1 rounded-xl border border-border bg-surface-2/70 p-1">
+      <div role="tablist" aria-label="มุมมองทีม" className="grid grid-cols-4 gap-1 rounded-xl border border-border bg-surface-2/70 p-1">
         <TabButton active={tab === "overview"} onClick={() => setTab("overview")} icon={Activity} label="ภาพรวม" desc="สถานะ & งานค้าง" />
         <TabButton active={tab === "shop-team"} onClick={() => setTab("shop-team")} icon={Store} label="จัดทีมร้าน" desc="แยกตามร้าน" />
         <TabButton active={tab === "platform-team"} onClick={() => setTab("platform-team")} icon={Globe} label="จัดทีมแพลตฟอร์ม" desc="แยกตามแพลตฟอร์ม" />
+        <TabButton active={tab === "calendar"} onClick={() => setTab("calendar")} icon={CalendarDays} label="ปฏิทิน" desc="วันลา & เวลาทำการ" />
       </div>
 
       {/* === Tab: Overview === */}
@@ -1174,6 +1176,8 @@ export default function TeamPage() {
           )}
         </div>
       )}
+      {/* === Tab: Calendar — ปฏิทินวันลา (view-only, mock data รอ API ระบบกลาง) === */}
+      {tab === "calendar" && <LeaveCalendar agents={data.agents} />}
     </PageShell>
   );
 }

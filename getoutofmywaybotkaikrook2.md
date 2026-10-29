@@ -8823,3 +8823,10 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - **จับ test-design bug ตัวเอง (สำคัญกว่า engine bug)**: insert flow ใหม่โดยไม่ disable ตัวก่อน → matchAndRun เลือก workflow enabled ตัวแรก → flow ที่เทสไม่ได้ยิงเลย (label ไม่ติด/park ผิด status) — แก้ด้วย `only()` helper ปิดตัวอื่นก่อนเทส; บทเรียน: e2e multi-workflow ต้องคุม enabled set เสมอ
 - verify: canonical **220/220** (+67 assertions), binding 1016, foundation 163, routes 47, tsc clean
 - เหลือ: marketplace flows 06/19/21 e2e (พัก — ไม่มี event จริง), bindings จริง + business_hours ร้าน + activate gates
+
+## ผ่านแล้ว (verified) — /team เพิ่ม tab ปฏิทินวันลา (2026-11-14)
+
+- เพิ่ม `src/components/team/LeaveCalendar.tsx` (view-only, mock leave records รอ API ระบบกลางงาน): 2 มุมมอง roster (คน×วัน) + month calendar (chip ชื่อคนลา), เดินเดือน ‹›, legend 4 ประเภทลา, เวลาทำการ 09:30–17:30 ทุกวัน (ค่าจริงจากผู้ใช้ — ใช้เติม shop business_hours ของ workflow ภายหลัง)
+- คนที่ลาวันนี้แสดง "ลา — ปิดรับงาน" (เตรียม logic ปิดรับ handoff ตอนเชื่อม API)
+- `team/page.tsx`: Tab + `calendar`, tablist grid-cols-3→4, render `<LeaveCalendar agents={data.agents}/>`
+- verify: `npx tsc --noEmit` clean
