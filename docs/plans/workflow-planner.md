@@ -458,6 +458,16 @@ UI: เพิ่มในหน้า `/config` ที่มีอยู่แ�
 **Current stage:** design approved; R1 implementation plan **not written**;
 no runtime code started.
 
+**Status update (R1 landed — 2026-10-27):** binding-resolution CAS batch +
+repeat expansion + fail-closed derived scope + overlap publish blocker +
+imported scope ownership + thin GET/POST bindings route +
+`BindingResolutionPanel` implemented and covered on
+`codex/zaapi-workflow-foundation` (plan:
+`docs/superpowers/plans/2026-10-27-zaapi-workflow-r1-implementation.md`;
+acceptance matrix §9 fully asserted — imported workflows stay
+`enabled:false`/`draft` and engine-invisible; formal R1 exit pending the
+recorded browser canary, §16).
+
 **Canonical design spec:** `docs/superpowers/specs/2026-10-27-zaapi-workflow-runtime-design.md`
 
 **Persistence foundation commits:**

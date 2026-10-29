@@ -495,6 +495,45 @@ Harness convention: `register(new URL("./<hooks>.mjs", import.meta.url))` before
 - [ ] Docs: `DATA_SCHEMA.md` `workflow_bindings.resolution` subsection + derived-scope ownership; planner status line; log completion.
 - [ ] Commit: `test+docs: binding-resolution acceptance matrix`
 
+> **Task 9 evidence (verified, pre-commit stop):** §32 gap-fill section in `test-workflow-binding-resolution.ts` — 42 asserts closing the five weak rows the §9 audit found (all other rows already had executable asserts; see mapping table below). §32.1 non-account scope-field reject: label/user/team binding proposals carrying `platform`/`shop_id` → typed `validation` reject + zero artifacts + zero audit + pointer/scope byte-identical. §32.2 one-`updateOne` commit shape: `updateOneHook` captures every `workflows` write — exactly one call, single `$set` carrying `current_version_id` + `version` + `enabled:false` + `status:"draft"` + derived `platforms`/`shop_ids` atomically. §32.3 version-insert E11000 reuse: `insertOneHook` throws E11000 against a seeded matching artifact → verify-and-reuse, pointer lands on verified `version_id`, zero duplicate version docs. §32.4 binding-insert E11000 reuse: same seam on `workflow_bindings` → exactly 6 bindings, zero duplicate `binding_id`s. §32.5 explicit engine-invisibility fixture: imported workflows persisted `enabled:false`/`draft` + legacy `enabled:true`/`published` control → `listWorkflows({enabledOnly:true, publishedOnly:true})` returns the control (non-vacuous) and zero imported. §32.6 non-vacuous credential sweep: fixture seeds real sentinel material (`sekret-br`, `img.example.com`, `zacc_token_x`-class hosts/token ids) → persisted binding docs, version docs, raw snapshots, workflow docs, and every captured `workflow.binding_resolve` audit event contain zero raw credential/URL substrings; credential-CLASS `source_values` persist as literal `["[redacted]"]` while external account ids persist verbatim (deliberate rebind identity — view layer masks). Suite 928→970 (+42); routes 35/35; persistence 452/452; foundation 161/161; `tsc --noEmit` clean; `git diff --check` clean; zero `src/` changes — every gap was test-only.
+>
+> **§9 acceptance matrix — row → executable assert (all 30):**
+>
+> | §9 row | Proving assert(s) |
+> |---|---|
+> | stale `expected_version` | res §2 `"stale expected_version"` (conflict + echoes current_version + zero writes) |
+> | stale `version_id` | res §2 `"stale version_id"` (conflict + echoes current_version_id) |
+> | wrong `workflow_id` (route/body; foreign binding) | res §2 `"route/body workflow_id mismatch"`, `"binding from another workflow"` |
+> | binding from another workflow/version | res §2 `"binding from another version"` (foreign workflow covered above) |
+> | `source_index` out of bounds | res §2 `"source_index out of bounds"` |
+> | duplicate `binding_id` | res §2 `"duplicate binding_id"` |
+> | duplicate `(binding_id, source_index)` | res §2 `"duplicate (binding_id, source_index)"` |
+> | `repeat:true` pre-Task 2 | **superseded milestone** — Task 2 implemented repeat; contract pinned by res §2 `"repeat:true with no same-kind sibling → resolves normally"` + §14-19 repeat matrix |
+> | wrong target kind | res §2 `"account target not in shops"`, `"label target not in conversations.labels"`, `"user target missing"`, `"user target inactive"`; res §32.1 non-account `platform`/`shop_id` scope-field reject (3 cases) |
+> | deleted/missing local target | proposed: res §2 ghost-target rejects above; carried: persist §26 `"deleted target → carried mapping state:'invalid'"` + invalidated_at/reason + binding `status:"invalid"` |
+> | account missing `platform`/`shop_id` | res §2 `"account missing platform"`, `"account missing shop_id"`, `"account local_id !== shop_id"` |
+> | client supplies source/identity keys | res §2 `forbidden key` loop (10 keys) + nested-in-mapping + top-level cases |
+> | partial mapping | res §2 `"partial mapping (count=2, only index 0)"` |
+> | invalid carried target | persist §26 scope-contract change → `state:"invalid"` + `status:"invalid"` + blocker; res §27 sticky-invalid count-complete |
+> | reordered `source_values` | persist §26 `"reordered source_values → unresolved (no positional reuse)"` |
+> | changed count/kind/field_path | persist §26 `"count change → affected binding fresh unresolved"`, `"kind change → unresolved"`, `"field_path change → unresolved"` |
+> | crash after version insert | res §4a `armInsertFail(bindings,1)` → orphan version; retry reuses deterministic id, exactly 2 version docs |
+> | crash mid-binding insert | res §4b `armInsertFail(bindings,3)` → partial orphans; retry completes 6 bindings, zero dup ids |
+> | crash before pointer CAS | res §4c `armUpdateFail(workflows,1)` → pointer+scope byte-identical, zero audit, retry idempotent |
+> | pointer CAS conflict | res §4d concurrent flip hook → `conflict`, pointer stays old, orphan unreachable, zero audit |
+> | concurrent same `expected_version` | res §4e `Promise.allSettled` pair → exactly one winner, loser conflict; res §5 C1 different-payload race |
+> | orphan artifacts | res §4a-4d orphan docs never auto-current; res §12 version_seq bump never blocks future payloads |
+> | pointer + derived scope one `$set` | res §32.2 exactly-one `updateOne` + single `$set` shape; res §4 crash rows byte-identical no-half-flip |
+> | overlap-producing scope save | res §28 commit ok + `publish_blockers` populated + stays disabled/draft |
+> | narrowed scope readiness recompute | res §28 re-resolution narrows scope → blocker clears; persist §29 scope regression |
+> | account reqs + zero resolved | res §20 `account_scope` blocker + disabled/draft + zero eligibility (never match-all) |
+> | imported direct scope edit | res §29 `saveWorkflowDraft` `shop_ids`/`platforms` reject w/ `import` provenance; persist §21 CAS bypass gate; `updateWorkflow` → `CAS_REQUIRED` |
+> | legacy workflow unchanged | res §2 `"non-imported workflow"` reject (no binding path); persist §6/§21 legacy CAS scope edit unaffected |
+> | imported engine-invisible | res §32.5 explicit fixture (legacy control non-vacuous + zero imported in `enabledOnly+publishedOnly` list) |
+> | validation/CAS failure → zero audit | res §2 `expectReject` zero-audit invariant on every reject; res §4c/4d zero audit on crash/CAS-miss; res §9 mapping-docs audit sweep; res §32.6 audit-event credential sweep |
+>
+> ("res" = `test-workflow-binding-resolution.ts`, "persist" = `test-workflow-persistence.ts`.)
+
 ---
 
 ## 12. Exact commands
@@ -555,6 +594,98 @@ All must hold before claiming done:
 - No new collections/indexes/workers/decision owners/private helpers; §10 counts hold exactly.
 - **Browser canary (explicit steps, recorded in log)**: open imported draft → bindings list shows `display_value` beside `source_index`; pick scoped candidates; resolve → disabled draft + derived scope; repeat checkbox → `repeat:true` observed in request payload; force stale `expected_version` → 409 toast + reload offer; overlap blocker chip renders; team row shows unavailable note; derived scope read-only.
 - No secrets/local paths in diffs; Phase 10B untouched; active log updated; **no push/merge/deploy**.
+
+### §16 status (Task 9 verification — pre-commit stop, HEAD `ccec6e3`)
+
+| Gate item | Status |
+|---|---|
+| resolution suite green | **proven** — 970/970 (`ADMIN_JWT_SECRET=dummy CHATBOT_INTERNAL_SECRET=dummy npx tsx scripts/test-workflow-binding-resolution.ts`) |
+| routes suite green | **proven** — 35/35 |
+| persistence suite green | **proven** — 452/452 (baseline was already above the stale §16 "210" figure — actual count authoritative) |
+| foundation suite green | **proven** — 161/161 |
+| `npx tsc --noEmit` / `git diff --check` | **proven** — both exit 0 |
+| §9 every-row executable | **proven** — 30/30 mapped (matrix in Task 9 evidence above); all gaps closed test-only |
+| imported `enabled:false`/`draft` + engine-invisible | **proven** — §20/§29 + explicit fixture §32.5 |
+| zero-valid-accounts ⇒ `account_scope` blocker; activation gates | **proven** — §20, §28, §29 |
+| §10 complexity counts | **proven** — Task 9 delta = tests + docs only, zero production-code change |
+| no secrets/local paths in diffs; Phase 10B untouched; active log updated; no push/merge/deploy | **proven** at pre-commit checkpoint |
+| **browser canary** | **PENDING** — runbook below written and executable-verbatim; must be run by user on a real environment, evidence recorded in active log, before R1 is claimed done |
+
+### Browser-canary runbook (§16 — user executes; record each step's evidence in `getoutofmywaybotkaikrook2.md`)
+
+**Prereqs:** `npm run dev` in `ChatAdminWeb` with real env; logged-in admin with
+workflow page-edit permission; a Zaapi-exported flows JSON on disk
+(`all-flows.json` or one flow file; pick a flow containing account + label +
+user + team bindings — e.g. trigger `accountIds`, condition `labelIds`,
+assignment `userIds`/`teamIds`); browser DevTools open on the Network tab.
+
+1. **Import → disabled drafts.** Open `/workflows/new` → click **Import**
+   (Upload icon, title "Zaapi workflow import preview") → select flows JSON
+   (index JSON optional) → **Preview import** → **Apply as disabled drafts**.
+   *Evidence:* toast `apply: N flows → M disabled drafts (batch …) · K
+   unresolved bindings`; `/workflows` list shows the imported row with draft
+   badge and disabled toggle.
+2. **Open imported draft.** Click the imported workflow card → editor opens
+   at `/workflows/<wf_imp_id>`.
+   *Evidence:* imported marker present; status select + enable switch
+   disabled; binding chip/panel reports `N unresolved bindings`.
+3. **Binding list shows display_value beside source_index.** Click a node
+   that carries an account binding → binding-resolution panel appears under
+   the node-metadata box.
+   *Evidence:* each row labelled `source 0`, `source 1`, … with the raw
+   external id displayed next to it (e.g. `zacc_123`); unresolved state chip.
+4. **Scoped candidate picks.** Open each `<select data-bid>` on an account
+   row → options render as `platform · shopname (shop_id)`; label row
+   options are label names; user row options are admin display names.
+   *Evidence:* account select contains no label/user options (kind-scoped
+   bucket); label/user selects contain no `shop_id`-shaped options.
+5. **Resolve → disabled draft + derived scope.** Pick a candidate for every
+   `source_index` of one account binding → click resolve.
+   *Evidence:* Network shows `POST /api/workflows/<id>/bindings` with body
+   containing only `workflow_id`, `expected_version`, `version_id`,
+   `proposed[{binding_id, mappings[{source_index, local_id, platform,
+   shop_id}]}]` — no `source_value`/`source_fp`/`node_id`/`display_value`
+   keys; response `200` `{ok:true, version: N+1}`; success toast; workflow
+   still disabled + draft; FlowSettingsPanel shows "derived from resolved
+   bindings" read-only scope chips equal to the picked shops — no editable
+   `platforms`/`shop_ids` inputs.
+6. **Repeat → `repeat:true` in payload.** On a second node with the same
+   account kind and identical source values, tick its `data-rbid` repeat
+   checkbox, then resolve the first binding again on a fresh unresolved
+   version (or resolve the second binding after ticking repeat).
+   *Evidence:* POST body carries `repeat: true` on that proposal; panel
+   marks expanded sibling mappings `via: "repeat"`.
+7. **Stale `expected_version` → 409.** Keep the editor open; in a second
+   tab (or via API) resolve another binding to bump `version`; back in the
+   first tab submit a resolve with the now-stale `expected_version`.
+   *Evidence:* response `409`; toast `conflict`; confirm dialog offers
+   reload; after confirming, page reloads and `expected_version` refreshes
+   to the winner's version.
+8. **Overlap chip.** Import/resolve a second imported workflow whose
+   account mappings produce the same platform+shop_id set as the first.
+   *Evidence:* binding-resolution panel on either workflow renders the
+   overlap/`publish_blockers` chip naming the conflicting workflow(s);
+   both stay disabled/draft.
+9. **Team row unavailable.** Click a node carrying a `teamIds` binding.
+   *Evidence:* row renders the "unavailable" note (verbatim copy from §3)
+   and **no** `<select>`; `publish_blockers` lists the unresolvable kind.
+10. **Derived scope read-only.** In FlowSettingsPanel confirm no platform or
+    shop checkboxes/inputs exist for the imported workflow — only the
+    derived chips from step 5.
+    *Evidence:* DOM shows zero editable scope inputs; PATCH
+    `/api/workflows/<id>` attempt with `platforms`/`shop_ids` in body →
+    `4xx` reject (or field absent from editable payload).
+11. **Engine invisibility (runtime check).** Ensure at least one legacy
+    enabled+published workflow exists (control), then query the runtime
+    workflow list (bot-worker `listWorkflows({enabledOnly:true,
+    publishedOnly:true})` — e.g. trigger a matching inbound message or call
+    the internal listing path).
+    *Evidence:* control workflow is returned/dispatched; the imported
+    `wf_imp_*` id does **not** appear in the runtime-visible set.
+
+Record per step: workflow_id, version before/after, response status, toast
+text, and a note of what was observed. All 11 steps passing closes the §16
+canary item; R1 is then claimable.
 
 ## 17. Remaining R2A–R5 (out of scope — pointers only)
 

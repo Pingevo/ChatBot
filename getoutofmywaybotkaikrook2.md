@@ -8575,3 +8575,188 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - **pre-commit checkpoint**: branch @ `d664dcf` ไม่เปลี่ยน · staging
   ว่าง · Phase 10B ไม่แตะ · browser canary ยังค้างที่ §16 (Task 9
   ยังไม่เริ่ม) · commit รอ reviewer re-inspect + explicit approval
+
+### กำลังจะทำ — R1 TASK 9 (FINAL): acceptance matrix + docs + canary runbook (implementation session, approved plan §11 Task 9)
+
+- **frozen state (verified 2026-10-28)**: worktree `zaapi-workflow-foundation` ·
+  branch `codex/zaapi-workflow-foundation` @ `ccec6e3` (chain
+  `ccec6e3 → a97b0c6 → d664dcf`) · tree clean · staging empty ·
+  Phase 10B แยก worktree (`feature-phase3-aswer-quality` @ `2278501`,
+  dirty = งานภายนอก) ไม่แตะ
+- **baseline (จะรันสดก่อนแก้)**: routes 35/35 · binding-resolution 928/928 ·
+  persistence 452/452 · foundation 161/161 · `tsc --noEmit` + `git diff --check`
+  clean — ต้องไม่ลด (resolution โตด้วย asserts ใหม่เท่านั้น)
+- **Task 9 scope (ตาม prompt + plan §9/§11/§16 เท่านั้น)**:
+  1. §9 failure table 30 rows → row-by-row assert mapping (ทุก row ต้องชื่อ
+     executable assert — gap ใดๆ เติมใน `test-workflow-binding-resolution.ts`)
+  2. credential-absence sweep: persisted binding/version docs + audit events
+     ไม่มี raw credential/URL (`sekret-br`, `img.example.com`) + mask เป็น
+     `"[redacted]"` — sentinel ต้อง seed จริงใน fixture (ไม่ vacuous)
+  3. engine-invisibility: `listWorkflows({enabledOnly:true, publishedOnly:true})`
+     คืน zero imported — explicit fixture (imported อยู่ใน collection จริง +
+     control legacy enabled+published)
+  4. fake-Mongo failure hooks ครบทุก write boundary: crash-after-version-insert ·
+     mid-binding-insert · pre-pointer-CAS · pointer CAS conflict · concurrent
+     same expected_version + unique-violation (E11000) seams — map ลง row §9
+  5. docs: `DATA_SCHEMA.md` `workflow_bindings.resolution` subsection +
+     derived-scope ownership note · `workflow-planner.md` status line (respect
+     SUPERSEDED) · plan file Task 9 evidence + §16 gate matrix · log นี้
+  6. browser-canary runbook (เขียนเท่านั้น — user รันเอง; §16 ค้างเปิดจนกว่า
+     canary evidence ลง log)
+- **ไม่ทำใน Task 9**: production code (tests/docs เท่านั้น — ถ้า §9 row
+  พิสูจน์ defect จริง → STOP รายงาน) · stage/commit/push/PR/deploy ·
+  `npm run dev` · real Mongo · browser automation · Phase 10B ·
+  `.env*`/`มาแล้วจ้า.md` · SRS_SSD (scope = ChatAdminWeb TS)
+- **stop gate**: pre-commit checkpoint — staging ว่าง, HEAD `ccec6e3` ไม่ขยับ;
+  ชื่อ commit สำรอง `test+docs: binding-resolution acceptance matrix`
+  (reviewer ใช้ภายหลัง, two-commit split)
+
+### ผ่านแล้ว (verified, pre-commit stop) — R1 TASK 9 (FINAL): acceptance matrix + docs + canary runbook
+
+- **§9 coverage audit**: table มี 30 rows — walk row-by-row แล้ว; 25 rows
+  มี executable asserts อยู่แล้ว (res §2 validation matrix · §4a-4e
+  crash/CAS/concurrent · §5 C1 · §12 seq-bump · §14-19 repeat · §20 scope ·
+  §27 sticky-invalid · §28 overlap · §29 ownership · §30 view · §31 SSR ·
+  persist §26/§28 carry + §21 CAS-bypass) · 5 กลุ่มเติม assert ใหม่ใน §32
+  (test-only — zero production code)
+- **§32 gap fills (+42 asserts, suite 928→970)**:
+  - 32.1 non-account scope-field reject — label/user/team binding + `platform`/
+    `shop_id` → typed `validation` reject (msg mentions "account") · zero
+    artifacts + zero audit + pointer/scope byte-identical (3 cases)
+  - 32.2 one-$set commit — `updateOneHook` capture: **exactly ONE** `workflows`
+    updateOne · `$set` เดียวครบ `current_version_id` + `version` +
+    `enabled:false` + `status:"draft"` + derived `platforms`/`shop_ids`
+  - 32.3 E11000 @version-insert — seeded matching artifact → verify+reuse ·
+    pointer lands on verified version_id · zero dup version docs
+  - 32.4 E11000 @binding-insert — seeded matching artifact → verify+skip ·
+    exact 6 bindings · zero dup binding_ids
+  - 32.5 engine-invisibility — imported docs persist จริง (all
+    `enabled:false`/`draft`) + legacy enabled+published control →
+    `listWorkflows({enabledOnly:true, publishedOnly:true})` คืน control
+    (non-vacuous) + zero imported + resolved wf ไม่อยู่ใน list
+  - 32.6 credential sweep — sentinel `sekret-br` + `img.example.com` +
+    `zacc_token_x` seed จริงใน fixture (non-vacuous) → persisted
+    binding/version/raw-snapshot/workflow docs + ทุก
+    `workflow.binding_resolve` audit event ไม่มี raw credential/URL ·
+    credential-CLASS `source_values` = literal `["[redacted]"]` · external
+    account ids persist verbatim (rebind identity — view layer mask §30.3) ·
+    audit metadata = ids/counts/scope only (zero source values)
+- **docs**: `DATA_SCHEMA.md` +39 — `workflow_bindings.resolution` appendix
+  (mappings shape, state/via/carried semantics, derived-scope ownership) ·
+  `workflow-planner.md` +10 — R1 status line (SUPERSEDED blocks ไม่แตะ) ·
+  plan file +131 — Task 9 evidence + full 30-row mapping table + §16 status
+  matrix + 11-step browser-canary runbook (executable-verbatim — user รัน
+  เอง) · log นี้
+- **GREEN สด**: `test-workflow-binding-routes.ts` **35/35** exit 0 ·
+  `test-workflow-binding-resolution.ts` **970/970** exit 0 ·
+  `test-workflow-persistence.ts` **452/452** exit 0 ·
+  `test-workflow-foundation.ts` **161/161** exit 0 · `npx tsc --noEmit` exit 0
+  · `git diff --check` exit 0
+- **complexity delta**: test asserts + docs only — production code, collections,
+  indexes, helpers, deps, flags ทั้งหมด +0 · src/ diff = 0 files
+- **pre-commit checkpoint**: branch `codex/zaapi-workflow-foundation` @
+  `ccec6e3` ไม่เปลี่ยน · staging ว่าง (`git diff --cached --quiet` ok) ·
+  ไฟล์ที่แตะ = `test-workflow-binding-resolution.ts`, `DATA_SCHEMA.md`,
+  `workflow-planner.md`, plan file, log นี้ (443 adds / 0 dels) · Phase 10B
+  ไม่แตะ (HEAD เลื่อนจาก `2278501` → `a293503` — external activity ใน
+  worktree นั้นเอง ไม่ใช่ของเรา) · browser canary **ยังค้าง** — runbook เขียน
+  แล้ว 11 steps ใน plan §16 · **R1 done claim ยังไม่เปิด** จนกว่า canary
+  evidence ลง log · commit รอ reviewer + explicit approval
+  (`test+docs: binding-resolution acceptance matrix`)
+
+### ผ่านแล้ว (verified) — UX restructure: import ที่หน้า list + export บน card (2026-10-28 17:45)
+
+- **ต้นตอปัญหา (browser canary พบจริง)**: import dialog ซ่อนใน editor → user ต้องสร้าง
+  workflow เปลือก (name/platform/shop บังคับ) ก่อนเข้าหน้า import → ทิ้งเปลือกว่าง
+  0-node ค้างใน list + ไฟล์ flow เดี่ยว (`{flow,versions,nodes,edges,lookups}`) ใช้
+  ไม่ได้ทั้งที่ dialog copy อ้างว่าได้ → error `invalid zaapi export: no flows found`
+- **แก้**:
+  - `zaapiImport.previewZaapiFlows` — detect single flow object (isFlowObj) → wrap
+    เป็น batch ของ 1 (owner เดียว ครอบทั้ง UI path `parseZaapiImportInputs` และ API
+    path `POST /import` — client ส่ง flow object ดิบได้ทั้งคู่)
+  - ใหม่ `ZaapiImportDialog.tsx` — shared component self-contained (file pickers +
+    dry-run preview + apply) · props `onLoadReportToCanvas` (editor เท่านั้น — โหลด
+    โครง flow ลง canvas, ไม่ render ถ้าไม่ส่ง) + `onApplied` (list refresh หลัง
+    apply) · apply สำเร็จ → close อัตโนมัติ
+  - `/workflows` list page — ปุ่ม `Import Zaapi` (ไม่ต้องสร้างเปลือก) + badge
+    `Zaapi` (tone info) บนแถว `wf.import.source==="zaapi"` + ปุ่ม `Export` บน
+    card → `GET /api/workflows/[id]/export` → ดาวน์โหลด `{name}.canonical.json`
+  - service `getWorkflowCanonicalExport` — compose CanonicalDraft จาก current
+    version doc (imported: nodes/edges/handle_labels/source_ref authoritative) +
+    binding rows + raw snapshot · legacy → จาก doc ตรง + empty extras ·
+    `exportCanonical` owner เดียวกับ editor · route thin GET delegate (zero Mongo)
+  - editor — dialog markup 92 บรรทัดย้ายออกเป็น shared component · state/file/parse
+    ทั้งหมดอยู่ใน dialog · เก็บ `loadReportToCanvas` เหมือนเดิม · ลบ dead
+    `importReport` display ที่ไม่เคย render (modal ปิดก่อนเสมอ)
+- **GREEN**: resolution **992/992** (+22 ใหม่: §33 SSR markup + wiring pins + §33.5
+  service export compose) · routes **47/47** (+12: export route delegation/404/
+  auth/zero-Mongo) · foundation **163/163** (+2: single flow file UI+API path) ·
+  persistence **452/452** · `tsc --noEmit` exit 0 · `git diff --check` exit 0
+- **src diff**: +ZaapiImportDialog.tsx, +export/route.ts, ±page.tsx (+42),
+  ±workflowService.ts (+40), ±WorkflowEditor.tsx (−121/+20), ±zaapiImport.ts (+1)
+- **ยังไม่ได้ทำ**: commit (รอ reviewer) · channel/shop finding — **ปิดแล้ว**:
+  panel ใช้ explicit allowlist `account|label|user` + fallback unavailable note
+  (fail-closed เหมือน server) — เช็ค code แล้วไม่ใช่ defect ค้าง · browser canary
+  11 steps ยังค้าง (จะง่ายขึ้นเพราะ import อยู่หน้า list แล้ว) · เปลือกว่าง 2 doc
+  ใน list ค้างไว้ตามที่ user สั่ง (ไม่ลบ)
+
+## 2026-11-14 — canvas node-card fidelity + selection highlight (user report: "ข้อมูล/เส้นโยงหาย")
+
+- **บริบท**: user เปิด imported flow → node card โชว์ `(ว่าง)`/`มี ""`/`→ ?`,
+  ชื่อ node ไม่เห็น, edge ดูลอย — ขอ (1) highlight node ที่คลิก/สร้าง (2) redesign
+  card (3) ยืนยันเงื่อนไข/branch edges ครบ
+- **วิเคราะห์ root cause** (data ไม่หาย — canonical config ครบ): 3 ชั้น —
+  (a) `configSummary` อ่าน legacy fields เท่านั้น (config.text/branches) ไม่รู้
+  zaapi shape (conditions[]/action.*/waitForReply) (b) card render handle
+  hardcode (cond=true/false, action=out) แต่ imported edges ใช้
+  condition-index-N/no-match/ai-chatbot-*/wfr-*/btn-template-*/randomizer-*
+  → handle id ไม่ตรง = เส้นลอย (c) card ไม่แสดง `config.label` (ชื่อจริงของ node)
+- **จับ defect จริงเพิ่ม 2 ตัว (test §34 RED)**:
+  1. `zaapiImport` step-ref loop — `anyEdge` check match แค่ (source,target):
+     ref ที่ชี้ pair เดียวกับ ref อื่น (เช่น buttons[0]+timeExpired → node เดียว)
+     ถูก flag `mismatched` แทนสร้าง edge → **edge หายจริง 1 เส้นต่อกลุ่ม** —
+     แก้ด้วย `pairClaims` (source,target → set expected handles): edge ต่าง
+     branch ในกลุ่มหลาย claim = ของ sibling ref → synthesize แยก; mismatch นับ
+     เฉพาะกลุ่ม claim เดียวจริงๆ
+  2. `nodeRegistry.resolveOutputHandles` dynamic:"buttons" อ่าน `config.buttons`
+     top-level แต่ zaapi shape เก็บ `action.buttonTemplate.buttons` →
+     btn-template handles ไม่ render → แก้ fallback nested path
+- **แก้**:
+  - `nodes.tsx` rewrite — `NodeShell` card ใหม่: header สีตาม type + ชื่อ node
+    จริง (`config.label`) ใหญ่ + subtype เล็ก + badge `zaapi` (data.imported/
+    importMeta) + selected ring (border สี + glow shadow) · `zaapiSummary`
+    อ่าน conditions[]/action.message/assignment/chatbot/jumpTo + waitForReply/
+    randomizer/delay/setTicketField · `resolveCardHandles` = single-owner จาก
+    `resolveOutputHandles(getNodeDef)` (registry) + `default`→`out` + label
+    เงื่อนไขจาก first text/operator + local branch labels + **usedHandles union**
+    (edge เดิมที่ใช้ handle นอก resolved set — เช่น local let_ai_respond→"out" —
+    ยังมี handle ไม่ลอย) · `OutHandles` shared renderer + `useSyncHandles`
+    (updateNodeInternals) ทุก node type
+  - `WorkflowEditor` — `displayNodes` memo inject `data.selected`
+    (selectedNodeId → click + addNode ไฮไลท์) + `data.usedHandles` (จาก edges
+    state จริง) · load effect เพิ่ม `imported: Boolean(wf.import)` · DTO +import
+  - subtypeMeta fallback → `getNodeDef(subtype).label` ครอบ 31 canonical types
+- **GREEN**: resolution **1011/1011** (+19 §34: ทุก edge branch→handle, per-family
+  sets, fan-in≥2, summaries zaapi+legacy regression, usedHandles union) ·
+  foundation 163 · routes 47 · persistence 452 · tsc + diff --check clean
+- **ยังไม่ได้ทำ**: commit (รอ approve) · browser canary (dev server live —
+  refresh editor จะเห็น card+edges+highlight ใหม่)
+
+  - **UI tweak (user feedback)**: branch labels แนวนอนด้านล่างแออัด →
+    `OutHandles` เปลี่ยนเป็นแถวแนวตั้งด้านขวา — output เดียว = dot ล่างกลาง +
+    label เล็ก · หลาย branch = row ต่อ branch (label สี right-aligned + handle
+    dot 9px ออกขวา Position.Right, ขอบขาว + shadow) · 1011/1011 ยังผ่าน
+
+## ผ่านแล้ว — Mongo clean slate + import Zaapi corpus 21 flows (ผู้ใช้อนุมัติลบทั้งหมด)
+
+- อะไร: ลบ workflows เดิมทั้งหมด 13 ตัว (รวม 'สวัสดีวันจันทร์' enabled ที่รันอยู่ — ผู้ใช้ยืนยันลบ) + versions/bindings/snapshots/runs/batches แล้ว import corpus 21 flows ผ่าน service owner (`applyImportBatch`) ลง Mongo dev
+- ผล: 21 workflows (imported, disabled drafts — engine ไม่เห็น), 21 versions + 21 raw snapshots + 119 binding requirements + 1 batch `wib_xz6m2w` — handle_labels มาครบจาก `flow.handles` ของ all-flows
+- พบระหว่างทำ: fail-closed guard ปฏิเสธ re-import flow ที่เคย import ผ่านไฟล์เดี่ยว (stored version ต่าง — generic name + handle_labels ว่าง) → ทำงานถูกตามดีไซน์ แก้ด้วย clean slate ตามที่ผู้ใช้สั่ง
+- script: `ChatAdminWeb/scripts/import-zaapi-corpus.ts` (idempotent — รันซ้ำได้ already_applied)
+- known gap ค้าง: ไฟล์เดี่ยว NN_*.json เก็บ handles ที่ `lookups.handles` แต่ converter อ่าน `flow.handles` → single-file import ยังเสีย branch labels (all-flows ไม่กระทบ)
+
+## กำลังจะทำ — R2 runtime layer (ยังไม่เริ่ม implement)
+
+- จด gap matrix เต็มไว้ที่ `docs/superpowers/plans/2026-10-29-zaapi-workflow-r2-runtime-gap-matrix.md`
+- สถานะจริง: imported 21 flows = พิมพ์เขียว (disabled drafts) — engine มี executor แค่ ~11 legacy subtypes อ่าน legacy config เท่านั้น; canonical Zaapi shape/branch vocab ยังไม่มี runtime
+- ลำดับเสนอ: lookups.handles fix → edge router → condition adapter+evaluators → action adapter → durable timer → label events → chatbot → marketplace → readiness gates → pilot flow 01
