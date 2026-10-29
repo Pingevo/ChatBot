@@ -27,6 +27,10 @@ export interface ShopDoc extends Document {
   bot_worker_enabled_at?: Date | null;
   last_polled_at?: Date | null;
   status?: "active" | "token_error" | "disabled";
+  // ⚡ canonical business_hours (Zaapi) — เวลาทำการของร้าน; flow business_hours
+  //   condition อ่านที่นี่ (Zaapi เก็บใน store settings ไม่ใช่ใน flow export)
+  //   schedule: { DAY: [{start,end}] } นาทีจากเที่ยงคืน — shape เดียวกับ event_time
+  business_hours?: { timezone: string; schedule: Record<string, { start: number; end: number }[]> };
 }
 
 export async function listShops(platform?: Platform): Promise<ShopDoc[]> {

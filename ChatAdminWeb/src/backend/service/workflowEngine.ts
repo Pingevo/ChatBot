@@ -31,6 +31,7 @@ import { testStatusConversationService, type TestSource } from "./testStatusConv
 import { statusConversationService } from "./statusConversationService";
 import { logBotworkerEvent } from "./botworkerEventService";
 import { isSafeFetchUrl } from "../lib/urlSafety";
+import { hasCanonicalConditions, evalCanonicalConditions } from "./workflowCanonicalEval";
 
 // ─── Types ────────────────────────────────────────────────
 
@@ -1131,6 +1132,12 @@ async function evalCondition(
   context: Record<string, unknown>
 ): Promise<{ branch: string; error?: string }> {
   try {
+    // ⚡ canonical (Zaapi-import) conditions[] — evaluator แยก owner ใน
+    //   workflowCanonicalEval.ts; branch = condition-index-i / no-match
+    if (hasCanonicalConditions(node.config)) {
+      return await evalCanonicalConditions(node, msg, workflow.workflow_id, workflow.current_version_id);
+    }
+
     // ⚡ multi-branch message_content (Zaapi pattern)
     if (node.subtype === "message_content" && isMultiBranchCondition(node.config)) {
       return evalMultiBranchCondition(node, msg, context);
