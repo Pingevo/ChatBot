@@ -8854,3 +8854,12 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - `systemConfigService.ts`: `pool_sources`/`kb_source` fields + `pool_sources` whitelist + `setKbSource` CAS (zaapi flip ต้องผ่าน `zaapiKbReady` gate, rollback→legacy ไม่ต้อง)
 - test `docs/test/test_pool_sources_admission.py` **25/25** · tsc clean · SRS §6.34/6.5/6.16/6.29 อัปเดต
 - เหลือ: P2 zaapi_kb collection+importer+adapter+selector wiring+/config UI, P3 let_ai_respond narrow
+
+## ผ่านแล้ว (verified) — Workstream E P2a: zaapi_kb corpus + adapter (2026-11-14)
+
+- Raw export เก็บใน repo: `docs/zaapi/kb-export/` — manifest 118 sources + 119 files (113 xlsx/5 txt) + raw json (กันข้อมูลหายจาก ~/Downloads)
+- `docs/zaapi/script/import_zaapi_kb.py` — doc ต่อ xlsx row (fields+text flattened) / txt ต่อไฟล์; fingerprint=sha256 idempotent; dry-run: **118 sources → 8,600 docs, missing=0**; openpyxl 3.1.5 ต้อง patch hyperlink `address` kwarg
+- `chatbot/shopeechat/kb_zaapi.py` — adapter contract `KbEvidenceResult`: gate = kb ON + kb_source=zaapi (fail-closed), shop scope ผ่าน `accounts.name` regex, bounded match เหมือน legacy, คืน supporting เท่านั้น (ไม่สร้าง sellable candidate)
+- `app.py` grouped kb_fetcher เลือก adapter ตาม `kb_source()` — legacy เดิมไม่เปลี่ยน
+- test 28/28 (+3 zaapi gate) · COMPILE_OK · SRS §6.34b
+- เหลือ P2b: รัน importer จริงเมื่อ dev mongo เปิด (127.0.0.1:27017 ตอนนี้ refused) + /config UI card + P3 let_ai_respond narrow

@@ -140,6 +140,24 @@ set_cfg({"pool_sources": {"image_text": False}})
 check("image_text OFF → attach_image_texts no-op",
       units.attach_image_texts([dict(u) for u in unit_docs], snap=None) == unit_docs)
 
+# ---------- zaapi adapter gate ----------
+print("== zaapi kb adapter gate ==")
+from shopeechat import kb_zaapi  # noqa: E402
+
+set_cfg({})
+r = kb_zaapi.zaapi_kb_evidence(shop="s", message="pb100")
+check("legacy selector → zaapi gate closed (zero reads)",
+      r.supporting_evidence == () and "zaapi_gate_closed" in r.trace)
+
+set_cfg({"pool_sources": {"kb": False}, "kb_source": "zaapi"})
+r = kb_zaapi.zaapi_kb_evidence(shop="s", message="pb100")
+check("kb OFF → zaapi gate closed", "zaapi_gate_closed" in r.trace)
+
+set_cfg({"kb_source": "zaapi"})
+r = kb_zaapi.zaapi_kb_evidence(shop="s", message="สวัสดี")
+check("zaapi + ไม่มี keyword → no_keywords (ไม่ query)",
+      "zaapi_no_keywords" in r.trace)
+
 reset_cfg()
 print(f"\n=== {PASS[0]} passed, {FAIL[0]} failed ===")
 sys.exit(1 if FAIL[0] else 0)
