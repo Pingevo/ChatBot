@@ -8788,3 +8788,23 @@ question ใน v2) + เพิ่ม direct tests ให้ r5 owner replacemen
 - พบระหว่างทำ: canonical action-park blocks แรกวางผิดตำแหน่ง (หลัง generic action dispatch → unreachable) — ย้ายไปก่อน dispatch; doResumeFlow เดิมบังคับ wait node — button template park บน action node → relax เมื่อ reply_branch ตั้ง
 - verify: canonical suite **121/121**, binding 1016, foundation 163, routes 47, tsc clean
 - สถานะ: **ทุก node type ใน corpus มี executor + behavioral test แล้ว** — เหลือ e2e per-flow แบบ flows 01-04 (เดิน graph จริงทุก branch), adapter จริงของ marketplace (Shopee/Lazada API), escalate signal จาก bot-worker → escalateAiRun, business_hours ของร้านจริง + binding resolution บน Mongo dev ก่อน activate ร้านแรก
+
+## กำลังจะทำ — R3 e2e per-flow: Flow 05 (wfr+chatbot+jump_to+unassign+close)
+
+- เป้า: e2e เดิน graph จริงของ flow 05 (ตัวใหญ่สุดใน corpus — ครอบเครื่องจักรใหม่ slice 9 ทั้งหมด) แบบเดียวกับ flows 01-04
+- ขอบเขต: ChatAdminWeb เท่านั้น — ไม่แตะ chatbot/shopeechat (ผู้ใช้สั่ง)
+- marketplace (06/19/21) พักไว้ก่อนตามที่ผู้ใช้สั่ง — ไม่มี event จริงป้อน ไม่กระทบ flow แชท
+
+## ผ่านแล้ว (verified) — R3 e2e Flow 05 + corpus operator gaps (2026-11-14)
+
+- **2 corpus gaps จับได้ก่อนเขียน e2e** (audit operators ทั้ง 21 flows): `label:contains_all` x10 (flows 05/06/09/15/16/17) + `label:does_not_contain_any_of` x1 (flow 07) — evaluator รองรับแค่ contains_one_of/equals → e2e จะ throw "unknown operator" ทุก flow เหล่านั้น
+- **แก้**: workflowCanonicalEval label case — `contains_all` = ครบทุก bound label (alias เดียวกับ equals), `does_not_contain_any_of` = ไม่มีเลยสักตัว
+- **Flow 05 e2e (§20, graph จริง 48 nodes/66 edges จาก Mongo `scripts/fixtures/flow05-graph.json`)** — 5 scenarios:
+  - A: no-match chain (label→content→assignee) → chatbot1 park ai_bot → oncePerOpen block run2 → escalate → bh within → add labels → send → unassign → assign6 (team→all_admins → adm_a)
+  - B: chatbot timeout (resumeTimerRun) → send10 → close_ticket → status closed
+  - C: bh={} OOH → escalate → OOH labels → wfr1 park → reply wfr-success → event_time → chatbot2 → bh กลับเข้าเวลา → escalate → assign3 adm_a
+  - D: OOH → wfr1 expire wfr-no-respond → jump11 → event_time2 → wfr2 park → reply → send6 → assign3 adm_b (round-robin หมุนต่อ node)
+  - E: label branch-0/1 + last_interaction >1h/≤1h + remove_label + jump paths + keyword match→jump2 + assignee match→unassign2→jump9
+- **พฤติกรรมจริงที่ e2e เปิดเผย**: assignWhenAllOoh:false + ร้าน OOH → assign skip (ไม่ใช่ bug — semantics ถูก; test ต้องเปลี่ยนเวลาให้เข้าเวลาก่อนขั้น assign)
+- **pin technique**: event_time schedules ใน fixture ถูกแทนด้วย 24/7/{} เพื่อ determinism (engine ใช้ real Date — ไม่มี clock injection)
+- verify: canonical **153/153**, binding 1016, foundation 163, routes 47, tsc clean

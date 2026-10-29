@@ -203,7 +203,8 @@ async function evalCanonicalCondition(
       const doc = await conv.findOne({ conversation_id: msg.conversation_id } as never);
       const have = new Set(doc?.labels || []);
       if (op === "contains_one_of") return ids.some((l) => have.has(l));
-      if (op === "equals") return ids.every((l) => have.has(l));
+      if (op === "equals" || op === "contains_all") return ids.every((l) => have.has(l));
+      if (op === "does_not_contain_any_of") return !ids.some((l) => have.has(l));
       throw new Error(`label: unknown operator "${op}"`);
     }
     case "review_rating": {
