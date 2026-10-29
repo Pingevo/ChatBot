@@ -1083,7 +1083,6 @@ def test_ask_only_explicit_scope_normalizes_current_single():
 
 # ── LOW-3: unknown wattage ≠ below-target — ต้องมี uncertainty channel ──────
 
-@pytest.mark.xfail(strict=False, reason="LOW-3 — awaiting separate approval")
 def test_unknown_wattage_pick_gets_uncertainty_note(monkeypatch):
     """LOW-3a: pick ที่ wattage ไม่รู้เลย (ไม่มี output_power_w / variants
     / name-watt) + device มี structured min_watt → ต้องติด uncertainty
@@ -1109,13 +1108,11 @@ def test_unknown_wattage_pick_gets_uncertainty_note(monkeypatch):
         f"— note={by_id['i:pU'].card.get('_context_note')!r}")
 
 
-@pytest.mark.xfail(strict=False, reason="LOW-3 — awaiting separate approval")
 def test_decided_compat_unknown_wattage_surfaces_power_caveat():
     """LOW-3b: charges verdict decided จาก connector match เพียงอย่างเดียว
-    (resolve_compat ไม่ consult min_watt) — subject ไม่มี watt evidence +
-    device มี structured min_watt → ต้องมี typed caveat ว่า full-speed
-    ยืนยันไม่ได้ (_context_note ของ card หรือ verdict reason —
-    role note ทั่วไปไม่นับ)."""
+    — subject ไม่มี watt evidence + device มี structured min_watt → verdict
+    ต้องติด typed caveat และ caveat ต้องถึง customer-visible answer
+    (ไม่ใช่ bare 'ใช้ได้')."""
     need = _need_compat(subj=("AC65B",), trefs=("dev-x",))
     req = _req("req-0", types=("cable",), codes=("AC65B",),
                target="dev-x", cm="connector_required")
@@ -1132,14 +1129,397 @@ def test_decided_compat_unknown_wattage_surfaces_power_caveat():
     v = [x for x in ctx.compat_verdicts]
     assert v and v[0].decision.outcome == "compatible", (
         f"premise: connector match → compatible — {ctx.compat_verdicts}")
-    note = " ".join(str(p.get("_context_note") or "")
-                    for p in ctx.products)
     reasons = {r for x in v for r in x.decision.reason_codes}
-    power_note = any(k in note for k in
-                     ("ช้า", "ชาร์จ", "ไฟ", "กำลัง", "ทราบ", "ยืนยัน"))
-    assert power_note or reasons & {"missing_wattage_evidence"}, (
-        f"full-speed ไม่ได้ถูกพิสูจน์ → ต้องมี typed caveat ที่ไหนสักที่ "
-        f"— note={note!r} reasons={reasons}")
+    assert "missing_wattage_evidence" in reasons, (
+        f"watt adequacy ไม่ได้พิสูจน์ → verdict ต้องติด typed caveat "
+        f"— reasons={reasons}")
+    answer = _render(_compose((need,), ctx,
+                              product_text="สายชาร์จ C to C 1m"))
+    assert "ใช้งานร่วมกับ" in answer and "เต็มสเปค" in answer, (
+        f"customer ต้องเห็นทั้ง connector-fit + full-speed caveat — "
+        f"answer:\n{answer}")
+
+
+def test_decided_compat_below_min_watt_says_not_full_speed():
+    """LOW-3 case2: subject output_w=65 < device min_watt=90 → compatible
+    verdict คงเดิม แต่ final answer ต้องไม่ claim full-speed (ต่ำกว่า
+    สเปค/อาจช้ากว่า)."""
+    need = _need_compat(subj=("AC65B",), trefs=("dev-x",))
+    req = _req("req-0", types=("cable",), codes=("AC65B",),
+               target="dev-x", cm="connector_required")
+    card = _sel_card("i:1", "subject", "req-0",
+                     "สายชาร์จ C to C 1m", model_codes=["AC65B"],
+                     connector="usb-c", output_power_w=65)
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "dev-x",
+         "data": {"connector": "usb-c", "min_watt": 90.0,
+                  "source": "spec-db"},
+         "subject_refs": ("i:1",)},))
+    ctx = _compile((need,), _selection((card, "req-0")), pool, (req,),
+                   _profile())
+    v = [x for x in ctx.compat_verdicts]
+    assert v and v[0].decision.outcome == "compatible", (
+        f"premise: connector match → compatible — {ctx.compat_verdicts}")
+    reasons = {r for x in v for r in x.decision.reason_codes}
+    assert "insufficient_wattage" in reasons, (
+        f"output_w=65 < min_watt=90 = known-below ไม่ใช่ unknown — "
+        f"reasons={reasons}")
+    answer = _render(_compose((need,), ctx,
+                              product_text="สายชาร์จ C to C 1m"))
+    assert "ใช้งานร่วมกับ" in answer, f"answer:\n{answer}"
+    assert "ต่ำกว่าสเปค" in answer, (
+        f"known-below ต้องบอกว่ากำลังไฟต่ำกว่าสเปค — answer:\n{answer}")
+    assert "ยังยืนยันไม่ได้" not in answer, (
+        f"known-below ห้ามใช้ unknown phrasing (มีหลักฐานแล้ว) — "
+        f"answer:\n{answer}")
+
+
+def test_decided_compat_ambiguous_variants_unconfirmed():
+    """LOW-3 case5: card มี structured variants 65/100/140W แต่ไม่มี
+    selected variant ที่ยืนยัน → ห้ามใช้ max(140W) เป็นหลักฐาน
+    full-speed — verdict ต้องติด variant-unconfirmed state และ final
+    answer เป็น uncertainty ไม่ใช่ adequate."""
+    need = _need_compat(subj=("AC65B",), trefs=("dev-x",))
+    req = _req("req-0", types=("cable",), codes=("AC65B",),
+               target="dev-x", cm="connector_required")
+    card = _sel_card("i:1", "subject", "req-0",
+                     "สายชาร์จ C to C 1m", model_codes=["AC65B"],
+                     connector="usb-c",
+                     variants=[{"output_power_w": w}
+                               for w in (65, 100, 140)])
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "dev-x",
+         "data": {"connector": "usb-c", "min_watt": 90.0,
+                  "source": "spec-db"},
+         "subject_refs": ("i:1",)},))
+    ctx = _compile((need,), _selection((card, "req-0")), pool, (req,),
+                   _profile())
+    v = [x for x in ctx.compat_verdicts]
+    assert v and v[0].decision.outcome == "compatible", (
+        f"premise: connector match → compatible — {ctx.compat_verdicts}")
+    reasons = {r for x in v for r in x.decision.reason_codes}
+    assert "wattage_variant_unconfirmed" in reasons, (
+        f"หลาย variant ไม่มี selected ที่ยืนยัน → ห้าม adequate จาก max "
+        f"— reasons={reasons}")
+    answer = _render(_compose((need,), ctx,
+                              product_text="สายชาร์จ C to C 1m"))
+    assert "ใช้งานร่วมกับ" in answer, f"answer:\n{answer}"
+    assert "ยืนยัน" in answer or "ตัวเลือก" in answer, (
+        f"ambiguous variants ต้อง render uncertainty — answer:\n{answer}")
+
+
+def _watt_verdict_card(name="สายชาร์จ C to C 1m", **kw):
+    return _sel_card("i:1", "subject", "req-0", name,
+                     model_codes=["AC65B"], connector="usb-c", **kw)
+
+
+def _watt_verdict_ctx(card, *, min_watt=90.0):
+    need = _need_compat(subj=("AC65B",), trefs=("dev-x",))
+    req = _req("req-0", types=("cable",), codes=("AC65B",),
+               target="dev-x", cm="connector_required")
+    data = {"connector": "usb-c", "source": "spec-db"}
+    if min_watt is not None:
+        data["min_watt"] = min_watt
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "dev-x", "data": data,
+         "subject_refs": ("i:1",)},))
+    return (need,), _compile((need,), _selection((card, "req-0")),
+                            pool, (req,), _profile())
+
+
+def _watt_reasons(ctx):
+    return {r for x in ctx.compat_verdicts
+            for r in x.decision.reason_codes}
+
+
+def test_name_watt_is_not_full_speed_proof():
+    """Defect A: card ไม่มี structured watt แต่ชื่อมี '100W' → name-derived
+    watt ห้ามเป็น adequacy proof — verdict ต้อง missing_wattage_evidence
+    และ final answer ไม่ claim full-speed."""
+    needs, ctx = _watt_verdict_ctx(
+        _watt_verdict_card("สายชาร์จ C to C 1m 100W"))
+    v = ctx.compat_verdicts
+    assert v and v[0].decision.outcome == "compatible", (
+        f"premise: connector match → compatible — {ctx.compat_verdicts}")
+    reasons = _watt_reasons(ctx)
+    assert "missing_wattage_evidence" in reasons, (
+        f"ชื่อ '100W' ไม่ใช่ structured evidence → missing — {reasons}")
+    answer = _render(_compose(needs, ctx,
+                              product_text="สายชาร์จ C to C 1m"))
+    assert "เต็มสเปค" in answer or "ยืนยัน" in answer, (
+        f"ต้องมี caveat ไม่ใช่ bare ใช้ได้ — answer:\n{answer}")
+
+
+def test_all_adequate_variants_no_caveat():
+    """Defect B case2: variants [100,140] ทุกค่า ≥ min 90 → variant ใดก็
+    พอ → adequate clean ไม่มี caveat."""
+    needs, ctx = _watt_verdict_ctx(_watt_verdict_card(
+        variants=[{"output_power_w": w} for w in (100, 140)]))
+    reasons = _watt_reasons(ctx)
+    assert reasons == {"connector_match"}, (
+        f"ทุก variant พอสเปค → ไม่มี wattage reason — {reasons}")
+    answer = _render(_compose(needs, ctx,
+                              product_text="สายชาร์จ C to C 1m"))
+    assert "เต็มสเปค" not in answer and "ต่ำกว่าสเปค" not in answer, (
+        f"adequate → ไม่มี caveat — answer:\n{answer}")
+
+
+def test_all_below_variants_insufficient():
+    """Defect B case3: variants [45,65] ทุกค่า < min 90 → ได้ใบไหนก็ต่ำ
+    กว่า → insufficient (known-below ไม่ใช่ unconfirmed)."""
+    needs, ctx = _watt_verdict_ctx(_watt_verdict_card(
+        variants=[{"output_power_w": w} for w in (45, 65)]))
+    reasons = _watt_reasons(ctx)
+    assert "insufficient_wattage" in reasons, (
+        f"ทุก variant ต่ำกว่าสเปค = known-below — {reasons}")
+    assert "wattage_variant_unconfirmed" not in reasons, (
+        f"ทุกใบต่ำกว่าเหมือนกัน → ไม่ใช่ ambiguous — {reasons}")
+    answer = _render(_compose(needs, ctx,
+                              product_text="สายชาร์จ C to C 1m"))
+    assert "ต่ำกว่าสเปค" in answer, (
+        f"known-below ต้องบอกต่ำกว่าสเปค — answer:\n{answer}")
+
+
+def test_min_boundary_variants_adequate():
+    """Defect B case4: variants [90,100] ทุกค่า ≥ min 90 (รวม boundary)
+    → adequate clean."""
+    needs, ctx = _watt_verdict_ctx(_watt_verdict_card(
+        variants=[{"output_power_w": w} for w in (90, 100)]))
+    reasons = _watt_reasons(ctx)
+    assert reasons == {"connector_match"}, (
+        f"≥min ทุก variant → adequate — {reasons}")
+
+
+def test_title_watt_not_adequate_tier_in_selection(monkeypatch):
+    """A(selection): title '100W' ไร้ structured watt → ห้ามเข้า adequate
+    tier — structured-adequate card ต้องนำหน้าแม้ score ต่ำกว่า และ title
+    card ต้องติด unknown note (title ใช้ relevance ได้ ไม่ใช่ proof)."""
+    from shopeechat import device_compat as dc
+    monkeypatch.setattr(dc, "_lookup_spec_db",
+                        lambda name: {"device": "dev-x", "min_watt": 90.0}
+                        if name == "dev-x" else None)
+    pool = _pool((
+        _watt_cand("pTitle", "TurboCell adapter 100W fast", None,
+                   score=9.0),
+        _watt_cand("pStruct", "BaseCell AD 90W charger", 100,
+                   score=1.0),
+    ))
+    req = _req("req-0", types=("charger",), subs=("adapter",),
+               target="dev-x")
+    sel = rsel.select_for_llm_context(
+        pool, (req,), _profile(), needs=(), per_request_limit=3)
+    ids = [s.identity for s in sel.selected]
+    assert ids.index("i:pStruct") < ids.index("i:pTitle"), (
+        f"structured adequate ต้องนำหน้า title-watt (adequacy ≠ "
+        f"relevance) — order={ids}")
+    note = {s.identity: (s.card.get("_context_note") or "")
+            for s in sel.selected}
+    assert "ไม่ระบุกำลังไฟ" in note["i:pTitle"], (
+        f"title-only watt → unknown note — {note}")
+    assert not note["i:pStruct"], (
+        f"structured adequate → ไม่มี note — {note}")
+
+
+def test_variant_watt_notes_follow_typed_state(monkeypatch):
+    """C(selection): notes ต้องตาม truth table เดียวกับ verdict —
+    all-below=ต่ำกว่าสเปค / mixed=หลายตัวเลือก / all-adequate=clean."""
+    from shopeechat import device_compat as dc
+    monkeypatch.setattr(dc, "_lookup_spec_db",
+                        lambda name: {"device": "dev-x", "min_watt": 90.0}
+                        if name == "dev-x" else None)
+    pool = _pool((
+        _watt_cand("pBelow", "SlowCell adapter", None,
+                   variants=(45, 65), score=4.0),
+        _watt_cand("pMix", "FlexCell adapter", None,
+                   variants=(65, 100, 140), score=3.0),
+        _watt_cand("pOk", "SureCell adapter", None,
+                   variants=(100, 140), score=2.0),
+    ))
+    req = _req("req-0", types=("charger",), subs=("adapter",),
+               target="dev-x")
+    sel = rsel.select_for_llm_context(
+        pool, (req,), _profile(), needs=(), per_request_limit=3)
+    notes = {s.identity: (s.card.get("_context_note") or "")
+             for s in sel.selected}
+    assert "ต่ำกว่าสเปค" in notes["i:pBelow"], (
+        f"all-below → below note — {notes}")
+    assert "หลายตัวเลือก" in notes["i:pMix"], (
+        f"mixed → unconfirmed-variant note — {notes}")
+    assert not notes["i:pOk"], (
+        f"ทุก variant ≥min = adequate → ไม่มี note — {notes}")
+
+
+def test_invalid_wattage_values_fail_verdict():
+    """D(verdict): bool/NaN/Inf/zero/negative → ไม่เป็น structured watt
+    proof → missing_wattage_evidence (ไม่ใช่ adequate/insufficient)."""
+    for bad in (True, float("nan"), float("inf"), 0, -5):
+        needs, ctx = _watt_verdict_ctx(
+            _watt_verdict_card(output_power_w=bad))
+        reasons = _watt_reasons(ctx)
+        assert "missing_wattage_evidence" in reasons, (
+            f"output_power_w={bad!r} → missing ไม่ใช่ state อื่น — "
+            f"{reasons}")
+
+
+def test_invalid_min_watt_no_wattage_claim():
+    """D(verdict): target min_watt malformed/inf/zero/negative → ไม่มี
+    wattage reason ใดๆ (watt ไม่ใช่ส่วนของคำตอบ — verdict เดิม)."""
+    for bad in (float("nan"), float("inf"), 0, -5):
+        needs, ctx = _watt_verdict_ctx(
+            _watt_verdict_card(output_power_w=100), min_watt=bad)
+        reasons = _watt_reasons(ctx)
+        assert reasons == {"connector_match"}, (
+            f"min_watt={bad!r} → ไม่มี wattage claim — {reasons}")
+
+
+def test_invalid_wattage_unknown_note_in_selection(monkeypatch):
+    """D(selection): invalid structured watts → card ติด unknown note
+    (ไม่ใช่ below note ที่มีตัวเลขเท็จ)."""
+    from shopeechat import device_compat as dc
+    monkeypatch.setattr(dc, "_lookup_spec_db",
+                        lambda name: {"device": "dev-x", "min_watt": 90.0}
+                        if name == "dev-x" else None)
+    pool = _pool((
+        _watt_cand("pBool", "BoolCell", True, score=9.0),
+        _watt_cand("pInf", "InfCell", float("inf"), score=8.0),
+    ))
+    req = _req("req-0", types=("charger",), subs=("adapter",),
+               target="dev-x")
+    sel = rsel.select_for_llm_context(
+        pool, (req,), _profile(), needs=(), per_request_limit=3)
+    for s in sel.selected:
+        note = s.card.get("_context_note") or ""
+        assert "ไม่ระบุกำลังไฟ" in note, (
+            f"{s.identity} invalid watt → unknown note — {note!r}")
+
+
+def test_decided_compat_single_variant_watt_confirmed():
+    """LOW-3 control: variant เดียว 100W ≥ min_watt=90 → variant ยืนยัน
+    ได้ → ไม่มี caveat (ไม่ใช่ ambiguous)."""
+    need = _need_compat(subj=("AC65B",), trefs=("dev-x",))
+    req = _req("req-0", types=("cable",), codes=("AC65B",),
+               target="dev-x", cm="connector_required")
+    card = _sel_card("i:1", "subject", "req-0",
+                     "สายชาร์จ C to C 1m", model_codes=["AC65B"],
+                     connector="usb-c",
+                     variants=[{"output_power_w": 100}])
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "dev-x",
+         "data": {"connector": "usb-c", "min_watt": 90.0,
+                  "source": "spec-db"},
+         "subject_refs": ("i:1",)},))
+    ctx = _compile((need,), _selection((card, "req-0")), pool, (req,),
+                   _profile())
+    v = [x for x in ctx.compat_verdicts]
+    assert v and v[0].decision.outcome == "compatible", (
+        f"premise: connector match → compatible — {ctx.compat_verdicts}")
+    reasons = {r for x in v for r in x.decision.reason_codes}
+    assert "wattage_variant_unconfirmed" not in reasons, (
+        f"variant เดียว = confirmed → ห้ามติด unconfirmed — {reasons}")
+
+
+def test_decided_compat_adequate_watt_no_caveat():
+    """LOW-3 case3: subject output_w=90 >= min_watt=90 → verdict สะอาด
+    ไม่มี caveat และไม่มี missing_wattage_evidence reason."""
+    need = _need_compat(subj=("AC65B",), trefs=("dev-x",))
+    req = _req("req-0", types=("cable",), codes=("AC65B",),
+               target="dev-x", cm="connector_required")
+    card = _sel_card("i:1", "subject", "req-0",
+                     "สายชาร์จ C to C 1m", model_codes=["AC65B"],
+                     connector="usb-c", output_power_w=100)
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "dev-x",
+         "data": {"connector": "usb-c", "min_watt": 90.0,
+                  "source": "spec-db"},
+         "subject_refs": ("i:1",)},))
+    ctx = _compile((need,), _selection((card, "req-0")), pool, (req,),
+                   _profile())
+    v = [x for x in ctx.compat_verdicts]
+    assert v and v[0].decision.outcome == "compatible", (
+        f"premise: connector match → compatible — {ctx.compat_verdicts}")
+    reasons = {r for x in v for r in x.decision.reason_codes}
+    assert "missing_wattage_evidence" not in reasons, (
+        f"watt พอตามสเปค → ห้ามติด caveat — reasons={reasons}")
+    answer = _render(_compose((need,), ctx,
+                              product_text="สายชาร์จ C to C 1m"))
+    assert "เต็มสเปค" not in answer and "ช้ากว่า" not in answer, (
+        f"watt พอ → ห้ามมี caveat — answer:\n{answer}")
+
+
+def test_decided_compat_no_min_watt_unchanged():
+    """LOW-3 case6: device ไม่มี structured min_watt → verdict เดิม
+    ไม่มี caveat ไม่มี reason code (behavior เดิมทุกประการ)."""
+    need = _need_compat(subj=("AC65B",), trefs=("dev-x",))
+    req = _req("req-0", types=("cable",), codes=("AC65B",),
+               target="dev-x", cm="connector_required")
+    card = _sel_card("i:1", "subject", "req-0",
+                     "สายชาร์จ C to C 1m", model_codes=["AC65B"],
+                     connector="usb-c")
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "dev-x",
+         "data": {"connector": "usb-c", "source": "spec-db"},
+         "subject_refs": ("i:1",)},))
+    ctx = _compile((need,), _selection((card, "req-0")), pool, (req,),
+                   _profile())
+    v = [x for x in ctx.compat_verdicts]
+    assert v and v[0].decision.outcome == "compatible", (
+        f"premise: connector match → compatible — {ctx.compat_verdicts}")
+    reasons = {r for x in v for r in x.decision.reason_codes}
+    assert reasons == {"connector_match"}, (
+        f"ไม่มี min_watt → reasons ต้องเหมือนเดิม — {reasons}")
+    answer = _render(_compose((need,), ctx,
+                              product_text="สายชาร์จ C to C 1m"))
+    assert "เต็มสเปค" not in answer and "ช้ากว่า" not in answer, (
+        f"ไม่มี min_watt → ห้ามมี caveat — answer:\n{answer}")
+
+
+def test_mixed_variant_listing_no_full_speed_claim(monkeypatch):
+    """LOW-3 case4: listing มี variants 65/100/140W แต่ไม่มี selected
+    variant structured → ห้ามใช้ card-level max เป็นหลักฐาน full-speed —
+    pick ต้องติด uncertainty note เดิม (mixed-variant contract)."""
+    from shopeechat import device_compat as dc
+    monkeypatch.setattr(dc, "_lookup_spec_db",
+                        lambda name: {"device": "dev-x", "min_watt": 90.0}
+                        if name == "dev-x" else None)
+    pool = _pool((
+        _watt_cand("pM", "FlexCharge multi-adapter", None,
+                   variants=(65, 100, 140), score=5.0),))
+    req = _req("req-0", types=("charger",), subs=("adapter",),
+               target="dev-x")
+    sel = rsel.select_for_llm_context(
+        pool, (req,), _profile(), needs=(), per_request_limit=3)
+    by_id = {s.identity: s for s in sel.selected}
+    assert "i:pM" in by_id, f"premise: mixed cand ต้องถูกเลือก — {list(by_id)}"
+    note = by_id["i:pM"].card.get("_context_note") or ""
+    assert "หลายตัวเลือก" in note or "ยืนยัน" in note, (
+        f"mixed listing ไม่มี selected variant → ต้องติด uncertainty "
+        f"note ไม่ใช่สรุป full-speed จาก max — note={note!r}")
+
+
+def test_wattage_caveat_not_duplicated_in_final_answer():
+    """LOW-3 case5: compat turn ที่ verdict ติด caveat + card มี uncertainty
+    note → final answer เห็น caveat เดียว (note เป็น model-facing ไม่ render
+    ซ้ำเป็นย่อหน้าที่สอง)."""
+    need = _need_compat(subj=("AC65B",), trefs=("dev-x",))
+    req = _req("req-0", types=("cable",), codes=("AC65B",),
+               target="dev-x", cm="connector_required")
+    card = _sel_card("i:1", "subject", "req-0",
+                     "สายชาร์จ C to C 1m", model_codes=["AC65B"],
+                     connector="usb-c",
+                     _context_note="ไม่ระบุกำลังไฟ — ยืนยันเต็มสเปคไม่ได้")
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "dev-x",
+         "data": {"connector": "usb-c", "min_watt": 90.0,
+                  "source": "spec-db"},
+         "subject_refs": ("i:1",)},))
+    ctx = _compile((need,), _selection((card, "req-0")), pool, (req,),
+                   _profile())
+    answer = _render(_compose((need,), ctx,
+                              product_text="สายชาร์จ C to C 1m"))
+    assert "เต็มสเปค" in answer, (
+        f"caveat ต้องถึง final answer — answer:\n{answer}")
+    assert answer.count("เต็มสเปค") == 1, (
+        f"caveat ต้องไม่ซ้ำสองย่อหน้า — answer:\n{answer}")
 
 
 # ── LOW-4: intrinsic ask ใน compat-target span — decided ห้ามทำหาย ──────────

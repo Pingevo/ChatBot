@@ -7842,3 +7842,69 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 **mechanism delta จริง:** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 fallbacks+0 deps+0 provider+0 · reason Literal +1 ค่า · typed field +1 (`clarify_types`) · need-outcome set +1 (`clarify`) · renderer branch +1 · merge arg +1 → **net ≈ +3 (ทั้งหมดใน existing owner contracts เดิม)**
 **SRS §6:** `UnansweredNeed` (reason+field) · `compile_answer_context` (FIX-5 condition) · `_unanswered_segment` (clarify render + `_type_query_word` call) · `_render_composition` (merge union) — ครบ
 **หมายเหตุ:** "decided candidates" = post-gate `cands` (products-for-device asks verdict pass skip ตาม contract เดิม "selection คือคำตอบอยู่แล้ว" → decided = selection-decided; verdicted asks = incompatible dropped แล้วจาก compat filter → span นับเฉพาะ servable types) · partial-undecided compat need (uncovered) → no_evidence path เดิม clarify ไม่ไหล · `primary_action` คง `execute_needs` — clarify เป็น per-need typed outcome (เลือก A — mixed turn ตอบ need อื่นต่อได้; literal action จะตัด coverage ของ need อื่น)
+
+### Phase 10B residual defects — กำลังจะทำ (mandate รอบใหม่ ห้าม commit)
+
+- **PART 1 (implement):** LOW-1b/1c — `compose_answer` synth `UnansweredNeed` 2 จุด (no_answer line ~1873, no_selection/context=None line ~1882) ไม่ส่ง `capability_asks` → populate field เดิมด้วย keyword arg; unxfail 2 tests
+- **PART 2 (implement):** LOW-3a/3b — wattage truth: connector-match `compatible` ≠ full-speed เมื่อ target มี `min_watt` แต่ subject ไม่มี `output_w`; trace canonical path (reason_codes → verdict segment vs `_context_note` → LLM context) ก่อนเลือก owner; ห้าม caveat ซ้ำ 2 ย่อหน้าใน final answer
+- **PART 3 (design gate เท่านั้น ห้าม runtime):** LOW-2 (subject-ref intent contract: current_subject/new_discovery/explicit_subject/unknown — ห้ามขยาย carrier เดิม), LOW-4c (relation ask vs intrinsic capability ask typed distinction)
+- **PART 4-5:** bounded verification + SRS + report; ห้าม stage/commit/push
+
+### LOW-1b/1c + LOW-3a/3b — ผ่านแล้ว ✓ (uncommitted, mandate ห้าม commit)
+
+**error → cause → fix → impact:**
+- LOW-1b/1c: capability ask หายเงียบเมื่อ task need แต่ answer ว่าง หรือ context ล้ม ← `compose_answer` synth `UnansweredNeed` 2 path (no_answer ~1873, ctx=None no_selection ~1882) ไม่ส่ง `capability_asks` ← populate keyword arg เดิมจาก NeedTask/TurnNeed (field+renderer มีอยู่แล้ว) ← outcome name ask verbatim ทุก path; asks ว่าง → render เดิม
+- LOW-3a: pick ไม่มี watt evidence เลยถูกเสนอเงียบๆ เมื่อ device มี min_watt ← `_minw` block ใน `select_for_llm_context` มี note เฉพาะ known-below + mixed-variant ← `elif not _vw:` → `_context_note` "ไม่ระบุกำลังไฟ — ยืนยันไม่ได้ว่าชาร์จเต็มสเปคได้" (model-facing เดิม) ← unknown ≠ below-target
+- LOW-3b: "ชาร์จ X ได้ไหม" connector match → "ใช้ได้" เปล่า แม้ไม่มีหลักฐาน watt ถึง min_watt ← `resolve_compat` ไม่ consult min_watt; `_compat_segment` render แค่ outcome ← charges + target `min_watt` fact + subject ไม่มี `output_w` ที่พิสูจน์ถึง → append `missing_wattage_evidence` (reason_codes เดิม) → `_compat_segment` append caveat clause เดียว (canonical customer path; verdict คง compatible) ← customer เห็น "หัวต่อเข้ากันได้ แต่ยังยืนยันไม่ได้ว่าชาร์จเต็มสเปคตามที่อุปกรณ์ต้องการ อาจชาร์จช้ากว่าปกติค่ะ"
+**RED→GREEN:** unxfail 4 + truth-table tests 4 ใหม่ — RED 4 (caveat/note ไม่มี) → GREEN 8/8 (+4 control: adequate-watt/no-min-watt/mixed-variant/dup-guard)
+**regression:** 10b+compat_decision+target_ownership+turn_decision+retrieval_selection×2+phase7 = **272 passed, 4 xfailed** (LOW-2abc+LOW-4c คง design gate) · phase8+phase11×2+phase5+r12+issue5f = **374 passed** · compat_mode_filter **144/144** · handoff_transport **47/47** · py_compile+diff --check clean
+**mechanism delta จริง:** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 fallbacks+0 deps+0 provider+0 · reason_codes +1 ค่า (`missing_wattage_evidence`) · elif branch +1 (unknown-watt note) · field populate +0 (มีอยู่แล้ว) → **net ≈ +2 ใน contract เดิม**
+**SRS §6:** `compose_answer` (LOW-1 synth carry) · `resolve_compat` (wattage caveat reason) · `_compat_segment` (caveat clause) · `select_for_llm_context` (unknown-watt note) — ครบ
+**หมายเหตุ:** `missing_wattage_evidence` semantics = "ไม่มีหลักฐานพิสูจน์กำลังชาร์จถึง min_watt" (absent หรือ below รวมกัน — caveat wording เดียว จริงทั้งสองเคส); `_context_note` = model-facing ไม่ซ้ำกับ segment ใน final answer; LOW-2/LOW-4c = design proposals รอ approval
+
+### Wattage semantics correction — กำลังจะทำ (mandate: 4 states, ห้าม commit)
+
+- **root cause (verified):** `resolve_compat` (policy_resolver.py ~807) collapse 2 truth states — `output_w` ขาด กับ `output_w=65<90` ได้ `missing_wattage_evidence` เดียวกัน; และ `_have_w=max(output_w)` — `output_w` fact มาจาก `_extract_max_wattage` = max รวม variants → listing 65/100/140W ที่ยังไม่ยืนยัน variant ถูกตี adequate จาก max=140
+- **fix:** (a) `extract_field_facts` emit `output_w_variants` fact เมื่อ distinct structured variant watts >1 (extract owner เดิม) (b) `resolve_compat` แยก 3 codes: `wattage_variant_unconfirmed` (หลาย variant ไม่ยืนยัน — ก่อน adequacy check) / `missing_wattage_evidence` (ไม่มี watt เลย) / `insufficient_wattage` (รู้ watt แต่ต่ำกว่า min) (c) `_compat_segment` render 3 clause ตาม code — verdict คง compatible ทุกเคส
+- **tests:** strengthen case2 (ต้อง "ต่ำกว่าสเปค" ไม่ใช่ unknown phrasing) + verdict-level ambiguous-variant + controls เดิม
+
+### Wattage semantics correction — ผ่านแล้ว ✓ (uncommitted, mandate ห้าม commit)
+
+**error → cause → fix → impact:**
+- 2 truth states collapse: `output_w` ขาด vs `65<90` ได้ `missing_wattage_evidence`+wording เดียว ← resolve_compat มี code เดียวครอบทั้ง absent/below ← แยก `missing_wattage_evidence` (ไม่มี watt) / `insufficient_wattage` (รู้ watt ต่ำกว่า min) → segment render clause ต่างกัน
+- listing 65/100/140W ไม่มี selected variant ถูกตี adequate ← `output_w` fact = `_extract_max_wattage` = max รวม variants (140) ≥ 90 → ไม่มี caveat ← `extract_field_facts` emit `output_w_variants` (distinct structured variant watts เมื่อ >1) → `wattage_variant_unconfirmed` ก่อน adequacy check → "มีหลายตัวเลือกกำลังไฟ ยังไม่ยืนยันตัวเลือกที่จะได้รับ"
+**RED→GREEN:** case2 (insufficient wording) + ambiguous-variant verdict → RED 2 → GREEN 9/9 wattage suite (+single-variant control +ทุกเคสเดิม)
+**regression:** 10b+compat_decision+target_ownership+retrieval_selection×2+phase7 = **163 passed, 4 xfailed** · phase8+phase11+turn_decision+phase5+r12 = **462 passed** · py_compile+diff --check clean · LOW-2abc+LOW-4c ยัง xfail + turn_decision zero diff
+**mechanism delta จริง:** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 · reason_codes +2 (`insufficient_wattage`, `wattage_variant_unconfirmed`) · FieldEvidence fact_key +1 (`output_w_variants`) · segment branches +2 → **net ≈ +3 ใน contract เดิม**
+**SRS §6:** `resolve_compat` (3 states) · `_compat_segment` (3 clauses) · `extract_field_facts` (fact emit) · `FieldEvidence` (key list) — ครบ
+**หมายเหตุ:** ไม่มี selected-variant contract ใน FieldEvidence → >1 distinct = unconfirmed เสมอ (fail-closed, แม้ทุก variant ≥ min ก็ยังไม่รู้ว่าได้ใบไหน); wording เดียวต่อ state, ไม่มีตัวเลข (typed fields ไม่พก watt ถึง segment — ไม่เพิ่ม field ใหม่)
+
+### Wattage evidence contract correction — กำลังจะทำ (mandate: ห้าม commit)
+
+- **Defect A:** `output_w` fact = `_extract_max_wattage` fallback ไปอ่าน "100W" จากชื่อสินค้า → name-derived watt กลายเป็น full-speed proof (ชื่อมี 100W + min 90 → adequate ผิด); `output_w` มี consumer อื่น (claim_supported grounding) → ห้ามเปลี่ยน semantics ← emit `output_w_structured` (structured fields เท่านั้น: card/specs `output_power_w` + variants) แทน `output_w_variants`; resolve_compat อ่านเฉพาะมัน
+- **Defect B:** `output_w_variants` len>1 → unconfirmed เสมอ แม้ทุก variant ≥min ← truth table บน structured set ทั้งหมด: ว่าง→missing / ทุกค่า<min→insufficient / ทุกค่า≥min→adequate-clean / mixed→unconfirmed (single value = confirmed compare ปกติ)
+
+### Wattage evidence contract correction — ผ่านแล้ว ✓ (uncommitted)
+
+**error → cause → fix → impact:**
+- Defect A: ชื่อมี "100W" + ไม่มี structured watt + min=90 → adequate ผิด ← `output_w` fact = `_extract_max_wattage` fallback ไป parse ชื่อ; `output_w` มี consumer อื่น (claim grounding) ห้ามเปลี่ยน ← emit `output_w_structured` (card/specs `output_power_w` + variants เท่านั้น) แทน `output_w_variants`; resolve_compat อ่านเฉพาะมัน ← name-derived watt ไม่ใช่ proof อีก → missing_wattage_evidence + caveat
+- Defect B: variants >1 → unconfirmed เสมอ ← len>1 check อย่างเดียว ไม่ประเมินค่า ← truth table บน structured set: ทุกค่า <min → insufficient (known-below ไม่ใช่ ambiguous) / ทุกค่า ≥min → adequate clean / mixed → unconfirmed / ว่าง → missing ← [100,140] clean, [45,65] insufficient, [65,100,140] unconfirmed, name-only → missing
+**RED→GREEN:** name-watt + 3 variant-set cases → RED 4 → GREEN 13/13 wattage suite
+**regression:** mandated list = **167 passed, 4 xfailed** · related = **479 passed** · py_compile+diff --check clean · turn_decision zero diff
+**mechanism delta จริง (สุทธิ vs committed):** helpers+0 guards+0 regex+0 kw-tables+0 owners+0 · fact_key net +1 (`output_w_structured` แทน `output_w_variants` — แก้ในรอบเดียวกัน ยังไม่ commit) · reason_codes +2 (insufficient/unconfirmed; missing อยู่แล้ว) · segment branches +2 → **net ≈ +3**
+**SRS §6:** `extract_field_facts` + `FieldEvidence` (output_w_structured) + `resolve_compat` (set truth table) — `_compat_segment`/`select_for_llm_context` ไม่แตะรอบนี้
+
+### Wattage proof unify (verdict+selection+ranking) — กำลังจะทำ (mandate: ห้าม commit)
+
+- **gap A (verified):** `retrieval_selection` sort ใช้ `_wattage_asc_key` → `_extract_max_wattage` (name-fallback) → ชื่อ "100W" ไร้ structured watt ถูกจัด tier adequate (retrieval_selection.py ~296-322, device_compat.py:836/1216)
+- **gap B:** numeric validation ขาด — `True`/`False`/`NaN`/`Inf` ผ่าน extraction ได้ (bool=int subtype, inf>0)
+- **fix:** canonical `device_compat._structured_watts(card)` (numeric จริง/ไม่ใช่ bool/finite/>0 — card+specs+variants เท่านั้น; name คง `_extract_max_wattage` สำหรับ relevance เดิม) — consumers: `extract_field_facts` (output_w_structured emit), `_wattage_asc_key` (tier adequate = ทุก structured ≥min), `_minw` note block (ว่าง→unknown/ทุก<→below/mixed→unconfirmed/ทุก≥→clean), `resolve_compat` +finite guard บน min_watt — verdict semantics เดิมทุกประการ
+
+### Wattage proof unify (verdict+selection+ranking) — ผ่านแล้ว ✓ (uncommitted)
+
+**error → cause → fix → impact:**
+- title "100W" ไร้ structured watt ถูกจัด adequate tier + เลี่ยง unknown note ← `_wattage_asc_key`/note ใช้ `_extract_max_wattage` (name-fallback) ← canonical `device_compat._structured_watts` (structured-only set: canonical_specs/specs/card output_power_w + variants — numericจริง/ไม่ใช่bool/finite/>0) ใช้ร่วมกันทั้ง verdict fact, sort tier, note ← adequate = ทุกค่า≥min เท่านั้น; title watt คงใช้ relevance (`output_w` fact, no-min sort) ได้
+- bool/NaN/Inf/0/neg ผ่านเป็น watt proof / inf min_watt → insufficient ผิด ← ไม่มี numeric validation ← predicate เดียวใน `_structured_watts` + finite guards บน `_req_w`(verdict)/`_minw`(selection) — invalid target → ไม่มี wattage claim
+**RED→GREEN:** title-tier + note-state + invalid-verdict + invalid-min + invalid-note → RED 5 → GREEN 14/14 wattage suite
+**regression:** mandated = **172 passed, 4 xfailed** · related = **572 passed** · py_compile+diff --check clean · turn_decision zero diff · `_structured_watts` ไม่มี name/regex
+**mechanism delta (สุทธิ vs committed):** helpers +1 (`_structured_watts` — mandate อนุญาต canonical owner เดียว แทน extraction ซ้ำ 2 จุดใน extract_field_facts+selection) · guards +0 · regex +0 · kw-tables +0 · owners +0 · imports +2 (math×2)

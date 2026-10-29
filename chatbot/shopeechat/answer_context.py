@@ -1589,9 +1589,24 @@ _DOMAIN_ORDER = {"claim": 0, "compat": 1, "constraint": 2,
 
 def _compat_segment(v: CompatVerdict) -> str:
     """deterministic verdict segment — subject display + target +
-    outcome เท่านั้น (typed fields; ไม่มี proof dict/prose เสริม)"""
+    outcome เท่านั้น (typed fields; ไม่มี proof dict/prose เสริม);
+    wattage reason codes = connector fit แต่กำลังชาร์จยังไม่ครบสเปค →
+    caveat clause ต่อท้าย segment เดิม (ห้าม render bare ใช้ได้):
+    insufficient_wattage = รู้ watt ต่ำกว่า / wattage_variant_unconfirmed
+    = หลาย variant ไม่ยืนยัน / missing_wattage_evidence = ไม่มี watt เลย"""
     if v.decision.outcome == "compatible":
-        return (f"{v.subject_name} ใช้งานร่วมกับ {v.target} ได้ค่ะ")
+        seg = f"{v.subject_name} ใช้งานร่วมกับ {v.target} ได้ค่ะ"
+        _rc = set(v.decision.reason_codes or ())
+        if "insufficient_wattage" in _rc:
+            seg += (" — หัวต่อเข้ากันได้ แต่กำลังไฟที่ยืนยันได้ต่ำกว่า"
+                    "สเปคของอุปกรณ์ จึงอาจชาร์จได้ช้ากว่าค่ะ")
+        elif "wattage_variant_unconfirmed" in _rc:
+            seg += (" — หัวต่อเข้ากันได้ แต่มีหลายตัวเลือกกำลังไฟ ยังไม่"
+                    "ยืนยันตัวเลือกที่จะได้รับ จึงยืนยันเต็มสเปคไม่ได้ค่ะ")
+        elif "missing_wattage_evidence" in _rc:
+            seg += (" — หัวต่อเข้ากันได้ แต่ยังยืนยันไม่ได้ว่าชาร์จ"
+                    "เต็มสเปคตามที่อุปกรณ์ต้องการ อาจชาร์จช้ากว่าปกติค่ะ")
+        return seg
     if v.decision.outcome == "incompatible":
         return f"{v.subject_name} ใช้งานร่วมกับ {v.target} ไม่ได้ค่ะ"
     return ""   # outcome นอก whitelist → ไม่ render compat claim
