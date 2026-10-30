@@ -261,3 +261,114 @@ def test_resolve_subjects_called_exactly_once():
     # Phase 2C.2: persisted/derived subject set แทน timeline resolver เดิม
     src = (ROOT / "chatbot" / "shopeechat" / "app.py").read_text(encoding="utf-8")
     assert src.count("resolve_subjects(") == 1
+
+
+# ── Phase 10B r2: pseudo-type intent scope — accessor เดียว ──
+
+def test_pseudo_other_intent_type_not_in_profile():
+    # reviewer finding: intent product_type="other" (classifier catch-all —
+    #   ไม่ใช่ canonical sellable type) ต้องไม่เข้า profile.product_types;
+    #   typed accessor เดียว `intent_product_scope` fail closed → unscoped
+    got = build_retrieval_profile(
+        "รุ่นนี้ต่างกันยังไง",
+        history=[],
+        intent_result={"intent": "product_spec", "product_type": "other",
+                       "confidence": 0.95},
+        shop="x",
+    )
+    assert got.product_types == frozenset()
+    assert ("product_types", "intent") not in got.fact_sources
+
+
+def test_unknown_intent_type_not_in_profile():
+    got = build_retrieval_profile(
+        "รุ่นนี้ต่างกันยังไง",
+        history=[],
+        intent_result={"intent": "product_spec", "product_type": "bogus_gadget",
+                       "confidence": 0.95},
+        shop="x",
+    )
+    assert got.product_types == frozenset()
+    assert ("product_types", "intent") not in got.fact_sources
+
+
+def test_canonical_intent_type_via_accessor_unchanged():
+    # canonical ที่ accessor validate ผ่าน (dashcam อยู่ใน PRODUCT_TYPES)
+    #   → intent proposal เดิมทำงานเหมือนเดิมเมื่อไม่มี current/anchor type
+    got = build_retrieval_profile(
+        "รุ่นนี้ต่างกันยังไง",
+        history=[],
+        intent_result={"intent": "product_recommend", "product_type": "dashcam",
+                       "confidence": 0.95},
+        shop="x",
+    )
+    assert got.product_types == frozenset({"dashcam"})
+    assert ("product_types", "intent") in got.fact_sources
+
+
+def test_subtype_domain_intent_maps_to_subtype_unchanged():
+    # "cable" = subtype domain — accessor → (None, "cable") เหมือนเดิม;
+    #   subtype ⇒ charger family + unit-domain expansion เดิม
+    got = build_retrieval_profile(
+        "รุ่นนี้ต่างกันยังไง",
+        history=[],
+        intent_result={"intent": "product_spec", "product_type": "cable",
+                       "confidence": 0.95},
+        shop="x",
+    )
+    assert got.subtype == "cable"
+    assert got.product_types == frozenset({"charger", "cable"})
+    assert ("subtype", "intent") in got.fact_sources
+
+
+def test_intent_charger_plus_subtype_pair_unchanged():
+    got = build_retrieval_profile(
+        "รุ่นนี้ต่างกันยังไง",
+        history=[],
+        intent_result={"intent": "product_spec", "product_type": "charger",
+                       "charger_subtype": "adapter", "confidence": 0.95},
+        shop="x",
+    )
+    assert got.subtype == "adapter"
+    assert got.product_types == frozenset({"charger"})
+    assert ("product_types", "intent") in got.fact_sources
+
+
+def test_current_message_type_beats_intent_proposal():
+    got = build_retrieval_profile(
+        "หูฟังตัวไหนดี",
+        history=[],
+        intent_result={"intent": "product_recommend", "product_type": "charger",
+                       "confidence": 0.95},
+        shop="x",
+    )
+    assert got.product_types == frozenset({"earphone"})
+    assert "charger" not in got.product_types
+
+
+def test_compatible_anchor_beats_intent_proposal():
+    got = build_retrieval_profile(
+        "รุ่นนี้ต่างกันยังไง",
+        history=[],
+        intent_result={"intent": "product_recommend", "product_type": "charger",
+                       "confidence": 0.95},
+        shop="x",
+        anchor_cards=[{"item_id": 1,
+                       "name": "Anker Soundcore R50i หูฟังบลูทูธ"}],
+    )
+    assert got.product_types == frozenset({"earphone"})
+    assert ("product_types", "anchor") in got.fact_sources
+
+
+def test_low_confidence_intent_scope_not_applied():
+    # conf gate ≥0.7 เดิม — ต่ำกว่าต้องไม่รับทั้ง type/subtype จาก intent
+    got = build_retrieval_profile(
+        "รุ่นนี้ต่างกันยังไง",
+        history=[],
+        intent_result={"intent": "product_recommend", "product_type": "dashcam",
+                       "charger_subtype": "cable", "confidence": 0.4},
+        shop="x",
+    )
+    assert got.product_types == frozenset()
+    assert got.subtype is None
+    assert ("product_types", "intent") not in got.fact_sources

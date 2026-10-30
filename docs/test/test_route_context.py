@@ -48,6 +48,30 @@ def main() -> int:
     assert corr.get("พาวเวอแบงค์") == "พาวเวอร์แบงค์", corr
     print("PASS thai typo: พาวเวอแบงค์→พาวเวอร์แบงค์")
 
+    # ── intent_product_scope: pseudo/non-canonical type → no scope ──
+    # "other" คือ catch-all label ของ classifier (declared domain —
+    #   ไม่ใช่ canonical sellable type) — ห้ามกลายเป็น product scope
+    assert rc.intent_product_scope({"product_type": "other"}) == (None, None)
+    assert rc.intent_product_scope({"product_type": "bogus_type"}) == (None, None)
+    assert rc.intent_product_scope({"product_type": "gadget"}) == (None, None)
+    # canonical top-level type ผ่านเหมือนเดิม (รวมชื่อนอก declared prompt
+    #   domain แต่อยู่ใน PRODUCT_TYPES registry — เช่น dashcam)
+    assert rc.intent_product_scope({"product_type": "charger"}) == ("charger", None)
+    assert rc.intent_product_scope({"product_type": "earphone"}) == ("earphone", None)
+    assert rc.intent_product_scope({"product_type": "dashcam"}) == ("dashcam", None)
+    # subtype-domain precedence เดิม (car_charger เป็นทั้ง subtype key และ
+    #   canonical name — subtype domain ต้องชนะเหมือนเดิม)
+    assert rc.intent_product_scope({"product_type": "cable"}) == (None, "cable")
+    assert rc.intent_product_scope({"product_type": "car_charger"}) == (None, "car_charger")
+    assert rc.intent_product_scope(
+        {"product_type": "charger", "charger_subtype": "adapter"}
+    ) == ("charger", "adapter")
+    # malformed/missing/non-str → fail closed
+    for bad in (None, {}, {"product_type": None}, {"product_type": 7},
+                {"product_type": ["charger"]}, {"product_type": ""}):
+        assert rc.intent_product_scope(bad) == (None, None), bad
+    print("PASS intent_product_scope canonical gate")
+
     print("\nALL PASS")
     return 0
 

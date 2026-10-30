@@ -245,6 +245,61 @@ def test_request_to_need_attribution_single_owner():
         "no attribution copy inside the compiler")
 
 
+def test_pseudo_intent_type_does_not_scope_gate_candidates():
+    # q182-shaped live defect: intent product_spec conf 0.95 +
+    # product_type="other" (classifier catch-all — ไม่ใช่ canonical sellable
+    # type) — need ต้อง scope ว่าง; selected card ที่ valid ต้องไม่ถูก
+    # product scope gate ทิ้ง → evidence ต้องถึง AnswerContext
+    msg = ("CUKTECH A18T 30W GaN หัวชาร์จ / CTC กับ "
+           "[ลดเหลือ 50] สายสำรอง Huawei Band 6 ต่างกันยังไง")
+    plan = td.decide_turn(msg, history=[], intent_result={
+        "intent": "product_spec", "product_type": "other",
+        "charger_subtype": None, "subject_scope": "current_set",
+        "subject_count": 2, "confidence": 0.95})
+    prodish = [n for n in plan.needs if n.kind in ("product", "compare")]
+    assert prodish, plan.needs
+    assert all("other" not in n.product_types for n in prodish), (
+        f"pseudo-type 'other' ห้ามเป็น need scope — "
+        f"{[(n.kind, n.product_types) for n in prodish]}")
+    sc = _sel_card("i:1", "subject", "req-0", "CUKTECH A18T 30W GaN",
+                   canonical_type="charger", model_codes=["A18T"])
+    sel = _selection((sc, "req-0"))
+    ctx = _compile(plan.needs, sel,
+                   _pool((_pooled("i:1", "1", codes=("A18T",)),)),
+                   (_req(types=("charger",), codes=("A18T",)),),
+                   _profile(msg))
+    assert ctx.products, (
+        "valid selected card ต้องไม่ถูกทิ้งเพราะ pseudo-type scope")
+
+
+def test_pseudo_intent_type_unscoped_need_attributes_and_reaches_context():
+    # q184-shaped live defect: intent product_recommend conf 0.95 +
+    # product_type="other" — need ต้อง attribute แบบ unscoped เข้า
+    # dashcam/camera slot requests และ selected evidence ต้องไปถึง
+    # AnswerContext (ก่อนแก้: {'other'} ∩ {'dashcam','camera'} = ∅ →
+    # ไม่ attribute → no_selection)
+    msg = ("[ลดเหลือ 1649] iSUPER Dash Cam Lite กับ "
+           "[ลดเหลือ 1649] iSUPER Dash Cam Lite เลือกตัวไหนดี")
+    plan = td.decide_turn(msg, history=[], intent_result={
+        "intent": "product_recommend", "product_type": "other",
+        "charger_subtype": None, "confidence": 0.95})
+    prodish = [n for n in plan.needs if n.kind in ("product", "compare")]
+    assert prodish, plan.needs
+    dash = _req(rid="req-0", slot="slot-dashcam", types=("dashcam",))
+    cam = _req(rid="req-1", slot="slot-camera", types=("camera",))
+    for n in prodish:
+        assert n in rsel.needs_for_request(dash, plan.needs), (
+            f"unscoped need ต้อง attribute เข้า dashcam request — {n}")
+        assert n in rsel.needs_for_request(cam, plan.needs), (
+            f"unscoped need ต้อง attribute เข้า camera request — {n}")
+    sc = _sel_card("i:1", "slot", "req-0", "iSUPER Dash Cam Lite",
+                   canonical_type="dashcam")
+    sel = _selection((sc, "req-0"))
+    ctx = _compile(plan.needs, sel, _pool(), (dash, cam), _profile(msg))
+    assert ctx.products, (
+        "selected evidence ต้องไปถึง AnswerContext — ไม่ใช่ no_selection")
+
+
 def test_unrelated_need_gets_no_other_products():
     # selection produced under need A's request; compile with unrelated need B
     need_b = TurnNeed(kind="product", operation="recommend",

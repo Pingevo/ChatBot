@@ -163,9 +163,11 @@ def intent_confidence(intent_result: dict | None) -> float:
 
 def intent_product_scope(intent_result: dict | None
                           ) -> tuple[str | None, str | None]:
-    """intent → (product_type, charger_subtype) proposals — type name จริง
-    เท่านั้น; ค่า subtype domain (เช่น "cable") → subtype (model พูด subtype
-    แทน type); charger_subtype field นับเฉพาะเมื่อ product_type=="charger"
+    """intent → (product_type, charger_subtype) proposals — canonical
+    product_type เท่านั้น (validate ด้วย product_store.PRODUCT_TYPES;
+    non-canonical catch-all เช่น "other" → empty scope); ค่า subtype domain
+    (เช่น "cable") → subtype (model พูด subtype แทน type); charger_subtype
+    field นับเฉพาะเมื่อ product_type=="charger"
     """
     if not intent_result:
         return None, None
@@ -180,7 +182,8 @@ def intent_product_scope(intent_result: dict | None
         return None, pt
     if pt == "charger" and st in _ps._CHARGER_SUBTYPES:
         return pt, st
-    return (pt or None), None
+    allowed = frozenset(n for n, _k, _r in _ps.PRODUCT_TYPES)
+    return (pt if pt in allowed else None), None
 
 
 def intent_fact_scope(intent_result: dict | None
@@ -536,15 +539,9 @@ def build_retrieval_profile(
     isubtype: str | None = None
     idevice: str | None = None
     if confidence >= 0.7:
-        iv = intent_result.get("product_type")
-        if isinstance(iv, str) and iv:
-            itypes = frozenset({iv})
-        elif isinstance(iv, (list, tuple, set)):
-            itypes = frozenset(str(x) for x in iv if x)
-        # ค่า subtype domain (เช่น "cable") ไม่ใช่ type proposal — normalize
-        # ไปที่ subtype แทน ไม่ให้ปนเข้า product_types
-        itypes = frozenset(t for t in itypes if t not in _ps._CHARGER_SUBTYPES)
-        isubtype = intent_product_scope(intent_result)[1]
+        itype, isubtype = intent_product_scope(intent_result)
+        if itype:
+            itypes = frozenset({itype})
         dv = intent_result.get("target_device")
         if dv:
             idevice = str(dv)
