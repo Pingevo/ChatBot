@@ -418,7 +418,7 @@ def run_turn(combo: str, case_id: str, conv: str, *, message: str,
         QUOTA_DEAD["at"] = f"{combo}|{case_id} (dead-intent streak x3)"
     results.append(rec)
     _persist()
-    time.sleep(4)                    # provider pacing (not a retry)
+    time.sleep(8)                    # provider pacing (not a retry)
     return rec
 
 
