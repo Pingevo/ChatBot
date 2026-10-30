@@ -505,13 +505,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--smoke", action="store_true",
                     help="run 3 conversations × A/B/C then stop")
+    ap.add_argument("--skip-convs", action="store_true",
+                    help="skip conversation smoke phase (resume)")
+    ap.add_argument("--cases", default="",
+                    help="comma-separated case-id substrings — gold filter")
     args = ap.parse_args()
 
     print(f"new_gid={NEW_GID} old_gid={OLD_GID} ts={TS}")
     smoke_fails: list[str] = []
 
     # ── smoke: conversations, round-robin per conversation ──────────────
-    for name, cdef in CONVS.items():
+    if not args.skip_convs:
+      for name, cdef in CONVS.items():
         for cname in ("A", "B", "C"):
             PM._COMBO = {**COMBOS[cname], "web_search_enabled": False}
             recs = run_conv(cname, name, cdef)
@@ -560,7 +565,9 @@ def main():
         return
 
     # ── full matrix: gold 26, round-robin per case ───────────────────────
-    for case in gold_cases():
+    _filt = [s.strip() for s in args.cases.split(",") if s.strip()]
+    for case in [c for c in gold_cases()
+                 if not _filt or any(f in c["id"] for f in _filt)]:
         for cname in ("A", "B", "C"):
             if QUOTA_DEAD["dead"]:
                 break
