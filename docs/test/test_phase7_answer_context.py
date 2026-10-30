@@ -784,3 +784,197 @@ def test_no_drop_baseline_ordinals_unchanged():
     body = ctx.context_text()
     assert '"need_indices": [\n      1' in body
     assert '"need_indices": [\n      2' in body
+
+
+# ── Phase 10B Round 4: charger-family scope membership ─────────────────────
+# declared 'charger' type scope = family head ของ charger domain — member
+# types = union(units._SUBTYPE_TO_TYPES.values()) — request attribution,
+# AnswerContext scope gate และ executor bucket ต้องใช้ artifact เดียวกัน;
+# explicit subtype แคบกว่า family เสมอ — member ไม่ expand เป็น sibling
+
+
+def _fam_need(**kw):
+    return TurnNeed(kind="product", operation="recommend",
+                    product_types=frozenset({"charger"}), **kw)
+
+
+def _ctype_card(identity, rid, ctype, roles=(), name="X"):
+    return _sel_card(identity, "slot", rid, name,
+                     canonical_type=ctype, canonical_roles=list(roles))
+
+
+def test_generic_charger_need_admits_cable_card_in_context():
+    need = _fam_need()
+    req = _req(rid="req-0", types=("charger",))
+    sc = _ctype_card("i:1", "req-0", "cable", roles=("cable",),
+                     name="CUKTECH Cable 240W")
+    ctx = _compile((need,), _selection((sc, "req-0")), _pool(),
+                   (req,), _profile())
+    assert ctx.products, (
+        "charger-family scope ต้องยอมรับ member card canonical_type='cable'")
+
+
+def test_charger_scope_covers_all_member_types_at_gate():
+    # member set derived จาก typed owner — ไม่เขียนรายชื่อซ้ำใน test
+    from shopeechat import units as _u
+    members = set().union(*_u._SUBTYPE_TO_TYPES.values())
+    assert "cable" in members and "charger" in members
+    for ctype in sorted(members):
+        need = _fam_need()
+        req = _req(rid="req-0", types=("charger",))
+        sc = _ctype_card("i:1", "req-0", ctype, name=f"{ctype} card")
+        ctx = _compile((need,), _selection((sc, "req-0")), _pool(),
+                       (req,), _profile())
+        assert ctx.products, (
+            f"member type {ctype!r} ต้องผ่าน generic charger scope gate")
+
+
+def test_generic_charger_need_attributes_cable_request():
+    need = _fam_need()
+    cable_req = _req(rid="req-0", slot="slot-cable",
+                     types=("cable",), subs=("cable",))
+    assert need in rsel.needs_for_request(cable_req, (need,)), (
+        "cable-scoped request เป็น member ของ charger family — "
+        "generic charger need ต้อง attribute")
+
+
+def test_cable_need_attributes_generic_charger_request():
+    need = TurnNeed(kind="product", operation="recommend",
+                    subtypes=frozenset({"cable"}))
+    req = _req(rid="req-0", types=("charger",))
+    assert need in rsel.needs_for_request(req, (need,)), (
+        "generic charger request cover family — cable need ต้อง attribute")
+
+
+def test_explicit_cable_need_rejects_other_family_cards():
+    need = TurnNeed(kind="product", operation="recommend",
+                    subtypes=frozenset({"cable"}))
+    req = _req(rid="req-0", types=("charger",), subs=("cable",))
+    adapter = _ctype_card("i:a", "req-0", "charger",
+                          roles=("adapter",), name="Adapter")
+    wireless = _ctype_card("i:w", "req-0", "wireless_charger",
+                           roles=("wireless",), name="Wireless")
+    cable = _ctype_card("i:c", "req-0", "cable",
+                        roles=("cable",), name="Cable")
+    ctx = _compile((need,),
+                   _selection((adapter, "req-0"), (wireless, "req-0"),
+                              (cable, "req-0")),
+                   _pool(), (req,), _profile())
+    got = {str(c.get("item_id")) for c in ctx.products}
+    assert got == {"c"}, (
+        f"explicit cable need ต้องได้เฉพาะ cable card — got {got}")
+
+
+def test_explicit_adapter_need_rejects_cable_card():
+    need = TurnNeed(kind="product", operation="recommend",
+                    subtypes=frozenset({"adapter"}))
+    req = _req(rid="req-0", types=("charger",), subs=("adapter",))
+    adapter = _ctype_card("i:a", "req-0", "charger",
+                          roles=("adapter",), name="Adapter")
+    cable = _ctype_card("i:c", "req-0", "cable",
+                        roles=("cable",), name="Cable")
+    ctx = _compile((need,),
+                   _selection((adapter, "req-0"), (cable, "req-0")),
+                   _pool(), (req,), _profile())
+    got = {str(c.get("item_id")) for c in ctx.products}
+    assert got == {"a"}, (
+        f"explicit adapter need ต้องได้เฉพาะ adapter-role card — got {got}")
+
+
+def test_unrelated_family_need_rejects_cable_card():
+    need = TurnNeed(kind="product", operation="recommend",
+                    product_types=frozenset({"dashcam"}))
+    req = _req(rid="req-0", types=("dashcam",))
+    sc = _ctype_card("i:c", "req-0", "cable", roles=("cable",),
+                     name="Cable")
+    ctx = _compile((need,), _selection((sc, "req-0")), _pool(),
+                   (req,), _profile())
+    assert ctx.products == (), (
+        "dashcam need ไม่ใช่ charger family — cable card ต้องถูกกั้น")
+
+
+def test_unscoped_need_still_admits_family_card():
+    # empty scope = unscoped contract เดิม — pseudo-type 'other'/unknown
+    # ถูก intent_product_scope กรองก่อน stamping อยู่แล้ว (bb219fb)
+    need = TurnNeed(kind="product", operation="recommend")
+    req = _req(rid="req-0", types=("charger",))
+    sc = _ctype_card("i:c", "req-0", "cable", roles=("cable",),
+                     name="Cable")
+    ctx = _compile((need,), _selection((sc, "req-0")), _pool(),
+                   (req,), _profile())
+    assert ctx.products, "unscoped need ต้อง admit card ตามเดิม"
+
+
+def test_unknown_intent_type_stays_unscoped():
+    plan = td.decide_turn("มีสายชาร์จไหม", history=[], intent_result={
+        "intent": "product_recommend", "product_type": "bogus_gadget",
+        "confidence": 0.9})
+    prodish = [n for n in plan.needs if n.kind in ("product", "compare")]
+    assert prodish, plan.needs
+    assert all(not n.product_types for n in prodish), (
+        "unknown type ต้อง fail closed เป็น unscoped เหมือนเดิม")
+    req = _req(types=("cable",), subs=("cable",))
+    for n in prodish:
+        assert n in rsel.needs_for_request(req, plan.needs)
+
+
+def test_attribution_and_context_share_one_family_semantic():
+    from shopeechat import units as _u
+    members = set().union(*_u._SUBTYPE_TO_TYPES.values())
+    need = _fam_need()
+    for ctype in sorted(members) + ["powerbank", "dashcam"]:
+        member = ctype in members
+        # request level — scope {ctype} ถูก generic charger need cover
+        # ก็ต่อเมื่อ ctype เป็น member ของ family
+        req_t = _req(rid=f"t-{ctype}", types=(ctype,))
+        assert (need in rsel.needs_for_request(req_t, (need,))
+                ) == member, (
+            f"{ctype}: attribution semantic diverge — member={member}")
+        # context level — card ctype=X ใต้ generic charger request
+        req = _req(rid=req_t.request_id, types=("charger",))
+        sc = _ctype_card("i:1", req.request_id, ctype)
+        ctx = _compile((need,), _selection((sc, req.request_id)),
+                       _pool(), (req,), _profile())
+        assert bool(ctx.products) == member, (
+            f"{ctype}: gate admission diverge — member={member} "
+            f"products={bool(ctx.products)}")
+
+
+def test_subject_ref_exemption_and_family_gate_coexist():
+    # subject_refs-pinned identity = explicit authority → exempt เดิม;
+    # card อื่นที่ไม่ pin ต้องผ่าน family gate — anchor isolation ไม่เปลี่ยน
+    need = TurnNeed(kind="product", operation="recommend",
+                    product_types=frozenset({"charger"}),
+                    subject_refs=("9",))
+    pinned = _sel_card("i:9", "subject", "req-0", "Pinned Item",
+                       canonical_type="powerbank")
+    other = _ctype_card("i:2", "req-0", "dashcam", name="Dashcam Other")
+    ctx = _compile((need,),
+                   _selection((pinned, "req-0"), (other, "req-0")),
+                   _pool(), (_req(types=("charger",),),), _profile())
+    ids = {str(c.get("item_id")) for c in ctx.products}
+    assert "9" in ids and "2" not in ids, (
+        f"pinned identity ต้องผ่าน, non-member card ต้องตก — got {ids}")
+
+
+def test_canonical_exact_type_match_unchanged():
+    need = TurnNeed(kind="product", operation="recommend",
+                    product_types=frozenset({"dashcam"}))
+    req = _req(rid="req-0", types=("dashcam",))
+    sc = _ctype_card("i:1", "req-0", "dashcam", name="Dashcam X")
+    ctx = _compile((need,), _selection((sc, "req-0")), _pool(),
+                   (req,), _profile())
+    assert ctx.products, "canonical exact-match เดิมต้องทำงานเหมือนเดิม"
+
+
+def test_executor_bucket_accepts_member_card_under_charger_request():
+    card = {"name": "Cable X", "customer_visibility": "visible",
+            "canonical_type": "cable", "sellable": True,
+            "_evidence": {"facts": {"canonical":
+                                    {"type_candidates": ["cable"]}},
+                          "item_ids": ()}}
+    req = _req(types=("charger",))
+    bucket, reason = rexec._bucket(card, req)
+    assert (bucket, reason) != ("rejected", "wrong_type"), (
+        f"member card ห้ามตก wrong_type ใต้ generic charger request — "
+        f"{bucket}:{reason}")

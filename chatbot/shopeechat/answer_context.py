@@ -1113,6 +1113,11 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         if n.kind == "product" and (n.subtypes or n.product_types):
             _nsubs = set(n.subtypes or ())
             _ntypes = set(n.product_types or ())
+            if "charger" in _ntypes:
+                # family head cover member types ทั้ง domain — owner เดียว
+                #   กับ needs_for_request scope (units._CHARGER_MEMBER_TYPES)
+                from .units import _CHARGER_MEMBER_TYPES
+                _ntypes |= _CHARGER_MEMBER_TYPES
             _nrefs = {str(x) for x in (n.subject_refs or ())}
             _kept = []
             for s in cands:

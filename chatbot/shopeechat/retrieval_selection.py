@@ -163,20 +163,29 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
 
 
 def _need_scope(need) -> set:
-    """scope ของ need — types ∪ subtypes ∪ subject_refs ∪ target_refs
-    (union semantics เหมือน _bucket eff_types — ไม่ expand subtype→unit
-    type ตรงนี้)"""
-    return (set(getattr(need, "product_types", ()) or ())
-            | set(getattr(need, "subtypes", ()) or ())
-            | set(getattr(need, "subject_refs", ()) or ())
-            | set(getattr(need, "target_refs", ()) or ()))
+    """scope ของ need — types ∪ subtypes ∪ subject_refs ∪ target_refs —
+    declared 'charger' (family head) cover member types ทั้ง domain
+    ผ่าน units._CHARGER_MEMBER_TYPES; subtype entry ไม่ expand —
+    explicit subtype แคบกว่า family"""
+    ptypes = set(getattr(need, "product_types", ()) or ())
+    s = (ptypes | set(getattr(need, "subtypes", ()) or ())
+         | set(getattr(need, "subject_refs", ()) or ())
+         | set(getattr(need, "target_refs", ()) or ()))
+    if "charger" in ptypes:
+        from .units import _CHARGER_MEMBER_TYPES
+        s |= _CHARGER_MEMBER_TYPES
+    return s
 
 
 def _req_scope(req: RetrievalRequest) -> set:
-    return (set(req.product_types or ()) | set(req.subtypes or ())
-            | set(req.model_codes or ()) | set(req.subject_refs or ())
-            | set(req.target_refs or ())
-            | ({req.target_device} if req.target_device else set()))
+    s = (set(req.product_types or ()) | set(req.subtypes or ())
+         | set(req.model_codes or ()) | set(req.subject_refs or ())
+         | set(req.target_refs or ())
+         | ({req.target_device} if req.target_device else set()))
+    if "charger" in (req.product_types or ()):
+        from .units import _CHARGER_MEMBER_TYPES
+        s |= _CHARGER_MEMBER_TYPES
+    return s
 
 
 def needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
