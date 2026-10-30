@@ -20,6 +20,14 @@
 
 ## กำลังทำ (active)
 
+### 🔬 BOT ANSWER-LOGIC FULL AUDIT + OFFLINE POOL-MATRIX REGRESSION (2026-10-29 — กำลังทำ, read-only audit ยังไม่แก้โค้ด)
+
+- **เป้าหมาย (user สั่ง)**: วิเคราะห์ logic ตอบคำถามทั้งหมดของบอท · ยิงคำถามจริงออฟไลน์ (real Mongo + real Gemini, web search ปิดสนิท) · regression matrix เปิด/ปิด pool แต่ละตัว + kb_source legacy/zaapi + grouped selection on/off → หา combo คำตอบดีสุด · เทียบ KB แบบเดิม vs ใหม่ · รายงาน + แนวทางแก้ (ห้ามแก้โค้ดก่อนอนุญาต)
+- **harness**: `docs/test/canary_phase10b_grouped.py` (in-proc `appmod.chat()` real Mongo read-only barrier, web/openrouter die-spies, full pool instrumentation) → adapt เป็น matrix runner ผลลัพธ์ลง `docs/test/results/` (gitignored)
+- **flag surface ที่จะ sweep**: `runtime_config` — `grouped_retrieval_selection_enabled`, `pool_sources{kb,mongo_catalog,units,image_text}`, `kb_source{legacy,zaapi}`; web_search บังคับ OFF + die-spy กันหลุม
+- **question set**: `docs/test/gold_retrieval.jsonl` 103 rows (มี expected_answer_mode/acceptable_item_ids/must_not_phrases สำหรับ auto-score)
+- **guard**: ไม่แตะ .env (process โหลดเอง) · Mongo read-only barrier · ไม่ commit/แก้ production logic
+
 ### 🔧 ZAAPI WORKFLOW FOUNDATION — parallel-safe registry/import/export/UI (worktree `zaapi-workflow-foundation` @ `20f9e69`, branch `codex/zaapi-workflow-foundation`)
 
 - **baseline**: worktree clean · `tsc --noEmit` exit0 · `git diff --check` clean · phase1+phase6 workflow tests 69/69 (ต้อง dummy env `ADMIN_JWT_SECRET`/`CHATBOT_INTERNAL_SECRET` เพราะ `config.ts` throw ตอน module load — pre-existing, ไม่แตะ secrets) · workflow-e2e ไม่รัน (ต้อง Mongo จริง — out of scope) · Phase 10B checkout ไม่แตะ
@@ -10156,3 +10164,63 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - **ผลกระทบเคสอื่น**: normal path ไม่เปลี่ยน; claim/tagged/hybrid กลับมาทำงาน; net change +1 default, 0 guard/owner ใหม่
 - **verify**: claim in-process → `warranty_claim_first_message` answer จริง · HTTP POST /chat claim → **200** · py_compile OK
 - branch `feature-botlogic-kb-workflow` (ต่อจาก `_rc` fix `938757e`)
+
+## ผลวิเคราะห์ (analysis — ยังไม่แก้, รออนุญาต) — pool-combo regression matrix 156 turns จริง (2026-10-29)
+
+- **ทำอะไร**: `docs/test/pool_matrix_audit.py` (ใหม่, test-side) ยิง 26 gold/representative Qs × 6 combos = 156 turns in-proc `app.chat()` บน live Mongo + Gemini จริง, web/openrouter ปิดด้วย die-spies, Mongo write barrier; artifacts `docs/test/results/pool_matrix_20261029-110343.json`
+- **combos**: A=legacy path selOFF all-pools · B=selON+zaapi · C=selON+legacy-kb · D=selON kb-pool-off · E=selON units-off · F=legacy kb-only
+- **ผล (rescore, normalize float ids)**: fails A=7 B=8 C=7 D=7 E=9 F=10 — แต่ D/E/F มี dead-intent 15-19/26 (Gemini quota หมดระหว่าง sweep → intent=`other` conf 0 → scope ว่าง → gate ถูกข้าม = fail-open artifact; เทียบตรงไม่ได้)
+- **root cause จริงของ no_selection (10/26 บน B, intent จริงทุกเคส)**: intent `product_type:"other"` (catch-all) ไหลเข้า `TurnNeed.product_types` → 2 จุด fail-closed:
+  1. `retrieval_selection.needs_for_request` — need scope `{'other'}` ∩ req scope `{'dashcam','camera'}` = ∅ → need ไม่ถูก attribute กับ slot request เลย (q184)
+  2. `answer_context.py:1113-1135` scope gate — `_ntypes={'other'}` vs card `canonical_type='charger'` → `scope_mismatch` drop ทุก candidate (q182/disc-70mai/oos-imac); 'charger' vs canonical 'cable' ก็ตกเหมือนกัน (compat-iphone13)
+  - พิสูจน์: q182 B vs D — pool/selected เหมือนกันทุกอย่าง ต่างแค่ D intent ตาย → scope ว่าง → ผ่าน
+- **legacy path fails (A)**: hallucination ฝั่งคำตอบ — `phrase:พร้อมส่ง` บนของหมดสต็อก (oos-hdmi, unlist-imilab), `bad_item` แนะนำของต้องห้าม (q005, q184) — typed verdicts ของ grouped path ถูกกว่าตรงนี้
+- **KB verdict**: B vs C ต่าง 1 fail — bug หลักอยู่ที่ scope gate ไม่ใช่ kb_source; ยังสรุป zaapi vs legacy ไม่ได้จาก matrix นี้
+- **infra artifacts**: `exports/gen/g20261024-072533-2be3443e/description_embeddings.npz` หาย (desc-vector degrade) · dead-intent จาก Gemini rate limit · scorer `.0` float ids (rescore แล้วใน analysis)
+- **จะแก้ยังไง (เสนอ — รออนุญาต)**: แก้ที่ owner — (a) `turn_decision`/`intent_product_scope` ไม่ stamp pseudo-type `'other'` เข้า `product_types` (empty scope = unscoped ตาม contract อยู่แล้ว) หรือ (b) gate ที่ answer_context:1131 ให้ `'other'` นับเป็น no-constraint + type↔subtype hierarchy ('cable'⊂'charger' domain); ยังไม่ลงมือ
+
+## กำลังจะทำ — Phase 10B Scope Contract Correction Round 1: pseudo-type `other` ห้ามเป็น scope (2026-10-30)
+
+- **เป้าหมาย (round เดียว)**: หยุด intent `product_type="other"` (catch-all ของ classifier — ไม่ใช่ canonical sellable type) ไม่ให้กลายเป็น retrieval/answer scope constraint — แก้ที่ typed producer owner `route_context.intent_product_scope` เท่านั้น · ห้ามแตะ answer_context.py/retrieval_selection.py/production gate · ห้าม commit/stage
+- **baseline**: branch `feature-botlogic-kb-workflow` @ `22b5f1a` · dirty เดิม: `M getoutofmywaybotkaikrook2.md` + `?? docs/test/pool_matrix_audit.py` (เก็บไว้) · staged=0 · `git diff --check` clean · uvicorn dev :8010/:8011 รันอยู่ (ไม่แตะ) · ไม่มี pytest/regression รันอยู่
+- **mechanism baseline**: route_context.py helpers=26 public=11 regex_sites=97 module_tables=16 · turn_decision helpers=7 · retrieval_selection helpers=8 · answer_context helpers=25 · product_store helpers=58
+- **root cause (พิสูจน์ source+in-proc)**: `route_context.intent_product_scope` (:164-183) return `product_type` string ตรงๆ โดยไม่ validate canonical — `"other"` (declared catch-all ใน intent_classifier prompt :15/:54, ไม่อยู่ใน `product_store.PRODUCT_TYPES` 106 names) ไหลเข้า `decide_turn` :616 (conf≥0.7) → stamp `TurnNeed.product_types={'other'}` → (1) `retrieval_selection.needs_for_request` slot branch `{'other'} ∩ {'dashcam','camera'} = ∅` → need ไม่ attribute (q184) (2) `answer_context` scope gate :1113-1135 `_ntypes={'other'}` vs card canonical_type → `scope_mismatch` drop ทุก candidate (q182) — dead-intent run (scope ว่าง) ผ่าน = empty scope คือ unscoped contract เดิม
+- **in-proc repro (pure, no Mongo/provider)**: q182 shape → product/describe types={'other'} refs=('A18T',) · q184 shape → product/recommend types={'other'} · `intent_product_scope({"product_type":"other"})` → `('other',None)`
+- **leak เสริมที่พบ (same defect, second ingress — รายงาน ไม่แก้รอบนี้)**: `build_retrieval_profile` :539-546 อ่าน `intent_result["product_type"]` raw เข้า `itypes` (ไม่ผ่าน owner) → profile.product_types={'other'} เมื่อ message+anchor ไม่มี type → carry→slot→`RetrievalRequest.product_types` → `_bucket` wrong_type/`_filter_false_positives` scope poison — เป็น missing data contract (consumer bypass owner) รอ consolidation รอบถัดไป
+- **plan**: RED tests (test_route_context.py truth table + test_phase6/phase7 behavioral q182/q184 shapes) → แก้ `intent_product_scope` ด้วย canonical `PRODUCT_TYPES` name check (pattern เดียวกับ :813) → GREEN + regression bounded → SRS §6 `intent_product_scope` row + numstat/mechanism delta
+- **ห้ามในรอบนี้**: charger↔cable hierarchy, final answer composition, multi-need composition, KB ranking, stock hallucination, Prompt Distillation, Logging/Analytics, bulk cleanup, helper/guard/regex/keyword table/decision owner ใหม่, provider/Mongo call, .env
+
+## ผ่านแล้ว — Phase 10B Round 1: pseudo-type `other` ไม่เป็น scope constraint อีก (2026-10-30)
+
+- **error**: intent `product_type="other"` (catch-all ของ classifier, ไม่ใช่ canonical sellable type) ไหลเข้า `TurnNeed.product_types` → `{'other'} ∩ real req scope = ∅` (needs_for_request ไม่ attribute — q184) + answer-context scope gate `scope_mismatch` ทิ้ง selected candidates ทั้งหมด (q182 ctx_ids=[])
+- **เกิดเพราะ**: `route_context.intent_product_scope` คืน `product_type` string ตรงๆ โดยไม่ validate canonical registry — pseudo-type จึงกลายเป็น scope constraint ของ retrieval/answer
+- **แก้ด้วย**: owner เดิมจุดเดียว — `route_context.py:182-184` final return ตรวจ `pt ∈ frozenset(n for n,_k,_r in _ps.PRODUCT_TYPES)` (idiom เดียวกับ `requested_product_types` :813) → non-canonical → `(None,None)` = unscoped · subtype-domain precedence (`_CHARGER_SUBTYPES` ก่อน) คงเดิม · ไม่แตะ consumer (`answer_context.py`/`retrieval_selection.py` bytes เดิม 0 diff)
+- **RED→GREEN**: route_context script (`intent_product_scope("other")` → AssertionError) + `test_pseudo_intent_product_type_never_scopes_need` (need stamped {'other'}) + phase7 q182/q184-shaped (scope_mismatch drop / ไม่ attribute) — แก้แล้วผ่านทั้งหมด; pre-fix sim `{'other'}`+card shape เดียวกัน → `products=()`,`no_selection` ยืนยัน chain
+- **ผลกระทบเคสอื่น**: canonical type ทุกตัว (106 names รวม dashcam/camera ที่นอก declared prompt domain) ยังผ่าน scope เหมือนเดิม; `cable`/`car_charger` subtype-domain + charger+subtype pair เดิม; missing/None/non-str/malformed fail closed เดิม; conf gate ≥0.7 ไม่เปลี่ยน; subject_refs ไม่เปลี่ยน
+- **verify**: focused 3 passed + route_context ALL PASS · test_turn_decision+phase6+phase7 = 177 passed · profile/selection/planner/slots/relations/executor/shadow/boundary/composition/p10+target = 300 passed · phase10b*/11/2/4b/5 = 535+ passed (description_builder = pre-existing import error ที่ HEAD; phase4_source_union 15 failed = **pre-existing เหมือนกันเป๊ะที่ HEAD** — proven ผ่าน git worktree ไม่แก้) · py_compile OK · diff --check clean
+- **mechanism delta**: helpers +0 · guards +0 (เพิ่มเฉพาะ membership check ใน owner เดิม) · regexes +0 · keyword tables +0 · decision owners +0 · provider/Mongo calls +0 · imports/deps +0 — diff = 2 hunks (docstring + return line) เท่านั้น
+- **เหลือ (รอบถัดไป ไม่ใช่งานนี้)**: `build_retrieval_profile` :539-546 raw-read `intent_result["product_type"]`→`itypes` bypass accessor = second ingress ของ defect เดียวกัน (profile.types={other} เมื่อ msg+anchor ไม่มี type → RetrievalRequest scope poison) — missing data contract รอ consolidation; charger↔cable hierarchy, answer composition, KB ranking, stock hallucination ยังไม่แตะตาม scope
+- **state**: ไม่ stage/commit — รอ independent reviewer
+
+## ผ่านแล้ว — Phase 10B Round 2 (reviewer correction): second ingress `build_retrieval_profile` ปิดแล้ว (2026-10-30)
+
+- **error**: reviewer reject Round 1 — pseudo-type contract ยังมี ingress ที่สอง: `build_retrieval_profile` raw-read `intent_result.get("product_type")` → `itypes` bypass accessor → `RetrievalProfile.product_types={'other'}` + provenance `("product_types","intent")` (probe: "รุ่นนี้ต่างกันยังไง" + conf 0.95)
+- **เกิดเพราะ**: block :541-549 parse product_type เอง (str+list contract ซ้ำ) แล้วกรองแค่ `_CHARGER_SUBTYPES` — ไม่เช็ค canonical `PRODUCT_TYPES` เหมือน defect เดิมของ decide_turn channel
+- **แก้ด้วย**: consolidation ไม่ใช่ patch ใหม่ — ลบ duplicate parsing block ทั้งหมด แทนด้วย `itype, isubtype = intent_product_scope(intent_result)` ครั้งเดียวใต้ conf gate ≥0.7 เดิม → `itypes=frozenset({itype})` เฉพาะ canonical; `isubtype` จาก tuple เดียวกัน; `target_device` raw-read คงเดิม (คนละ contract) — diff net −6 lines ใน block
+- **RED→GREEN**: probe `{'other'}`→`frozenset()` PASS · tests ใหม่ 8 (test_retrieval_profile) — RED เฉพาะ pseudo 2 ตัว (`{'other'}`, `{'bogus_gadget'}`); controls 6 (dashcam/cable-subtype/charger+adapter/current-wins/anchor-wins/conf<0.7) ผ่านก่อนแก้ = precedence เดิม
+- **ผลกระทบเคสอื่น**: precedence current→anchor→intent→history เดิม; subtype expansion `_SUBTYPE_TO_TYPES` เดิม; subtype-domain (cable→subtype) เดิม; list `product_type` ที่เคยผ่าน raw block ตอนนี้ accessor fail closed → empty (duplicate contract ที่ mandate สั่งลบ — classifier contract เป็น single str)
+- **verify**: test_retrieval_profile 26/26 · prior pseudo 3 tests pass · test_route_context ALL PASS · bounded set (turn_decision/phase6/phase7/profile-hints/profile-wiring/slots/relations/selection×2/evidence/grouped-reqs/executor/shadow) = 318 passed · py_compile OK · diff --check clean
+- **callsite census (raw `intent_result.get("product_type")` เหลือ)**: route_context.py:175 = owner เอง · app.py:1515 = presentation echo (output dict) · app.py:3136-3137 + app.py:5014 + device_compat.py:999 = **compat legacy path** (`_compat_mode`/compat-retrieval kw map — คนละ contract, ไม่ใช่ RetrievalProfile/TurnNeed scope chain; `other` ตกเข้า legacy block นี้ได้ แต่ไม่ใช่ scope constraint ของ pipeline ใหม่ — รายงานไว้ ไม่แก้)
+- **mechanism delta**: helpers +0 · guards +0 · regexes +0 · keyword tables +0 · decision owners +0 · provider/Mongo +0 · imports/deps/flags +0 · file net −3 lines; `answer_context.py`/`retrieval_selection.py`/`turn_decision.py` = 0 bytes
+- **เหลือ (out-of-scope)**: compat legacy path ที่ app.py:3136 (raw type → Thai kw map — residual defect family เดียวกันใน legacy contract), charger↔cable hierarchy, answer composition, KB ranking, stock hallucination
+- **state**: ไม่ stage/commit — รอ independent reviewer
+
+## ผ่านแล้ว — Phase 10B Round 3 (pre-commit verification): test isolation `test_grouped_selection_calls_selector_once` (2026-10-30)
+
+- **error**: reviewer พบ `docs/test/test_phase6_need_selection.py` standalone → 27 dots แล้ว process ไม่จบ — faulthandler stack: `test_grouped_selection_calls_selector_once` → `run_grouped_selection` → `retrieval_executor._rc.source_enabled("units")` → `runtime_config.pool_sources()` → `get_runtime_config()` → `_fetch()` → Mongo `find_one` — test พึ่ง ambient Mongo state (up=เร็วแต่ใช้ config จริง / down=server-selection ค้าง + monitor thread)
+- **เกิดเพราะ**: test เจตนา offline แต่ executor admission boundary เรียก `source_enabled` จริง → อ่าน `main_config` doc จาก admin DB — ไม่ใช่ส่วนที่ test วัด (selector ถูกเรียกครั้งเดียว + needs forward)
+- **แก้ด้วย**: monkeypatch ใน test เดียว — `runtime_config.source_enabled` → `lambda _name: True` (= absent-field default เดิมของ `pool_sources`) + raising seam `runtime_config._fetch` → AssertionError("offline leak") — patch เล็กสุดที่ admission boundary เดียว, คง fake units/legacy fetchers + real executor/pool/selector path เดิม, auto-restore
+- **verify**: phase6 standalone **28 passed exit 0 จบปกติ** (ก่อนแก้: 27 dots + hang) · Order A/B = 66 passed exit 0 ทั้งสองทิศ · bounded batch 14 files = **344 passed exit 0** · `test_retrieval_shadow.py` standalone 7 passed (ไม่ใช่สาเหตุ hang — เป็น phase6 เท่านั้น) · py_compile OK · diff --check clean
+- **mechanism delta**: production bytes +0 รอบนี้ (route_context.py ยังเป็น 3-hunk diff เดิมที่ reviewer accept) · helpers/fixtures/guards/regexes/tables/owners/timeouts/retries = +0 · ไม่มี shared fixture/helper ใหม่ — เพิ่ม import `runtime_config` 1 บรรทัด + monkeypatch 2 จุดใน test เดียว
+- **กระทบ**: รอบนี้แก้เฉพาะ test isolation — production behavior เดิมทุกบรรทัด; PID pytest ค้างของ reviewer ถูก terminate แล้ว (graceful), ไม่มี process เหลือ
+- **state**: ไม่ stage/commit — รอ reviewer ตรวจ process จบจริง
