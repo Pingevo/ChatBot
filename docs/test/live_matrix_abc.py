@@ -405,13 +405,17 @@ def run_turn(combo: str, case_id: str, conv: str, *, message: str,
     rec["provider_affected"] = bool(
         rec["e429_delta"] or rec["dead_intent"]
         or (err and ("429" in err or "RESOURCE_EXHAUSTED" in err)))
-    # real quota death: provider error escapes turn level, or sustained 429s
+    # quota death = provider actually cannot serve: turn-level error, or
+    # dead-intent streak (intent call unrecoverable across turns).
+    # Transient per-key 429 recovered by rotation ≠ death (shared quota).
     if err and ("429" in err or "RESOURCE_EXHAUSTED" in err):
         QUOTA_DEAD["dead"] = True
         QUOTA_DEAD["at"] = f"{combo}|{case_id} (turn error)"
-    elif counts["e429"] >= 12:
+    QUOTA_DEAD["streak"] = QUOTA_DEAD.get("streak", 0) + 1 \
+        if rec["dead_intent"] else 0
+    if QUOTA_DEAD["streak"] >= 3:
         QUOTA_DEAD["dead"] = True
-        QUOTA_DEAD["at"] = f"{combo}|{case_id} (e429={counts['e429']} sustained)"
+        QUOTA_DEAD["at"] = f"{combo}|{case_id} (dead-intent streak x3)"
     results.append(rec)
     _persist()
     time.sleep(4)                    # provider pacing (not a retry)
