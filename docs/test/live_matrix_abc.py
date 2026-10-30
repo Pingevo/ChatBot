@@ -152,9 +152,11 @@ def _client(api_key: str | None = None):
                         continue
                 elif "429" in code or "429" in msg \
                         or "RESOURCE_EXHAUSTED" in msg:
+                    # transient key/model-fallback 429 (live service shares
+                    # quota) — count + let llm's own rotation/fallback handle;
+                    # NOT quota death. Real death = escapes to run_turn error
+                    # or sustained events (checked in run_turn).
                     counts["e429"] += 1
-                    QUOTA_DEAD["dead"] = True
-                    QUOTA_DEAD["at"] = _cur.get("case_id")
                 raise
     c.models.generate_content = gen
     return c
@@ -336,7 +338,7 @@ def run_turn(combo: str, case_id: str, conv: str, *, message: str,
              expect=None, turn_i=0) -> dict:
     global _cur
     _cur = {"case_id": case_id}
-    g0, a0 = counts["gemini"], counts["attempts"]
+    g0, a0, q0 = counts["gemini"], counts["attempts"], counts["e429"]
     req = appmod.ChatRequest(
         message=message, shop=shop, item_id=item_id, order_sn=order_sn,
         conversation_id=conv, history=list(history or []), limit=10,
@@ -375,6 +377,7 @@ def run_turn(combo: str, case_id: str, conv: str, *, message: str,
                        if isinstance(s, dict)] if resp else None,
         "gemini_calls": counts["gemini"] - g0,
         "gemini_attempts": counts["attempts"] - a0,
+        "e429_delta": counts["e429"] - q0,
         "gemini_log": _cur.get("gemini_log"),
         "error": err, "expect": expect or {},
         "intent": _cur.get("intent"), "plan": _cur.get("plan"),
@@ -396,8 +399,22 @@ def run_turn(combo: str, case_id: str, conv: str, *, message: str,
         "web_calls": PM.counts["web"] + counts["web"],
         "or_calls": PM.counts["openrouter"] + counts["openrouter"],
     }
+    _i = rec.get("intent") or {}
+    rec["dead_intent"] = _i.get("intent") == "other" \
+        and not _i.get("confidence")
+    rec["provider_affected"] = bool(
+        rec["e429_delta"] or rec["dead_intent"]
+        or (err and ("429" in err or "RESOURCE_EXHAUSTED" in err)))
+    # real quota death: provider error escapes turn level, or sustained 429s
+    if err and ("429" in err or "RESOURCE_EXHAUSTED" in err):
+        QUOTA_DEAD["dead"] = True
+        QUOTA_DEAD["at"] = f"{combo}|{case_id} (turn error)"
+    elif counts["e429"] >= 12:
+        QUOTA_DEAD["dead"] = True
+        QUOTA_DEAD["at"] = f"{combo}|{case_id} (e429={counts['e429']} sustained)"
     results.append(rec)
     _persist()
+    time.sleep(4)                    # provider pacing (not a retry)
     return rec
 
 
