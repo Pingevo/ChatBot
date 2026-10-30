@@ -530,6 +530,9 @@ class TestBoundaryComposition:
 class TestFinalizeAnswer:
 
     def test_finalize_joins_in_canonical_order(self, monkeypatch):
+        """canonical order = comp.results order (need-major จาก
+        compose owner — renderer ไม่ re-sort); ตัวอย่างนี้ need
+        order [0,1,2] → product ก่อน claim ก่อน policy."""
         _import_app(monkeypatch)
         comp = acx.AnswerComposition(
             results=(
@@ -539,7 +542,7 @@ class TestFinalizeAnswer:
             ))
         resp = _finalize(comp)
         a = resp.answer
-        assert a.index("claim text") < a.index("prod text") < a.index(
+        assert a.index("prod text") < a.index("claim text") < a.index(
             "เปลี่ยน/คืนได้ตามเงื่อนไข")
 
     def test_finalize_dedupes_identical_segments(self, monkeypatch):
@@ -778,6 +781,22 @@ class TestEnforceComposition:
 # ────────────────────────────────────────────────────────────────────────────
 
 class TestE2EMixedComposition:
+
+    @pytest.fixture(autouse=True)
+    def _runtime_config_contract(self, monkeypatch):
+        """pin runtime-config doc = {} → contract defaults เดิมทุกตัว
+        (pool_sources absent→ON, kb_source→"legacy") — E2E เหล่านี้ต้อง
+        deterministic จาก cold process ไม่ depend on warm _cache หรือ
+        local Mongo doc; `_fetch` = trap พิสูจน์ว่า DB path เข้าไม่ถึง
+        (auto-restore ผ่าน monkeypatch — ไม่แตะ production runtime_config)"""
+        from shopeechat import runtime_config as _rc
+        monkeypatch.setattr(
+            _rc, "get_runtime_config", lambda *a, **k: {})
+        monkeypatch.setattr(
+            _rc, "_fetch",
+            lambda *a, **k: pytest.fail(
+                "OFFLINE LEAK: runtime_config._fetch → MongoClient",
+                pytrace=False))
 
     def test_flag_on_ineligible_composes_structural_segments(
             self, monkeypatch):

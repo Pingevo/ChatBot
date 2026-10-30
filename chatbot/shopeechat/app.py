@@ -750,8 +750,10 @@ def _render_composition(comp) -> str:
         return llm.LLM_ERROR_REPLY
     parts: list[str] = []
     seen: set[str] = set()
-    for r in sorted(comp.results,
-                    key=lambda r: _acx._DOMAIN_ORDER.get(r.domain, 9)):
+    # comp.results = canonical order จาก compose_answer (ordering owner
+    #   เดียว — need_index แล้วตามด้วย _DOMAIN_ORDER ภายใน need) —
+    #   renderer consume ตรงๆ ไม่ re-derive order ที่นี่
+    for r in comp.results:
         text = (r.text if r.domain != "policy"
                 else _guards.policy_outcome_text(r.outcome))
         if text and text not in seen:

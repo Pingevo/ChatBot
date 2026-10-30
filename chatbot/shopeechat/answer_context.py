@@ -1004,6 +1004,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     partial_refs: dict[int, tuple[str, ...]] = {}
     tainted_reqs: set[str] = set()
     tainted_idents: set[str] = set()
+    no_emit: set[int] = set()   # cands ไม่ว่างแต่ emitted card = 0
     for i, n in enumerate(needs):
         if n.kind != "compat" or i not in prodish_idx:
             continue
@@ -1060,6 +1061,15 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                      + (f"unresolved={list(unres)} → partial "
                         if verdicts else "")
                      + "no_evidence → dropped")
+    # serialized evidence compile ก่อน need loop — `_ev_idx` = need
+    #   indices ที่มี typed-attributed evidence จริง: ตัดสิน task
+    #   survival ใน not-cands/no_emit (evidence ครอบ → task คงอยู่
+    #   outcome เดียว; ไม่มี → unanswered ครั้งเดียว + dropped)
+    evidence = _compile_evidence(
+        pool, web_evidence, req_needs=req_needs, idx_of=idx_of,
+        prodish_idx=prodish_idx, target_of=target_of,
+        ref_needs=ref_needs, trace=trace)
+    _ev_idx = {j for e in evidence for j in (e.get("need_indices") or ())}
     for i, n in enumerate(needs):
         scope = tuple(sorted(set(n.product_types or ())
                              | set(n.subtypes or ())))
@@ -1305,6 +1315,11 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 # gate ของ need เอง/need อื่นแต่ deterministic decision
                 # (compat / no-match constraint) ครอบคลุม need แล้ว
                 trace.append(f"need[{i}] verdict kept (products dropped)")
+            elif i in _ev_idx:
+                # serialized evidence attribute ถึง need → task คงอยู่
+                #   ให้ model ตอบจาก evidence — outcome เดียว ห้ามซ้อน
+                #   cannot-confirm บน need เดียวกัน
+                trace.append(f"need[{i}] evidence kept (products dropped)")
             else:
                 unanswered.append(UnansweredNeed(
                     i, n.kind, n.operation, tuple(n.subject_refs or ()),
@@ -1365,6 +1380,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 capability_asks=_asks))
             _ask_unanswered.add(i)
         took = 0
+        union_hit = False   # union ownership = emitted coverage ของ need นี้
         for s in cands:
             prev = emitted.get(s.identity)
             if prev is not None:
@@ -1376,6 +1392,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                     trace.append(
                         f"need[{i}] union {s.identity} → "
                         f"need_indices={prev['need_indices']}")
+                union_hit = True
                 continue
             if took >= per_need_limit or len(products) >= hard_cap:
                 continue  # intake ใหม่ถูก quota/cap กั้น — union ยังทำได้
@@ -1398,6 +1415,25 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             products.append(card)
         trace.append(f"need[{i}] {n.kind}/{n.operation} "
                      f"cand={len(cands)} took={took}")
+        if not took and not union_hit and i not in decided \
+                and i not in no_match and i not in clarify \
+                and i not in _ask_unanswered:
+            # candidates ผ่าน gate มาแต่ไม่มี emitted card attribute ถึง
+            #   need นี้เลย (ทุกใบ hidden/quota) — task ที่ไม่มี evidence
+            #   ใน context = coverage ปลอม (model แต่งคำตอบโดยไม่มีข้อมูล)
+            #   → typed cannot-confirm contract เดียวกับ `not cands`;
+            #   ยกเว้น serialized evidence ยัง attribute ถึง need → task
+            #   คงอยู่ outcome เดียว (เหตุผลเดียวกับ not-cands)
+            if i in _ev_idx:
+                trace.append(f"need[{i}] evidence kept (no emitted card)")
+            else:
+                unanswered.append(UnansweredNeed(
+                    i, n.kind, n.operation, tuple(n.subject_refs or ()),
+                    scope, target_of[i],
+                    "no_evidence" if tainted else "no_selection",
+                    capability_asks=tuple(
+                        getattr(n, "capability_asks", ()) or ())))
+                no_emit.add(i)
     # uncovered (no_evidence) + decided (verdict → deterministic segment)
     # ทั้งหมดไม่เป็น model task; evidence ที่ attribute เฉพาะ needs เหล่านี้
     # ไม่เข้า model context (proof/verdict ถูก consume โดย decision แล้ว) —
@@ -1408,7 +1444,17 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     # (subject/scope/target) → model freestyle hedge ซ้ำกับ segment;
     # เซ็ตเดิม + field เดิมเท่านั้น (facts/constraints/value/ranking
     # ที่เหลือ = model work จริง → task ยังอยู่)
-    dropped = (uncovered | set(decided) | no_match | clarify
+    # unanswered ที่ไม่มี serialized evidence เลย (not-cands: candidates
+    #   ถูก filter จนหมด / no_emit: emitted = 0 — evidence-backed needs
+    #   ไม่เข้า unanswered ตั้งแต่ต้น ตาม one-outcome invariant) → ตัด
+    #   task ตาม contract เดียวกัน — task ที่ไม่มี evidence ใน context =
+    #   coverage ปลอม; need ที่ยังมี evidence ครอบ → task คงอยู่ —
+    #   model มีข้อมูลจริงไม่ใช่การแต่งคำตอบลอยๆ
+    dropped = (uncovered | set(decided) | no_match | clarify | no_emit
+               | {u.need_index for u in unanswered
+                  if u.reason in ("no_selection", "no_evidence")
+                  and u.need_index not in _ask_unanswered
+                  and u.need_index not in _ev_idx}
                | {t.need_index for t in task.tasks
                   if t.need_index in _ask_unanswered
                   and not (t.requested_facts or t.constraints
@@ -1421,10 +1467,6 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 for t in task.tasks
                 if t.need_index not in dropped),
             deferred=task.deferred, trace=task.trace)
-    evidence = _compile_evidence(
-        pool, web_evidence, req_needs=req_needs, idx_of=idx_of,
-        prodish_idx=prodish_idx, target_of=target_of,
-        ref_needs=ref_needs, trace=trace)
     if dropped:
         kept_ev: list[dict] = []
         for e in evidence:
@@ -1449,9 +1491,14 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         availability_notes=notes, unanswered_needs=tuple(unanswered),
         estimated_tokens=estimate_tokens(payload),
         trace=tuple(trace) + tuple(selection.trace or ()),
-        compat_verdicts=tuple(v for i in sorted(decided)
-                              for v in decided[i])
-                         + tuple(product_verdicts),
+        # verdict order = TurnNeed order (need_index) เสมอ — decided
+        #   (compat needs) กับ product_verdicts (product/compare needs)
+        #   เป็น need_index sets ที่ไม่ซ้อนกัน; merge แล้ว sort ไม่ใช่
+        #   ต่อ collection ท้ายกัน (product need index ต่ำต้องไม่ตกหลัง)
+        compat_verdicts=tuple(sorted(
+            tuple(v for vs in decided.values() for v in vs)
+            + tuple(product_verdicts),
+            key=lambda v: v.need_index)),
         constraint_notes=tuple(cnotes),
         constraint_segments=tuple(det_segments),
         spec_measured_facts=tuple(
@@ -1896,7 +1943,14 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
         results.append(DomainResult(
             "policy", idxs, outcome=policy_decision.outcome,
             origin="deterministic"))
-    results.sort(key=lambda r: _DOMAIN_ORDER.get(r.domain, 9))
+    # segment order = TurnNeed order เสมอ — primary key = earliest
+    #   original need_index ของ result; `_DOMAIN_ORDER` เหลือเฉพาะ
+    #   tie-break ภายใน need เดียว (verdict ก่อน card ของ need เดียวกัน);
+    #   result ที่ไม่มี need_indices อยู่หลัง indexed เสมอ (anchor =
+    #   len(needs) — structural bound ของ index space จริง ไม่ใช่ sentinel)
+    results.sort(key=lambda r: (
+        min(r.need_indices) if r.need_indices else len(needs),
+        _DOMAIN_ORDER.get(r.domain, len(_DOMAIN_ORDER))))
     if context is not None:
         unanswered = [u for u in ctx_unanswered
                       if u.need_index not in covered

@@ -184,7 +184,10 @@ def test_value_constraints_carried_into_need_task():
     need = TurnNeed(kind="product", operation="recommend",
                     product_types=frozenset({"earphone"}))
     req = _req(types=("earphone",), vc=prof.value_constraints)
-    ctx = _compile((need,), _selection(), _pool(), (req,), prof)
+    sel = _selection(
+        (_sel_card("i:1", "subject", "req-0", "Earphone X",
+                   model_codes=["EAR-1"]), "req-0"),)
+    ctx = _compile((need,), sel, _pool(), (req,), prof)
     assert ("price_max", 500) in ctx.task.tasks[0].value_constraints
     assert "500" in ctx.task.render()
 
