@@ -568,7 +568,7 @@ listing path:
 | ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
 |---|---|---|---|---|---|---|---|
 | `_unit_to_months` | unit→months | value, unit | int | — | extract_warranty_from_name | y/ปี→×12, เดือน→ตรง | — |
-| `extract_warranty_from_name` | ระยะประกันจากชื่อ | item_name | dict/None {months, text} | regex, _unit_to_months | cards, warranty check | "1y"/"6 เดือน" → months | — |
+| `extract_warranty_from_name` | ระยะประกันจากชื่อ โดยแยกความยาวสาย `m` ออกจากเดือน `M` | item_name: str (ชื่อสินค้า) | dict {months: int, raw: str, text: str, source: str} หรือ None | `_TAIL_PATTERN`, `_NEAR_WARRANTY_PATTERN`, `_THAI_WARRANTY_PATTERN`, `_unit_to_months` (ในไฟล์เดียวกัน) | product cards, policy facts, warranty/order flow | ท้ายชื่อ `M` = เดือน, `Y/y` = ปี; `m` ต้องอยู่ใกล้คำประกัน; ไม่ชัดเจนคืน None | ไม่มี side effect; ชื่อว่าง/ไม่พบหลักฐานคืน None |
 | `is_in_warranty` | เช็คหมดประกัน | purchase_date, warranty_months, now | dict{in_warranty, expire_date, …} | datetime | check/auto | date math | — |
 | `parse_purchase_date` | parse วันที่ซื้อ | text | datetime/None | regex TH formats | claim flow | dd/mm/yy, บริบทไทย | — |
 | `strip_warranty_keywords` | ลบคำประกันออกจาก msg | message | str | kw list | flow | เหลือข้อมูลจริง | — |
@@ -588,6 +588,8 @@ listing path:
 | `check_warranty_status` | ประกันของสินค้า | product, purchase_text | dict | is_in_warranty, parse_purchase_date, extract_warranty_from_name | flow | — | — |
 | `auto_check_warranty` | auto warranty | product/order info | dict | is_in_warranty | order flow | — | — |
 | `auto_check_delivery_warranty` | auto warranty จาก delivery | order_sn, shop_filter, bot_name | (answer, info, ctx) | order_store.lookup_order, is_in_warranty | _chat_impl (หลัง order flow) | delivery date → คำนวณประกัน | DB read |
+
+`extract_warranty_from_name` (`chatbot/shopeechat/warranty.py:67`): รับ `item_name: str` และคืน `{"months": int, "raw": str, "text": str, "source": "tail"|"near_warranty"|"thai"}` หรือ `None` เมื่อชื่อว่าง/กำกวม/ไม่พบหลักฐาน. เริ่มจาก tail pattern: `Y/y` แปลงเป็นปี, เฉพาะ uppercase `M` เป็นเดือน; lowercase `m` ไม่ใช่หลักฐานจากท้ายชื่อ. จากนั้น near-warranty pattern รับ `m/M/Y/y` เฉพาะเมื่อมี `ประกัน`/`warranty` ใกล้ตัวเลข; สุดท้าย Thai pattern รับ `ปี`/`เดือน` ก่อนคืน `None`. เรียก `_unit_to_months` ในไฟล์เดียวกันเพื่อแปลงหน่วย; ไม่เขียน DB, ไม่เรียก HTTP, ไม่มี cache. ถูกเรียกโดย `_warranty_info` (`product_store.py:479`) และ `_unit_warranty` (`units.py:437`) เพื่อประกอบ card, `_warranty_months` (`policy_resolver.py:412`) เพื่อ emit typed warranty fact, `auto_check_delivery_warranty` (`warranty.py:1046`) เพื่อคำนวณประกันจาก order. Automated regression ยืนยัน `-24M` ให้ card duration 24 เดือนและ typed warranty fact 24 ขณะที่ bare `2m` ไม่ให้ duration/fact; ยังไม่ได้พิสูจน์ customer-visible duration answer (`2 ปี` หรือไม่มี `ประกัน 2 เดือน`) จาก bot ทั้ง turn เพราะ answer path นั้นพึ่ง LLM. ให้ตรวจคำตอบจริงใน live QA รอบถัดไป; deterministic order auto-check เป็นคำตอบสถานะตามวันส่งมอบ ไม่ใช่ renderer สำหรับคำถามระยะประกัน.
 
 ### 6.9 `warranty_flow.py` — claim state machine
 
