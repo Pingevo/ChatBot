@@ -10797,3 +10797,36 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - **redaction:** XLSX credential headers (รวม header ที่มี `:`) redact ใน fields+text ชุดเดียว; text ต้องเป็น exact permutation ของ field lines ไม่งั้น `ValueError("invalid raw row")`; TXT line-level เดิม (free-form residual ยังมี); raw audit เก็บต้นฉบับ
 - **tests:** focused 264 · matrix สองลำดับ 412 ×2 · pool admission 28 · warranty 11 · py_compile/diff-check clean
 - **pending:** real-Mongo performance canary (pre-production gate) · Task 4 ยังไม่เริ่ม · ไม่ push/deploy
+
+## กำลังจะทำ — Phase 4 audit (Zaapi KB canonical retrieval) (2026-11-03)
+
+- **Baseline:** `feature-botlogic-kb-workflow` @ 7a4e402, staging ว่าง, working tree clean; process: uvicorn :8010 ของผู้ใช้ (ไม่แตะ)
+- **อ่าน log:** ไม่ได้อ่านครบทุกบรรทัด (ไฟล์ 1 ~8.6k, ไฟล์ 2 ~10.8k บรรทัด) — อ่าน tail Task 3 closeout + heading index
+- **Gate 0 = audit อย่างเดียว ไม่แก้โค้ด.** พบ: Docker daemon down, ไม่มี mongod/mongosh local, ไม่มี mongomock → Task 4A ต้องให้ผู้ใช้เปิด Docker/Mongo disposable ก่อน
+- **Reuse:** `kb_zaapi_schema` validators, `load_active_state`, `embedding.embed_texts` (BGE-M3 1024d), `_save_verified_npz` / `_embed_all`, `generation_pointer.GEN_ID_RE/mint_generation_id`, `publish_generation` CAS+rollback pattern
+- **ขาดจริง:** zaapi embedding generation builder/validator, pointer `zaapi_kb_embedding_generations`, canonical retrieval owner, readiness owner
+- สถานะ: รอผู้ใช้อนุมัติ design (Gate 1)
+
+### Phase 4 — Gate 0/1 revision (reviewer feedback, 2026-11-03)
+- Read-only measurement (no DB/provider; temp script deleted): 118 sources, 0 parse errors, **8,600 unique raw rows** → 112,974 deliveries (rows × accounts). Row text chars p50 154 / p95 2,340 / max 9,928. BGE-M3 tokenizer on raw sanitized row text (proxy, not final serialization): p50 59 / p95 654 / p99 1,557 / max 2,727, sum 1.196M; 588 rows >512, 223 >1024, 0 >8192. Model max_seq_length 8192 (from local sentence_bert_config / tokenizer) ≠ retrieval chunk budget.
+- Evidence contract: reuse `KbEvidenceResult(cards=(), supporting_evidence=(dict,...))`; no new public result type. สถานะ: รอ reviewer approve revised design
+
+### Phase 4 — Gate 0 completion + Gate 1 rev.2 (2026-11-03, ไม่แก้โค้ด)
+- อ่านเพิ่ม: AGENTS.md ครบ (§10), test_zaapi_kb_import.py ครบ 2,930 บรรทัด, publish_generation.py ครบ, answer_context evidence compiler (`_compile_evidence`/`_attribute`/constants). Log: อ่านจริงเฉพาะหัวไฟล์ 1 (36 บรรทัด), หัวไฟล์ 2 (40 บรรทัด) และ Task 3 ไฟล์ 2 บรรทัด 10526–10750 + tail — ประมาณ 4% ของ 2.97MB; ไม่ครบตามข้อกำหนด (ต้องอ่านราว 145 chunk) รอ reviewer ตัดสิน
+- Findings: `cas_publish`/`rollback` ผูก `sellable_units_meta`+`generation_id`+`_SNAPSHOT_FIELDS` ของ product (เรียกตรงจะเขียน pointer ผิด collection); ไม่มี readback validation หลัง CAS; legacy `kb_zaapi.py` emit kind `kb_zaapi` ซึ่งไม่อยู่ใน `_SUPPORTING_KINDS` (อ่านโค้ดเท่านั้น ยังไม่ได้รัน); dict payload ที่มี `text` ถูก compile เหลือเฉพาะ text; `load_active_state` อยู่ใน script ที่ patch openpyxl ตอน import
+- Design rev.2: vector identity = semantic_digest (ไม่ใช่ content_fingerprint); 8,600 = raw rows (upper bound ของ digest, ยังไม่ใช่ vector count)
+
+### Phase 4 — Gate 1 rev.3 (2026-11-03, ไม่แก้โค้ด)
+- **Gate 0 log audit: PHASE_4_LOG_AUDIT_REQUIRES_DEDICATED_SESSION** — อ่านครบไม่ได้ใน session นี้ (892,284 B / 8,624 บรรทัด + 2,082,744 B / 10,817 บรรทัด ≈ 166 reads @18KB, ข้อความไทยหนัก token) อ่านจริง: ไฟล์1 บรรทัด 1–36; ไฟล์2 บรรทัด 1–40, 10526–10750 และ tail ~10750–10799 (ไม่อ้างว่าครบ)
+- Design rev.3 (provisional จน log audit เสร็จ): generation pin canonical_generation + canonical_sources + record_ids → retrieval ไม่อ่าน manifest ปัจจุบัน; lifecycle ไม่มี state machine (insert-once doc status="ready" + CAS pointer revision-fenced + readback); evidence payload = {"text": plain text} fit ใน budget ที่ producer
+
+## กำลังจะทำ — Waythrough protocol correction + canonical ledger (2026-11-03, docs only)
+
+- **Root cause:** กฎข้อ 8 เดิมบังคับอ่าน raw logs ทั้งสองไฟล์ครบทุก task — logs รวม ~19,445 บรรทัด / 2.97 MB; executable attempt อ่านได้ 240 บรรทัด (~25k tokens) → verdict เดิม `PHASE_4_FULL_LOG_AUDIT_INCOMPLETE`. ไม่ใช่ Dev Worker ข้ามงาน แต่ protocol ไม่ scale
+- **ผู้ใช้อนุมัติ:** เปลี่ยนเป็น canonical ledger + incremental active tail
+- **ขอบเขต:** แก้เฉพาะ AGENTS.md ข้อ 8; สร้าง `docs/waythrough-ledger.md` (coverage: partial) + `docs/plans/waythrough-ledger-migration.md`; ไม่แตะ frozen log / production code / Phase 4; ไม่ stage/commit รอ independent review
+
+### Waythrough protocol — correction (reviewer, 2026-11-03, docs only)
+- **ปัญหา:** candidate ใช้ `indexed_prefix_lines` ทั้งเป็น append-only integrity cursor และ semantic coverage cursor → ตั้ง 0 แล้วทุก task ต้องอ่าน active ทั้งไฟล์ ปัญหาเดิมไม่หาย
+- **แก้:** แยกเป็น active integrity prefix (ยืนยันไม่ถูก rewrite, ตั้งที่ EOF ได้) กับ semantic coverage ranges (ranges ที่อ่าน+สรุปจริง, partial ได้); F-013 เป็น exact range 218–240; หลังงานต้องสรุป tail เข้า ledger + เลื่อน integrity prefix (บังคับ ไม่ optional)
+- **หมายเหตุ:** บรรทัดนี้เป็น append สุดท้ายของ task; ledger integrity baseline วัดหลังจุดนี้
