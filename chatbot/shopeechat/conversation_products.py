@@ -1011,6 +1011,7 @@ def resolve_subjects(
       no_subject_ref (open question / ไม่มี ref signal)
     """
     n = len(persisted.subject_ids) if persisted else 0
+    explicit_without_refs = False
     if subject_scope:
         if subject_scope not in _SUBJECT_SCOPES:
             return SubjectResolution("clarify", None)
@@ -1018,27 +1019,31 @@ def resolve_subjects(
             _refs = tuple(
                 str(r).strip() for r in (subject_refs or ())
                 if str(r).strip())
-            if any(r.isdigit() for r in _refs):
+            if _refs:
+                if any(r.isdigit() for r in _refs):
+                    return SubjectResolution("no_subject_ref", None)
+                _want = {r.upper() for r in _refs}
+                if persisted and persisted_code_index:
+                    _matched = tuple(
+                        str(sid) for sid in persisted.subject_ids
+                        if _want <= {str(c).strip().upper()
+                                     for c in persisted_code_index.get(sid)
+                                     or ()})
+                    if len(_matched) == 1:
+                        return SubjectResolution(
+                            "resolved", ConversationSubjectSet(
+                                subject_ids=_matched,
+                                source_turn_id=persisted.source_turn_id,
+                                relation="single",
+                                requested_operations=(),
+                                confidence=persisted.confidence))
+                    if len(_matched) > 1:
+                        return SubjectResolution("clarify", None)
                 return SubjectResolution("no_subject_ref", None)
-            _want = {r.upper() for r in _refs}
-            if _want and persisted and persisted_code_index:
-                _matched = tuple(
-                    str(sid) for sid in persisted.subject_ids
-                    if _want <= {str(c).strip().upper()
-                                 for c in persisted_code_index.get(sid)
-                                 or ()})
-                if len(_matched) == 1:
-                    return SubjectResolution(
-                        "resolved", ConversationSubjectSet(
-                            subject_ids=_matched,
-                            source_turn_id=persisted.source_turn_id,
-                            relation="single",
-                            requested_operations=(),
-                            confidence=persisted.confidence))
-                if len(_matched) > 1:
-                    return SubjectResolution("clarify", None)
-            return SubjectResolution("no_subject_ref", None)
-        if subject_scope in ("current_single", "current_set"):
+            # Malformed explicit-without-refs has no typed identity authority;
+            # continue through the existing canonical reference resolver.
+            explicit_without_refs = True
+        elif subject_scope in ("current_single", "current_set"):
             if (signal_confidence is not None
                     and signal_confidence < _SUBJECT_SIGNAL_MIN_CONF):
                 return SubjectResolution("clarify", None)
@@ -1051,6 +1056,8 @@ def resolve_subjects(
                 persisted if n == 1 else None)
         # scope == "none" → canonical path
     sig = _classify_subject_ref((message or "").lower())
+    if explicit_without_refs and sig not in ("singular", "generic"):
+        return SubjectResolution("no_subject_ref", None)
     if sig == "pair":
         return SubjectResolution(
             "resolved" if n else "clarify", persisted if n else None)
@@ -1079,9 +1086,9 @@ def decide_subject_set(
 ) -> ConversationSubjectSet | None:
     """Single decision owner — explicit > pair > resolved consume > batch > none.
 
-    resolved = set ที่ resolver เพิ่ง consume ใน turn นี้ (deictic/generic ref)
-    — turn นั้นใช้ subject เดิมตอบ ไม่ใช่ตัดสิน subject ใหม่ → ห้ามให้
-    selected batch (สินค้าที่แสดง) ทับ set ที่ resolve มา
+    resolved = set authoritative ที่ turn นี้ consume อยู่แล้ว (resolver หรือ
+    item-card commit ก่อนหน้าใน turn เดียวกัน) → ห้ามให้ selected batch
+    (สินค้าที่แสดง) ทับ set ที่ตัดสินแล้ว
 
     Returns:
         set ใหม่ที่ควร persist หรือ None (ไม่มี subject / set ปัจจุบันเหมือน

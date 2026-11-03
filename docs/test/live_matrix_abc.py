@@ -62,7 +62,7 @@ COMBOS = {
 
 counts = {"gemini": 0, "attempts": 0, "e503": 0, "e429": 0,
           "web": 0, "openrouter": 0, "mongo_write": 0, "tokens_in": 0,
-          "tokens_out": 0}
+          "tokens_out": 0, "vision": 0}
 QUOTA_DEAD = {"dead": False, "at": None}
 _cur: dict = {}
 results: list[dict] = []
@@ -91,6 +91,8 @@ def _die(name):
 
 ws.reanswer = _die("web")
 ws.should_use_web_search = _die("web")
+llm.describe_image = _die("vision")
+llm.describe_images = _die("vision")
 llm.get_provider = lambda *a, **k: "gemini"
 try:
     from shopeechat import chatbotv3
@@ -455,8 +457,11 @@ CONVS = {
         {"message": "ดีจ้า", "expect": {"kind": "greeting"}},
     ]},
     "aumporn_w01": {"shop": "IMILabThailand", "turns": [
-        {"message": "[สินค้า: 18408364022]", "item_id": "18408364022",
-         "expect": {"kind": "exact_item", "id": "18408364022"}},
+        # Customer link 5VJojEDvgU belongs to this shop/item.  The previous
+        # 18408364022 fixture is the SuperITMall listing and correctly fails
+        # the shop-scoped description channel.
+        {"message": "[สินค้า: 19308362993]", "item_id": "19308362993",
+         "expect": {"kind": "exact_item", "id": "19308362993"}},
         {"message": "ขอสอบถามค่ะ รุ่น IMILAB W01 เวลาใช้โหมดวิ่ง สามารถเชื่อมต่อ GPS จากมือถือเพื่อบันทึกระยะทางและเพซวิ่งได้ไหมคะ แล้วระหว่างวิ่งสามารถดูชีพจร เวลา ระยะทาง และเพซบนหน้าจอนาฬิกาได้หรือไม่คะ",
          "expect": {"kind": "multifact_spec"}},
         {"message": "แล้วเชื่อมเข้ากับแอปสตาวาไหม",
@@ -539,6 +544,7 @@ def main():
         "mongo_write": PM.counts["mongo_write"],
         "web": PM.counts["web"] + counts["web"],
         "openrouter": PM.counts["openrouter"] + counts["openrouter"],
+        "vision": counts["vision"],
         "e429": counts["e429"], "quota_dead": QUOTA_DEAD["dead"],
     }
     print(f"=== SMOKE GATE === {json.dumps(infra, ensure_ascii=False)}")
@@ -548,6 +554,8 @@ def main():
         smoke_fails.append("web calls>0")
     if infra["openrouter"] > 0:
         smoke_fails.append("openrouter calls>0")
+    if infra["vision"] > 0:
+        smoke_fails.append("vision calls>0")
     if QUOTA_DEAD["dead"]:
         smoke_fails.append(f"provider quota dead at {QUOTA_DEAD['at']}")
     if smoke_fails:

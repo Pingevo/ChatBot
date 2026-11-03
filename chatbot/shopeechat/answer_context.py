@@ -88,7 +88,8 @@ EMPTY_CONTEXT_REPLY = (
 # card fields ที่เข้า customer context — closed set; desc หนักเฉพาะ op ที่ต้อง
 # (recommend/price/link/stock = slim เสมอ — ตัด full-desc-per-product เดิม)
 _BASE_CARD_FIELDS = frozenset({
-    "name", "item_id", "shop", "price", "warranty", "short_link", "image_url",
+    "name", "item_id", "model_id", "unit_id", "shop", "price",
+    "warranty", "short_link", "image_url",
     "has_promotion", "is_flash_sale", "variants", "tier_variation",
     "brand", "category", "sold_out", "total_stock", "status",
     "catalog_status", "_available_for_sale", "sellable",

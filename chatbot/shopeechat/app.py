@@ -920,6 +920,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
     _subject_view_loaded = False
     _sv = None
     _turn_plan = None
+    _grouped_kb_fetcher = None
 
     # ⚡ Phase 8 — resolve effective LLM context limit (per-request from admin config)
     #   ถ้า req.llm_context_limit ส่งมา → ใช้ค่านั้น (range 10-50)
@@ -1214,6 +1215,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
         except Exception:
             _sel_flag = False
+        if _sel_flag and _rcfg.kb_source() == "zaapi":
+            from . import kb_zaapi as _kbz
+            _grouped_kb_fetcher = lambda: _kbz.zaapi_kb_evidence(
+                shop=req.shop, platform=req.platform or "shopee",
+                message=req.message)
         _tagged_item_id = req.item_id or _extract_item_id_tag(req.message)
         _is_from_history_anchor = False
         _hybrid_anchor_card = None  # ⚡ 2026-09-12 — anchor สำหรับ hybrid merge (compat+target_device)
@@ -1754,7 +1760,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         #   explicit evidence (item card / image anchor / model kw / claim flow)
         #   → resolver ไม่ consult (explicit ชนะ precedence เสมอ)
         _subject_ev = {"explicit_ids": (), "pair_ids": (), "ops": (),
-                       "stored": _subject_stored}
+                       "stored": _subject_stored, "resolved": None}
         # ⚡ Phase 2C.3 — resolver อ่าน subject signal ทั้งหมดจาก TurnPlan
         #   เดียวที่คำนวณ post-classify (ไม่ใช่ _intent_result ตรง):
         #   scope/count จาก product need + signal conf จาก plan
@@ -1766,11 +1772,13 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 _plan_scope = _n.subject_scope
                 _plan_count = _n.subject_count
                 break
-        # explicit ids ที่ persist ไปแล้วใน turn นี้ (item-tag block เขียนไว้
-        #   แล้ว) → ไม่ส่งเป็น explicit evidence ซ้ำให้ recorder ตัดสินใหม่
-        #   (same set churn write) — ส่งเฉพาะ explicit ที่ยังไม่ถูก commit
+        # explicit ids ที่ item-tag block commit แล้ว → carry เป็น committed
+        #   evidence เพื่อกัน display batch ทับ โดยไม่เขียน set เดิมซ้ำ
         _persisted_ids = set(
             _subject_stored.subject_ids) if _subject_stored else set()
+        if (_tagged_item_id and _subject_stored is not None
+                and str(_tagged_item_id) in _persisted_ids):
+            _subject_ev["resolved"] = _subject_stored
         _subj_explicit = tuple(
             str(i) for i in (
                 _tagged_item_id,
@@ -2442,6 +2450,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         if kb_result and kb_result.get("found"):
             kb_context = kb_result.get("context", "")
             kb_docs = kb_result.get("kb_docs", [])
+            if _sel_flag:
+                _grouped_kb_fetcher = lambda: (
+                    knowledge_base.kb_product_evidence(
+                        db, kb_docs, shop=req.shop,
+                        message=req.message))
             if kb_context:
                 # ดึง Mongo มาผสม — เอาราคา/ร้าน/ลิงก์/image/status จาก Mongo
                 # ใช้ model keywords จาก KB docs แทน req.message เพื่อค้นให้ตรง
@@ -2789,17 +2802,6 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     if _sel_flag and _retrieval_profile is not None:
                         try:
                             from . import retrieval_runtime as _rr
-                            from . import runtime_config as _rcfg
-                            from . import kb_zaapi as _kbz
-                            _kb_fetcher = (
-                                (lambda: _kbz.zaapi_kb_evidence(
-                                        shop=req.shop,
-                                        platform=req.platform or "shopee",
-                                        message=req.message))
-                                if _rcfg.kb_source() == "zaapi"
-                                else (lambda: knowledge_base.kb_product_evidence(
-                                        db, kb_docs, shop=req.shop,
-                                        message=req.message)))
                             _grouped_sel = _rr.run_grouped_selection(
                                 _retrieval_profile, message=req.message,
                                 shop=req.shop,
@@ -2810,7 +2812,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                 needs=(_turn_plan.needs
                                        if _turn_plan else ()),
                                 snap=_snap,
-                                kb_fetcher=_kb_fetcher,
+                                kb_fetcher=_grouped_kb_fetcher,
                                 desc_fetcher=product_store
                                     .fetch_description_evidence,
                                 supporting=([{"kind": "kb",
@@ -5074,6 +5076,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                                   "source") or "web-structured"}}]
                                    if _device_spec_data else []),
                     desc_fetcher=product_store.fetch_description_evidence,
+                    kb_fetcher=_grouped_kb_fetcher,
                     snap=_snap)
             except Exception as _e:
                 print(f"[SELECTION] grouped-retrieval error: {_e}",

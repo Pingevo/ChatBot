@@ -560,6 +560,32 @@ class TestDecide:
             requested_operations=("price", "describe", "price"))
         assert got.requested_operations == ("describe", "price")
 
+    def test_committed_item_subject_survives_display_batch(
+            self, monkeypatch):
+        """A same-turn item-card decision is stronger than displayed results."""
+        prior = _set(["4001"], "single", ("item_card",))
+        state = {"value": prior}
+        monkeypatch.setattr(cp, "add_product", lambda *a, **k: None)
+        monkeypatch.setattr(app.knowledge_base, "extract_model_keywords",
+                            lambda _message: [])
+
+        def _record(_cid, subject_set, **_kw):
+            state["value"] = subject_set
+            return subject_set
+
+        monkeypatch.setattr(cp, "record_subject_set", _record)
+        req = app.ChatRequest(
+            message="ลูกค้าส่งการ์ดสินค้าชิ้นนี้มาในแชท",
+            shop="KingGadgets", platform="shopee",
+            conversation_id="committed-item-subject")
+        app._record_suggestion_products(
+            req,
+            [{"item_id": "4001", "name": "Anchor"},
+             {"item_id": "4002", "name": "Alternative"}],
+            {"stored": prior, "resolved": prior, "ops": ()})
+
+        assert state["value"] == prior
+
 
 # ═══ resolve_subjects reference matrix ═══════════════════════════════════════
 
@@ -718,6 +744,15 @@ class TestStructuredSubjectSignal:
             _set(["1", "2"], "compare"), "AC65B เทียบกับ AC65B2",
             subject_scope="explicit", signal_confidence=0.9)
         assert res.outcome == "no_subject_ref"
+
+    def test_explicit_scope_without_refs_uses_canonical_reference_signal(self):
+        """Malformed explicit-without-identity cannot veto a persisted item."""
+        res = cp.resolve_subjects(
+            _set(["27639651334"], "single"), "Speed data เท่าไหร่?ครับ",
+            subject_scope="explicit", subject_refs=(),
+            signal_confidence=0.9)
+        assert res.outcome == "resolved"
+        assert res.subject_set.subject_ids == ("27639651334",)
 
     def test_current_single_multi_persisted_clarifies(self):
         res = cp.resolve_subjects(

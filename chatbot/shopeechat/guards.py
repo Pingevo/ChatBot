@@ -273,7 +273,11 @@ def _spec_fact_grounded(resp, tok: str) -> bool:
         return False
     cards = list(getattr(resp, "products", None) or [])
     if _sids:
-        cards = [p for p in cards if _cp._identity_key(p)[0] in _sids]
+        cards = [
+            p for p in cards
+            if (_cp._identity_key(p)[0] in _sids
+                or ((_iid := _cp._card_ids(p)[2]) is not None
+                    and f"i:{_iid}" in _sids))]
     for _p in cards:
         _sid = _cp._identity_key(_p)[0]
         if _sid and _pr.claim_supported(

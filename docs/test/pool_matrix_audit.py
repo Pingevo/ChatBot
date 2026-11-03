@@ -153,10 +153,24 @@ _claim: dict = {}
 
 def _get(cid):
     st = _mem.get(cid)
-    if st is None:
-        return cp.SubjectSetView(None, None, ())
-    return cp.SubjectSetView(st, st, (), None,
-                             st.subject_ids[0] if st.subject_ids else None)
+    timeline = _tl.get(cid) or {}
+    products = tuple(timeline.get("products") or ())
+    active_item_id = timeline.get("active_item_id")
+    claim_state = _claim.get(cid)
+    if st is not None:
+        return cp.SubjectSetView(
+            st, st, products, claim_state, active_item_id)
+    anchor_ids = cp._norm_subject_ids(
+        p.get("item_id") for p in products
+        if p.get("is_anchor") and p.get("item_id") is not None)
+    if not anchor_ids:
+        return cp.SubjectSetView(
+            None, None, products, claim_state, active_item_id)
+    relation = "single" if len(anchor_ids) == 1 else "alternatives"
+    effective = cp.ConversationSubjectSet(
+        anchor_ids, None, relation, (), 0.5)
+    return cp.SubjectSetView(
+        effective, None, products, claim_state, active_item_id)
 
 
 cp.get_subject_set = _get

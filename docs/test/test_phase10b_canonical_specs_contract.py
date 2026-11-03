@@ -178,6 +178,8 @@ def test_compile_answer_context_no_raise_on_none_canonical_specs():
     assert ctx is not None
     scoped = [p for p in ctx.products if str(p.get("item_id")) == ITEM]
     assert scoped, "subject card missing from context"
+    assert scoped[0].get("unit_id") == card.get("unit_id")
+    assert scoped[0].get("model_id") == card.get("model_id")
     sf = scoped[0].get("spec_facts") or {}
     assert sf.get("data_transfer_mbps") == 480.0, (
         f"480Mbps description evidence must reach spec_facts: {sf}")
