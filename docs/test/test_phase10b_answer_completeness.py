@@ -1851,3 +1851,59 @@ def test_code_ref_resolution_end_to_end_subjects_channel(monkeypatch):
     txt = ctx.context_text()
     for sib in ("W02", "20069873881"):
         assert sib not in txt, f"sibling {sib} รั่วเข้า context"
+
+
+def _cable_verdict(specs, target_protocols=None):
+    need = td.TurnNeed(kind="compat", operation="compat",
+                       subject_refs=("CTC620P",),
+                       product_types=frozenset({"cable"}))
+    req = _req("req-0", types=("cable",), codes=("CTC620P",),
+               target="xiaomi 17 ultra", cm="connector_required")
+    card = _sel_card("i:1", "subject", "req-0",
+                     "CTC620P สายชาร์จ USB-C to USB-C",
+                     model_codes=["CTC620P"], product_type="cable",
+                     canonical_specs=specs)
+    pool = _pool(supporting=({
+        "kind": "device_spec", "target": "xiaomi 17 ultra",
+        "data": {"connector": "usb-c", "min_watt": 90,
+                 "source": "spec-db",
+                 **({"protocols": target_protocols}
+                    if target_protocols is not None else {})},
+        "subject_refs": ("i:1",)},))
+    ctx = _compile((need,), _selection((card, "req-0")), pool, (req,),
+                   _profile())
+    return ctx, [v for v in ctx.compat_verdicts if v.need_index == 0]
+
+
+@pytest.mark.parametrize(("specs", "target_protocols"), [
+    ({"power_capacity_w": 240}, None),
+    ({"power_capacity_w": 240, "charging_protocols": ["pd3.1"]}, ["qc3.0"]),
+    ({"power_capacity_w": 240, "charging_protocols": ["pd3.1"]}, ["pd3.1"]),
+    ({"power_capacity_w": 240, "charging_protocols": ["pd3.1"]}, None),
+    ({"power_capacity_w": 240, "max_current_a": 6,
+      "charging_protocols": ["pd3.1"]}, ["pd3.1"]),
+])
+def test_cable_capacity_only_verdict_has_honest_customer_caveat(
+        specs, target_protocols):
+    ctx, v = _cable_verdict(specs, target_protocols)
+    assert v and v[0].decision.outcome == "compatible"
+    assert "cable_capacity_covers_target" in v[0].decision.reason_codes
+    assert "missing_wattage_evidence" not in v[0].decision.reason_codes
+    assert not any("protocol" in code for code in v[0].decision.reason_codes)
+    assert v[0].decision.proofs[0].facts == ("connector:usb-c",)
+    seg = acx._compat_segment(v[0])
+    caveat = ("สายรองรับกำลังไฟตามที่อุปกรณ์ต้องการ แต่กำลังชาร์จจริงยังขึ้น"
+              "กับหัวชาร์จ อุปกรณ์ และโปรโตคอลที่รองรับค่ะ")
+    assert seg.count(caveat) == 1
+    assert "จ่ายไฟ 240W" not in seg and "PD3.1" not in seg
+    comp = _compose((td.TurnNeed(
+        kind="compat", operation="compat",
+        subject_refs=("CTC620P",),
+        product_types=frozenset({"cable"})),), ctx)
+    assert [r.text for r in comp.results if r.domain == "compat"] == [seg]
+
+
+def test_cable_without_typed_capacity_keeps_cannot_confirm_caveat():
+    _ctx, v = _cable_verdict({})
+    assert v and "missing_wattage_evidence" in v[0].decision.reason_codes
+    assert "ยืนยันไม่ได้" in acx._compat_segment(v[0])

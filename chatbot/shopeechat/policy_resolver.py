@@ -443,6 +443,18 @@ def extract_field_facts(card: dict, *, subject_id: str = "",
     facts: list[FieldEvidence] = []
 
     def add(key, val, source, prov):
+        # typed charging facts: invalid shape -> no row (unknown)
+        if key == "product_type":
+            if source != "card" or not isinstance(val, str) or not val.strip():
+                return
+        elif key in ("power_capacity_w", "max_current_a"):
+            val = (val if isinstance(val, (int, float))
+                   and not isinstance(val, bool)
+                   and math.isfinite(val) and val > 0 else None)
+        elif key == "charging_protocols":
+            val = (tuple(x.strip() for x in val if x.strip())
+                   if isinstance(val, (list, tuple))
+                   and all(isinstance(x, str) for x in val) else None)
         if val in (None, "", (), [], {}):
             return
         facts.append(FieldEvidence(
@@ -493,6 +505,7 @@ def extract_field_facts(card: dict, *, subject_id: str = "",
     add("output_w_structured",
         device_compat._structured_watts(card) or None,
         "card", "output_power_w|variants (structured only)")
+    add("product_type", card.get("product_type"), "card", "product_type")
     # canonical numeric/feature facts (extractor owner เดียวกัน — ไม่มี
     #   evidence → ไม่ emit row = unknown ไม่ใช่ negative)
     add("data_transfer_mbps",
@@ -841,9 +854,17 @@ def resolve_compat(*, subject_id: str, target: str, relation: str,
                     if math.isfinite(_fv):
                         _req_w = max(_req_w, _fv)
                 _ws = []
+                # cable: capacity is not power-source output
+                _cable = any(
+                    f.subject_id.lower() == _sid
+                    and f.fact_key == "product_type" and f.source == "card"
+                    and isinstance(f.value, str)
+                    and _norm_tok(f.value) == "cable"
+                    for f in subject_facts or ())
                 for _v in _fact_vals(
                         subject_facts, subject_id,
-                        "output_w_structured"):
+                        "power_capacity_w" if _cable
+                        else "output_w_structured"):
                     try:
                         _fw = float(_v)
                     except (TypeError, ValueError):
@@ -857,6 +878,8 @@ def resolve_compat(*, subject_id: str, target: str, relation: str,
                         _rc.append("insufficient_wattage")
                     elif any(_w < _req_w for _w in _ws):
                         _rc.append("wattage_variant_unconfirmed")
+                    elif _cable:
+                        _rc.append("cable_capacity_covers_target")
             return CompatDecision("compatible", (proof,), tuple(_rc))
         if "usb-a" in sub and "usb-c" in dev:
             return _unk("adapter_bridge_possible")

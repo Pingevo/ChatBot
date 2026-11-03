@@ -1646,7 +1646,8 @@ def _compat_segment(v: CompatVerdict) -> str:
     wattage reason codes = connector fit แต่กำลังชาร์จยังไม่ครบสเปค →
     caveat clause ต่อท้าย segment เดิม (ห้าม render bare ใช้ได้):
     insufficient_wattage = รู้ watt ต่ำกว่า / wattage_variant_unconfirmed
-    = หลาย variant ไม่ยืนยัน / missing_wattage_evidence = ไม่มี watt เลย"""
+    = หลาย variant ไม่ยืนยัน / missing_wattage_evidence = ไม่มี watt เลย;
+    cable_capacity_covers_target = สายไม่เป็นคอขวดด้าน watt เท่านั้น"""
     if v.decision.outcome == "compatible":
         seg = f"{v.subject_name} ใช้งานร่วมกับ {v.target} ได้ค่ะ"
         _rc = set(v.decision.reason_codes or ())
@@ -1659,6 +1660,9 @@ def _compat_segment(v: CompatVerdict) -> str:
         elif "missing_wattage_evidence" in _rc:
             seg += (" — หัวต่อเข้ากันได้ แต่ยังยืนยันไม่ได้ว่าชาร์จ"
                     "เต็มสเปคตามที่อุปกรณ์ต้องการ อาจชาร์จช้ากว่าปกติค่ะ")
+        elif "cable_capacity_covers_target" in _rc:
+            seg += (" — สายรองรับกำลังไฟตามที่อุปกรณ์ต้องการ แต่กำลังชาร์จจริง"
+                    "ยังขึ้นกับหัวชาร์จ อุปกรณ์ และโปรโตคอลที่รองรับค่ะ")
         return seg
     if v.decision.outcome == "incompatible":
         return f"{v.subject_name} ใช้งานร่วมกับ {v.target} ไม่ได้ค่ะ"
