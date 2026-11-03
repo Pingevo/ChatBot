@@ -10351,3 +10351,51 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - **verdict**: `PHASE_10B_LIVE_MATRIX_INCONCLUSIVE` — B/C เหนือกว่า A เล็กน้อย (1 vs 2 fails + พฤติกรรม structured ดีกว่า 3 จุด) แต่ B/C มี regression ใหม่ t4 (HIGH) ที่ A ทำถูก + B=C แยกกันไม่ได้ → ไม่มีผู้ชนะเด็ดขาด
 - **artifacts**: `docs/test/results/live_matrix_abc_{092145,093702}.{json,md}` + `live_matrix_abc_MERGED.json` (111 turns + scored + ground truth) — gitignored ไม่ commit
 - **safety**: mongo_write=0 · web=0 · openrouter=0 · ไม่มี secret ใน artifacts · ไม่แก้ production · tree clean · ไม่ push
+
+## กำลังจะทำ — Phase 10B Matrix Root-Cause Correction (2026-10-30)
+
+- **เป้าหมาย**: แก้สาม contract ที่ตรวจจาก production source จริง: subject-reference มี owner ซ้ำ (`subject_scope`/`ref_kind`), explicit item-card subject ถูก displayed batch ทับ, และ Zaapi KB fetcher ไม่ถูกส่งเข้า grouped main path
+- **แนวทาง**: ให้ `subject_scope` เป็น typed authority เดียว; รักษา subject ที่ commit แล้วใน turn เดิมผ่าน evidence carrier/precedence เดิมโดยไม่ห้าม recommendation set ใหม่; สร้าง source-selected KB fetcher ครั้งเดียวแล้วส่งเข้า grouped execution ทุก path
+- **TDD**: เพิ่ม RED behavioral tests ก่อนแตะ production — conflicting subject fields ต้องใช้ `subject_scope`; item-card + multi-product response ต้องคง single subject แต่ fresh recommendation ยังเป็น alternatives; grouped main path + `kb_source=zaapi` ต้องเรียก Zaapi adapter และ legacy path ต้องไม่เปลี่ยน
+- **ข้อห้าม**: helper/guard/regex/keyword table/heuristic/decision owner ใหม่; Mongo/provider/web call; stage/commit/push ก่อน independent verification
+
+## ผ่านแล้ว — Phase 10B Matrix Root-Cause Correction (2026-10-30)
+
+- `subject_scope` เป็น semantic owner เดียว: ลบ `ref_kind` ออกจาก intent schema/default/validator และลบ typed map ซ้ำใน `decide_turn`; conflict regression ยืนยัน scope หลักไม่ถูก metadata เก่าทับ
+- Zaapi KB เข้า grouped main path ได้โดยไม่ต้องมี legacy hit: app ส่ง deferred Zaapi adapter เมื่อ selection ON และแทนด้วย legacy evidence เฉพาะเมื่อ legacy lookup คืน docs จริง; adapter/config owners ยังคุม source admission เดิม
+- item-card subject ที่ commit ก่อน suggestion batch ใช้ `resolved` channel เดิมของ `decide_subject_set` จึงไม่ถูก displayed alternatives ทับ; fresh recommendation behavior เดิม
+- matrix harness อ่าน products/active/claim จาก in-memory timeline จริง, derive explicit anchors เหมือน production และติด die-spy ที่ `llm.describe_image(s)` จริง
+- RED 3 failures → GREEN; owner batch 324 passed; broad offline batch 361 passed, 19 skipped, 4 xfailed; pool-source script 28/28; py_compile/diff-check clean
+- mechanism delta: helpers +0, guards +0, regex +0, keyword tables +0, decision owners -1; semantic enum/map ซ้ำถูกลบ 2 ชุด; ไม่มี Mongo/provider/web call ใน verification
+
+## ผ่านแล้ว — Phase 10B Independent Guard/Helper + Live-Answer Correction Audit (2026-11-03; uncommitted)
+
+- **baseline/state**: branch `feature-botlogic-kb-workflow`; dirty tree 19 files, staging ว่าง; รอบนี้ไม่ stage/commit/push/deploy และไม่เปลี่ยน shared generation pointer
+- **root causes ที่พิสูจน์จาก source + RED**: same-identity merge ทำ `description_excerpt` หาย; guard เทียบ item/variant identity แบบ exact จึงลบ spec ถูก; AnswerContext ตัด `unit_id/model_id` ก่อน final guard; Gemini อาจส่ง `subject_scope=explicit` แต่ `subject_refs=()` ทำให้ persisted subject ถูก veto; targeted compatibility ถูก emit ซ้ำเป็น product need; `ref_kind` เป็น semantic owner ซ้ำกับ `subject_scope`
+- **owner-level corrections**: `_merge_group` รักษา description จาก identity เดียว; `_BASE_CARD_FIELDS` รักษา typed variant identity; `_spec_fact_grounded` ยอมรับ variant ภายใต้ item subject เดียวแต่ปฏิเสธ cross-item; `resolve_subjects` ให้ malformed explicit-without-refs ใช้ canonical singular/generic resolver เดิม และ pair/set/none ยัง fail closed; compatibility fact มี need owner เดียว; ลบ `ref_kind` owner/map ซ้ำ; grouped main path ได้ source-selected KB fetcher จริง
+- **live evidence**: `live_matrix_abc_20261103-021104.json` พบ defect; `...022401/022858` ใช้แยก identity/subject-signal; final bounded acceptance `live_matrix_abc_20261103-023307.json` — wattaka Q2 ยึด item `27639651334` ตลอด selection→context→guard และตอบ `480 Mbps` จาก exact-item description; Gemini 4 attempts, web/OpenRouter/Mongo-write/vision = 0
+- **read-only data audit**: W01 item `19308362993` description มี Glory Fit/Imilab Fit แต่ไม่มี exact evidence ของ GPS/pace/heart-rate display/Strava; Zaapi KB lookup เคสนี้ได้ 0 evidence — คำตอบที่ถูกคือ cannot-confirm/admin ไม่ใช่เดา
+- **verification**: focused identity/subject suites ผ่าน; impacted batch **663 passed**; broader batch **888 passed, 1 xfailed**; changed production modules `py_compile` clean; `git diff --check` clean
+- **guard/helper verdict**: ไม่ถือว่าของเดิมทุกตัวสมบูรณ์หรือควรอยู่ถาวร; typed/schema owners (`policy_outcome_text`, composition-marker validation, typed identity/evidence boundaries) ควรเก็บ; prose/regex rewrite chain (`_claim_grounded`, `_identity_pool`, `_evidence_pool`, `_replace_clause`, model/spec/promo/stock scans ใน `enforce`) เป็น legacy safety debt ที่ต้อง freeze ไม่ขยาย และลบหลัง typed composition ครอบคลุม
+- **mechanism delta รอบนี้**: helpers +0 · guards +0 (patch existing identity contract เท่านั้น) · regexes +0 · keyword tables +0 · decision owners -1 (`ref_kind` ถูกลบ)
+- **remaining gates**: ยังไม่ rerun full A/B/C หลัง final fixes; W01/Zaapi KB ขาด evidence; Pingevox wattage ต้อง enrich structured unit data; legacy prose guard debt; workflow execution/import + KB/pool switches; prompt distillation; logging/analytics — ห้ามอ้างว่า Phase 10B ปิดสมบูรณ์จนกว่า gates นี้ผ่าน
+
+## กำลังจะทำ — Zaapi-Primary Evidence + Phase 10B Answer Acceptance (2026-11-03)
+
+- **การตัดสินใจของผู้ใช้**: Zaapi KB เป็น factual authority หลักด้านสเปก/compatibility/FAQ/troubleshooting และจะไม่เปิดเดี่ยว — ต้องทำงานร่วมกับ Shopee catalog + units เสมอ; Shopee/units ยังเป็น authority ด้าน identity/listing/link/variant/stock/price/status
+- **ปัญหาที่ต้องปิด**: CTC620P มี description ยืนยัน USB-C/PD3.1/6A/Xiaomi 120W แต่ unit ไม่มี structured cable-capability facts จึงได้ `missing_wattage_evidence`; recommendation แสดงทุก selected verdict/card; variant identity ที่จำเป็นต่อ stock ไม่ถูก collapse ตอน present; Zaapi KB import/search ยังไม่ใช้ข้อมูลหนาแน่นแบบ need-scoped identity-bound อย่างเต็มประสิทธิภาพ
+- **ลำดับ**: freeze+review candidate diff 19 ไฟล์ → typed product evidence contract → Zaapi raw+canonical import → need-scoped identity-bound hybrid retrieval → central pool source policy (Zaapi requires catalog+units) → selection/cardinality/composition → RED/GREEN regression → live Mongo+Gemini acceptance
+- **ข้อห้าม**: helper/guard/keyword/regex/heuristic/decision owner ใหม่เพื่อแก้อาการ; Zaapi KB สร้าง sellable identity เอง; runtime prose parsing เป็น business authority; cross-item evidence; web/OpenRouter; Product DB write; stage/commit ก่อน candidate diff ผ่าน independent review
+- **สถานะเริ่มต้น**: branch `feature-botlogic-kb-workflow` @ `6c81d16`; modified 19 files (+388/−145), staging ว่าง, `git diff --check` clean; รอบ design นี้ไม่แตะ production bytes
+- **design approved**: ผู้ใช้อนุมัติให้ดำเนินงานต่อ; spec `docs/superpowers/specs/2026-11-03-zaapi-primary-evidence-design.md` เปลี่ยนสถานะเป็น Approved
+- **implementation plan**: `docs/superpowers/plans/2026-11-03-zaapi-primary-evidence-implementation-plan.md` — 9 tasks ตามลำดับ: close candidate diff → typed charging evidence → canonical import/export → KB embeddings → identity-bound retrieval → source dependency → recommendation presentation → offline acceptance → live Mongo+Gemini closeout
+
+## ผ่านแล้ว — Task 1 candidate audit corrections; รอ commit gate (2026-11-03)
+
+- **frozen candidate**: HEAD `6c81d16`; candidate เดิม 19 files, staging ว่าง; spec/implementation plan ใหม่ 2 files แยกจาก candidate; `git diff --check` clean
+- **finding 1 — KB selector fall-through**: grouped main path สร้าง Zaapi fetcher ทันทีเมื่อ selection ON โดยไม่ตรวจ `kb_source`; เลือก legacy แต่ lookup ไม่พบจึงอาจไหลไป Zaapi ผิด switch; RED ยืนยัน fetcher ไม่เป็น None → แก้ condition เดิมใน `app.py` ให้สร้างเฉพาะ `kb_source()=="zaapi"`; Zaapi/legacy controls GREEN
+- **finding 2 — hidden title heuristic**: `_wattage_asc_key` นำ watt จากชื่อสินค้ามา override relevance เมื่อ structured evidence ว่าง; ลบ semantic use นี้ออก — adequate/below ยังเรียงจาก typed structured watts, unknown คง relevance order เดิม; SRS+behavioral test อัปเดต
+- **test isolation**: ปิด ambient Mongo/config/generation leaks ใน test boundary เดิม — `test_phase4_source_union` pin source policy + `_fetch` tripwire; description tests pin `_resolve_snap`; answer-completeness e2e ส่ง `snap=None`; ไม่เพิ่ม timeout/retry หรือ production behavior
+- **verification**: focused candidate **424 passed**; final two-order regression (source-union first/last) เท่ากันทั้งคู่ = **925 passed, 19 skipped, 4 xfailed**; typed watt controls 4/4; `py_compile` production modules + `git diff --check` clean; commands exit จริง
+- **mechanism delta vs HEAD**: helpers +0 · guards +0 · regexes +0 · keyword/phrase tables +0 · heuristic mechanisms +0 · decision owners -1 (`ref_kind` ลบ); typed enum/map ซ้ำ -2; test-only fixtures/helpers +0
+- **state**: ยังไม่ stage/commit/push/deploy/Mongo/provider/web; รอ repository-required first-commit approval ก่อนเริ่ม Task 2
