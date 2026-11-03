@@ -10443,3 +10443,39 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - **verify ก่อน commit**: focused 217 passed/5 warnings exit 0; `test_compat_mode_filter.py` 144/144 exit 0; bounded offline regression รอบ final candidate 1207 passed/19 skipped/4 xfailed ทั้งสอง order exit 0; `py_compile` 3 files และ `git diff --check` ผ่าน
 - **mechanism delta**: helpers +0 · guards +0 · regex +0 · keyword/protocol tables +0 · heuristics +0 · decision owners +0; ไม่มี Mongo/provider/web call
 - **residual/next**: warranty parser อาจอ่าน `2m` เป็น 2 เดือน (บันทึกแยก ไม่แก้รอบนี้); ยังไม่มี required/optional protocol contract; Task 3 — Raw + Canonical Zaapi KB Records ต้องเติม canonical data จริง; ไม่ deploy/activate
+
+## กำลังจะทำ — Task 2.1 warranty unit correction (2026-11-03)
+
+- **baseline**: branch `feature-botlogic-kb-workflow` @ `88cf035d5d5b7d4cb47a4c47bc4b2a8b175d81b9`; worktree/staging/untracked ว่าง, `git diff --check` exit 0, ไม่มี pytest/build process ค้าง
+- **error → root cause**: parser `extract_warranty_from_name` ใช้ `unit.lower() == "m"` ใน tail match ทำให้ `CTC620P ... 2m` และ `สายชาร์จยาว 1m` กลายเป็นประกัน 2/1 เดือน; raw parse offline ยืนยันแล้ว; ข้อมูลนี้ไหลไป card, policy facts, order/warranty answer
+- **plan / impact**: RED parser cases + downstream fact/answer; แก้เงื่อนไข tail ที่ owner เดิมให้รับเฉพาะ `M` เป็นเดือน ปล่อย lowercase `m` ให้ near-warranty parser เดิมรับเมื่อ explicit; คง `Y/y` และ Thai units เดิม; SRS + focused/bounded offline tests + compile/diff check. ดีขึ้นสูงสำหรับสายทุกแบรนด์; ความเสี่ยงต่ำ-ปานกลางต่อชื่อที่เคยใช้ `m` ท้ายชื่อโดยไม่ระบุประกัน (จงใจ fail closed); ไม่เพิ่ม helper/guard/regex/table/heuristic/owner
+- **gate**: ได้รับอนุมัติ Stage A; ห้าม stage/commit/push/deploy, Mongo/provider/web calls, หรือแตะ services/ports 8010/8011; หยุด review ก่อน Stage B
+
+## ผ่านแล้ว — Task 2.1 warranty unit correction (2026-11-03; รอ independent review)
+
+- **RED**: `test_warranty_unit_semantics.py` 7 failed / 3 passed, exit 1; ชื่อสาย `2m`/`1m` และ `-24m` ถูกอ่านเป็นเดือน, explicit `24m`/`6m` ได้ source=tail, mixed title ให้ประกัน 2 เดือนแทน 24 เดือน; product card ให้ duration 2 เดือนจริง
+- **error → สาเหตุ → วิธีแก้**: tail branch ลด case `M/m` ก่อนตัดสิน → เปลี่ยนเงื่อนไขของ `extract_warranty_from_name` เฉพาะบรรทัดเดือนให้รับ literal `M`; `m` ไม่มีประกันคืน None, explicit `ประกัน`/`warranty` ไป near-warranty branch เดิม; `Y/y` และ Thai unit ไม่เปลี่ยน; SRS section 6.8 อัปเดต
+- **ผลกระทบเคสอื่น**: สายทุกแบรนด์ที่ลงท้าย `m` ไม่ได้ประกันปลอม; สินค้าที่ระบุ `M`, `Y/y` หรือ explicit `ประกัน 24m`/`warranty 6m` ยังให้เดือน/ปีถูกต้อง; ambiguous bare lowercase `m` fail closed, downstream product card และ policy fact ไม่แสดง 2 เดือน
+- **GREEN**: focused 10 passed exit 0; warranty/claim/policy + Phase 10B answer/Zaapi + answer-context suites 536 passed / 5 warnings exit 0; bounded answer/field/source-union regression 377 passed / 5 warnings exit 0; warnings เป็น deprecation จาก dependency/FastAPI
+- **mechanism delta**: helpers +0 · guards +0 · regexes +0 · keyword tables +0 · heuristics +0 · decision owners +0; production เปลี่ยนเฉพาะ tail condition ใน owner เดิม; ไม่ stage/commit/push/deploy, ไม่เรียก Mongo/provider/web หรือแตะ services/ports
+- **final checks**: `py_compile` production/test exit 0; `git diff --check` และ staged diff check exit 0; HEAD คงเดิม, staging ว่าง; modified `warranty.py`, `SRS_SSD.md`, active log + untracked `test_warranty_unit_semantics.py`; รอ independent review ก่อน Task 3
+
+## กำลังจะทำ — Task 2.1 correction รอบ independent review (2026-11-03)
+
+- **baseline**: branch `feature-botlogic-kb-workflow` @ `88cf035d5d5b7d4cb47a4c47bc4b2a8b175d81b9`, candidate เดิม 3 modified + 1 untracked test, staging ว่าง, `git diff --check` exit 0, ไม่มี pytest/build ค้าง
+- **finding / root cause**: test เดิมยืนยัน parser, product card และ typed policy fact แต่ยังไม่ทดสอบ customer-visible duration answer; module docstring/comment ยังบอกว่า bare `m` ท้ายชื่อรองรับ. `_render_composition` render text ที่มีอยู่แล้ว, `_append_base_warranty` ไม่สร้างระยะประกัน, `auto_check_delivery_warranty` สร้างสถานะตามวันส่งมอบ (ต้อง lookup order) ไม่ใช่คำตอบ duration `2 ปี`; ไม่มี pure duration-answer seam ที่รับ card/fact แล้วสร้างคำตอบนั้น
+- **plan / impact**: เพิ่ม positive `-24M` ที่ `_warranty_info` + `extract_field_facts` ควบคู่ negative `2m`, ปรับ docstring/comment ของ `warranty.py` เท่านั้น (ไม่แตะ regex/behavior), แก้ SRS/log ให้บอก coverage ถึง card/fact และตั้ง customer-visible duration เป็น live QA acceptance รอบถัดไป. โอกาสปิด coverage gap สูง; regression risk ต่ำ (production behavior คงเดิม), mechanism ทุกชนิด +0
+- **gate**: ไม่สร้าง output helper/renderer/guard, ไม่ stage/commit/push/deploy, ไม่ Mongo/provider/web/service call, ไม่เริ่ม Task 3
+
+## ผ่านแล้ว — Task 2.1 correction รอบ independent review (2026-11-03; รอ second review)
+
+- **error → สาเหตุ → วิธีแก้**: source comment อ้าง tail `M/m` ทั้งที่ parser รับเฉพาะ `M`; แก้ module docstring/comment ให้แยก tail `Y/y/M` กับ explicit near `m` โดยไม่เปลี่ยน regex/behavior. เพิ่ม positive card/fact control `-24M` → duration `2 ปี`/`24` เดือน, typed warranty fact `24`; negative `2m` → ไม่มี duration/fact
+- **coverage correction**: ก่อนหน้านี้กล่าวถึง downstream answer กว้างเกินหลักฐาน; tests ยืนยัน parser + product card + typed policy fact เท่านั้น ไม่ได้ทดสอบ bot customer-visible duration answer. `_render_composition` render จาก text ที่ให้มา, `_append_base_warranty` ไม่สร้าง duration, order auto-check ตอบสถานะตามวันส่งมอบ; live QA รอบถัดไปต้องเช็ก `-24M` ตอบ `2 ปี` และ bare `2m` ไม่ตอบ `ประกัน 2 เดือน`; ไม่สร้าง renderer เฉพาะเพื่อผ่าน test
+- **verification**: positive control focused 11 passed exit 0; warranty/claim/policy + Phase 10B answer/Zaapi + answer-context 661 passed / 5 deprecation warnings exit 0; bounded answer regression 253 passed / 5 warnings exit 0; adversarial `m/M/Y/y` 10 cases passed exit 0; `py_compile` production/test exit 0, `git diff --check` และ staged check exit 0
+- **impact / mechanism delta**: positive/negative typed evidence ครอบคลุมทุกแบรนด์โดยไม่มี special case; helpers +0 · guards +0 · regexes +0 · keyword tables +0 · heuristics +0 · decision owners +0; ไม่เรียก Mongo/provider/web/service, ไม่ stage/commit/push/deploy, ไม่เริ่ม Task 3
+
+## ผ่านแล้ว — Task 2.1 independent second review + closeout (2026-11-03)
+
+- **review**: second review PASSED, ไม่มี finding ค้าง; independent warranty/claim/policy 234 passed, Phase 10B + answer context/composition 257 passed; adversarial downstream: `2m` ไม่ได้ card/fact, `-24M` และ `ประกัน 24m` ได้ 24 เดือน/typed fact 24
+- **commit 1**: `f15d026181bb7405f55ecb6086f678246c7adde3` (`fix: distinguish cable length from warranty months`), parent `88cf035d5d5b7d4cb47a4c47bc4b2a8b175d81b9`; manifest เฉพาะ warranty parser/source docs, SRS และ behavioral test; pre-commit 11 passed, compile/diff/staged manifest/safety scan exit 0
+- **residual**: customer-visible live duration answer ยังต้อง live QA; ไม่มี Mongo/provider/web/service call, ไม่ push/deploy; Task 3 เริ่มหลัง commit log และยืนยัน tree clean เท่านั้น
