@@ -1,0 +1,1 @@
+Demo Shop cable CB-100: use the USB-C connector. This is a sanitized example.

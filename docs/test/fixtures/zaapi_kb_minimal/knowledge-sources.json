@@ -1,0 +1,24 @@
+{
+  "items": [
+    {
+      "id": "demo-cable",
+      "name": "Sanitized cable catalog",
+      "version": {"versionId": "v1", "type": "file"},
+      "accounts": [{"id": "demo-shop", "platform": "shopee", "name": "Demo Shop"}],
+      "downloaded_file": {
+        "file": "cables.xlsx",
+        "sha256": "fd3509285748248732484b7d544a78f8f471fdbf7f4cc52dfbbb69f1ba9d5f74"
+      }
+    },
+    {
+      "id": "demo-guide",
+      "name": "Sanitized cable guide",
+      "version": {"versionId": "v1", "type": "file"},
+      "accounts": [{"id": "demo-shop", "platform": "shopee", "name": "Demo Shop"}],
+      "downloaded_file": {
+        "file": "guide.txt",
+        "sha256": "699979436e9cd965dd08a64fc1479f8d3b1e7b1419850877e1837bb9ec34a80f"
+      }
+    }
+  ]
+}
