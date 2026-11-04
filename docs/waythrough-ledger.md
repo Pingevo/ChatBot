@@ -25,9 +25,9 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 11234 |
-| active_integrity_prefix_sha256 | `05cd78eec98953be1ecf07963ee90adf9c8efbebc916449aadd307766e9f4bbd` |
-| active_line_count_at_baseline | 11234 (bytes 2156346) |
+| active_integrity_prefix_lines | 11254 |
+| active_integrity_prefix_sha256 | `39b29c4cb35632a6491ff9eceab0433f29ea97fe589f1076d4cec2050618e2b9` |
+| active_line_count_at_baseline | 11254 (bytes  2159592) |
 | active_integrity_recorded_at | 2026-11-04T12:08+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
@@ -99,6 +99,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11226–11234 | read + indexed (A-046) |
 | 11235–11241 | read + indexed (A-047) |
 | 11242–11249 | read + indexed (A-048) |
+| 11250–11254 | read + indexed (A-049) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -167,6 +168,8 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-045 | 11216–11225 | Phase 4 Task 13 gate — 4A disposable real-Mongo fidelity 2026-11-04 | passed behavior | `PHASE_4A_DISPOSABLE_MONGO_FIDELITY_PASSED` 19/19 — refusal 15/15, ambient URI unread, lifecycle rev1→4, real DuplicateKeyError/matched_count/16MiB/readback/CLI; **fix พบโดย gate**: build_generation manifest=None → TypeError → ValueError (TDD); evidence phase4a_*.md/json; cleanup 0/0 | verified | งานค้าง = T13B (network approval), T15/T16 (provider+approval) |
 | A-046 | 11226–11234 | Phase 4 Task 13B gate — packaging py3.11 2026-11-04 | passed behavior | `PHASE_4_PACKAGING_PY311_VERIFIED` — ST==5.7.0 + gen/retrieval modules import บน python:3.11-slim (path b online install, user-approved) | verified | งานค้าง = T15/T16 (approved) |
 | A-047 | 11235–11241 | Phase 4 Task 15 gate — 4C canonical corpus provider-run 2026-11-04 | passed behavior | **provider fix พบโดย gate**: `gemini-2.5-flash` retired (404) → `gemini-3.5-flash-lite` + anonymous `genai.Client()` GC'd mid-call → named binding; free-tier 20 req/day/model → corpus = single-product spec files (082/083/084/103) 5 calls → 14 resolved records, 4-source manifest; checkpoint resume 0 calls สำหรับ resolved rows; `PHASE_4C_CANONICAL_CORPUS_COMPLETE` 11/11 บน real BGE-M3 + real Mongo; evidence phase4c_matrix.json | verified | งานค้าง = T16 benchmark + container cleanup |
+| A-048 | 11242–11249 | Phase 4 Task 16 gate — 4D retrieval benchmark 2026-11-04 | passed behavior | candidates npz-fp32/npy+memmap/npz-fp16 วัดครบ (size/load/RSS/query/recall): ไม่มี candidate เหนือกว่าที่ scale นี้ → **keep npz-fp32 default** (spec §20); exact 2.12ms, semantic 262ms (model encode), scope isolation 0 hits, corrupt vectors→fail-closed, evidence p95=850B<1500B; corpus rebuild ผ่าน checkpoint cache = 0 provider calls; cleanup containers+volumes = 0 ใน finally; `PHASE_4D_RETRIEVAL_BENCHMARK_COMPLETE`; evidence phase4d_benchmark.md | verified | งานค้าง = acceptance update + final regression + review |
+| A-049 | 11250–11254 | Phase 4 closeout — all tasks+gates complete 2026-11-04 | passed behavior | acceptance matrix 18/18 done; final regression 903/0; staging ว่าง; containers 0; พร้อม independent review | verified | pending = independent review |
 
 ## 7. Known semantic coverage gaps
 

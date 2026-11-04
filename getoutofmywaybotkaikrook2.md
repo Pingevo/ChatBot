@@ -11247,3 +11247,8 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - cleanup บังคับใน finally: containers+volumes zaapi-p4 = 0
 - verdict: `PHASE_4D_RETRIEVAL_BENCHMARK_COMPLETE`; evidence `docs/test/results/phase4d_benchmark.md`
 - งานค้าง: อัปเดต acceptance (T18 ก่อนหน้าทำตอน gates ยัง blocked) + final regression + independent review
+
+## Phase 4 closeout — ทุก task+gate ครบแล้ว
+- acceptance matrix อัปเดต: 18/18 done, gates 4 รายการเคลียร์ (4A fidelity 19/19, py3.11 packaging, 4C corpus 11/11, 4D benchmark)
+- final regression: 903 passed / 0 failed (16-file matrix), git diff --check ผ่าน, staging ว่าง, leftover containers 0
+- งานค้าง: independent code review ก่อนสรุป PHASE_4_IMPLEMENTATION_COMPLETE
