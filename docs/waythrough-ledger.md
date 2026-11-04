@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 11188 |
-| active_integrity_prefix_sha256 | `50bb892bf0943971ceeef0a5cfff9ac258aa0c704264d87d01502f8e11ce58ba` |
-| active_line_count_at_baseline | 11188 (bytes 2150116) |
-| active_integrity_recorded_at | 2026-11-04T11:56+0700 |
+| active_integrity_prefix_lines | 11197 |
+| active_integrity_prefix_sha256 | `b5728d8332bfa43ffdb1442949088a848eb369894a04d14fefae020ce192c221` |
+| active_line_count_at_baseline | 11197 (bytes 2151560) |
+| active_integrity_recorded_at | 2026-11-04T11:58+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -92,6 +92,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11162–11170 | read + indexed (A-039) |
 | 11171–11179 | read + indexed (A-040) |
 | 11180–11188 | read + indexed (A-041) |
+| 11189–11197 | read + indexed (A-042) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -154,6 +155,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-039 | 11162–11170 | Phase 4 Task 10 implementation — publish/rollback CAS + thin CLI 2026-11-04 | passed behavior | `_cas_swap` ABA fence (rev+gid, matched=0→reread ครั้งเดียว), `_resolve_and_cas` bootstrap find→validate→insert_only (corrupt→raise ไม่ repair), `_run_canary`, `publish` (drift pre-check→canary→CAS→readback→newer_canonical_pending), `rollback` (CAS owner เดียว, no-previous→conflict); CLI `zaapi_kb_gen.py` + `require_disposable_target` (loopback+non-27017+no creds/db-path, db_name pattern — gate ก่อน MongoClient เสมอ); verify: gen 25/25, regression 787/0, no upsert in source | verified | งานค้าง = T11→T18 |
 | A-040 | 11171–11179 | Phase 4 Task 11 implementation — producer→pool→compiler attribution contract 2026-11-04 | passed behavior | test-only `test_phase4_zaapi_attribution.py`: retrieve() producer records → RetrievalExecutionResult(request_id) → build_candidate_pool stamp → _compile_evidence — closed schema hold, request_id ถูกลบ, need_indices จาก request_id, verbatim identity/target, payload plain str ≤ byte budget — ผ่านครั้งแรก 0 production byte | verified | งานค้าง = T12→T18 |
 | A-041 | 11180–11188 | Phase 4 Task 12 implementation — isolation + regression matrix + SRS completeness 2026-11-04 | passed behavior | **test พบ bug จริง**: CLI module-level `sys.path.insert(parent.parent)` ผิด dir (chatbot/shopeechat ≠ chatbot) — รันเป็น script = ModuleNotFoundError → ย้ายเข้า `main()` + แก้ path; +4 isolation tests (import probe, offline lifecycle under tripwires, import-order, CLI-as-script regression); +2 SRS helper rows; verify: isolation 9/9, **matrix 16 files = 902/0** | verified | งานค้าง = T13/T13B gates→T14→T15/T16 gates→T17/T18 |
+| A-042 | 11189–11197 | Phase 4 Task 14 implementation — Gate 4B census tool (file-only) 2026-11-04 | passed behavior | `phase4b_census.py` — `_build_docs`+schema owners เดิม, validate_raw_row gate ทุก row; ผลจริง 118/8,600/112,974 deliveries/8,597 cfp ตรง prior เป๊ะ, 0 malformed, report gitignored | verified | งานค้าง = T13/T13B+T15/T16 (approvals), T17, T18 |
 
 ## 7. Known semantic coverage gaps
 

@@ -11186,3 +11186,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: CLI import path behavior เดียวกันเดิม (tests import `zaapi_kb_gen` top-level ผ่าน scripts dir อยู่แล้ว); publish_generation/build_embeddings ไม่แตะ
 - verify: isolation 9/9 (รวม offline lifecycle + CLI runpy); **T12 matrix ครบ 16 files = 902 passed/19 skipped/4 xfailed/0 failed**; py_compile+diff --check OK; SRS census = 0 missing
 - งานค้าง: T13/T13B (Docker gates — STOP ขอ approval), T14 (census file-only), T15/T16 (provider+Docker — STOP), T17/T18 (closeout)
+
+## ผ่านแล้ว — Phase 4 Task 14: Gate 4B raw/source census (file-only path) (2026-11-04)
+
+- error: census ของ raw sources ยังไม่มี (T14 gate — file-only path เพราะ 4A ยังไม่ได้ approval)
+- cause: ไม่มี deterministic counting tool
+- แก้ด้วย: `docs/test/phase4b_census.py` — reuse `_build_docs` (importer row semantics owner เดิม) + schema owners เท่านั้น (`canonical_delivery_scope`/`raw_row_id`/`sanitize_source_row`/`fingerprint`/`canonical_json`/`validate_raw_row`/`RAW_CONTENT_FIELDS` — ไม่มี logic ซ้ำ); ทุก row rebuild เป็น closed storage doc → `validate_raw_row` gate; report → `docs/test/results/phase4b_census.md` (gitignored) + canonical_json stdout
+- ผลกระทบเคสอื่น: 0 — read-only analysis tool ใหม่ ไม่มี production/test change
+- verify: `{"sources_declared":118,"sources_parsed":118,"malformed":0,"empty":0,"raw_rows":8600,"distinct_content_fingerprint":8597,"deliveries":112974}` — **ตรง prior 118/8,600/112,974 เป๊ะ**; kind dist: 8,595 xlsx_row + 5 text; 2 fingerprint collisions คลุม 5 rows (expected — scope/provenance-only duplicates share content); `git status` = tool file เดียว
+- งานค้าง: T13/T13B (Docker approval), T15/T16 (provider+Docker approval), T17, T18 closeout
