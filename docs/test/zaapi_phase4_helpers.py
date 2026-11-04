@@ -125,3 +125,58 @@ def block_network(monkeypatch):
                         lambda self, *a, **k: _leak("pymongo.MongoClient()"))
     monkeypatch.setattr(urllib.request, "urlopen",
                         lambda *a, **k: _leak("urllib.request.urlopen"))
+
+
+def write_gen_dir(exports_root, gid: str, records: list, embed=None):
+    """Write a full generation artifact dir `exports_root/zaapi_kb_gen/<gid>/`
+    via `kb_zaapi_generation` builders (no logic copied here):
+    semantic_text/digests → sorted-digest vectors.npz (keys
+    digests/embeddings/generation_id) + record_map.json + structured_index.json
+    + manifest.json (validated). Returns the gen dir Path."""
+    import json
+    from pathlib import Path
+    from shopeechat.kb_zaapi_generation import (
+        _write_artifact, build_manifest_payload, build_record_map,
+        build_structured_index, semantic_digest, semantic_text)
+    from shopeechat.kb_zaapi_schema import (canonical_json,
+                                            validate_artifact_manifest)
+    import numpy as np
+
+    embed = embed or stub_embed
+    gen_dir = Path(exports_root) / "zaapi_kb_gen" / gid
+    gen_dir.mkdir(parents=True, exist_ok=True)
+
+    texts = {}
+    for rec in records:
+        texts.setdefault(semantic_digest(rec), semantic_text(rec))
+    digests = sorted(texts)
+    vectors = embed([texts[d] for d in digests])
+
+    roles = {}
+    meta = _write_artifact(gen_dir, "vectors.npz", {
+        "digests": np.array(digests), "embeddings": vectors,
+        "generation_id": np.array(gid)})
+    roles["vectors"] = {**meta, "format": "npz", "row_count": len(digests),
+                        "dim": 1024, "dtype": "float32"}
+
+    record_map = build_record_map(records, texts)
+    meta = _write_artifact(gen_dir, "record_map.json",
+                           canonical_json(record_map).encode("utf-8"))
+    roles["record_map"] = {**meta, "format": "json",
+                           "digest_count": len(record_map),
+                           "record_count": len(records)}
+
+    structured_index = build_structured_index(records)
+    meta = _write_artifact(gen_dir, "structured_index.json",
+                           canonical_json(structured_index).encode("utf-8"))
+    roles["structured_index"] = {
+        **meta, "format": "json", "field_count": len(structured_index),
+        "key_count": sum(len(v) for v in structured_index.values()),
+        "posting_count": sum(len(ids) for entries in structured_index.values()
+                             for ids in entries.values())}
+
+    manifest = build_manifest_payload(gid, roles)
+    validate_artifact_manifest(manifest)
+    _write_artifact(gen_dir, "manifest.json",
+                    canonical_json(manifest).encode("utf-8"))
+    return gen_dir

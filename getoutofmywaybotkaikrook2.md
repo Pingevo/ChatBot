@@ -11123,3 +11123,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: schema module +3 public validators, +1 private primitive, +2 constant tables — pure, ไม่มี DB/env/network; `load_active_state` เดิมไม่ถูกแตะ
 - verify: generation suite 12/12 (truth tables ครบ missing/extra/bool/uppercase/naive-tz/non-UTC/wrong-file/field_count); regression 748 passed/0 failed; py_compile + diff --check OK
 - งานค้าง: T6 (generation owner builders+artifact writers)
+
+## ผ่านแล้ว — Phase 4 Task 6: generation builders + artifact writers (2026-11-04)
+
+- error: ไม่มี `kb_zaapi_generation.py` — semantic_text renderer/digest/record_map/structured_index/manifest builders + atomic writers ยังไม่มี owner
+- cause: Phase 4 owner-1 module ยังไม่ถูกสร้าง
+- แก้ด้วย: RED 9 tests (ImportError จริง) → GREEN: module ใหม่ — `semantic_text` (locked v1 renderer, scope/provenance/record_id ห้ามรวม), `semantic_digest` (sha256 text), `record_set_digest` (fingerprint(sorted ids) ผ่าน schema owner), `build_record_map` (vector_index=sorted-digest pos, text ครั้งเดียว, projections 7 fields, scope normalize ผ่าน canonical_delivery_scope), `build_structured_index` (6 namespaces, strip, sorted+unique postings), `build_manifest_payload` (spec §10, ไม่มี self entry), `_sha256_file` (pattern-copy — publish_generation import ไม่ได้เพราะ sys.path side effect), `_write_artifact` (tmp→verify→os.replace); helpers +`write_gen_dir` (เรียก builders ทั้งหมด ไม่ copy logic)
+- ผลกระทบเคสอื่น: module ใหม่เท่านั้น (+test file +helper fn +SRS §6.34d) — ไม่มี callsite production เดิมถูกแตะ
+- verify: gen suite 13/13 (semantic_text determinism+field order, digest truth table 7 แถว, record_map self-contained, index namespaces, manifest deterministic+validate chain, reproducibility, atomic writer, write_gen_dir); regression 757/0; py_compile+diff --check OK
+- งานค้าง: T7 (retrieval loaders)
