@@ -212,3 +212,145 @@ def load_active_generation(db, *, exports_root=None) -> ZaapiKbSnapshot | None:
     if snap.canonical_generation != pointer["canonical_generation"]:
         return _fail("pointer canonical_generation != gen doc")
     return snap
+
+
+# --- Task 8: retrieve() full query contract (spec §8/§9/§14) ---
+
+from .answer_context import EVIDENCE_LIMIT  # noqa: E402
+from .kb_zaapi_schema import canonical_delivery_scope  # noqa: E402
+
+_TYPED_CHANNELS = (("item_ids", "item_id"), ("model_ids", "model_id"),
+                   ("model_codes", "model_code"), ("aliases", "alias"),
+                   ("subject_ids", "subject_id"), ("target_ids", "target_id"))
+
+
+def _empty(*trace: str):
+    from .knowledge_base import KbEvidenceResult
+    return KbEvidenceResult(supporting_evidence=(), raw_count=0, trace=trace)
+
+
+def _evidence_record(digest: str, projection: dict, record_map: dict) -> dict:
+    """Producer record ตาม spec §9 — materialize จาก artifacts เท่านั้น;
+    omit field ว่าง/None; ห้ามเดา/parse prose"""
+    ev: dict = {"kind": "kb"}
+    if projection["item_id"] is not None:
+        ev["item_id"] = projection["item_id"]
+    identity = projection["subject_id"] or projection["model_id"]
+    if identity is not None:
+        ev["identity"] = identity
+    if projection["target_id"] is not None:
+        ev["target"] = projection["target_id"]
+    ev["payload"] = {"text": record_map[digest]["text"]}
+    return ev
+
+
+def retrieve(snapshot, *, shop, platform, item_ids=(), model_ids=(),
+             model_codes=(), aliases=(), subject_ids=(), target_ids=(),
+             semantic_query=None, limit=EVIDENCE_LIMIT):
+    """Canonical-KB retrieval บน snapshot — boundary validation → scope
+    normalize → structured channels → semantic channel → scoped merge →
+    limit → producer records → KbEvidenceResult (fail closed เป็น empty+trace)"""
+    # boundary validation — group เดียว (spec §8)
+    if not isinstance(shop, str) or not isinstance(platform, str):
+        return _empty("invalid_query")
+    shop, platform = canonical_delivery_scope(shop, platform)
+    if not shop or not platform:
+        return _empty("invalid_query")
+    if not isinstance(limit, int) or isinstance(limit, bool) \
+            or limit < 1 or limit > EVIDENCE_LIMIT:
+        return _empty("invalid_query")
+    if semantic_query is not None and not isinstance(semantic_query, str):
+        return _empty("invalid_query")
+    channels = {}
+    for kwarg, ns in _TYPED_CHANNELS:
+        refs = locals()[kwarg]
+        if not isinstance(refs, (tuple, list)):
+            return _empty("invalid_query")
+        norms = []
+        for ref in refs:
+            if not isinstance(ref, str) or not ref.strip():
+                return _empty("invalid_query")
+            norms.append(ref.strip())
+        if norms:
+            channels[ns] = norms
+    has_semantic = (semantic_query is not None
+                    and bool(semantic_query.strip()))
+    if not channels and not has_semantic:
+        return _empty("no_query")
+
+    def in_scope(projection):
+        return projection["shop"] == shop and projection["platform"] == platform
+
+    trace: list[str] = []
+    # structured channel: per-ns union → projections → scope filter → sorted
+    exact_ids: list[str] = []
+    for ns, norms in channels.items():
+        for norm in norms:
+            for rid in snapshot.structured_index[ns].get(norm, ()):
+                if rid not in exact_ids and in_scope(
+                        snapshot.record_index[rid][1]):
+                    exact_ids.append(rid)
+    exact_ids.sort()
+    ordered: list[tuple] = [(rid, None) for rid in exact_ids]
+    if exact_ids:
+        trace.append(f"exact={len(exact_ids)}")
+
+    # semantic channel: score rows → eligible digests → scoped expand
+    semantic_hits: list[tuple] = []
+    if has_semantic:
+        if not snapshot.model_compatible:
+            trace.append("semantic_unavailable")
+        else:
+            try:
+                from . import embedding as _emb
+                query_vec = _emb.embed_query(semantic_query)
+                scores = snapshot.vectors @ np.asarray(
+                    query_vec, dtype=np.float32)
+            except Exception:
+                trace.append("semantic_unavailable")
+            else:
+                ranked = sorted(
+                    range(len(snapshot.digests)),
+                    key=lambda i: (-float(scores[i]), snapshot.digests[i]))
+                for i in ranked:
+                    digest = snapshot.digests[i]
+                    eligible = [p for p in
+                                snapshot.record_map[digest]["records"]
+                                if in_scope(p)]
+                    for p in eligible:
+                        semantic_hits.append(
+                            (float(scores[i]), p["record_id"], digest))
+                if semantic_hits:
+                    trace.append(f"semantic={len({h[2] for h in semantic_hits})}")
+
+    # merge: structured ก่อน semantic (score desc, tie → record_id asc); dedupe
+    seen = set(exact_ids)
+    records: list[tuple] = [(rid, snapshot.record_index[rid])
+                          for rid in exact_ids]
+    for _, rid, digest in sorted(semantic_hits,
+                                 key=lambda h: (-h[0], h[1])):
+        if rid not in seen:
+            seen.add(rid)
+            records.append((rid, snapshot.record_index[rid]))
+    records = records[:limit]
+    evs = tuple(_evidence_record(digest, p, snapshot.record_map)
+                for _, (digest, p) in records)
+    from .knowledge_base import KbEvidenceResult
+    return KbEvidenceResult(supporting_evidence=evs,
+                            raw_count=len(evs), trace=tuple(trace))
+
+
+def retrieve_active(db, *, shop, platform, item_ids=(), model_ids=(),
+                    model_codes=(), aliases=(), subject_ids=(), target_ids=(),
+                    semantic_query=None, limit=EVIDENCE_LIMIT,
+                    exports_root=None):
+    """End-to-end boundary: load_active_generation → None แปลงเป็น
+    empty + ("generation_unavailable",) ตาม spec §14"""
+    snapshot = load_active_generation(db, exports_root=exports_root)
+    if snapshot is None:
+        return _empty("generation_unavailable")
+    return retrieve(snapshot, shop=shop, platform=platform, item_ids=item_ids,
+                    model_ids=model_ids, model_codes=model_codes,
+                    aliases=aliases, subject_ids=subject_ids,
+                    target_ids=target_ids, semantic_query=semantic_query,
+                    limit=limit)

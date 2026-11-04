@@ -11141,3 +11141,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: module ใหม่เท่านั้น — ไม่มี callsite เดิมถูกแตะ; DAG ถูก (retrieval → schema+embedding เท่านั้น)
 - verify: retrieval suite 8/8 (self-containment, pointer/gen-doc corruption matrix, manifest/payload hash corrupt, shape-dim corrupt ชั้น3, namespace corrupt, path traversal, model_compat ทีละ field=6, by-gid lookup); regression 765/0; py_compile+diff --check OK
 - งานค้าง: T8 (retrieve() full query contract)
+
+## ผ่านแล้ว — Phase 4 Task 8: retrieve() + retrieve_active() (2026-11-04)
+
+- error: `retrieve`/`retrieve_active` ยังไม่มี — snapshot ใช้งานไม่ได้จนกว่า query contract ครบ
+- cause: T8 boundary/scoped-merge ยังไม่ implement
+- แก้ด้วย: RED 10 tests (AttributeError) → GREEN: `retrieve` — boundary validation group เดียว (scope normalize ผ่าน owner/ว่าง→invalid_query; containers tuple/list; refs str+strip; limit int ไม่ bool 1..EVIDENCE_LIMIT; semantic_query str/None, whitespace→ไม่มี channel), structured union เฉพาะ namespaces ที่ขอ → scope filter → record_id asc, semantic vectors@q → eligible digests เท่านั้น → scoped expand (shared digest ไม่ leak), merge structured+semantic → dedupe → limit ท้ายสุด; `_evidence_record` ตาม §9 (identity subject→model, omit empty, kind="kb"); `retrieve_active` แปลง None→empty+("generation_unavailable",); trace: invalid_query/no_query/semantic_unavailable/generation_unavailable + counters
+- ผลกระทบเคสอื่น: module เดิม +3 fns — ไม่มี callsite production เดิมถูกแตะ; KbEvidenceResult เป็น type เดิม (+0 public type)
+- verify: retrieval suite 18/18 (validation truth table, whitespace-semantic no-embed-call, dup refs noop, strip+ns isolation, scope isolation, merge dedupe, semantic_unavailable×3, scoped ranking quota, materialization verbatim+closed record, load-failure trace+delegation identity); regression 775/0; py_compile+diff --check OK
+- งานค้าง: T9 (validate_generation + build_generation)
