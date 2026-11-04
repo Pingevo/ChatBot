@@ -64,6 +64,13 @@ def fingerprint(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def canonical_delivery_scope(shop: str, platform: str) -> tuple[str, str]:
+    """Single owner of delivery-scope normalization: shop whitespace-collapse
+    (case-sensitive), platform strip+casefold. Pure — callers validate types
+    at the boundary."""
+    return " ".join(shop.split()), platform.strip().casefold()
+
+
 def account_scope_fingerprint(accounts: list[dict]) -> str:
     """Hash account identity/scope without depending on account order."""
     if not isinstance(accounts, list) or not all(
@@ -73,15 +80,15 @@ def account_scope_fingerprint(accounts: list[dict]) -> str:
             for account in accounts):
         raise ValueError("invalid account scope")
     delivery = {
-        (" ".join(account.get("name", "").split()),
-         account.get("platform", "").strip().casefold())
+        canonical_delivery_scope(account.get("name", ""),
+                                 account.get("platform", ""))
         for account in accounts}
     if len(delivery) != len(accounts):
         raise ValueError("duplicate account scope")
     return fingerprint(sorted({
         (account.get("id", "").strip(),
-         " ".join(account.get("name", "").split()),
-         account.get("platform", "").strip().casefold())
+         *canonical_delivery_scope(account.get("name", ""),
+                                   account.get("platform", "")))
         for account in accounts
     }))
 

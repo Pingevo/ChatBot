@@ -11074,3 +11074,20 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - verify: isolation 5/5 pass (0.80s); regression 9 files = 709 passed/19 skipped/4 xfailed/0 failed (10.67s); baseline = 416 passed (คงเดิมเป๊ะ); py_compile 5 files OK; `git diff --check` OK; executable census — AST dump 10 defs เหลือ owner เดียว mongo_doubles.py + `__module__`/`is` census ใน test; production bytes = 0
 - ข้อสังเกต: `validate_legacy_turn_fixtures.py:_norm` AST-identical กับตัวที่ย้าย — pre-existing copy ใน HEAD ของ fixture validator (ไม่ใช่ Mongo double ไม่ import donor) — นอก scope ตาม audit; file-local `_get_path`/`_match`/`_norm` อื่น (phase2_claim_state, phase10b_named_product, draft_gold) semantics ต่างกัน — AST dump ยืนยันไม่เหมือน
 - งานค้าง: Task 2 เท่านั้น (Zaapi generation owner `kb_zaapi_generation.py` ตาม plan); Task 1 ยังไม่ commit — รอ independent review; verdict PHASE_4_TASK_1_NEUTRAL_MONGO_DOUBLES_READY_FOR_INDEPENDENT_REVIEW
+
+## กำลังจะทำ — Phase 4 Task 2: canonical_delivery_scope owner consolidation (2026-11-04, same worker session)
+
+- baseline: HEAD 13b8d65 (Task 1 committed), branch feature-botlogic-kb-workflow, tree clean, `git diff --check` ผ่าน; frozen sha ตรง (8624 lines); active prefix 1..11076 sha `1d1190…` ตรง (tail ว่าง — commit 13b8d65 รวม ledger+log แล้ว)
+- audit เสร็จ: inline normalization copy 2 จุดใน `account_scope_fingerprint` (`kb_zaapi_schema.py:76–77` delivery pair + `:82–84` identity triple — id.strip() แยกอยู่นอก scope); `import_zaapi_kb.py:78` `_clean` = xlsx-cell helper ต่าง semantics (ไม่ casefold platform, ไม่แตะ) — ไม่มี copy ที่สาม; `_clean` ไม่ถูกใช้กับ account fields ก่อน fingerprint → parity ปลอดภัย; callsites `account_scope_fingerprint`: schema:198,337 + importer:134,264 + exporter:33 + tests:1618,1884 (ผ่าน importer re-export) — signature/behavior คงเดิม ไม่ต้องแก้ไฟล์เหล่านั้น
+- spec contract: §5 owner เดียว (shop whitespace-collapse case-sensitive, platform strip+casefold); §16.25 truth table (whitespace→match, shop case→ไม่ match, platform case→match, ต่าง scope→ไม่ leak); §16.31 scope-owner parity (output ตรง normalization เดิม, ไม่มี inline copy ใน callsites, malformed fail ที่ boundary — fn pure callers validate)
+- จะ: RED `docs/test/test_phase4_zaapi_scope.py` (truth table + fingerprint parity + uses-owner spy + malformed boundary) → GREEN: เพิ่ม `canonical_delivery_scope` ใน `kb_zaapi_schema.py` (หน้า `account_scope_fingerprint`) + แทน inline 2 จุด → SRS 6.34c (+row, แก้ Calls) → regression 416 ต้องคง; mechanism delta: pure data-contract fn +1 (budgeted §17), inline callsites −2, owners +0; ไม่แตะ Task 3/Task 5 files
+- PART 1 audit report → หยุดรอ user approval ตาม AGENTS §9 ก่อนแก้ไฟล์
+
+## ผ่านแล้ว — Phase 4 Task 2: canonical_delivery_scope owner consolidation (2026-11-04)
+
+- error: delivery-scope normalization มี inline copy 2 จุดใน `account_scope_fingerprint` — spec §5 กำหนด owner เดียว `canonical_delivery_scope` ใน `kb_zaapi_schema.py` (generation/retrieval จะ reuse ใน Task ถัดไป — ตอนนี้ยังไม่มี owner ให้เรียก)
+- cause: normalization เขียนซ้ำ inline ทั้งใน delivery-uniqueness set และ identity fingerprint — ไม่มี single owner ตาม spec §17 budget (normalization fn +1, callsites −2)
+- แก้ด้วย: RED `docs/test/test_phase4_zaapi_scope.py` 4 tests → 2 failed จริง (ImportError/AttributeError) + 2 passed (parity/boundary locks — เดิมผ่านอยู่แล้ว); GREEN: เพิ่ม `canonical_delivery_scope` (pure — callers validate types ที่ boundary) หน้า `account_scope_fingerprint` + แทน inline ทั้ง 2 จุด (`*`-unpack คง identity triple order); SRS §6.34c +row + แก้ Calls cell
+- ผลกระทบเคสอื่น: ไม่มี — pure refactor normalization bytes-identical → fingerprint ของ fixture/records เดิมทุกตัวไม่ขยับ (uses-owner spy test พิสูจน์ callsite rewire จริง: 2 calls/account)
+- verify: scope 4/4 pass (0.02s); regression scope+import+phase4b+isolation = 425 passed/0 failed; baseline = 416 คงเดิม; py_compile OK; `grep " ".join` เหลือเฉพาะใน owner fn :71; diff --check OK; production delta = kb_zaapi_schema.py ไฟล์เดียว (+11/−4)
+- งานค้าง: Task 3 (`load_active_state` owner move — ไฟล์เดียวกัน depends on T2); Task 2 ยังไม่ commit — รอ independent review
