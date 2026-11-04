@@ -298,3 +298,173 @@ def validate_generation(gen_dir, gen_doc, db) -> dict:
     return {"generation_id": gen_doc["generation_id"],
             "record_count": gen_doc["record_count"],
             "digest_count": len(loaded["digests"])}
+
+
+# --- Task 10: publish/rollback CAS + canary (spec §12/§13) — CAS +1 ที่นี่ ---
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _cas_swap(db, *, expected_rev: int, expected_gid: str, new_gid: str,
+              canonical_generation: str, now: str):
+    """ABA-safe CAS — filter `{_id, revision:R, generation_id:OLD}`; matched=0
+    → reread ครั้งเดียว → conflict:<actual>@rev<n> (ไม่มี retry loop)"""
+    coll = db[GEN_COLL]
+    res = coll.update_one(
+        {"_id": "active", "revision": expected_rev,
+         "generation_id": expected_gid},
+        {"$set": {"revision": expected_rev + 1,
+                  "generation_id": new_gid,
+                  "previous_generation_id": expected_gid,
+                  "canonical_generation": canonical_generation,
+                  "activated_at": now}})
+    if res.matched_count:
+        return True
+    actual = coll.find_one({"_id": "active"})
+    if actual is None:
+        return "conflict:no-pointer"
+    return f"conflict:{actual['generation_id']}@rev{actual['revision']}"
+
+
+def _resolve_and_cas(db, new_doc: dict, *, expected_rev=None,
+                     expected_gid=None, now: str):
+    """Bootstrap (find→validate→insert_only เท่านั้น) หรือ CAS owner
+    เดียวสำหรับ publish/rollback (spec §12)"""
+    from pymongo.errors import DuplicateKeyError
+    from .kb_zaapi_schema import validate_gen_pointer
+    coll = db[GEN_COLL]
+    existing = coll.find_one({"_id": "active"})
+    if existing is None:
+        if expected_rev is not None or expected_gid is not None:
+            return "conflict:no-pointer"
+        try:
+            coll.insert_one({
+                "_id": "active", "revision": 1,
+                "generation_id": new_doc["generation_id"],
+                "previous_generation_id": None,
+                "canonical_generation": new_doc["canonical_generation"],
+                "activated_at": now})
+        except DuplicateKeyError:
+            actual = coll.find_one({"_id": "active"})
+            return f"conflict:{actual['generation_id']}@rev{actual['revision']}"
+        return True
+    validate_gen_pointer(existing)          # corrupt → raise, bytes ไม่แก้
+    rev = expected_rev if expected_rev is not None else existing["revision"]
+    old = expected_gid if expected_gid is not None \
+        else existing["generation_id"]
+    return _cas_swap(db, expected_rev=rev, expected_gid=old,
+                     new_gid=new_doc["generation_id"],
+                     canonical_generation=new_doc["canonical_generation"],
+                     now=now)
+
+
+def _readback_ok(db, doc: dict) -> bool:
+    from .kb_zaapi_schema import validate_gen_pointer
+    try:
+        pointer = db[GEN_COLL].find_one({"_id": "active"})
+        validate_gen_pointer(pointer)
+    except ValueError:
+        return False
+    return (pointer["generation_id"] == doc["generation_id"]
+            and pointer["canonical_generation"]
+            == doc["canonical_generation"])
+
+
+def _run_canary(snapshot, cases):
+    """canary gate — case `{name, query:{retrieve kwargs}, assert:{min_hits?,
+    record_ids?, empty?}}`; คืน failing case name หรือ None"""
+    from . import kb_zaapi_retrieval as retr
+    for case in cases:
+        res = retr.retrieve(snapshot, **case["query"])
+        want = case.get("assert", {})
+        hits = [ev for ev in res.supporting_evidence]
+        fail = (want.get("empty") and hits
+                or "min_hits" in want and len(hits) < want["min_hits"]
+                or "record_ids" in want
+                and want["record_ids"]
+                != [h.get("item_id") for h in hits])
+        if fail:
+            return case.get("name", "?")
+    return None
+
+
+def publish(db, gid: str, *, canary_cases=(), exports_root=None,
+            expected_rev=None, expected_gid=None) -> str:
+    """Publish flow (spec §13): read+validate gen doc → full
+    `validate_generation` → `expected_canonical` pre-check → canary →
+    ABA-safe CAS → readback — คืน status string"""
+    from .kb_zaapi_schema import validate_gen_doc
+    coll = db[GEN_COLL]
+    doc = coll.find_one({"_id": f"gen:{gid}"})
+    if doc is None:
+        return "reject:gen-doc-missing"
+    try:
+        validate_gen_doc(doc)
+        validate_generation(_exports_dir(exports_root, gid), doc, db)
+    except ValueError as exc:
+        return f"reject:validate:{exc}"
+    manifest = db[RECORDS_COLL].find_one({"_id": MANIFEST_ID})
+    if (manifest is None
+            or manifest.get("generation") != doc["canonical_generation"]):
+        return "reject:canonical_drift"
+    if canary_cases:
+        from . import kb_zaapi_retrieval as retr
+        snap = retr.load_generation_snapshot(db, gid,
+                                             exports_root=exports_root)
+        if snap is None:
+            return "reject:snapshot-load"
+        bad = _run_canary(snap, canary_cases)
+        if bad is not None:
+            return f"reject:canary:{bad}"
+    result = _resolve_and_cas(db, doc, expected_rev=expected_rev,
+                              expected_gid=expected_gid, now=_now_iso())
+    if result is not True:
+        return result
+    if not _readback_ok(db, doc):
+        return "readback_invalid"
+    current = db[RECORDS_COLL].find_one({"_id": MANIFEST_ID})
+    pending = (current is not None
+               and current.get("generation") != doc["canonical_generation"])
+    return "published" + ("+newer_canonical_pending" if pending else "")
+
+
+def rollback(db, expected_gid: str, *, exports_root=None,
+             expected_rev=None) -> str:
+    """Rollback ผ่าน CAS owner เดียว (spec §13): validate previous gen doc +
+    artifacts → CAS swap → readback"""
+    from .kb_zaapi_schema import validate_gen_doc, validate_gen_pointer
+    coll = db[GEN_COLL]
+    pointer = coll.find_one({"_id": "active"})
+    if pointer is None:
+        return "conflict:no-pointer"
+    validate_gen_pointer(pointer)            # corrupt → raise, ไม่แก้
+    if expected_gid != pointer["generation_id"]:
+        return (f"conflict:{pointer['generation_id']}"
+                f"@rev{pointer['revision']}")
+    prev_gid = pointer["previous_generation_id"]
+    if prev_gid is None:
+        return "conflict:no-previous"
+    prev_doc = coll.find_one({"_id": f"gen:{prev_gid}"})
+    if prev_doc is None:
+        return "reject:prev-gen-doc-missing"
+    try:
+        validate_gen_doc(prev_doc)
+        from . import kb_zaapi_retrieval as retr
+        if retr._load_artifacts(_exports_dir(exports_root, prev_gid),
+                                prev_doc) is None:
+            return "reject:prev-artifacts"
+    except ValueError as exc:
+        return f"reject:prev-invalid:{exc}"
+    result = _cas_swap(db,
+                       expected_rev=(expected_rev if expected_rev is not None
+                                     else pointer["revision"]),
+                       expected_gid=expected_gid, new_gid=prev_gid,
+                       canonical_generation=prev_doc["canonical_generation"],
+                       now=_now_iso())
+    if result is not True:
+        return result
+    if not _readback_ok(db, prev_doc):
+        return "readback_invalid"
+    return "rolled-back"

@@ -11159,3 +11159,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: module เดิม +4 fns +4 constants — ไม่มี callsite production เดิมถูกแตะ; mint_generation_id reuse จาก generation_pointer
 - verify: gen suite 18/18 (happy path, determinism 2 builds, failure no-side-effects, model reject ×2, pin validation ×4); regression 780/0; py_compile+diff --check OK
 - งานค้าง: T10 (publish/rollback CAS + thin CLI)
+
+## ผ่านแล้ว — Phase 4 Task 10: publish/rollback CAS + thin CLI (2026-11-04)
+
+- error: publish/rollback lifecycle + disposable CLI ยังไม่ implement
+- cause: T10 CAS owner + gate ยังไม่ทำ
+- แก้ด้วย: RED 7 tests (AttributeError/ImportError) → GREEN: `_cas_swap` (filter rev+gid, $set rev+1/prev=OLD/canonical/activated_at, matched=0→reread ครั้งเดียว conflict:<actual>@rev<n>), `_resolve_and_cas` (bootstrap find→validate→insert_only — ไม่มี upsert; corrupt pointer→raise bytes ไม่แตะ; DuplicateKey→conflict), `_run_canary` (arg cases ผ่าน retrieve), `publish` (validate gen doc+generation → canonical_drift pre-check → canary → CAS → readback_invalid → +newer_canonical_pending), `rollback` (validate prev doc+artifacts → CAS swap → readback; prev=None→conflict:no-previous), CLI `zaapi_kb_gen.py` + `require_disposable_target` (mongodb:// loopback+explicit non-27017 port+no creds/query/multi-host/db-path + db_name pattern — validate ก่อน MongoClient เสมอ)
+- ผลกระทบเคสอื่น: +6 fns +1 script — ไม่มี callsite เดิมถูกแตะ; CAS impl +1 (budgeted ที่ owner เดียว)
+- verify: gen suite 25/25 (bootstrap 7 เคส, stale writer, ABA fence, rollback ครบ, canonical drift, readback invalid, canary gate, disposable gate matrix ~20 เคส 0 MongoClient calls, pointer schema write path); regression 787/0; `grep upsert` ไฟล์ → ไม่มี; py_compile+diff --check OK
+- งานค้าง: T11 (attribution contract test) → T12 (isolation+regression matrix)

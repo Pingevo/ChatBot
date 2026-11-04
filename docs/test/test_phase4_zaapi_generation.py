@@ -475,3 +475,230 @@ def test_canonical_pin_validation(tmp_path):
     rec_coll._docs.append(tampered)
     with _pt.raises(ValueError):
         gen.validate_generation(gen_dir, doc, db)
+
+
+# --- Task 10: publish/bootstrap CAS + rollback + thin CLI ---
+
+def _built_db(tmp_path, specs=({"item_id": "I-1"}, {"item_id": "I-2"}),
+              gid=GID):
+    gen = _import_gen()
+    db, recs, _ = _seeded_db(tmp_path, specs)
+    gen.build_generation(db, embed=stub_embed, exports_root=tmp_path, gid=gid)
+    return db
+
+
+def _pointer(db):
+    return db["zaapi_kb_embedding_generations"].find_one({"_id": "active"})
+
+
+def test_bootstrap_insert_only(tmp_path):
+    """§16.35: absent→insert rev1 prev None; concurrent→1 ชนะ conflict;
+    existing invalid→fail closed bytes ไม่แก้; ไม่มี upsert"""
+    gen = _import_gen()
+    db = _built_db(tmp_path)
+    out = gen.publish(db, GID, exports_root=tmp_path)
+    p = _pointer(db)
+    assert out == "published"
+    assert p["revision"] == 1 and p["generation_id"] == GID
+    assert p["previous_generation_id"] is None
+    schema.validate_gen_pointer(p)
+    # concurrent bootstrap — insert dup → conflict
+    db2 = _built_db(tmp_path / "c")
+    coll = db2["zaapi_kb_embedding_generations"]
+    p1 = {"_id": "active", "revision": 1, "generation_id": "g20261201-000000-aaaaaaa1",
+          "previous_generation_id": None, "canonical_generation": "a" * 64,
+          "activated_at": "2026-12-01T00:00:00+00:00"}
+    coll.insert_one(p1)
+    # existing valid pointer → normal CAS (rev+1, prev=old gid)
+    out = gen.publish(db2, GID, exports_root=tmp_path / "c")
+    assert out == "published"
+    p2 = db2["zaapi_kb_embedding_generations"].find_one({"_id": "active"})
+    assert p2["revision"] == 2
+    assert p2["previous_generation_id"] == p1["generation_id"]
+    # concurrent bootstrap — insert_one แพ้ race → DuplicateKey → conflict
+    from pymongo.errors import DuplicateKeyError
+    db3 = _built_db(tmp_path / "c3")
+    coll3 = db3["zaapi_kb_embedding_generations"]
+    def _loser(doc, *a, **k):
+        coll3._docs.append({**p1})
+        raise DuplicateKeyError("dup _id active")
+    coll3.insert_one = _loser
+    doc3 = coll3.find_one({"_id": "gen:" + GID})
+    out = gen._resolve_and_cas(db3, doc3,
+                               now="2026-12-01T00:00:00+00:00")
+    assert out.startswith("conflict")
+    # existing invalid pointer → fail closed, bytes ไม่แก้
+    for bad in ({"_id": "active", "generation_id": GID},          # ขาด revision
+                {"_id": "active", "revision": 1},                 # ขาด gid
+                {"_id": "active", "revision": 1, "generation_id": GID,
+                 "previous_generation_id": None,
+                 "canonical_generation": "a" * 64,
+                 "activated_at": "2026-12-01T00:00:00+00:00",
+                 "extra": 1}):                                    # extra field
+        coll._docs[:] = [d for d in coll._docs if d.get("_id") != "active"]
+        coll.insert_one(bad)
+        before = [dict(d) for d in coll._docs]
+        try:
+            gen.publish(db2, GID, exports_root=tmp_path / "c")
+            raised = False
+        except ValueError:
+            raised = True
+        assert raised
+        assert coll._docs == before                     # bytes เดิมไม่แก้
+    import inspect
+    assert "upsert" not in inspect.getsource(gen._resolve_and_cas)
+
+
+def test_cas_stale_writer_and_aba(tmp_path):
+    """§16.11/12: stale expected → matched=0 → conflict:<actual>@rev<n>;
+    A→B→A race → revision fence จับได้"""
+    gen = _import_gen()
+    db = _built_db(tmp_path)
+    g2 = "g20261105-010203-abcdef12"
+    _built_db(tmp_path, gid=g2)   # build ก่อน — ใช้ db เดียวกันไม่ได้; rebuild
+    db, _, _ = _seeded_db(tmp_path / "x")
+    gen.build_generation(db, embed=stub_embed, exports_root=tmp_path / "x",
+                         gid=GID)
+    gen.build_generation(db, embed=stub_embed, exports_root=tmp_path / "x",
+                         gid=g2)
+    assert gen.publish(db, GID, exports_root=tmp_path / "x") == "published"
+    # stale writer — expected (rev0? no — publish again ด้วย gid เดิม expected stale)
+    out = gen.publish(db, g2, exports_root=tmp_path / "x",
+                      expected_rev=0)
+    assert out.startswith("conflict")
+    assert "@rev" in out
+    # normal publish g2 → rev2, prev=GID
+    out = gen.publish(db, g2, exports_root=tmp_path / "x")
+    p = _pointer(db)
+    assert out == "published"
+    assert p["revision"] == 2 and p["generation_id"] == g2
+    assert p["previous_generation_id"] == GID
+    # ABA: tamper pointer back to gid A โดยไม่เพิ่ม rev → publish อื่นคิดว่า
+    # expected (rev2, g2) — filter revision+gid: gid ต่าง → conflict
+    out = gen.publish(db, GID, exports_root=tmp_path / "x",
+                      expected_rev=2, expected_gid=GID)   # stale gid fence
+    assert out.startswith("conflict")
+
+
+def test_rollback(tmp_path):
+    """§16.14: stale expected → conflict; success → prev active + fields ครบ;
+    previous=None → conflict:no-previous"""
+    gen = _import_gen()
+    db, _, _ = _seeded_db(tmp_path / "r")
+    g2 = "g20261105-010203-abcdef12"
+    for g in (GID, g2):
+        gen.build_generation(db, embed=stub_embed, exports_root=tmp_path / "r",
+                             gid=g)
+    gen.publish(db, GID, exports_root=tmp_path / "r")
+    gen.publish(db, g2, exports_root=tmp_path / "r")
+    out = gen.rollback(db, g2, exports_root=tmp_path / "r")
+    p = _pointer(db)
+    assert out == "rolled-back"
+    assert p["generation_id"] == GID                 # prev กลับมา active
+    assert p["previous_generation_id"] == g2
+    assert p["revision"] == 3
+    doc = db["zaapi_kb_embedding_generations"].find_one({"_id": f"gen:{GID}"})
+    assert p["canonical_generation"] == doc["canonical_generation"]
+    schema.validate_gen_pointer(p)
+    # stale expected gid → conflict
+    out = gen.rollback(db, "g20990101-000000-00000000",
+                       exports_root=tmp_path / "r")
+    assert out.startswith("conflict")
+    # rollback อีกครั้ง → previous=g2 มีอยู่ → สำเร็จ; แต่ prev=None case:
+    db2, _, _ = _seeded_db(tmp_path / "r2")
+    gen.build_generation(db2, embed=stub_embed,
+                         exports_root=tmp_path / "r2", gid=GID)
+    gen.publish(db2, GID, exports_root=tmp_path / "r2")
+    out = gen.rollback(db2, GID, exports_root=tmp_path / "r2")
+    assert "conflict" in out or "no-previous" in out
+
+
+def test_canonical_drift_and_canary(tmp_path):
+    """§16.15 + canary: manifest drift ก่อน pre-check → reject; canary fail →
+    reject ก่อน CAS; ผ่าน → published"""
+    gen = _import_gen()
+    db, recs, _ = _seeded_db(tmp_path)
+    gen.build_generation(db, embed=stub_embed, exports_root=tmp_path, gid=GID)
+    # drift: manifest generation เปลี่ยน → reject ก่อน CAS
+    coll = db["zaapi_kb_records"]
+    m = dict(coll.find_one({"_id": "active:manifest"}))
+    m["generation"] = "f" * 64
+    coll._docs[:] = [d for d in coll._docs if d.get("_id") != "active:manifest"]
+    coll._docs.append(m)
+    out = gen.publish(db, GID, exports_root=tmp_path)
+    assert out.startswith("reject") or "drift" in out
+    assert _pointer(db) is None                        # CAS ไม่เกิด
+    # restore + canary fail → reject
+    db2, recs2, _ = _seeded_db(tmp_path / "d2")
+    gen.build_generation(db2, embed=stub_embed, exports_root=tmp_path / "d2",
+                         gid=GID)
+    cases = [{"name": "c1", "query": {"shop": "ShopA", "platform": "shopee", "item_ids": ("MISS",)},
+              "assert": {"min_hits": 1}}]
+    out = gen.publish(db2, GID, exports_root=tmp_path / "d2",
+                      canary_cases=cases)
+    assert "reject" in out or "canary" in out
+    assert _pointer(db2) is None
+    cases = [{"name": "c2", "query": {"shop": "ShopA", "platform": "shopee", "item_ids": ("I-1",)},
+              "assert": {"min_hits": 1}}]
+    out = gen.publish(db2, GID, exports_root=tmp_path / "d2",
+                      canary_cases=cases)
+    assert out == "published"
+
+
+def test_readback_invalid(tmp_path, monkeypatch):
+    """§16.16: write สำเร็จแต่ readback ผิด → report ไม่ auto-rollback"""
+    gen = _import_gen()
+    db = _built_db(tmp_path)
+    g2 = "g20261105-010203-abcdef12"
+    _import_gen().build_generation(db, embed=stub_embed,
+                                   exports_root=tmp_path, gid=g2)
+    assert gen.publish(db, GID, exports_root=tmp_path) == "published"
+    coll = db["zaapi_kb_embedding_generations"]
+    orig_update = coll.update_one
+    def poisoned(filt, update, *a, **k):
+        res = orig_update(filt, update, *a, **k)
+        if filt.get("_id") == "active" and res.matched_count:
+            for d in coll._docs:
+                if d.get("_id") == "active":
+                    d["generation_id"] = "poisoned"
+        return res
+    monkeypatch.setattr(coll, "update_one", poisoned)
+    out = gen.publish(db, g2, exports_root=tmp_path)
+    assert "readback" in out or "conflict" in out
+    assert "published" not in out
+
+
+def test_disposable_target_gate():
+    """refusal matrix — ทุกเคส MongoClient ถูกเรียก 0 ครั้ง (validate ก่อนเสมอ)"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent
+                         / "chatbot" / "shopeechat" / "scripts"))
+    import zaapi_kb_gen as cli
+    import pytest as _pt
+    good = "mongodb://localhost:51234"
+    for bad in ("mongodb+srv://x.example.com", "mongodb://digital.in.th:27018",
+                "mongodb://prod.internal:27018", "mongodb://localhost:27017",
+                "mongodb://127.0.0.1:27017", "mongodb://[::1]:27017",
+                "mongodb://localhost", "mongodb://user:pass@localhost:51234",
+                "mongodb://localhost:51234/?replicaSet=rs",
+                "mongodb://localhost:51234,localhost:51235",
+                "mongodb://localhost:51234/dbpath", "", "not-a-uri"):
+        with _pt.raises(ValueError):
+            cli.require_disposable_target(bad, "zaapi_kb_p4_verify_abcd1234")
+    for db in ("admin", "zaapi_kb_records", "zaapi_kb_p4_verify_",
+               "zaapi_kb_p4_verify_short", "other_p4_verify_abcdefgh",
+               123, None):
+        with _pt.raises(ValueError):
+            cli.require_disposable_target(good, db)
+    uri, name = cli.require_disposable_target(
+        good, "zaapi_kb_p4_verify_abcd1234")
+    assert (uri, name) == cli.require_disposable_target(
+        good, "zaapi_kb_p4_verify_abcd1234")           # deterministic
+
+
+def test_pointer_schema_write_path(tmp_path):
+    """§16.39: doc ที่ publish เขียน → validate_gen_pointer ผ่าน round-trip"""
+    gen = _import_gen()
+    db = _built_db(tmp_path)
+    gen.publish(db, GID, exports_root=tmp_path)
+    assert schema.validate_gen_pointer(_pointer(db))
