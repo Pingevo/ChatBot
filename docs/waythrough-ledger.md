@@ -25,9 +25,9 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 11254 |
-| active_integrity_prefix_sha256 | `39b29c4cb35632a6491ff9eceab0433f29ea97fe589f1076d4cec2050618e2b9` |
-| active_line_count_at_baseline | 11254 (bytes  2159592) |
+| active_integrity_prefix_lines | 11269 |
+| active_integrity_prefix_sha256 | `b02d2e8f32a66a511ee7e109e6e4a0402b2c5a4545523a6050f9a3faaa871a15` |
+| active_line_count_at_baseline | 11269 (bytes 1692724) |
 | active_integrity_recorded_at | 2026-11-04T12:08+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
@@ -100,6 +100,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11235–11241 | read + indexed (A-047) |
 | 11242–11249 | read + indexed (A-048) |
 | 11250–11254 | read + indexed (A-049) |
+| 11255–11262 | read + indexed (A-050) |
+| 11263–11269 | read + indexed (A-051) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -169,7 +171,9 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-046 | 11226–11234 | Phase 4 Task 13B gate — packaging py3.11 2026-11-04 | passed behavior | `PHASE_4_PACKAGING_PY311_VERIFIED` — ST==5.7.0 + gen/retrieval modules import บน python:3.11-slim (path b online install, user-approved) | verified | งานค้าง = T15/T16 (approved) |
 | A-047 | 11235–11241 | Phase 4 Task 15 gate — 4C canonical corpus provider-run 2026-11-04 | passed behavior | **provider fix พบโดย gate**: `gemini-2.5-flash` retired (404) → `gemini-3.5-flash-lite` + anonymous `genai.Client()` GC'd mid-call → named binding; free-tier 20 req/day/model → corpus = single-product spec files (082/083/084/103) 5 calls → 14 resolved records, 4-source manifest; checkpoint resume 0 calls สำหรับ resolved rows; `PHASE_4C_CANONICAL_CORPUS_COMPLETE` 11/11 บน real BGE-M3 + real Mongo; evidence phase4c_matrix.json | verified | งานค้าง = T16 benchmark + container cleanup |
 | A-048 | 11242–11249 | Phase 4 Task 16 gate — 4D retrieval benchmark 2026-11-04 | passed behavior | candidates npz-fp32/npy+memmap/npz-fp16 วัดครบ (size/load/RSS/query/recall): ไม่มี candidate เหนือกว่าที่ scale นี้ → **keep npz-fp32 default** (spec §20); exact 2.12ms, semantic 262ms (model encode), scope isolation 0 hits, corrupt vectors→fail-closed, evidence p95=850B<1500B; corpus rebuild ผ่าน checkpoint cache = 0 provider calls; cleanup containers+volumes = 0 ใน finally; `PHASE_4D_RETRIEVAL_BENCHMARK_COMPLETE`; evidence phase4d_benchmark.md | verified | งานค้าง = acceptance update + final regression + review |
-| A-049 | 11250–11254 | Phase 4 closeout — all tasks+gates complete 2026-11-04 | passed behavior | acceptance matrix 18/18 done; final regression 903/0; staging ว่าง; containers 0; พร้อม independent review | verified | pending = independent review |
+| A-049 | 11250–11254 | Phase 4 closeout — all tasks+gates complete 2026-11-04 | passed behavior | acceptance matrix 18/18 done; final regression 903/0; staging ว่าง; containers 0; พร้อม independent review | verified | — |
+| A-050 | 11255–11262 | Phase 4 review fix — KbEvidenceResult contract module 2026-11-04 | passed behavior | review Important: lazy `from .knowledge_base import KbEvidenceResult` ลาก `_load_env()` เข้า standalone path → `kb_evidence_result.py` (verbatim dataclass) + knowledge_base re-export; probe `HEAVY-KB-LEAKED`→`CONTRACT-MODULE-OK`; regression 905/0 | verified | — |
+| A-051 | 11263–11269 | Phase 4 review fix — minor hardening batch 2026-11-04 | passed behavior | manifest.file pinned "manifest.json" (§10); manifest sources หลัง load_active_state (KeyError→ValueError); EMBEDDING_DIM owner; allow_pickle=False ×2; lazy embedding import ซ้ำออก; re.fullmatch ปิด newline quirk; RED→GREEN 905/0 | verified | — |
 
 ## 7. Known semantic coverage gaps
 
