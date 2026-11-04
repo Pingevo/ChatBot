@@ -10980,3 +10980,79 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - verdict received: PHASE_4_DESIGN_SPEC_INDEPENDENT_PRECOMMIT_REVIEW_PASSED — design spec ผ่าน independent review
 - A-016..A-022 statuses → verified (เงื่อนไข "reviewer ผ่าน" ครบ); A-017/A-021 notes เก็บ protocol exception ไว้ตามจริง; A-013 คง historical-unverified (scope ต่าง verdict), A-015 คง superseded
 - commit เฉพาะไฟล์ design spec ตาม gate เดิม (staging เฉพาะ spec); ledger/log ยัง dirty ตาม protocol
+
+## กำลังจะทำ — Phase 4 implementation plan (2026-11-04, docs only)
+
+- baseline: HEAD 0f919f1 (design spec committed รวม spec+ledger+log), working tree clean, branch feature-botlogic-kb-workflow; protocol B ผ่าน — frozen sha ตรง, active prefix 1..10970 sha ตรง; pre-work: สรุป tail 10971–10982 → ledger A-023
+- จะ: audit implementation surfaces จาก callsites จริง (schema/embedding/kb/product_store/units/generation_pointer/build+publish scripts/Task 3 importer-exporter/requirements/Dockerfile/evidence contracts+tests) แล้วเขียน `docs/plans/2026-11-04-phase4-zaapi-canonical-retrieval-implementation.md` — sequential tasks, RED→GREEN→regression, commit boundaries, gates 4A–4D
+- ไม่แตะ production code/test/SRS; ไม่รัน Mongo/provider/Docker; ไม่ stage/commit/push; หยุดรอ independent review
+
+## ผ่านแล้ว — Phase 4 implementation plan drafted (2026-11-04, docs only)
+
+- audit callsite จริงครบ: schema/embedding/kb/product_store/units/generation_pointer/build+publish scripts/Task 3 importer-exporter/requirements/Dockerfile/evidence contracts+tests — dispositions: reuse / owner move (`load_active_state`→schema, impl ชุดเดียว re-export compat) / new owners ×2 (`kb_zaapi_generation`,`kb_zaapi_retrieval`, DAG gen→retrieval→schema) / ห้ามแตะ (`app.py:1218`, `kb_zaapi.py`, `generation_pointer.py`, `publish_generation.py` cas pattern, shared npz) / deferred Task 5
+- wrote `docs/plans/2026-11-04-phase4-zaapi-canonical-retrieval-implementation.md` — 18 sequential tasks ครบ 13 required fields ทุก task; locked interfaces + semantic_text renderer + artifact filenames; coverage map §16 items 1–40 → tasks; 16 commit boundaries; gates 4A–4D มี stop conditions (Docker ต้อง user start, provider ต้อง explicit approval, disposable เท่านั้น); T4 บังคับ audit+lock revision จริง (ห้าม refs-main-as-proof) + ST pin ที่ requirements.txt จุดเดียว
+- user guards incorporated: `load_active_state` single-owner; fake Mongo reuse `GenColl/GenDb/_match` (ห้ามชุดที่สี่); baseline 416 passed ต้องคง; MODEL_REVISION resolve จาก snapshot ที่โหลดจริง
+- verified: offline suite 416 passed (264+152), ไม่แตะ production code/test/SRS, ไม่รัน Mongo/provider/Docker, staging ว่าง — หยุดรอ independent review ก่อน implementation
+
+## กำลังจะทำ — Phase 4 implementation plan corrections (2026-11-04, docs only)
+
+- verdict ได้รับ: PHASE_4_IMPLEMENTATION_PLAN_REVIEW_FAILED_CORRECTION_REQUIRED — 2 High (disposable barrier เพียง warning / failure trace สร้างไม่ได้ตาม design), 3 Medium (test-module side-effect imports / provider-network gate อ้างกลไกไม่มีจริง / packaging py3.11 ไม่มี task), ยังไม่ commit plan
+- จะ: verify findings เทียบ spec/โค้ดจริงก่อนแก้ — disposable URI validation ก่อน MongoClient + T13/T15 inject db ตรง; load-failure→empty KbEvidenceResult+trace ตาม spec §14; extract doubles→neutral owner ห้าม import test module; approval = manual stop gate; local_files_only ก่อน; เพิ่ม py3.11 packaging task; แก้ doc accuracy ครบ
+- ไม่แตะ production code/test/SRS; ไม่รัน Mongo/provider/Docker; ไม่ stage/commit/push; หยุดรอ re-review
+
+## ผ่านแล้ว — Phase 4 implementation plan corrections applied (2026-11-04, docs only)
+
+- verify findings เทียบจริงก่อนแก้: H1/H2/M1–M3 ยืนยันเป็นของจริง (legacy test module side-effects บรรทัด 53+, `_get_admin_db` ambient path, design §14:500 บังคับ result ว่าง+trace, Dockerfile `python:3.11-slim`); Low 2 รายการไม่พบในไฟล์ (T3 Owner เดียว, T13 seed ครั้งเดียว) — รายงานตามจริงไม่แก้เทียบ
+- H1: disposable barrier → enforcement — `require_disposable_uri` (loopback literal เท่านั้น) ก่อน `MongoClient` + RED case ใน T10; T13/T15 inject colls เข้า `import_source` ตรง ห้าม ambient `--apply`/`ADMIN_MONGO_URI` path; global constraint + audit table แก้ตาม
+- H2: `retrieve_active(db,…)` end-to-end entrypoint — load failure → `KbEvidenceResult` ว่าง + `trace:("generation_unavailable",)`; `load_active_generation` คง None เป็น internal signal (canary/publish ใช้เป็น reject); result type ยัง +0
+- M1: `docs/test/mongo_doubles.py` neutral owner — ย้าย verbatim 9 defs จาก 2 donor files, donors re-import, helpers import เฉพาะมัน; T1 มี RED จริง (single-owner + no-test-module-import)
+- M2: T15 approval = manual stop gate (ไม่มี dry-run/pre-flight/flag/state file); T4 ลอง `local_files_only=True` ก่อน network ต้องขอแยก
+- M3: +Task 13B packaging py3.11 (`pip install -r requirements.txt` + version assert + module import ใน `python:3.11-slim` container, Docker window เดียวกับ 4A)
+- doc accuracy: T6 retitle, T14 census script → committed tool, file 725 บรรทัด, 19 tasks ครบ 13 fields, commit order +13B
+- ไม่แตะ production code/test/SRS; ไม่รัน Mongo/provider/Docker; staging ว่าง — หยุดรอ re-review
+
+## กำลังจะทำ — Phase 4 plan second-review corrections (2026-11-04, docs only)
+
+- verdict ได้รับ: PHASE_4_IMPLEMENTATION_PLAN_SECOND_REVIEW_FAILED_CORRECTION_REQUIRED — 1 High (loopback≠disposable: port/creds/db/srv/multi-host loopholes) + 2 Medium (network approval รวมกับ Docker approval; budget categories ขัด spec §17)
+- จะ: adopt proven contract จาก log:3605 (`validateLoopbackMongoUri` — mongodb:// เท่านั้น/loopback/explicit port≠27017/no creds,no query,no multi-host,refusal matrix ก่อน connect, random prefixed DB) → `require_disposable_uri`; T13B cache-first `--no-index` ก่อน แล้ว STOP ขอ network approval แยก; itemize budget ทุกแถวให้ตรง spec หรือ review-mandated
+- ไม่แตะ production code/test/SRS; ไม่รัน Mongo/provider/Docker; staging ว่าง — หยุดรอ re-review
+
+## ผ่านแล้ว — Phase 4 plan second-review corrections applied (2026-11-04, docs only)
+
+- High: `require_disposable_uri` adopt proven contract จาก log:3605 ครบ — `mongodb://` เท่านั้น (reject srv), single loopback host, explicit port ≠27017, no credentials/query/multi-host/db-path; test DB = generated `zaapi_kb_p4_verify_<rand>`; T10 refusal matrix ทุกแถว assert `MongoClient` 0 calls; T13 matrix ใช้ generated DB + barrier proof ครบ
+- Medium: T13B ล็อกลำดับ — step1 `--network none` + `pip install --no-index` + mount pip cache (local-only เสมอก่อน); wheels ไม่ครบ → STOP ขอ network approval แยก (Docker approval ไม่รวม network); evidence บันทึก path ที่ใช้
+- Medium: budget itemized ทุกแถว — spec §17 rows (owners+2/result+0/normalization+1/query-validation+1/CAS+1/+0 rows) แยกจาก declared additions (validators+3 ตาม §10–12, `retrieve_active`+1 ตาม §14, `model_identity`+1 ตาม §13, `MODEL_REVISION`+1) + review-mandated (`require_disposable_uri`+1, `mongo_doubles`+1 test-only); T18 delta reconciliation map 1:1 ไม่รวม category
+- ไฟล์ 755 บรรทัด, 19 tasks ครบ 13 fields, ไม่แตะ production/test/SRS, staging ว่าง — หยุดรอ re-review
+
+## กำลังจะทำ — Phase 4 plan third-review corrections (2026-11-04, docs only)
+
+- verdict ได้รับ: PHASE_4_IMPLEMENTATION_PLAN_THIRD_REVIEW_FAILED_CORRECTION_REQUIRED — 1H (CLI ไม่มีวิธี share random DB ข้าม process — build/publish/rollback/writers ต้องอยู่ DB เดียวกัน) + 2M (`--no-index` มองไม่เห็น pip HTTP cache; `docker run` อาจ pull image ก่อน approval) + 1L (cleanup proof ตรวจ volume ทั้งเครื่องผิด)
+- จะ: validator เดิมขยายเป็น `(uri, db_name)` pair (ไม่เพิ่ม helper — count ยัง +1) + CLI `--db-name` required + harness สุ่มครั้งเดียวส่งทุก command; T13B เลือก wheelhouse `--no-index --find-links` หรือ STOP เท่านั้น; เพิ่ม `docker image inspect` local gate + pull approval แยกทั้ง mongo:7/python:3.11-slim; cleanup proof → scoped ตาม name/label Phase 4 เท่านั้น
+- ไม่แตะ production code/test/SRS; ไม่รัน Mongo/provider/Docker; staging ว่าง — หยุดรอ re-review
+
+## ผ่านแล้ว — Phase 4 plan third-review corrections applied (2026-11-04, docs only)
+
+- High: validator เดิมขยายเป็น `require_disposable_target(uri, db_name)` pair (count ยัง +1, ไม่มี helper ที่สอง) — CLI `--mongo-uri`+`--db-name` required; harness สุ่ม `zaapi_kb_p4_verify_<rand>` ครั้งเดียว pass ทุก command/writer (cross-invocation consistency test รวมใน T10); db_name closed pattern `^zaapi_kb_p4_verify_[A-Za-z0-9_-]{8,}$`; refusal ทุกแถว assert `MongoClient` 0 calls เหมือนเดิม
+- Medium: T13B แก้เป็น wheelhouse จริง `--no-index --find-links=/wheelhouse` หรือ STOP ขอ network approval — ลบ pip-cache mount ที่ใช้ไม่ได้
+- Medium: image-pull gate — `docker image inspect` local check ก่อนทุก `docker run` (mongo:7, python:3.11-slim); missing → STOP ขอ pull approval แยก; Docker/pull/network = 3 approval ชั้นแยกใน global constraints
+- Low: cleanup proof scoped — `docker rm -fv` + `docker ps -a --filter name=zaapi-p4` + `docker volume ls --filter name=zaapi-p4` → 0 ใน scope; ห้ามตัดสินจาก volume ทั้งเครื่อง
+- ไฟล์ 765 บรรทัด, 19 tasks ครบ 13 fields, ไม่แตะ production/test/SRS, staging ว่าง — หยุดรอ re-review
+
+## ผ่านแล้ว — Phase 4 plan fourth-review corrections applied (2026-11-04, docs only)
+
+- High: แก้ callsite ผิด 4 จุดเป็น pattern เดียว `safe_uri, safe_db = require_disposable_target(uri, db_name)` → `MongoClient(safe_uri)[safe_db]` — audit-table :111, T13 header :595, T13 seed :600, T15 GREEN :678 (เดิมส่ง tuple เข้า client / index ซ้ำ / single-arg); ไม่มี helper เพิ่ม
+- Medium: T13B online path เขียน command แยกชัดเจนหลัง approval — `docker run --rm -v "$PWD:/repo" -w /repo python:3.11-slim sh -c "pip install -r requirements.txt && ..."` ไม่มี wheelhouse mount ไม่มี `--find-links`
+- Low: mongo container เพิ่ม `--tmpfs /data/db` → ไม่สร้าง anonymous volume เลย → cleanup proof = named container + named-filter เท่านั้น (อัปเดต global constraint + T13)
+- ไฟล์ 771 บรรทัด, 19 tasks ครบ 13 fields, ไม่แตะ production/test/SRS, staging ว่าง — หยุดรอ re-review
+
+## กำลังจะทำ — Phase 4 plan fifth-review corrections (2026-11-04, docs only)
+
+- แก้ implementation plan ตาม independent re-review รอบห้า (1 High)
+- High: T13 cleanup ลบ `zaapi-p4-test` แต่ T15/T16 ต้องใช้ disposable Mongo ต่อ → lock lifecycle: T15 เปิด container ใหม่ `zaapi-p4-corpus` (`--tmpfs`, image-inspect gate, สุ่ม URI/DB ครั้งเดียว) ใช้ต่อเนื่องถึง T16; T15 ห้าม cleanup เมื่อผ่าน; T16 cleanup ใน `finally` ทั้ง success/failure + scoped proof = 0; T15 fail ก่อน T16 → failure cleanup ชัดเจน
+- ไม่เพิ่ม helper/owner/mechanism
+
+## ผ่านแล้ว — Phase 4 plan fifth-review corrections applied (2026-11-04, docs only)
+
+- High: lock container lifecycle — `zaapi-p4-test` = T13 เท่านั้น (cleanup ใน T13); T15 spin `zaapi-p4-corpus` ใหม่หลัง approval (image-inspect gate + `--tmpfs` + สุ่ม port/db_name ครั้งเดียว) ใช้ target เดิมตลอด T15–T16; T15 ห้าม cleanup เมื่อผ่าน (T16 ต้องใช้ corpus/generation เดิม); T15 fail → failure cleanup ทันที; T16 cleanup `zaapi-p4-corpus` ใน `finally` ทั้ง success/failure + scoped proof = 0 — lifecycle rule เขียนใน global constraints ด้วย
+- ไม่เพิ่ม helper/owner/mechanism
+- ไฟล์ 772 บรรทัด, 19 tasks ครบ 13 fields, ไม่แตะ production/test/SRS, staging ว่าง — หยุดรอ re-review
