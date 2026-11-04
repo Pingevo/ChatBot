@@ -97,6 +97,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11207–11215 | read + indexed (A-044) |
 | 11216–11225 | read + indexed (A-045) |
 | 11226–11234 | read + indexed (A-046) |
+| 11235–11241 | read + indexed (A-047) |
+| 11242–11249 | read + indexed (A-048) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -164,6 +166,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-044 | 11207–11215 | Phase 4 Task 18 closeout — budget reconciliation + acceptance 2026-11-04 | passed behavior | `phase4_acceptance.md`: budget table ทุกแถว actual ≤ budget (ไม่มี over), acceptance matrix 17 รายการ (13 done/4 blocked-by-gates), final regression 902/0, staging ว่าง | verified | งานค้าง = T13/T13B+T15/T16 approvals เท่านั้น |
 | A-045 | 11216–11225 | Phase 4 Task 13 gate — 4A disposable real-Mongo fidelity 2026-11-04 | passed behavior | `PHASE_4A_DISPOSABLE_MONGO_FIDELITY_PASSED` 19/19 — refusal 15/15, ambient URI unread, lifecycle rev1→4, real DuplicateKeyError/matched_count/16MiB/readback/CLI; **fix พบโดย gate**: build_generation manifest=None → TypeError → ValueError (TDD); evidence phase4a_*.md/json; cleanup 0/0 | verified | งานค้าง = T13B (network approval), T15/T16 (provider+approval) |
 | A-046 | 11226–11234 | Phase 4 Task 13B gate — packaging py3.11 2026-11-04 | passed behavior | `PHASE_4_PACKAGING_PY311_VERIFIED` — ST==5.7.0 + gen/retrieval modules import บน python:3.11-slim (path b online install, user-approved) | verified | งานค้าง = T15/T16 (approved) |
+| A-047 | 11235–11241 | Phase 4 Task 15 gate — 4C canonical corpus provider-run 2026-11-04 | passed behavior | **provider fix พบโดย gate**: `gemini-2.5-flash` retired (404) → `gemini-3.5-flash-lite` + anonymous `genai.Client()` GC'd mid-call → named binding; free-tier 20 req/day/model → corpus = single-product spec files (082/083/084/103) 5 calls → 14 resolved records, 4-source manifest; checkpoint resume 0 calls สำหรับ resolved rows; `PHASE_4C_CANONICAL_CORPUS_COMPLETE` 11/11 บน real BGE-M3 + real Mongo; evidence phase4c_matrix.json | verified | งานค้าง = T16 benchmark + container cleanup |
 
 ## 7. Known semantic coverage gaps
 

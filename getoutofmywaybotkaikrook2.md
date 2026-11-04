@@ -11239,3 +11239,11 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - checkpoint resume พิสูจน์: resolved rows → 0 provider calls; unresolved rows → retry เท่านั้น (by design, cache เฉพาะ resolved)
 - ผ่าน: PHASE_4C_CANONICAL_CORPUS_COMPLETE — build/validate/publish+canary บน real BGE-M3 + real Mongo; evidence `docs/test/results/phase4c_matrix.json`
 - งานค้าง: T16 benchmark ใช้ corpus db+generation นี้ต่อ, cleanup container ท้าย T16
+
+## Phase 4 T16 — Gate 4D retrieval benchmark — ผ่านแล้ว
+- corpus rebuild หลัง finally-cleanup รอบแรก: checkpoint `/tmp/phase4c_checkpoint.json` ให้ผล extract ครบ → re-import 4 sources = **0 provider calls** (พิสูจน์ resume ซ้ำได้จริง)
+- ผลวัดจริง (5 vectors x 1024d, real BGE-M3): npz-fp32 19.6KB/0.172ms load vs npy+memmap 20.5KB/1.363ms vs npz-fp16 10.2KB/0.123ms — fp16 top-3 agreement 100% แต่ไม่มี candidate เหนือกว่าที่ scale นี้ → **keep npz-fp32 default** (spec §20)
+- exact 2.12ms / semantic 262ms (ภาระ = model encode ฝั่ง query ไม่ใช่ vector search) / scope isolation 0 hits / corrupt vectors.npz → fail closed ถูก / evidence p95=850B < 1500B cap
+- cleanup บังคับใน finally: containers+volumes zaapi-p4 = 0
+- verdict: `PHASE_4D_RETRIEVAL_BENCHMARK_COMPLETE`; evidence `docs/test/results/phase4d_benchmark.md`
+- งานค้าง: อัปเดต acceptance (T18 ก่อนหน้าทำตอน gates ยัง blocked) + final regression + independent review
