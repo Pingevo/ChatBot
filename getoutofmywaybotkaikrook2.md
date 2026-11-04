@@ -11204,3 +11204,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: 0 — analysis only; **verdict `needs-rebuild: exports/qa_embeddings.npz`** (no texts → unprovable) — อื่นทั้งหมด prove-compatible (product/unit legacy root = bit-identical 0.000e+00; gen-paired = 0.0/1.676e-07/7.451e-09 fp32 noise)
 - verify: offline load + 3 probes × 6 artifacts; ทุก artifact (11503/27807/392/11792/28072/27183 rows) dim 1024 f32 L2-norm — shape-compat; ไม่มี Mongo/provider/network
 - งานค้าง: T13/T13B (Docker approval), T15/T16 (provider+Docker approval), T18 closeout
+
+## ผ่านแล้ว — Phase 4 Task 18: closeout — budget delta + acceptance + verdict (2026-11-04)
+
+- error: mechanism delta จริงเทียบ §17 budget + acceptance matrix รวมยังไม่ reconcile
+- cause: T18 closeout bookkeeping
+- แก้ด้วย: `docs/test/results/phase4_acceptance.md` (gitignored) — budget table actual-vs-budget ทุกแถว (owners +2 ≤max, normalization +1/−2, validators +3, URI validator +1, retrieve_active +1, CAS +1, model_identity +1, MODEL_REVISION +1, load_active_state move +0, test-infra +1, ทุก row อื่น +0) + acceptance matrix 17 รายการ + regression proof; ST dep = pin ไม่ใช่ add (+0)
+- ผลกระทบเคสอื่น: 0 — closeout only; **ทุก actual อยู่ใน budget — ไม่มี over-budget row**
+- verify: regression matrix รอบสุดท้าย **902/0**; `git diff --check` OK; `git status` staging ว่าง; SRS census = 0 missing
+- งานค้าง: T13/T13B (Docker approval), T15/T16 (provider+Docker approval) — gates เท่านั้น
