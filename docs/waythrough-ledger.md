@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 11058 |
-| active_integrity_prefix_sha256 | `9e734b7353ba0c861b879d474ee038e63485a1da819206e24601fcb8bf59a264` |
-| active_line_count_at_baseline | 11058 (bytes 2122283) |
-| active_integrity_recorded_at | 2026-11-04T10:47+0700 |
+| active_integrity_prefix_lines | 11076 |
+| active_integrity_prefix_sha256 | `1d1190f78060419587d570c7adb00503703b92f2816b98d9f661b61c75f412cf` |
+| active_line_count_at_baseline | 11076 (bytes 2127721) |
+| active_integrity_recorded_at | 2026-11-04T11:07+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -80,6 +80,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11026–11039 | read + indexed (A-027) |
 | 11040–11046 | read + indexed (A-028) |
 | 11047–11058 | read + indexed (A-029) |
+| 11059–11076 | read + indexed (A-030) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -130,6 +131,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-027 | 11026–11039 | Phase 4 plan third-review corrections 2026-11-04 | decision/approval | verdict THIRD_REVIEW_FAILED → fix 4 จุดเท่านั้น: (H) validator เดิม → `require_disposable_target(uri, db_name)` pair (count +1 คงเดิม), CLI `--db-name` required, harness สุ่ม `zaapi_kb_p4_verify_<rand>` ครั้งเดียว pass ทุก command (cross-invocation consistency test), db_name closed pattern, refusal ยัง assert client 0 calls; (M) T13B → wheelhouse `--no-index --find-links=/wheelhouse` หรือ STOP (ลบ pip-cache mount — `--no-index` มองไม่เห็น HTTP cache); (M) `docker image inspect` local gate ก่อน pull/run ทั้ง mongo:7+python:3.11-slim — Docker/pull/network = 3 approval ชั้น; (L) cleanup scoped `rm -fv`+`ps --filter name=zaapi-p4`+`volume ls --filter` → 0 ใน scope ไม่นับทั้งเครื่อง; ไฟล์ 765 lines/19 tasks×13 fields; docs only | verified | plan ยังไม่ approve — fourth review พบ 1H/1M/1L (A-028); cleanup ใน entry นี้ถูกแทนด้วย `--tmpfs` approach (A-028) |
 | A-028 | 11040–11046 | Phase 4 plan fourth-review corrections 2026-11-04 | decision/approval | verdict FOURTH_REVIEW_FAILED → fix call syntax/คำสั่งเท่านั้น: (H) callsite 4 จุด → pattern เดียว `safe_uri, safe_db = require_disposable_target(uri, db_name)` → `MongoClient(safe_uri)[safe_db]` (audit-table/T13 header/T13 seed/T15 — เดิม tuple-เข้า-client/index ซ้ำ/single-arg), ไม่มี helper เพิ่ม; (M) T13B online command แยกชัดเจน — `docker run --rm -v "$PWD:/repo" -w /repo python:3.11-slim sh -c "pip install -r requirements.txt && ..."` ไม่มี wheelhouse mount/`--find-links`; (L) `--tmpfs /data/db` → ไม่มี anonymous volume → cleanup proof = named container+named-filter เท่านั้น; ไฟล์ 771 lines/19 tasks×13 fields; docs only | verified | — |
 | A-029 | 11047–11058 | Phase 4 plan fifth-review corrections 2026-11-04 | decision/approval | verdict FIFTH_REVIEW_FAILED → fix lifecycle gap เท่านั้น (1 High): T13 ลบ `zaapi-p4-test` แต่ T15/T16 ต้องใช้ Mongo ต่อ → lock lifecycle: T15 spin `zaapi-p4-corpus` ใหม่หลัง approval (image-inspect + `--tmpfs` + สุ่ม port/db_name ครั้งเดียว) ใช้ target เดิมตลอด T15–T16; T15 ห้าม cleanup เมื่อผ่าน; T15 fail ก่อน T16 → failure cleanup ทันที; T16 cleanup `zaapi-p4-corpus` ใน `finally` ทั้ง success/failure + scoped proof = 0; lifecycle rule ใน global constraints; ไม่มี helper/owner/mechanism เพิ่ม; ไฟล์ 772 lines/19 tasks×13 fields; docs only | verified | — |
+| A-030 | 11059–11076 | Phase 4 Task 1 implementation — neutral mongo_doubles + Phase 4 helpers 2026-11-04 | passed behavior | approved scope 10 defs (9 + `_AdminNs` companion): RED จริง 5 failed (ModuleNotFoundError ×4 + behavioral `phase4b import pulled the donor side-effect module` — `[KEYS]` line พิสูจน์ app-import side effect); GREEN: `docs/test/mongo_doubles.py` เจ้าของเดียว (verbatim move — GenColl ลบเฉพาะ late `_match` imports ×3), donors re-export `is`-identity parity (replay 8 ชื่อ + `_AdminNs`, p4b 5 ชื่อ), `zaapi_phase4_helpers.py` (record/manifest_for/stub_embed/block_network — lazy schema imports, fingerprint/revision ผ่าน schema owner เดิม); verify: isolation 5/5, regression 9 files = 709 passed/0 failed, baseline 416 คงเดิม, executable census single-owner (AST+`__module__`), diff --check OK, production bytes = 0; pre-existing identical `_norm` ใน `validate_legacy_turn_fixtures.py` = HEAD เดิม นอก scope; ยังไม่ commit — รอ independent review `PHASE_4_TASK_1_NEUTRAL_MONGO_DOUBLES_READY_FOR_INDEPENDENT_REVIEW` | verified | งานค้าง = Task 2 เท่านั้น |
 
 ## 7. Known semantic coverage gaps
 

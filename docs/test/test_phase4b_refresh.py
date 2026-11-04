@@ -33,8 +33,8 @@ sys.path.insert(0, str(ROOT))                # chatbot.shopeechat.scripts.*
 sys.path.insert(0, str(ROOT / "chatbot"))    # shopeechat.*
 sys.path.insert(0, str(TEST_DIR))            # replay fakes
 
-from test_legacy_turn_incident_replay import (FakeClient, FakeColl,  # noqa: E402
-                                              FakeDb)
+from mongo_doubles import (FakeClient, FakeColl, FakeDb,  # noqa: E402
+                           GenColl, GenDb)
 
 # ── provider/env stubs installed BEFORE any script-module import ─────────────
 
@@ -67,109 +67,11 @@ def _pkg(name: str):
 
 
 # ── gen-aware collection double ──────────────────────────────────────────────
-
-class GenColl(FakeColl):
-    """FakeColl + insert_many/replace_one/bulk_write/drop + _id uniqueness +
-    write-order recording for publication-order assertions."""
-
-    def __init__(self, docs=None, name="", db=None):
-        super().__init__(docs)
-        self.name = name
-        self._db = db
-        self.indexes: list = []
-        self.dropped = False
-
-    def _check_id(self, doc):
-        from pymongo.errors import DuplicateKeyError
-        if "_id" in doc and any(d.get("_id") == doc["_id"] for d in self._docs):
-            raise DuplicateKeyError(f"dup _id {doc['_id']}")
-
-    def insert_one(self, doc, *a, **k):
-        self._check_id(doc)
-        return super().insert_one(doc)
-
-    def insert_many(self, docs, *a, **k):
-        for d in docs:
-            self._check_id(d)
-        for d in docs:
-            self._docs.append(dict(d))
-        return types.SimpleNamespace(inserted_ids=list(range(len(docs))))
-
-    def bulk_write(self, ops, *a, **k):
-        from pymongo import UpdateOne
-        n = 0
-        for op in ops:
-            if isinstance(op, UpdateOne):
-                filt, update = op._filter, op._doc
-                hit = False
-                for d in self._docs:
-                    from test_legacy_turn_incident_replay import _match
-                    if _match(d, filt):
-                        self._apply(d, update)
-                        hit = True
-                if not hit and op._upsert:
-                    doc = {k: v for k, v in filt.items() if not k.startswith("$")}
-                    self._apply(doc, update)
-                    self._check_id(doc)
-                    self._docs.append(doc)
-                n += 1
-        return types.SimpleNamespace(
-            upserted_count=0, modified_count=n, matched_count=n)
-
-    def replace_one(self, filt, doc, upsert=False, *a, **k):
-        from test_legacy_turn_incident_replay import _match
-        for i, d in enumerate(self._docs):
-            if _match(d, filt):
-                self._docs[i] = dict(doc)
-                return types.SimpleNamespace(matched_count=1, upserted_id=None)
-        if upsert:
-            self._check_id(doc)
-            self._docs.append(dict(doc))
-            return types.SimpleNamespace(matched_count=0, upserted_id=len(self._docs))
-        return types.SimpleNamespace(matched_count=0, upserted_id=None)
-
-    def update_one(self, filt, update, upsert=False, *a, **k):
-        # fenced bootstrap: upsert that would create a doc with an _id that
-        # already exists must raise DuplicateKeyError (real Mongo behavior)
-        from test_legacy_turn_incident_replay import _match
-        if not any(_match(d, filt) for d in self._docs) and upsert:
-            doc = {k: v for k, v in (filt or {}).items() if not k.startswith("$")}
-            self._apply(doc, update)
-            self._check_id(doc)
-            self._docs.append(doc)
-            return types.SimpleNamespace(matched_count=0, upserted_id=len(self._docs))
-        return super().update_one(filt, update, upsert=upsert, *a, **k)
-
-    def create_index(self, spec, *a, **k):
-        self.indexes.append(spec)
-        return None
-
-    def drop(self, *a, **k):
-        self.dropped = True
-        self._docs.clear()
-        if self._db is not None:
-            self._db._colls.pop(self.name, None)
-
-
-class GenDb(FakeDb):
-    """FakeDb vending GenColl + recording collection-name access order."""
-
-    def __init__(self, colls=None):
-        self.accessed: list[str] = []
-        super().__init__()
-        for name, docs in (colls or {}).items():
-            self._colls[name] = GenColl(docs, name=name, db=self)
-            self._colls[name].database = self
-
-    def __getitem__(self, name):
-        self.accessed.append(name)
-        if name not in self._colls:
-            self._colls[name] = GenColl(name=name, db=self)
-            self._colls[name].database = self
-        return self._colls[name]
-
-    def drop_collection(self, name):
-        self._colls.pop(name, None)
+# GenColl/GenDb moved verbatim to mongo_doubles.py (single shared owner) —
+# imported above; OrderColl etc. subclass the imported names. The late
+# `from test_legacy_turn_incident_replay import _match` imports inside the
+# moved methods became a same-module name in mongo_doubles — that also means
+# importing THIS module no longer pulls the donor's import-time side effects.
 
 
 def _write_export(path: Path, docs: list[dict]) -> Path:
