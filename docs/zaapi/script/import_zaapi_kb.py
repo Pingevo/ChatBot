@@ -51,7 +51,7 @@ from shopeechat.kb_zaapi_schema import (  # noqa: E402
 EXPORT_DIR = Path(__file__).resolve().parent.parent / "kb-export"
 ADMIN_DB_NAME = os.environ.get("ADMIN_MONGO_DB", "chatbot_admin").strip()
 ZA_KB_RAW_COLL = "zaapi_kb_raw_sources"
-MODEL_VERSION = "gemini-2.5-flash"
+MODEL_VERSION = "gemini-3.5-flash-lite"  # gemini-2.5-flash retired provider-side (404); free-tier daily caps make non-lite models unusable
 PROMPT_VERSION = "zaapi-kb-v1"
 
 
@@ -177,7 +177,8 @@ def _gemini_extract(raw: dict) -> dict:
         "answer_text": {"type": "string"},
         "steps": {"type": "array", "items": {"type": "string"}},
     }
-    response = genai.Client().models.generate_content(
+    client = genai.Client()  # named binding — anonymous temp is GC'd and closes the httpx client mid-call (google-genai 1.75)
+    response = client.models.generate_content(
         model=MODEL_VERSION,
         contents=(f"Extract only facts explicitly present in this Zaapi KB row. "
                   f"Do not guess identity, values, or compatibility.\n{raw['text']}"),

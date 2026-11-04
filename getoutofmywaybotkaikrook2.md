@@ -11232,3 +11232,10 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: 0 — evidence เท่านั้น (gitignored)
 - verify: `docs/test/results/phase4_packaging.md`; image sha256:e88e9763 local; ephemeral container
 - งานค้าง: T15 (4C provider corpus — approved), T16 (4D benchmark)
+
+## Phase 4 T15 — Gate 4C canonical corpus (provider) — ผ่านแล้ว (11/11)
+- error: extraction ทุก row unresolved — เกิดเพราะ (1) `MODEL_VERSION=gemini-2.5-flash` retired ฝั่ง provider (404), (2) `genai.Client()` anonymous temp ถูก GC ก่อนส่ง request ("client has been closed" — google-genai 1.75) → แก้โดย bump model → `gemini-3.5-flash-lite` (probe จริงผ่าน schema) + bind client ให้ local name → ผลกระทบ: canonicalize path เท่านั้น, provenance `model_version` บันทึก model ใหม่ใน record ใหม่เท่านั้น, records/checkpoint เดิมไม่แตะ (key รวม MODEL_VERSION)
+- constraint พบ: free tier = 20 req/day/model → corpus ต้องเป็นไฟล์ที่ทุก row resolve (single-product spec sheets 082/083/084/103 — 5 calls, 14 records, 4-source manifest); unresolved = row ไม่มี identity จริง (FAQ/policy) = correct-by-design ไม่ใช่ bug
+- checkpoint resume พิสูจน์: resolved rows → 0 provider calls; unresolved rows → retry เท่านั้น (by design, cache เฉพาะ resolved)
+- ผ่าน: PHASE_4C_CANONICAL_CORPUS_COMPLETE — build/validate/publish+canary บน real BGE-M3 + real Mongo; evidence `docs/test/results/phase4c_matrix.json`
+- งานค้าง: T16 benchmark ใช้ corpus db+generation นี้ต่อ, cleanup container ท้าย T16
