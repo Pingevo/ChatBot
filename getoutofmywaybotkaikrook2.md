@@ -11195,3 +11195,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: 0 — read-only analysis tool ใหม่ ไม่มี production/test change
 - verify: `{"sources_declared":118,"sources_parsed":118,"malformed":0,"empty":0,"raw_rows":8600,"distinct_content_fingerprint":8597,"deliveries":112974}` — **ตรง prior 118/8,600/112,974 เป๊ะ**; kind dist: 8,595 xlsx_row + 5 text; 2 fingerprint collisions คลุม 5 rows (expected — scope/provenance-only duplicates share content); `git status` = tool file เดียว
 - งานค้าง: T13/T13B (Docker approval), T15/T16 (provider+Docker approval), T17, T18 closeout
+
+## ผ่านแล้ว — Phase 4 Task 17: shared-vector compatibility gate report (2026-11-04)
+
+- error: artifacts vector เดิมทุกชิ้นไม่มี model revision stored — identity ต้อง prove ไม่เดา (spec §13 gate ส่ง Task 5)
+- cause: npz เดิมไม่มี model identity field (มี generation_id เฉพาะ gen-paired; legacy root ไม่มีเลย; qa_embeddings ไม่มี texts)
+- แก้ด้วย: byte-compare จริง — load pinned BGE-M3 (`5617a9f6…`, HF_HUB_OFFLINE=1) re-embed stored texts (3 probes/artifact) เทียบ stored vectors → report `docs/test/results/phase4_shared_vector_gate.md` (gitignored)
+- ผลกระทบเคสอื่น: 0 — analysis only; **verdict `needs-rebuild: exports/qa_embeddings.npz`** (no texts → unprovable) — อื่นทั้งหมด prove-compatible (product/unit legacy root = bit-identical 0.000e+00; gen-paired = 0.0/1.676e-07/7.451e-09 fp32 noise)
+- verify: offline load + 3 probes × 6 artifacts; ทุก artifact (11503/27807/392/11792/28072/27183 rows) dim 1024 f32 L2-norm — shape-compat; ไม่มี Mongo/provider/network
+- งานค้าง: T13/T13B (Docker approval), T15/T16 (provider+Docker approval), T18 closeout
