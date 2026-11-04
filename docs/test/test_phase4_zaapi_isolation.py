@@ -145,3 +145,159 @@ def test_manifest_for_validates_with_schema_owner():
            if k != "revision_id"},
         "revision_id": revision["_id"]}
     assert revision["record_ids"] == [r["record_id"] for r in recs]
+
+
+def test_no_new_module_touches_network_or_mongo_at_import():
+    """T12 §16.19: importing the new production owner modules + thin CLI must
+    not connect Mongo, open sockets, hit urlopen, load_dotenv, pull
+    sentence_transformers/pymongo.MongoClient work, or mutate os.environ —
+    every heavy dependency is lazy."""
+    probe = textwrap.dedent("""
+        import os, socket, sys, urllib.request
+        sys.path.insert(0, {chatbot!r})
+        import dotenv, pymongo
+        env_before = dict(os.environ)
+        path_before = list(sys.path)
+
+        def _trap(what):
+            raise AssertionError(f"OFFLINE LEAK at import: {{what}}")
+        dotenv.load_dotenv = lambda *a, **k: _trap("load_dotenv")
+        socket.socket.connect = lambda self, addr: _trap(
+            f"socket.connect({{addr!r}})")
+        urllib.request.urlopen = lambda *a, **k: _trap("urlopen")
+        pymongo.MongoClient.__init__ = lambda self, *a, **k: _trap(
+            "pymongo.MongoClient()")
+
+        from shopeechat import (  # noqa: F401
+            kb_zaapi_generation, kb_zaapi_retrieval, kb_zaapi_schema,
+            embedding)
+        import shopeechat.scripts.zaapi_kb_gen as cli  # noqa: F401
+
+        assert "sentence_transformers" not in sys.modules, \\
+            "sentence_transformers loaded at import (must be lazy)"
+        assert os.environ == env_before, "os.environ mutated at import"
+        assert sys.path == path_before, "sys.path mutated at import"
+        assert "shopeechat.app" not in sys.modules, "app pulled at import"
+        # DAG lock: retrieval must not import generation
+        import shopeechat.kb_zaapi_retrieval as ret
+        assert not hasattr(ret, "kb_zaapi_generation"), \\
+            "retrieval imported generation (DAG violation)"
+        print("P4-IMPORT-CLEAN")
+    """).format(chatbot=str(ROOT / "chatbot"))
+    _probe(probe, "P4-IMPORT-CLEAN")
+
+
+def test_no_provider_or_mongo_leak(monkeypatch, tmp_path):
+    """T12 §16.19: load_active_generation + retrieve + validate_generation +
+    publish-path validation run fully offline with fakes — any socket/Mongo
+    call trips the wire."""
+    from mongo_doubles import GenDb
+    from zaapi_phase4_helpers import (
+        block_network, record, seed_canonical_state, stub_embed)
+    from shopeechat import kb_zaapi_generation as gen
+    from shopeechat.kb_zaapi_retrieval import (
+        load_active_generation, retrieve)
+
+    block_network(monkeypatch)
+
+    db = GenDb()
+    recs, _ = seed_canonical_state(db, ({"item_id": "IT-1",
+                                         "subject_id": "SUB-1"},))
+    gid = "g20261104-010203-abcdef12"
+    rep = gen.build_generation(db, embed=stub_embed,
+                               exports_root=tmp_path, gid=gid)
+    assert rep["record_count"] == 1
+    doc = db["zaapi_kb_embedding_generations"].find_one({"_id": f"gen:{gid}"})
+    assert rep == gen.validate_generation(
+        tmp_path / "zaapi_kb_gen" / gid, doc, db)
+    assert gen.publish(db, gid, exports_root=tmp_path) == "published"
+    snap = load_active_generation(db, exports_root=tmp_path)
+    assert snap is not None
+    res = retrieve(snap, shop="ShopA", platform="shopee",
+                   item_ids=("IT-1",))
+    assert len(res.supporting_evidence) == 1
+    # semantic path — embed seam monkeypatched (real model ไม่แตะ offline)
+    from shopeechat import embedding as _emb
+    monkeypatch.setattr(_emb, "embed_query",
+                        lambda q: stub_embed((q,))[0])
+    res2 = retrieve(snap, shop="ShopA", platform="shopee",
+                    semantic_query="offline canary")
+    assert len(res2.supporting_evidence) == 1
+
+
+def test_import_order_isolation():
+    """T12 §16.20: importing retrieval/generation in either order (and after
+    another test module) yields identical public behavior — no module-level
+    state that depends on import order."""
+    probe = textwrap.dedent("""
+        import sys
+        sys.path.insert(0, {chatbot!r})
+        # order A: retrieval first
+        from shopeechat import kb_zaapi_retrieval as r1
+        from shopeechat import kb_zaapi_generation as g1
+        a = (r1.retrieve, g1.semantic_text, g1.build_generation)
+        probe = r1.canonical_delivery_scope("  Shop  A ", " ShOPEE ")
+        assert probe == ("Shop A", "shopee"), probe
+        print("ORDER-A-OK")
+    """).format(chatbot=str(ROOT / "chatbot"))
+    _probe(probe, "ORDER-A-OK")
+
+    probe = textwrap.dedent("""
+        import sys
+        sys.path.insert(0, {chatbot!r})
+        sys.path.insert(0, {testdir!r})
+        # order B: generation first + an unrelated test module imported before
+        import test_phase4_zaapi_scope  # noqa: F401
+        from shopeechat import kb_zaapi_generation as g2
+        from shopeechat import kb_zaapi_retrieval as r2
+        assert g2.semantic_text is not None and r2.retrieve is not None
+        probe = r2.canonical_delivery_scope("  Shop  A ", " ShOPEE ")
+        assert probe == ("Shop A", "shopee"), probe
+        print("ORDER-B-OK")
+    """).format(chatbot=str(ROOT / "chatbot"), testdir=str(TEST_DIR))
+    _probe(probe, "ORDER-B-OK")
+
+
+def test_cli_runs_as_script_and_reaches_owner():
+    """T12 §16.19/20: `python zaapi_kb_gen.py publish ...` บน sys.path ว่าง
+    (scripts dir เท่านั้น) ต้อง resolve `from shopeechat import` ได้ —
+    regression สำหรับ bootstrap path bug (เดิม insert parent.parent =
+    chatbot/shopeechat ซึ่งทำให้ ModuleNotFoundError) — subprocess stub
+    pymongo → command ถึง owner จริงและพิมพ์ status JSON."""
+    probe = textwrap.dedent("""
+        import sys, types
+
+        class _Coll:
+            def find_one(self, *a, **k):
+                return None
+
+        class _Db(dict):
+            def __getitem__(self, name):
+                return _Coll()
+
+        class _FakeClient:
+            def __init__(self, uri):
+                self.uri = uri
+            def __getitem__(self, name):
+                return _Db()
+
+        sys.modules["pymongo"] = types.SimpleNamespace(
+            MongoClient=_FakeClient)
+        sys.argv = ["zaapi_kb_gen.py", "publish",
+                    "--mongo-uri", "mongodb://localhost:28018",
+                    "--db-name", "zaapi_kb_p4_verify_abcd1234",
+                    "--gid", "g20261104-010203-abcdef12"]
+        import runpy
+        try:
+            runpy.run_path({script!r}, run_name="__main__")
+        except SystemExit:
+            pass
+    """).format(
+        script=str(ROOT / "chatbot/shopeechat/scripts/zaapi_kb_gen.py"))
+    out = subprocess.run(
+        [sys.executable, "-c", probe], cwd=str(ROOT),
+        capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, (
+        f"script run failed ({out.returncode}):\n{out.stdout}\n{out.stderr}")
+    assert "ModuleNotFoundError" not in out.stderr, out.stderr
+    assert '"reject:gen-doc-missing"' in out.stdout, out.stdout

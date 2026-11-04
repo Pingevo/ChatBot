@@ -7,10 +7,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
 def require_disposable_target(uri: str, db_name: str) -> tuple[str, str]:
@@ -48,6 +44,9 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     uri, db_name = require_disposable_target(args.mongo_uri, args.db_name)
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
     import pymongo
     from shopeechat import kb_zaapi_generation as gen
     from shopeechat.kb_zaapi_schema import canonical_json

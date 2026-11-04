@@ -11177,3 +11177,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: 0 — test file เดียว ไม่มี production byte; producer contract ผ่านครั้งแรก (ไม่ต้องแก้ retrieval owner — spec §9 mapping ตรง compiler seam)
 - verify: attribution 1/1, compile emit ตรง closed schema, regression จะรันรวมใน T12 matrix
 - งานค้าง: T12 (isolation + regression matrix + SRS completeness) → T13+ gates
+
+## ผ่านแล้ว — Phase 4 Task 12: offline/isolation + regression matrix + SRS completeness (2026-11-04)
+
+- error: (1) isolation contract §16.19/20 ยังไม่ครอบ Phase 4 modules; (2) **bug จริงที่ test พบ: `zaapi_kb_gen.py` module-level `sys.path.insert(parent.parent)` = `chatbot/shopeechat` ผิด dir — รันเป็น script แล้ว `from shopeechat import` → ModuleNotFoundError + import-time side effect**
+- cause: bootstrap path ชี้ผิด + อยู่ module level
+- แก้ด้วย: (a) ย้าย `sys.path.insert` เข้า `main()` + แก้เป็น `parent.parent.parent` (`chatbot/` — dir ที่ทำให้ `from shopeechat import` resolve) — import module ไม่มี side effect, repo script convention คงเดิม; (b) +4 isolation tests: P4 import probe (no socket/urlopen/MongoClient/dotenv/env/sys.path/ST/app leak + DAG check), offline lifecycle leak (block_network + seed→build→validate→publish→load→retrieve exact+semantic — tripwire ครบ), import-order A/B probe, CLI-as-script runpy+pymongo stub → `"reject:gen-doc-missing"` (regression ของ bug ที่แก้); (c) SRS completeness — +2 grouped helper rows (`_repo_root`/`_exports_dir`/`_now_iso`/`_default_embed`/`_readback_ok`, `_sha256_file`/`_fail`/`_gen_dir`/`_empty`) ลบ "(planned)" ที่เสร็จแล้ว
+- ผลกระทบเคสอื่น: CLI import path behavior เดียวกันเดิม (tests import `zaapi_kb_gen` top-level ผ่าน scripts dir อยู่แล้ว); publish_generation/build_embeddings ไม่แตะ
+- verify: isolation 9/9 (รวม offline lifecycle + CLI runpy); **T12 matrix ครบ 16 files = 902 passed/19 skipped/4 xfailed/0 failed**; py_compile+diff --check OK; SRS census = 0 missing
+- งานค้าง: T13/T13B (Docker gates — STOP ขอ approval), T14 (census file-only), T15/T16 (provider+Docker — STOP), T17/T18 (closeout)
