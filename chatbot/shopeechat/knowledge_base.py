@@ -1200,16 +1200,7 @@ def _kb_model_row_match(doc: dict, token: str) -> dict | None:
     return None
 
 
-@dataclass(frozen=True)
-class KbEvidenceResult:
-    """ผล KB product evidence resolution — cards (live listing ที่ model
-    match) + attachments (item-domain joins) + supporting (name-only/
-    unmatched — ห้ามกลายเป็น candidate)"""
-    cards: tuple[dict, ...] = ()
-    supporting_evidence: tuple[dict, ...] = ()
-    attachment_evidence: tuple = ()
-    raw_count: int = 0
-    trace: tuple[str, ...] = ()
+from .kb_evidence_result import KbEvidenceResult  # noqa: F401 — contract owner; re-export เพื่อ callsites เดิม
 
 
 def kb_product_evidence(

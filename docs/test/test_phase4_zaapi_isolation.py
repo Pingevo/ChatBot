@@ -301,3 +301,27 @@ def test_cli_runs_as_script_and_reaches_owner():
         f"script run failed ({out.returncode}):\n{out.stdout}\n{out.stderr}")
     assert "ModuleNotFoundError" not in out.stderr, out.stderr
     assert '"reject:gen-doc-missing"' in out.stdout, out.stdout
+
+
+def test_retrieve_boundary_imports_no_heavy_kb():
+    """§18: retrieve/retrieve_active ต้องไม่ลาก knowledge_base (ซึ่งอ่าน .env
+    ตอน import) เข้ามา — result contract ต้องมาจาก module บริสุทธิ์
+    (precedent: message_detectors split)"""
+    probe = textwrap.dedent("""
+        import sys
+        sys.path.insert(0, "@CHATBOT@")
+        from shopeechat.kb_zaapi_retrieval import retrieve
+        from shopeechat.kb_zaapi_retrieval import ZaapiKbSnapshot
+        import numpy as np
+        snap = ZaapiKbSnapshot(
+            generation_id="g20261104-000000-deadbeef", vectors=np.zeros((0, 1024), dtype=np.float32),
+            digests=(), record_map={}, structured_index={k: {} for k in
+                ("item_id","model_id","model_code","alias","subject_id","target_id")},
+            record_index={}, model={}, model_compatible=False,
+            canonical_generation="0"*64, record_count=0)
+        res = retrieve(snap, shop="x", platform="y", item_ids=("nope",))
+        assert res.raw_count == 0
+        leaked = "shopeechat.knowledge_base" in sys.modules
+        print("CONTRACT-MODULE-OK" if not leaked else "HEAVY-KB-LEAKED")
+    """).replace("@CHATBOT@", str(ROOT / "chatbot"))
+    _probe(probe, "CONTRACT-MODULE-OK")

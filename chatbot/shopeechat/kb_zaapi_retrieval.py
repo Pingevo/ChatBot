@@ -12,8 +12,8 @@ gen อื่น, ไม่ serve ผิด generation):
 T8) แปลง None → empty result + trace ตาม spec §14
 
 Import DAG (locked): retrieval → kb_zaapi_schema + embedding +
-knowledge_base (lazy `KbEvidenceResult`) + answer_context — ห้าม import
-`kb_zaapi_generation`
+kb_evidence_result (`KbEvidenceResult` — side-effect-free contract) +
+answer_context — ห้าม import `kb_zaapi_generation`
 """
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 
 from . import embedding
+from .kb_evidence_result import KbEvidenceResult
 from .kb_zaapi_schema import (validate_artifact_manifest,
                               validate_gen_doc, validate_gen_pointer)
 
@@ -102,7 +103,7 @@ def _load_artifacts(gen_dir: Path, gen_doc: dict) -> dict | None:
             return _fail(f"{role} bytes/hash/size mismatch")
         try:
             if role == "vectors":
-                z = np.load(path, allow_pickle=True)
+                z = np.load(path, allow_pickle=False)
                 if ("generation_id" not in z.files
                         or str(z["generation_id"].item())
                         != manifest["generation_id"]):
@@ -225,7 +226,6 @@ _TYPED_CHANNELS = (("item_ids", "item_id"), ("model_ids", "model_id"),
 
 
 def _empty(*trace: str):
-    from .knowledge_base import KbEvidenceResult
     return KbEvidenceResult(supporting_evidence=(), raw_count=0, trace=trace)
 
 
@@ -302,8 +302,7 @@ def retrieve(snapshot, *, shop, platform, item_ids=(), model_ids=(),
             trace.append("semantic_unavailable")
         else:
             try:
-                from . import embedding as _emb
-                query_vec = _emb.embed_query(semantic_query)
+                query_vec = embedding.embed_query(semantic_query)
                 scores = snapshot.vectors @ np.asarray(
                     query_vec, dtype=np.float32)
             except Exception:
@@ -335,7 +334,6 @@ def retrieve(snapshot, *, shop, platform, item_ids=(), model_ids=(),
     records = records[:limit]
     evs = tuple(_evidence_record(digest, p, snapshot.record_map)
                 for _, (digest, p) in records)
-    from .knowledge_base import KbEvidenceResult
     return KbEvidenceResult(supporting_evidence=evs,
                             raw_count=len(evs), trace=tuple(trace))
 

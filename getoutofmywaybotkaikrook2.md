@@ -11252,3 +11252,9 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - acceptance matrix อัปเดต: 18/18 done, gates 4 รายการเคลียร์ (4A fidelity 19/19, py3.11 packaging, 4C corpus 11/11, 4D benchmark)
 - final regression: 903 passed / 0 failed (16-file matrix), git diff --check ผ่าน, staging ว่าง, leftover containers 0
 - งานค้าง: independent code review ก่อนสรุป PHASE_4_IMPLEMENTATION_COMPLETE
+
+## Phase 4 review findings — fix #1 (Important): KbEvidenceResult contract leak
+- error: `retrieve`/`_empty` lazy `from .knowledge_base import KbEvidenceResult` → knowledge_base อ่าน `.env` ตอน import → .env read รั่วเข้า standalone retrieval path (spec §18)
+- เกิดเพราะ: contract type อยู่ใน module ที่มี side effect — แก้ด้วย `kb_evidence_result.py` (frozen dataclass verbatim) + `knowledge_base` re-export compat + retrieval top-level import (precedent: message_detectors §6.36)
+- ผลกระทบ: callsites `from .knowledge_base import KbEvidenceResult` ทั้งหมดทำงานเหมือนเดิมผ่าน re-export; kb_zaapi.py คงเดิม (ต้อง extract_model_keywords อยู่แล้ว); +1 module ไม่ใช่ mechanism ใหม่ (owner move เหมือน T3)
+- verify: probe พิสูจน์ `shopeechat.knowledge_base` ไม่เข้า sys.modules หลัง retrieve; regression 905/0
