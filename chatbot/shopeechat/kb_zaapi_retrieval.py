@@ -1,0 +1,214 @@
+"""kb_zaapi_retrieval — Phase 4 standalone canonical-KB retrieval owner เดียว.
+
+Load path (fail closed ตาม spec §14 — corruption ทุกรูป → None, ไม่ fallback
+gen อื่น, ไม่ serve ผิด generation):
+- `_load_artifacts` — validation chain ชั้น 1–3 (gen doc→manifest→payloads)
+- `load_generation_snapshot` / `load_active_generation` — snapshot loaders
+- `ZaapiKbSnapshot` — self-contained retrieval surface (spec §10 invariant:
+  เพียงพอต่อ exact+semantic retrieval + evidence materialization โดยไม่อ่าน
+  canonical collections)
+
+`None` เป็น internal loader signal เท่านั้น — public boundary (`retrieve_active`,
+T8) แปลง None → empty result + trace ตาม spec §14
+
+Import DAG (locked): retrieval → kb_zaapi_schema + embedding +
+knowledge_base (lazy `KbEvidenceResult`) + answer_context — ห้าม import
+`kb_zaapi_generation`
+"""
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+import numpy as np
+
+from . import embedding
+from .kb_zaapi_schema import (validate_artifact_manifest,
+                              validate_gen_doc, validate_gen_pointer)
+
+GEN_COLL = "zaapi_kb_embedding_generations"
+POINTER_ID = "active"
+ROOT = Path(__file__).resolve().parent.parent.parent
+EMBEDDING_DIM = embedding.EMBEDDING_DIM
+_STRUCTURED_FIELDS = ("item_id", "model_id", "model_code", "alias",
+                      "subject_id", "target_id")
+_PROJECTION_FIELDS = {"record_id", "shop", "platform", "item_id", "model_id",
+                      "subject_id", "target_id"}
+_MODEL_FIELDS = ("name", "revision", "sentence_transformers_version", "dim",
+                 "normalize_embeddings", "output_dtype")
+
+
+@dataclass(frozen=True)
+class ZaapiKbSnapshot:
+    generation_id: str
+    vectors: "np.ndarray"            # (n_digests, 1024) float32 — row i ↔ digests[i]
+    digests: tuple                   # sorted semantic_digest order
+    record_map: dict                 # digest → {vector_index, text, records[…]}
+    structured_index: dict           # 6 namespaces → {norm_value: [record_id…]}
+    record_index: dict               # record_id → (digest, projection)
+    model: dict                      # gen doc pin 6 fields
+    model_compatible: bool           # runtime identity == pin (exact ไม่พึ่ง flag)
+    canonical_generation: str
+    record_count: int
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _fail(what: str):
+    print(f"[ZAAPI-GEN] {what} → fail closed", file=sys.stderr)
+    return None
+
+
+def _gen_dir(gid: str, exports_root) -> Path:
+    root = Path(exports_root) if exports_root is not None else ROOT / "exports"
+    return root / "zaapi_kb_gen" / gid
+
+
+def _load_artifacts(gen_dir: Path, gen_doc: dict) -> dict | None:
+    """Validation chain ชั้น 1–3 (spec §11) → payload objects; fail → None."""
+    entry = gen_doc["artifacts"]["manifest"]
+    manifest_path = gen_dir / entry["file"]
+    if not manifest_path.is_file():
+        return _fail(f"manifest missing ({manifest_path})")
+    if (manifest_path.name != "manifest.json"
+            or _sha256_file(manifest_path) != entry["sha256"]
+            or manifest_path.stat().st_size != entry["size_bytes"]):
+        return _fail("manifest hash/size mismatch")
+    try:
+        manifest = json.loads(manifest_path.read_bytes())
+        validate_artifact_manifest(manifest)
+    except Exception as exc:
+        return _fail(f"manifest invalid ({exc})")
+    if manifest["generation_id"] != gen_doc["generation_id"]:
+        return _fail("manifest generation_id != gen doc")
+
+    payloads: dict = {}
+    for role in ("vectors", "record_map", "structured_index"):
+        meta = manifest[role]
+        path = gen_dir / meta["file"]
+        if (not path.is_file()
+                or path.parent != gen_dir              # fixed filename เท่านั้น
+                or _sha256_file(path) != meta["sha256"]
+                or path.stat().st_size != meta["size_bytes"]):
+            return _fail(f"{role} bytes/hash/size mismatch")
+        try:
+            if role == "vectors":
+                z = np.load(path, allow_pickle=True)
+                if ("generation_id" not in z.files
+                        or str(z["generation_id"].item())
+                        != manifest["generation_id"]):
+                    return _fail("vectors generation_id mismatch")
+                payloads[role] = {"digests": [str(d) for d in z["digests"]],
+                                  "embeddings": z["embeddings"]}
+            else:
+                payloads[role] = json.loads(path.read_bytes())
+        except Exception as exc:
+            return _fail(f"{role} load error ({exc})")
+
+    # ชั้น 3 — shape/dim/count/dtype/cross-counts (spec §11)
+    vectors, record_map, sindex = (payloads["vectors"],
+                                   payloads["record_map"],
+                                   payloads["structured_index"])
+    emb = vectors["embeddings"]
+    digests = vectors["digests"]
+    if (not isinstance(emb, np.ndarray) or emb.ndim != 2
+            or emb.dtype != np.float32
+            or emb.shape[0] != len(digests)
+            or emb.shape[1] != manifest["vectors"]["dim"]
+            or emb.shape[1] != EMBEDDING_DIM
+            or digests != sorted(digests)
+            or len(digests) != manifest["vectors"]["row_count"]):
+        return _fail("vectors shape/dim/dtype/digest-order mismatch")
+    if (not isinstance(record_map, dict)
+            or set(record_map) != set(digests)
+            or len(record_map) != manifest["record_map"]["digest_count"]
+            or sum(len(e.get("records", ())) for e in record_map.values())
+            != manifest["record_map"]["record_count"]):
+        return _fail("record_map count/digest-set mismatch")
+    for i, digest in enumerate(digests):
+        e = record_map[digest]
+        if (not isinstance(e, dict)
+                or set(e) != {"vector_index", "text", "records"}
+                or e["vector_index"] != i
+                or not isinstance(e["text"], str)
+                or any(set(p) != _PROJECTION_FIELDS for p in e["records"])):
+            return _fail("record_map entry/projection mismatch")
+    if (set(sindex) != set(_STRUCTURED_FIELDS)
+            or manifest["structured_index"]["field_count"] != len(_STRUCTURED_FIELDS)
+            or any(not isinstance(entries, dict) for entries in sindex.values())
+            or sum(len(v) for v in sindex.values())
+            != manifest["structured_index"]["key_count"]
+            or sum(len(ids) for v in sindex.values() for ids in v.values())
+            != manifest["structured_index"]["posting_count"]
+            or any(ids != sorted(set(ids))
+                   for v in sindex.values() for ids in v.values())):
+        return _fail("structured_index namespaces/postings mismatch")
+    record_ids = {p["record_id"] for e in record_map.values()
+                  for p in e["records"]}
+    if any(rid not in record_ids
+           for v in sindex.values() for ids in v.values() for rid in ids):
+        return _fail("structured_index posting references unknown record_id")
+    return {"vectors": emb, "digests": tuple(digests),
+            "record_map": record_map, "structured_index": sindex}
+
+
+def load_generation_snapshot(db, gid: str, *, exports_root=None
+                             ) -> ZaapiKbSnapshot | None:
+    """gen doc read + validate → artifact chain → snapshot; fail → None."""
+    try:
+        doc = db[GEN_COLL].find_one({"_id": f"gen:{gid}"})
+        if doc is None:
+            return _fail(f"gen doc missing ({gid})")
+        validate_gen_doc(doc)
+    except Exception as exc:
+        return _fail(f"gen doc invalid ({exc})")
+    gen_dir = _gen_dir(doc["generation_id"], exports_root)
+    loaded = _load_artifacts(gen_dir, doc)
+    if loaded is None:
+        return None
+    record_index = {}
+    for digest in loaded["digests"]:
+        for projection in loaded["record_map"][digest]["records"]:
+            record_index[projection["record_id"]] = (digest, projection)
+    if len(record_index) != doc["record_count"]:
+        return _fail("record_index size != gen doc record_count")
+    runtime = embedding.model_identity()
+    compatible = all(doc["model"][k] == runtime[k] for k in _MODEL_FIELDS)
+    if not compatible:
+        print("[ZAAPI-GEN] model identity mismatch — semantic channel "
+              "unavailable (exact channels still usable)", file=sys.stderr)
+    return ZaapiKbSnapshot(
+        generation_id=doc["generation_id"], vectors=loaded["vectors"],
+        digests=loaded["digests"], record_map=loaded["record_map"],
+        structured_index=loaded["structured_index"],
+        record_index=record_index, model=doc["model"],
+        model_compatible=compatible,
+        canonical_generation=doc["canonical_generation"],
+        record_count=doc["record_count"])
+
+
+def load_active_generation(db, *, exports_root=None) -> ZaapiKbSnapshot | None:
+    """pointer find_one + `validate_gen_pointer` → snapshot(pointer.gid); fail → None."""
+    try:
+        pointer = db[GEN_COLL].find_one({"_id": POINTER_ID})
+        if pointer is None:
+            return _fail("active pointer missing")
+        validate_gen_pointer(pointer)
+    except Exception as exc:
+        return _fail(f"active pointer invalid ({exc})")
+    snap = load_generation_snapshot(db, pointer["generation_id"],
+                                    exports_root=exports_root)
+    if snap is None:
+        return None
+    if snap.canonical_generation != pointer["canonical_generation"]:
+        return _fail("pointer canonical_generation != gen doc")
+    return snap

@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 11134 |
-| active_integrity_prefix_sha256 | `57bd4b3225c7cddac30d1083a03bb08d13a181d898a468dac6e7ea300d34d9d5` |
-| active_line_count_at_baseline | 11134 (bytes 2140137) |
-| active_integrity_recorded_at | 2026-11-04T11:44+0700 |
+| active_integrity_prefix_lines | 11143 |
+| active_integrity_prefix_sha256 | `1b70961c6d3353dd7726a200f7afb1cc3728e0b7260dc8053cd19dbf7e908b88` |
+| active_line_count_at_baseline | 11143 (bytes 2141682) |
+| active_integrity_recorded_at | 2026-11-04T11:45+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -86,6 +86,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11108–11116 | read + indexed (A-033) |
 | 11117–11125 | read + indexed (A-034) |
 | 11126–11134 | read + indexed (A-035) |
+| 11135–11143 | read + indexed (A-036) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -142,6 +143,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-033 | 11108–11116 | Phase 4 Task 4 implementation — model identity audit + pin 2026-11-04 | passed behavior | audit evidence จริง (ห้าม placeholder): ST `5.7.0`, snapshot_download local-only → `5617a9f61b028005a4858fdac845db406aefb181`, `HF_HUB_OFFLINE=1` offline load proven 1024d; RED 2 (AttributeError) → GREEN: `MODEL_REVISION` 40-hex, `_get_model` +`revision=` (loader เดียว), `model_identity()` 6 fields ผ่าน importlib.metadata; requirements.txt +`sentence-transformers==5.7.0` (owner เดียว dep +0), Dockerfile ลบ unpinned ST (คง pythainlp/rapidfuzz); verify: scope 8/8, regression 571/0, live identity check OK; delta: constant +1, accessor +1, dep +0 | verified | งานค้าง = T5→T18 |
 | A-034 | 11117–11125 | Phase 4 Task 5 implementation — closed-schema validators ×3 2026-11-04 | passed behavior | RED 4 → GREEN: `validate_gen_pointer`/`validate_gen_doc`/`validate_artifact_manifest` ใน `kb_zaapi_schema.py` (spec §10–§12) — exact key sets, `GEN_ID_RE` reuse (ไม่มี regex ใหม่), revision ABA int≥1, ISO-8601 UTC stdlib, canonical_generation==fingerprint(sources), model 6-field pin, file==role.format, field_count==6; +`_sha256_hex` primitive +2 constant tables; verify: gen suite 12/12, regression 748/0 | verified | งานค้าง = T6→T18 |
 | A-035 | 11126–11134 | Phase 4 Task 6 implementation — generation builders + atomic artifact writers 2026-11-04 | passed behavior | RED 9 → GREEN: `kb_zaapi_generation.py` (owner 1 ของ 2) — `semantic_text` locked v1 renderer, `semantic_digest`/`record_set_digest`, `build_record_map` (projections 7f, scope ผ่าน `canonical_delivery_scope`), `build_structured_index` (6 ns sorted+unique), `build_manifest_payload`, `_sha256_file` pattern-copy, `_write_artifact` tmp→verify→os.replace; helpers +`write_gen_dir`; verify: gen suite 13/13, regression 757/0 | verified | งานค้าง = T7→T18 |
+| A-036 | 11135–11143 | Phase 4 Task 7 implementation — retrieval loaders + ZaapiKbSnapshot 2026-11-04 | passed behavior | `kb_zaapi_retrieval.py` (owner 2 ของ 2) — `_load_artifacts` chain ชั้น1–3, `load_generation_snapshot`/`load_active_generation` fail-closed→None, `ZaapiKbSnapshot` self-contained surface, model-compat 6f flag; `_sha256_file` pattern-copy (DAG ห้าม retrieval→generation); verify: retrieval 8/8 (self-containment+corruption matrix+traversal+compat), regression 765/0 | verified | งานค้าง = T8→T18 |
 
 ## 7. Known semantic coverage gaps
 

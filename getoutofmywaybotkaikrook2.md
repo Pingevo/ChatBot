@@ -11132,3 +11132,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: module ใหม่เท่านั้น (+test file +helper fn +SRS §6.34d) — ไม่มี callsite production เดิมถูกแตะ
 - verify: gen suite 13/13 (semantic_text determinism+field order, digest truth table 7 แถว, record_map self-contained, index namespaces, manifest deterministic+validate chain, reproducibility, atomic writer, write_gen_dir); regression 757/0; py_compile+diff --check OK
 - งานค้าง: T7 (retrieval loaders)
+
+## ผ่านแล้ว — Phase 4 Task 7: retrieval loaders + ZaapiKbSnapshot (2026-11-04)
+
+- error: ไม่มี `kb_zaapi_retrieval.py` — snapshot loaders/artifact validation chain ยังไม่มี owner
+- cause: Phase 4 owner-2 module ยังไม่ถูกสร้าง
+- แก้ด้วย: RED (ImportError) → GREEN: `ZaapiKbSnapshot` frozen dataclass 10 fields; `_load_artifacts` (ชั้น1 manifest sha256/size ตรง gen doc; ชั้น2 closed-schema+gid+per-role hash/size; ชั้น3 vectors npz gid/float32/(row,1024)/sorted digests, record_map digest-set/vector_index/projections-7f/counts, structured_index 6ns/sorted+unique/counts/resolve-refs); `load_generation_snapshot` (record_index derive + `len==record_count` + model-compat 6f vs `embedding.model_identity()`); `load_active_generation` (pointer validate + coherence check canonical_generation); `_sha256_file` pattern-copy (DAG ห้าม retrieval→generation)
+- ผลกระทบเคสอื่น: module ใหม่เท่านั้น — ไม่มี callsite เดิมถูกแตะ; DAG ถูก (retrieval → schema+embedding เท่านั้น)
+- verify: retrieval suite 8/8 (self-containment, pointer/gen-doc corruption matrix, manifest/payload hash corrupt, shape-dim corrupt ชั้น3, namespace corrupt, path traversal, model_compat ทีละ field=6, by-gid lookup); regression 765/0; py_compile+diff --check OK
+- งานค้าง: T8 (retrieve() full query contract)
