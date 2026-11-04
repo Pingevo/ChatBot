@@ -11091,3 +11091,17 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: ไม่มี — pure refactor normalization bytes-identical → fingerprint ของ fixture/records เดิมทุกตัวไม่ขยับ (uses-owner spy test พิสูจน์ callsite rewire จริง: 2 calls/account)
 - verify: scope 4/4 pass (0.02s); regression scope+import+phase4b+isolation = 425 passed/0 failed; baseline = 416 คงเดิม; py_compile OK; `grep " ".join` เหลือเฉพาะใน owner fn :71; diff --check OK; production delta = kb_zaapi_schema.py ไฟล์เดียว (+11/−4)
 - งานค้าง: Task 3 (`load_active_state` owner move — ไฟล์เดียวกัน depends on T2); Task 2 ยังไม่ commit — รอ independent review
+
+## กำลังจะทำ — Phase 4 Task 3: load_active_state owner move (2026-11-04)
+
+- baseline: HEAD cf5959b (T2 committed), tree clean; user อนุมัติทำต่อครบทุก task (RED→GREEN→regression ทุกรอบ, mechanism +0 นอก budget)
+- จะ: ย้าย `load_active_state` verbatim จาก `import_zaapi_kb.py:214` → `kb_zaapi_schema.py`; importer เพิ่มชื่อใน schema import block (re-export compat — `importer.load_active_state` resolve ต่อ); exporter เปลี่ยน import source → schema ตรง; RED ใน test_phase4_zaapi_scope.py (callable + `is`-identity + behavioral); SRS +entry; regression 416+ ต้องคง
+
+## ผ่านแล้ว — Phase 4 Task 3: load_active_state owner move (2026-11-04)
+
+- error: `load_active_state` owner อยู่ใน `docs/zaapi/script/import_zaapi_kb.py` — Phase 4 generation build (runtime) ห้าม import docs script → ต้องย้ายไป `kb_zaapi_schema.py` เป็น owner เดียว
+- cause: function เติบโตใน importer script ตอน Task 3 (Zaapi import) — runtime owner ใหม่ต้องเรียก แต่ script ไม่ใช่ production module
+- แก้ด้วย: RED 2 tests → `AttributeError: no attribute load_active_state` จริง; GREEN: ย้าย verbatim ไปท้าย `kb_zaapi_schema.py` (deps `validate_manifest`/`index_raw_rows`/`validate_manifest_records` = same-module); importer เพิ่มชื่อใน schema import block → `importer.load_active_state` re-export (compat — callsites :270,399,418,439 ไม่แตะ); exporter เปลี่ยน import source → schema ตรง; behavioral test = GenDb-seeded coherent state (raw+record+revision+manifest wired ผ่าน schema fns เท่านั้น — GenColl `find`/`$in` รองรับ read path; `$setOnInsert` ขาดจึงไม่รัน import_source บน GenDb — seed ตรงแทน)
+- ผลกระทบเคสอื่น: ไม่มี — verbatim move + `is`-identity (`imp.load_active_state is schema.load_active_state`, `exp.…` เช่นกัน); `def load_active_state` เหลือ 1 impl ทั้ง repo (schema:527)
+- verify: scope 6/6 pass; regression scope+import+phase4b+isolation = 427 passed/0 failed; py_compile 3 ไฟล์ OK; diff --check OK; SRS §6.34c อัปเดต owner
+- งานค้าง: T4 (model pin) → T5 → … (ต่อเนื่อง); delta: owners +0 (move), functions +0 net

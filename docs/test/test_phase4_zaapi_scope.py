@@ -13,7 +13,10 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
+TEST_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(TEST_DIR))            # mongo_doubles / zaapi_phase4_helpers
 sys.path.insert(0, str(ROOT / "chatbot"))    # shopeechat.kb_zaapi_schema
+sys.path.insert(0, str(ROOT / "docs" / "zaapi" / "script"))  # import_/export_zaapi_kb
 
 
 def test_scope_owner_truth_table():
@@ -86,3 +89,61 @@ def test_scope_boundary_malformed():
                                     "platform": 123}])
     with pytest.raises(ValueError, match="invalid account scope"):
         account_scope_fingerprint("not-a-list")
+
+
+def _canonical_state():
+    """One coherent (raw row, record, revision+manifest) state — every
+    provenance field wired through schema owner fns only (no hand-computed
+    fingerprints). Returns (raw_docs, records_docs, manifest)."""
+    import zaapi_phase4_helpers as helpers
+    from shopeechat.kb_zaapi_schema import (
+        RAW_CONTENT_FIELDS, account_scope_fingerprint, canonical_json,
+        fingerprint, raw_row_id, sanitize_source_row)
+
+    accounts = [{"id": "a1", "name": "ShopA", "platform": "shopee"}]
+    scope_fp = account_scope_fingerprint(accounts)
+    row_data = {"kind": "xlsx_row", "sheet": "S1", "row_index": 0,
+                "source_row": 0, "fields": {"model_code": "CB-100"},
+                "text": "model_code: CB-100"}
+    raw = {"source_id": "src-1", "version_id": "rev-1", "accounts": accounts,
+           "fingerprint": "sfp-1", "scope_fingerprint": scope_fp,
+           "raw_row_json": canonical_json(row_data), "active": True, **row_data,
+           "source_name": "src", "source_type": "file",
+           "source_file": "c.xlsx", "import_batch": "b1",
+           "zaapi_updated_at": "2026-01-01"}
+    raw["_id"] = raw_row_id(raw)
+    safe = sanitize_source_row(raw)
+    content_fp = fingerprint({k: safe.get(k) for k in RAW_CONTENT_FIELDS})
+    rec = helpers.record(
+        shop="ShopA", platform="shopee", item_id="IT-1",
+        **{"source_fingerprint": "sfp-1", "source_revision": "rev-1",
+           "scope_fingerprint": scope_fp, "content_fingerprint": content_fp,
+           "sheet": "S1", "row": 0})
+    built = helpers.manifest_for({"src-1": [rec]})
+    return [raw], [built["revisions"]["src-1"], rec], built["manifest"]
+
+
+def test_load_active_state_lives_in_schema_owner():
+    """Owner move: schema is the single implementation; importer re-exports
+    the same object (compatibility), exporter binds the schema owner directly."""
+    import shopeechat.kb_zaapi_schema as schema
+    assert callable(schema.load_active_state)
+    import import_zaapi_kb as imp
+    assert imp.load_active_state is schema.load_active_state
+    import export_zaapi_kb as exp
+    assert exp.load_active_state is schema.load_active_state
+
+
+def test_load_active_state_behavioral():
+    """Read path on a GenDb-seeded coherent state: bounded fetch + full
+    owner validation returns the canonical record doc."""
+    import shopeechat.kb_zaapi_schema as schema
+    from mongo_doubles import GenDb
+
+    raw_docs, rec_docs, manifest = _canonical_state()
+    raw_coll = GenDb({"zaapi_kb_raw_sources": raw_docs}
+                     )["zaapi_kb_raw_sources"]
+    records_coll = GenDb({"zaapi_kb_records": rec_docs}
+                         )["zaapi_kb_records"]
+    docs = schema.load_active_state(records_coll, raw_coll, manifest)
+    assert len(docs) == 1 and docs[0]["item_id"] == "IT-1"

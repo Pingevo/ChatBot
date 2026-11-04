@@ -10,10 +10,9 @@ sys.path.insert(0, str(ROOT / "chatbot"))
 from shopeechat.kb_zaapi_schema import (  # noqa: E402
     RAW_CONTENT_FIELDS, RAW_STORAGE_FIELDS, SCHEMA_REVISION, account_scope_fingerprint,
     build_revision, canonical_json, fingerprint,
-    index_raw_rows, raw_row_id, sanitize_source_row, validate_manifest,
-    validate_record_provenance, validate_raw_row,
+    index_raw_rows, load_active_state, raw_row_id, sanitize_source_row,
+    validate_manifest, validate_record_provenance, validate_raw_row,
 )
-from import_zaapi_kb import load_active_state  # noqa: E402
 
 
 def export_snapshot(raw_coll, records_coll, *, source_id: str | None = None,

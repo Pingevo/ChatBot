@@ -522,3 +522,19 @@ def validate_manifest_records(sources: dict, revisions: list[dict],
         if (not expected or expected != delivered
                 or revision["record_count"] != len(expected)):
             raise ValueError("active manifest record mismatch")
+
+
+def load_active_state(records_coll, raw_coll, manifest: dict) -> list[dict]:
+    """Bounded fetch + owner validation of the persisted global active state."""
+    validate_manifest(manifest)
+    sources = manifest["sources"]
+    revisions = list(records_coll.find({"_id": {"$in": [
+        pointer["revision_id"] for pointer in sources.values()]}}))
+    docs = [doc for revision in revisions for doc in records_coll.find({
+        "_id": {"$in": revision["record_ids"]
+                if isinstance(revision.get("record_ids"), list) else []}})]
+    index = index_raw_rows(
+        row for source_id in sources
+        for row in raw_coll.find({"source_id": source_id}))
+    validate_manifest_records(sources, revisions, docs, index)
+    return docs
