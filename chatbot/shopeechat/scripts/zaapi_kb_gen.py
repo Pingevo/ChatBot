@@ -27,8 +27,8 @@ def require_disposable_target(uri: str, db_name: str) -> tuple[str, str]:
         raise ValueError("mongo uri must be single loopback host with "
                          "explicit non-27017 port, no creds/query/db-path")
     if (not isinstance(db_name, str)
-            or not re.match(r"^zaapi_kb_p4_verify_[A-Za-z0-9_-]{8,}$",
-                            db_name)):
+            or not re.fullmatch(r"zaapi_kb_p4_verify_[A-Za-z0-9_-]{8,}",
+                                db_name)):
         raise ValueError("db_name must match zaapi_kb_p4_verify_<8+ chars>")
     return uri, db_name
 

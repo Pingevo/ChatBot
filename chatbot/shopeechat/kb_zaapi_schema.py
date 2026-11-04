@@ -616,7 +616,7 @@ def validate_gen_doc(doc: dict) -> dict:
             or not isinstance(manifest["manifest"], dict)
             or set(manifest["manifest"]) != {"file", "sha256", "size_bytes",
                                             "format"}
-            or not _nonempty_str(manifest["manifest"]["file"])
+            or manifest["manifest"]["file"] != "manifest.json"
             or not _sha256_hex(manifest["manifest"]["sha256"])
             or not _plain_int(manifest["manifest"]["size_bytes"])
             or manifest["manifest"]["size_bytes"] < 0

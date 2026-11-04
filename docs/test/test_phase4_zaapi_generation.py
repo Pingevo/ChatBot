@@ -105,6 +105,10 @@ def test_validate_gen_doc_truth_table():
     bad = [
         {**{k: v for k, v in ok.items() if k != "model"}},             # missing
         {**ok, "extra": 1},                                            # extra
+        {**ok, "artifacts": {"manifest": {"file": "evil.json",
+                                        "sha256": "c" * 64,
+                                        "size_bytes": 10,
+                                        "format": "json"}}},           # §10 pinned filename
         {**ok, "_id": "gen:other"},                                    # _id != gen:<gid>
         {**ok, "generation_id": "bad"},                                # GEN_ID_RE
         {**ok, "status": "building"},                                  # != ready
@@ -687,6 +691,7 @@ def test_disposable_target_gate():
             cli.require_disposable_target(bad, "zaapi_kb_p4_verify_abcd1234")
     for db in ("admin", "zaapi_kb_records", "zaapi_kb_p4_verify_",
                "zaapi_kb_p4_verify_short", "other_p4_verify_abcdefgh",
+               "zaapi_kb_p4_verify_abcdefgh\n",   # $ quirk — trailing \n must refuse
                123, None):
         with _pt.raises(ValueError):
             cli.require_disposable_target(good, db)
@@ -718,4 +723,16 @@ def test_build_missing_manifest_fails_closed(tmp_path):
         {"_id": f"gen:{GID}"}) is None
     assert db["zaapi_kb_embedding_generations"].find_one(
         {"_id": "active"}) is None
+
+
+def test_build_malformed_manifest_fails_closed(tmp_path):
+    """§14: manifest doc มีแต่ sources หาย → ValueError (ไม่ใช่ KeyError) —
+    validate ก่อนเข้าถึง sources เสมอ (build + validate รูปแบบเดียวกัน)"""
+    gen = _import_gen()
+    from mongo_doubles import GenDb
+    db = GenDb({"zaapi_kb_records": [{"_id": "active:manifest"}]})
+    import pytest as _pt
+    with _pt.raises(ValueError, match="manifest"):
+        gen.build_generation(db, embed=stub_embed,
+                             exports_root=tmp_path, gid=GID)
     assert not (tmp_path / "zaapi_kb_gen" / GID).exists()

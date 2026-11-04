@@ -11258,3 +11258,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - เกิดเพราะ: contract type อยู่ใน module ที่มี side effect — แก้ด้วย `kb_evidence_result.py` (frozen dataclass verbatim) + `knowledge_base` re-export compat + retrieval top-level import (precedent: message_detectors §6.36)
 - ผลกระทบ: callsites `from .knowledge_base import KbEvidenceResult` ทั้งหมดทำงานเหมือนเดิมผ่าน re-export; kb_zaapi.py คงเดิม (ต้อง extract_model_keywords อยู่แล้ว); +1 module ไม่ใช่ mechanism ใหม่ (owner move เหมือน T3)
 - verify: probe พิสูจน์ `shopeechat.knowledge_base` ไม่เข้า sys.modules หลัง retrieve; regression 905/0
+
+## Phase 4 review findings — fix #2 (Minor batch): spec-conformance + hardening
+- `validate_gen_doc`: `artifacts.manifest.file` pin "manifest.json" ตาม spec §10 (ก่อนหน้ารับ nonempty ใดๆ)
+- `build_generation`/`validate_generation`: `load_active_state` ก่อนเข้าถึง `manifest["sources"]` — manifest ห่วย → ValueError เดิมเสมอ (ไม่ใช่ KeyError)
+- `1024` → `embedding.EMBEDDING_DIM` (owner เดิม ไม่ใช่ literal)
+- `np.load(allow_pickle=False)` ×2 (artifacts hash-verified อยู่แล้ว แต่ไม่จำเป็น)
+- ลบ lazy `from . import embedding` ซ้ำใน `retrieve` (top-level มีอยู่)
+- `re.match($)` → `re.fullmatch` ปิด quirk trailing `\n` ใน db_name gate
+- verify: RED 4 tests → GREEN; regression 905/0; py_compile OK

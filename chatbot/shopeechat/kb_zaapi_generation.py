@@ -132,7 +132,7 @@ def _write_artifact(gen_dir: Path, name: str, payload) -> dict:
     tmp = out.parent / f"{out.stem}.tmp{out.suffix}"
     if isinstance(payload, dict):
         np.savez_compressed(tmp, **payload)
-        with np.load(tmp, allow_pickle=True) as z:
+        with np.load(tmp, allow_pickle=False) as z:
             for key in payload:
                 if key not in z.files:
                     tmp.unlink(missing_ok=True)
@@ -199,8 +199,8 @@ def build_generation(db, *, embed=None, exports_root=None, gid=None,
     manifest = records_coll.find_one({"_id": MANIFEST_ID})
     if manifest is None:
         raise ValueError("active manifest missing for canonical check")
-    canonical_sources = manifest["sources"]       # validate_manifest ใน load
     records = load_active_state(records_coll, raw_coll, manifest)
+    canonical_sources = manifest["sources"]       # load ผ่าน validate แล้ว
 
     texts: dict = {}
     for rec in records:
@@ -209,8 +209,9 @@ def build_generation(db, *, embed=None, exports_root=None, gid=None,
     embed = embed or _default_embed()
     vectors = embed([texts[d] for d in digests])
     import numpy as np
+    from . import embedding
     vectors = np.asarray(vectors, dtype=np.float32)
-    if vectors.shape != (len(digests), 1024):
+    if vectors.shape != (len(digests), embedding.EMBEDDING_DIM):
         raise ValueError("embeddings shape mismatch")
 
     tmp_dir = _exports_dir(exports_root, f".tmp-{gid}")
@@ -287,9 +288,9 @@ def validate_generation(gen_dir, gen_doc, db) -> dict:
     manifest = records_coll.find_one({"_id": MANIFEST_ID})
     if manifest is None:
         raise ValueError("active manifest missing for canonical check")
+    docs = load_active_state(records_coll, raw_coll, manifest)
     if fingerprint(manifest["sources"]) != gen_doc["canonical_generation"]:
         raise ValueError("canonical_generation pin mismatch")
-    docs = load_active_state(records_coll, raw_coll, manifest)
     pinned_ids = sorted(rec["record_id"] for rec in docs)
     map_ids = sorted(p["record_id"] for e in loaded["record_map"].values()
                      for p in e["records"])
