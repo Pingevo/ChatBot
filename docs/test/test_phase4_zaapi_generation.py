@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "chatbot"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from zaapi_phase4_helpers import record, manifest_for
+from zaapi_phase4_helpers import record, manifest_for, stub_embed
 from shopeechat import kb_zaapi_schema as schema
 
 GID = "g20261104-010203-abcdef12"
@@ -344,3 +344,134 @@ def test_write_gen_dir_helper(tmp_path):
     digests = [str(d) for d in z["digests"]]
     assert digests == sorted(digests)                  # sorted digest order
     assert z["embeddings"].shape == (2, 1024)
+
+
+# --- Task 9: validate_generation + build_generation orchestration ---
+
+def _seeded_db(tmp_path, specs=({"item_id": "I-1"}, {"item_id": "I-2"})):
+    from mongo_doubles import GenDb
+    from zaapi_phase4_helpers import seed_canonical_state
+    db = GenDb()
+    recs, manifest = seed_canonical_state(db, specs)
+    return db, recs, manifest
+
+
+def test_build_happy_path(tmp_path):
+    """GenDb canonical state + stub_embed → build → gen dir 4 artifacts +
+    ready gen doc §11 fields; pointer ไม่แตะ (ไม่มี active doc)"""
+    gen = _import_gen()
+    db, recs, _ = _seeded_db(tmp_path)
+    out = gen.build_generation(db, embed=stub_embed, exports_root=tmp_path,
+                               gid=GID)
+    assert out["generation_id"] == GID and out["record_count"] == 2
+    assert out["digest_count"] == 2
+    gen_dir = tmp_path / "zaapi_kb_gen" / GID
+    for name in ("vectors.npz", "record_map.json", "structured_index.json",
+                 "manifest.json"):
+        assert (gen_dir / name).is_file(), name
+    doc = db["zaapi_kb_embedding_generations"].find_one({"_id": f"gen:{GID}"})
+    assert doc is not None and doc["status"] == "ready"
+    assert doc["record_count"] == 2 and doc["_id"] == f"gen:{GID}"
+    schema.validate_gen_doc(doc)
+    assert db["zaapi_kb_embedding_generations"].find_one(
+        {"_id": "active"}) is None               # pointer ไม่แตะ
+
+
+def test_build_determinism(tmp_path):
+    """§16.26 build-side: input เดียวกัน gid ต่าง → digests/record_map/
+    structured_index/record_set_digest เท่ากันเป๊ะ"""
+    gen = _import_gen()
+    db, recs, _ = _seeded_db(tmp_path)
+    g1 = "g20261104-010203-abcdef12"; g2 = "g20261105-010203-abcdef12"
+    gen.build_generation(db, embed=stub_embed, exports_root=tmp_path, gid=g1)
+    gen.build_generation(db, embed=stub_embed, exports_root=tmp_path, gid=g2)
+    import json
+    def payload(g, name):
+        return json.loads(
+            (tmp_path / "zaapi_kb_gen" / g / name).read_text())
+    assert payload(g1, "record_map.json") == payload(g2, "record_map.json")
+    assert payload(g1, "structured_index.json") == \
+        payload(g2, "structured_index.json")
+    d1 = db["zaapi_kb_embedding_generations"].find_one({"_id": f"gen:{g1}"})
+    d2 = db["zaapi_kb_embedding_generations"].find_one({"_id": f"gen:{g2}"})
+    assert d1["record_set_digest"] == d2["record_set_digest"]
+    assert d1["canonical_generation"] == d2["canonical_generation"]
+
+
+def test_build_failure_no_side_effects(tmp_path):
+    """§14 build crash: embed raise → raise; ไม่มี gen doc; pointer ไม่เปลี่ยน;
+    tmp dir orphan เท่านั้น"""
+    gen = _import_gen()
+    db, recs, _ = _seeded_db(tmp_path)
+    def boom(texts, **kw):
+        raise RuntimeError("embed down")
+    import pytest as _pt
+    with _pt.raises(RuntimeError):
+        gen.build_generation(db, embed=boom, exports_root=tmp_path, gid=GID)
+    assert db["zaapi_kb_embedding_generations"].find_one(
+        {"_id": f"gen:{GID}"}) is None
+    assert db["zaapi_kb_embedding_generations"].find_one(
+        {"_id": "active"}) is None
+    assert not (tmp_path / "zaapi_kb_gen" / GID).exists()   # ไม่มี final dir
+
+
+def test_model_unresolvable_reject(tmp_path, monkeypatch):
+    """§16.34 build-side: model identity resolve ไม่ได้/invalid → reject
+    ก่อนเขียน artifact/doc ใด ๆ"""
+    gen = _import_gen()
+    db, recs, _ = _seeded_db(tmp_path)
+    monkeypatch.setattr("shopeechat.embedding.model_identity",
+                        lambda: {"name": "BAAI/bge-m3", "revision": "refs/main",
+                                 "sentence_transformers_version": "5.7.0",
+                                 "dim": 1024, "normalize_embeddings": True,
+                                 "output_dtype": "float32"})
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        gen.build_generation(db, embed=stub_embed, exports_root=tmp_path,
+                             gid=GID)
+    assert db["zaapi_kb_embedding_generations"].find_one(
+        {"_id": f"gen:{GID}"}) is None
+    assert not (tmp_path / "zaapi_kb_gen" / GID).exists()
+    monkeypatch.setattr("shopeechat.embedding.model_identity",
+                        lambda: (_ for _ in ()).throw(
+                            RuntimeError("no ST")))
+    with _pt.raises(RuntimeError):
+        gen.build_generation(db, embed=stub_embed, exports_root=tmp_path,
+                             gid=GID)
+    assert not (tmp_path / "zaapi_kb_gen" / GID).exists()
+
+
+def test_canonical_pin_validation(tmp_path):
+    """§16.8/16.10: pinned-record drift / canonical pin mismatch →
+    validate_generation reject"""
+    gen = _import_gen()
+    db, recs, _ = _seeded_db(tmp_path)
+    gen.build_generation(db, embed=stub_embed, exports_root=tmp_path, gid=GID)
+    gen_dir = tmp_path / "zaapi_kb_gen" / GID
+    coll = db["zaapi_kb_embedding_generations"]
+    doc = dict(coll.find_one({"_id": f"gen:{GID}"}))
+    # canonical_generation != fingerprint(canonical_sources) → gen_doc reject
+    bad = dict(doc); bad["canonical_generation"] = "a" * 64
+    import pytest as _pt
+    with _pt.raises(ValueError):
+        gen.validate_generation(gen_dir, bad, db)
+    # record_set_digest mismatch → reject
+    bad = dict(doc); bad["record_set_digest"] = "b" * 64
+    with _pt.raises(ValueError):
+        gen.validate_generation(gen_dir, bad, db)
+    # record_count mismatch → reject
+    bad = dict(doc); bad["record_count"] = 99
+    with _pt.raises(ValueError):
+        gen.validate_generation(gen_dir, bad, db)
+    # happy path — valid doc ผ่าน (ก่อน tamper)
+    assert gen.validate_generation(gen_dir, doc, db)["generation_id"] == GID
+    # pinned-record drift — tamper a record doc แล้ว re-validate → reject
+    tampered = dict(db["zaapi_kb_records"].find_one(
+        {"_id": recs[0]["record_id"]}))
+    tampered["answer_text"] = "tampered"
+    rec_coll = db["zaapi_kb_records"]
+    rec_coll._docs[:] = [d for d in rec_coll._docs
+                         if d.get("_id") != tampered["_id"]]
+    rec_coll._docs.append(tampered)
+    with _pt.raises(ValueError):
+        gen.validate_generation(gen_dir, doc, db)

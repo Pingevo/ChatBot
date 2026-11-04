@@ -145,3 +145,156 @@ def _write_artifact(gen_dir: Path, name: str, payload) -> dict:
     sha, size = _sha256_file(tmp), tmp.stat().st_size
     os.replace(tmp, out)
     return {"file": name, "sha256": sha, "size_bytes": size}
+
+
+# --- Task 9: build/validate orchestration (spec §13) ---
+
+RECORDS_COLL = "zaapi_kb_records"
+RAW_COLL = "zaapi_kb_raw_sources"
+GEN_COLL = "zaapi_kb_embedding_generations"
+MANIFEST_ID = "active:manifest"
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _model_pin() -> dict:
+    """Immutable model identity pin — reject ก่อนเขียนอะไรเลยถ้า resolve/
+    identity ไม่ใช่ immutable commit (spec §13)"""
+    from . import embedding
+    identity = embedding.model_identity()
+    revision = identity.get("revision")
+    if (not isinstance(identity, dict)
+            or not isinstance(revision, str)
+            or len(revision) != 40
+            or any(c not in "0123456789abcdef" for c in revision)
+            or identity.get("dim") != embedding.EMBEDDING_DIM
+            or identity.get("normalize_embeddings") is not True
+            or identity.get("output_dtype") != "float32"
+            or not all(isinstance(identity.get(k), str) and identity.get(k)
+                       for k in ("name", "sentence_transformers_version"))):
+        raise ValueError("model identity not an immutable commit")
+    return identity
+
+
+def _exports_dir(exports_root, gid: str) -> Path:
+    root = (Path(exports_root) if exports_root is not None
+            else _repo_root() / "exports")
+    return root / "zaapi_kb_gen" / gid
+
+
+def build_generation(db, *, embed=None, exports_root=None, gid=None,
+                     now=None) -> dict:
+    """Canonical build orchestration (spec §13 Build):
+    model identity pin → `load_active_state` → builders → tmp dir →
+    `validate_generation` → atomic rename → insert ready doc.
+    Failure ไม่แตะ pointer/doc — tmp dir orphan เท่านั้น"""
+    identity = _model_pin()                       # reject ก่อนเขียนใด ๆ
+    from .generation_pointer import mint_generation_id
+    from .kb_zaapi_schema import (SCHEMA_REVISION, fingerprint,
+                                load_active_state, validate_gen_doc)
+    gid = gid or mint_generation_id(now)
+    records_coll, raw_coll = db[RECORDS_COLL], db[RAW_COLL]
+    manifest = records_coll.find_one({"_id": MANIFEST_ID})
+    canonical_sources = manifest["sources"]       # validate_manifest ใน load
+    records = load_active_state(records_coll, raw_coll, manifest)
+
+    texts: dict = {}
+    for rec in records:
+        texts.setdefault(semantic_digest(rec), semantic_text(rec))
+    digests = sorted(texts)
+    embed = embed or _default_embed()
+    vectors = embed([texts[d] for d in digests])
+    import numpy as np
+    vectors = np.asarray(vectors, dtype=np.float32)
+    if vectors.shape != (len(digests), 1024):
+        raise ValueError("embeddings shape mismatch")
+
+    tmp_dir = _exports_dir(exports_root, f".tmp-{gid}")
+    final_dir = _exports_dir(exports_root, gid)
+    if final_dir.exists():
+        raise ValueError("generation dir already exists (immutable)")
+    tmp_dir.mkdir(parents=True, exist_ok=False)
+
+    roles = {}
+    meta = _write_artifact(tmp_dir, "vectors.npz", {
+        "digests": np.array(digests), "embeddings": vectors,
+        "generation_id": np.array(gid)})
+    roles["vectors"] = {**meta, "format": "npz", "row_count": len(digests),
+                        "dim": int(vectors.shape[1]), "dtype": "float32"}
+    record_map = build_record_map(records, texts)
+    meta = _write_artifact(tmp_dir, "record_map.json",
+                           canonical_json(record_map).encode("utf-8"))
+    roles["record_map"] = {**meta, "format": "json",
+                           "digest_count": len(record_map),
+                           "record_count": len(records)}
+    sindex = build_structured_index(records)
+    meta = _write_artifact(tmp_dir, "structured_index.json",
+                           canonical_json(sindex).encode("utf-8"))
+    roles["structured_index"] = {
+        **meta, "format": "json", "field_count": len(sindex),
+        "key_count": sum(len(v) for v in sindex.values()),
+        "posting_count": sum(len(i) for v in sindex.values()
+                             for i in v.values())}
+    manifest_payload = build_manifest_payload(gid, roles)
+    manifest_meta = _write_artifact(
+        tmp_dir, "manifest.json",
+        canonical_json(manifest_payload).encode("utf-8"))
+
+    from datetime import datetime, timezone
+    created = (now if isinstance(now, datetime)
+               else datetime.now(timezone.utc)).isoformat()
+    gen_doc = {
+        "_id": f"gen:{gid}", "generation_id": gid, "status": "ready",
+        "created_at": created,
+        "canonical_generation": fingerprint(canonical_sources),
+        "canonical_schema_revision": SCHEMA_REVISION,
+        "canonical_sources": canonical_sources,
+        "record_set_digest": record_set_digest(
+            rec["record_id"] for rec in records),
+        "record_count": len(records),
+        "serialization": {"version": SERIALIZATION_VERSION},
+        "model": identity,
+        "artifacts": {"manifest": {**manifest_meta, "format": "json"}}}
+    validate_gen_doc(gen_doc)
+    validate_generation(tmp_dir, gen_doc, db)
+    tmp_dir.rename(final_dir)
+    db[GEN_COLL].insert_one(gen_doc)
+    return {"generation_id": gid, "record_count": len(records),
+            "digest_count": len(digests)}
+
+
+def _default_embed():
+    from . import embedding
+    return embedding.embed_texts
+
+
+def validate_generation(gen_dir, gen_doc, db) -> dict:
+    """Full generation validation gate (build/publish path — spec §13):
+    closed gen doc → artifact chain → canonical pin cross-checks ผ่าน
+    `load_active_state` (touch point #1 เท่านั้น) → summary dict"""
+    from .kb_zaapi_schema import (fingerprint, load_active_state,
+                                validate_gen_doc)
+    from . import kb_zaapi_retrieval as retr
+    gen_doc = validate_gen_doc(gen_doc)            # raises on invalid
+    loaded = retr._load_artifacts(Path(gen_dir), gen_doc)
+    if loaded is None:
+        raise ValueError("generation artifact chain failed")
+    records_coll, raw_coll = db[RECORDS_COLL], db[RAW_COLL]
+    manifest = records_coll.find_one({"_id": MANIFEST_ID})
+    if manifest is None:
+        raise ValueError("active manifest missing for canonical check")
+    if fingerprint(manifest["sources"]) != gen_doc["canonical_generation"]:
+        raise ValueError("canonical_generation pin mismatch")
+    docs = load_active_state(records_coll, raw_coll, manifest)
+    pinned_ids = sorted(rec["record_id"] for rec in docs)
+    map_ids = sorted(p["record_id"] for e in loaded["record_map"].values()
+                     for p in e["records"])
+    if (map_ids != pinned_ids
+            or fingerprint(pinned_ids) != gen_doc["record_set_digest"]
+            or len(pinned_ids) != gen_doc["record_count"]):
+        raise ValueError("pinned record set drift")
+    return {"generation_id": gen_doc["generation_id"],
+            "record_count": gen_doc["record_count"],
+            "digest_count": len(loaded["digests"])}

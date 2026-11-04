@@ -180,3 +180,47 @@ def write_gen_dir(exports_root, gid: str, records: list, embed=None):
     _write_artifact(gen_dir, "manifest.json",
                     canonical_json(manifest).encode("utf-8"))
     return gen_dir
+
+
+def seed_canonical_state(db, record_specs=(), *, source_id="src-1"):
+    """Seed a coherent canonical state on GenDb for Phase 4 build tests —
+    one raw row + one record per spec; all provenance via schema owner fns.
+    `record_specs`: iterable of record() kwargs (one record per spec, unique
+    row_index per spec → unique content fingerprint).
+    Inserts into `zaapi_kb_raw_sources` + `zaapi_kb_records` (records,
+    revision doc, `active:manifest`). Returns (records, manifest)."""
+    from shopeechat.kb_zaapi_schema import (
+        RAW_CONTENT_FIELDS, account_scope_fingerprint, canonical_json,
+        fingerprint, raw_row_id, sanitize_source_row)
+    raw_coll = db["zaapi_kb_raw_sources"]
+    rec_coll = db["zaapi_kb_records"]
+    accounts = [{"id": "a1", "name": "ShopA", "platform": "shopee"}]
+    scope_fp = account_scope_fingerprint(accounts)
+    records = []
+    for i, spec in enumerate(record_specs):
+        row_data = {"kind": "xlsx_row", "sheet": "S1", "row_index": i,
+                    "source_row": 0, "fields": {"model_code": f"CB-{i}"},
+                    "text": f"model_code: CB-{i}"}
+        raw = {"source_id": source_id, "version_id": "rev-1",
+               "accounts": accounts, "fingerprint": "sfp-1",
+               "scope_fingerprint": scope_fp,
+               "raw_row_json": canonical_json(row_data), "active": True,
+               **row_data, "source_name": "src", "source_type": "file",
+               "source_file": "c.xlsx", "import_batch": "b1",
+               "zaapi_updated_at": "2026-01-01"}
+        raw["_id"] = raw_row_id(raw)
+        raw_coll.insert_one(raw)
+        safe = sanitize_source_row(raw)
+        content_fp = fingerprint({k: safe.get(k) for k in RAW_CONTENT_FIELDS})
+        rec = record(
+            shop="ShopA", platform="shopee",
+            **{"source_id": source_id, "source_fingerprint": "sfp-1",
+               "source_revision": "rev-1", "scope_fingerprint": scope_fp,
+               "content_fingerprint": content_fp, "sheet": "S1", "row": 0,
+               **spec})
+        rec_coll.insert_one(rec)
+        records.append(rec)
+    built = manifest_for({source_id: records})
+    rec_coll.insert_one(built["revisions"][source_id])
+    rec_coll.insert_one(built["manifest"])
+    return records, built["manifest"]

@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 11152 |
-| active_integrity_prefix_sha256 | `530aa37c5de1f559b51f75b8ea0773a73abe39c18cf1ac237f8ded7ad610c847` |
-| active_line_count_at_baseline | 11152 (bytes 2143464) |
-| active_integrity_recorded_at | 2026-11-04T11:47+0700 |
+| active_integrity_prefix_lines | 11161 |
+| active_integrity_prefix_sha256 | `49229a81d44ff7ee8f9a548f163b682307503cc931795ed91538ecb9cac9135d` |
+| active_line_count_at_baseline | 11161 (bytes 2145005) |
+| active_integrity_recorded_at | 2026-11-04T11:49+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -88,6 +88,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11126–11134 | read + indexed (A-035) |
 | 11135–11143 | read + indexed (A-036) |
 | 11144–11152 | read + indexed (A-037) |
+| 11153–11161 | read + indexed (A-038) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -146,6 +147,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-035 | 11126–11134 | Phase 4 Task 6 implementation — generation builders + atomic artifact writers 2026-11-04 | passed behavior | RED 9 → GREEN: `kb_zaapi_generation.py` (owner 1 ของ 2) — `semantic_text` locked v1 renderer, `semantic_digest`/`record_set_digest`, `build_record_map` (projections 7f, scope ผ่าน `canonical_delivery_scope`), `build_structured_index` (6 ns sorted+unique), `build_manifest_payload`, `_sha256_file` pattern-copy, `_write_artifact` tmp→verify→os.replace; helpers +`write_gen_dir`; verify: gen suite 13/13, regression 757/0 | verified | งานค้าง = T7→T18 |
 | A-036 | 11135–11143 | Phase 4 Task 7 implementation — retrieval loaders + ZaapiKbSnapshot 2026-11-04 | passed behavior | `kb_zaapi_retrieval.py` (owner 2 ของ 2) — `_load_artifacts` chain ชั้น1–3, `load_generation_snapshot`/`load_active_generation` fail-closed→None, `ZaapiKbSnapshot` self-contained surface, model-compat 6f flag; `_sha256_file` pattern-copy (DAG ห้าม retrieval→generation); verify: retrieval 8/8 (self-containment+corruption matrix+traversal+compat), regression 765/0 | verified | งานค้าง = T8→T18 |
 | A-037 | 11144–11152 | Phase 4 Task 8 implementation — retrieve() + retrieve_active() 2026-11-04 | passed behavior | `retrieve` full query contract (boundary group เดียว, scoped structured+semantic merge, limit ท้ายสุด, `_evidence_record` §9), `retrieve_active` §14 boundary (None→empty+generation_unavailable); trace: invalid_query/no_query/semantic_unavailable/generation_unavailable; verify: retrieval 18/18 (ทุก cluster §16), regression 775/0 | verified | งานค้าง = T9→T18 |
+| A-038 | 11153–11161 | Phase 4 Task 9 implementation — build/validate orchestration 2026-11-04 | passed behavior | `_model_pin` (immutable-commit gate ก่อนเขียน), `build_generation` (load_active_state→builders→.tmp-<gid>→validate→rename→insert_one), `validate_generation` (doc→artifacts→canonical pin cross-checks); helpers +`seed_canonical_state`; verify: gen 18/18, regression 780/0 | verified | งานค้าง = T10→T18 |
 
 ## 7. Known semantic coverage gaps
 

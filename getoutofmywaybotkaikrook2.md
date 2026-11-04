@@ -11150,3 +11150,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: module เดิม +3 fns — ไม่มี callsite production เดิมถูกแตะ; KbEvidenceResult เป็น type เดิม (+0 public type)
 - verify: retrieval suite 18/18 (validation truth table, whitespace-semantic no-embed-call, dup refs noop, strip+ns isolation, scope isolation, merge dedupe, semantic_unavailable×3, scoped ranking quota, materialization verbatim+closed record, load-failure trace+delegation identity); regression 775/0; py_compile+diff --check OK
 - งานค้าง: T9 (validate_generation + build_generation)
+
+## ผ่านแล้ว — Phase 4 Task 9: validate_generation + build_generation (2026-11-04)
+
+- error: ไม่มี build orchestration — `build_generation`/`validate_generation` ยังไม่ implement
+- cause: T9 owner orchestration ยังไม่ทำ
+- แก้ด้วย: RED 5 tests (AttributeError) → GREEN: `_model_pin` (model_identity ต้อง resolve + revision 40-hex immutable commit + dim/normalize/dtype pin — reject ก่อนเขียน), `build_generation` (manifest+load_active_state → unique sorted-digest texts → embed injected → vectors shape gate → `.tmp-<gid>` → 4 artifacts → ready gen doc → validate → rename → insert_one; final dir มีอยู่→raise immutable; DuplicateKey propagate), `validate_generation` (validate_gen_doc → `_load_artifacts` → manifest fingerprint pin → load_active_state pinned ids == record_map == record_set_digest == record_count); helpers +`seed_canonical_state` (raw+record+revision+manifest coherent บน GenDb ผ่าน schema owner fns เท่านั้น)
+- ผลกระทบเคสอื่น: module เดิม +4 fns +4 constants — ไม่มี callsite production เดิมถูกแตะ; mint_generation_id reuse จาก generation_pointer
+- verify: gen suite 18/18 (happy path, determinism 2 builds, failure no-side-effects, model reject ×2, pin validation ×4); regression 780/0; py_compile+diff --check OK
+- งานค้าง: T10 (publish/rollback CAS + thin CLI)
