@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 10832 |
-| active_integrity_prefix_sha256 | `723f3350ad0d5fa2ce0974302f37d616ab00b4e6efd317aa1edffd868b14617c` |
-| active_line_count_at_baseline | 10832 (bytes 2085662) |
-| active_integrity_recorded_at | 2026-11-03T17:52+0700 |
+| active_integrity_prefix_lines | 10970 |
+| active_integrity_prefix_sha256 | `82764c4ba78098a70ff42fbb497a179e31298c7e3f9b36b49e1b33b49764622d` |
+| active_line_count_at_baseline | 10970 (bytes 2107140) |
+| active_integrity_recorded_at | 2026-11-04T09:57+0700 |
 
 Baseline ตั้งที่ EOF หลัง append correction note (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -51,34 +51,76 @@ Baseline ตั้งที่ EOF หลัง append correction note (บร�
 
 | range | state |
 | --- | --- |
+| 595–683 | read + indexed (A-002) |
+| 6490–6569 | read + indexed (A-003) |
+| 6897–6966 | read + indexed (A-004) |
+| 7105–7177 | read + indexed (A-005) |
+| 7474–7609 | read + indexed (A-006) |
+| 10026–10117 | read + indexed (A-007) |
+| 10118–10181 | read + indexed (A-008) |
+| 10383–10426 | read + indexed (A-009) |
+| 10483–10525 | read + indexed (A-010) |
+| 10526–10750 | read + indexed (A-011) |
+| 10751–10822 | read + indexed (A-012) |
 | 10823–10832 | read + indexed (A-001) |
-| 1–10822 | ไม่ได้ index (gap) |
+| 10833–10848 | read + indexed (A-013) |
+| 10849–10858 | read + indexed (A-014) |
+| 10859–10871 | read + indexed (A-015) |
+| 10872–10889 | read + indexed (A-016) |
+| 10890–10900 | read + indexed (A-017) |
+| 10901–10918 | read + indexed (A-018) |
+| 10919–10934 | read + indexed (A-019) |
+| 10935–10951 | read + indexed (A-020) |
+| 10952–10958 | read + indexed (A-021) |
+| 10959–10970 | read + indexed (A-022) |
+| 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
 
-F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240); A-xxx = active `getoutofmywaybotkaikrook2.md` (10823–10832) — ช่วงบรรทัดตรวจกับต้นฉบับแล้ว
+F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240); A-xxx = active `getoutofmywaybotkaikrook2.md` — exact ranges ในคอลัมน์ `lines` (A-001..A-019 ครอบหลายช่วง) — ช่วงบรรทัดตรวจกับต้นฉบับแล้ว
 
-| id | lines | task / date | category | summary | status |
-| --- | --- | --- | --- | --- | --- |
-| F-001 | 1–34 | protocol / freeze 2026-09-17 | decision/approval | ไฟล์ freeze; งานใหม่เขียนใน file 2; ลำดับงาน C→A→B→D→Q14→Replay UI; **ไม่มี Phase 4 contract** ใน 1–240 | verified |
-| F-002 | 38–56 | C context loss | passed behavior | `conversation_products.py` timeline anchor/suggestion; active = anchor ล่าสุด else suggestion; `[สินค้า: id]` จาก messageService; Q1–Q4 ผ่าน | verified |
-| F-003 | 58–62 | A claim trigger | passed behavior | คำถามรับประกันเข้า claim flow ผิด → warranty detection จับก่อน; Q11 ผ่าน | verified |
-| F-004 | 64–70 | B claim cascade | passed behavior | claim state machine เลิก flow ได้; Q12 trust, Q13 compat ไม่ถูกดัก | verified |
-| F-005 | 72–76 | D trust | passed behavior | แก้ prompt/context ตอบ authenticity/shipping/sealed/warranty; Q5,Q8,Q9 — evidence บางในบรรทัดนี้ | historical-unverified |
-| F-006 | 78–92 | Q14 ดึงผิดรุ่น | regression lock | root cause 4 จุด: CONV-ACTIVE หลัง history block, "ดูสินค้า" ใน new_topic_kws, `_ref_regex_products` reset, fetch_products ทับ; routing ผ่าน (products=1 BioKoop) แต่ LLM 429 → **answer ไม่ verify**. อย่าให้ active anchor ถูกทับ | historical-unverified |
-| F-007 | 94–113 | Order lookup | passed behavior | `order_store.py` + `extract_order_sn`/`lookup_order`/`build_order_context`; flow ผ่าน (found / not-found) แต่ LLM 429 → answer ไม่ verify | historical-unverified |
-| F-008 | 115–126 | Ticket panel order history | passed behavior | API orders route + `OrderHistorySection`; build ผ่าน, manual UI ไม่ verify; join `customer_id`=`buyer_user_id` (buyer_user_id 0/None เชื่อมไม่ได้) | historical-unverified |
-| F-009 | 128–147 | Q2/Q6/Q7 | passed behavior | desc_kw ขยาย, "เปลี่ยน" ออกจาก warranty kw, State 6 post-handoff (บอทหยุดตอบหลัง handoff), prompt อนุญาต history สินค้าเดียวกัน; Q2,Q6,Q7 ผ่าน | verified |
-| F-010 | 149–160 | Replay UI | passed behavior | `run_conv` + `?history=1` + 3 tabs; typecheck/build ผ่าน, ผู้ใช้ยังไม่ทดสอบจริง | historical-unverified |
-| F-011 | 162–188 | Phase 2Z++++ 2026-09-07 | regression lock | `is_target_device_kw` เพิ่ม regex `^1[1-7][\u0E00-\u0E7F]+$` + `ไอโฟน\s*\d+` กัน "13คะ" ทำให้ข้าม CONV-ACTIVE; unit 14 cases ผ่าน, replay จริงยังไม่ verify. **ประวัติขยาย regex/keyword เฉพาะ case — สนับสนุนกฎ: ห้ามเพิ่ม semantic table/regex โดยไม่ขออนุญาต** (ดูเพิ่ม F-006 `new_topic_kws`, F-009 `desc_kw`) | historical-unverified |
-| F-012 | 190–216 | Phase 2Z++++ (duplicate) | superseded | เนื้อหาซ้ำ F-011 ทุกบรรทัด | superseded (by F-011 — duplicate, ไม่มี info ใหม่) |
-| F-013 | 218–240 | Phase 3C order lookup ครบ + order anchor 2026-09-07 | pending/deferred work | `[order: sn]`, ฟิลด์ order เพิ่ม, order anchor, ส่งเลข order เฉยๆ → ตอบรับสั้นไม่เรียก LLM, `order_sn` ใน ChatRequest; py_compile/tsc/lookup ผ่าน; **หัวข้อยังต่อหลังบรรทัด 240 และยังไม่ indexed (gap ส่วน 7)** | historical-unverified |
-| A-001 | 10823–10832 | waythrough protocol correction 2026-11-03 | decision/approval | ผู้ใช้อนุมัติเปลี่ยนกฎข้อ 8 เป็น ledger + incremental tail; แยก integrity prefix ออกจาก semantic coverage; docs only | verified |
+| id | lines | task / date | category | summary | status | superseded-by / note |
+| --- | --- | --- | --- | --- | --- | --- |
+| F-001 | 1–34 | protocol / freeze 2026-09-17 | decision/approval | ไฟล์ freeze; งานใหม่เขียนใน file 2; ลำดับงาน C→A→B→D→Q14→Replay UI; **ไม่มี Phase 4 contract** ใน 1–240 | verified | — |
+| F-002 | 38–56 | C context loss | passed behavior | `conversation_products.py` timeline anchor/suggestion; active = anchor ล่าสุด else suggestion; `[สินค้า: id]` จาก messageService; Q1–Q4 ผ่าน | verified | — |
+| F-003 | 58–62 | A claim trigger | passed behavior | คำถามรับประกันเข้า claim flow ผิด → warranty detection จับก่อน; Q11 ผ่าน | verified | — |
+| F-004 | 64–70 | B claim cascade | passed behavior | claim state machine เลิก flow ได้; Q12 trust, Q13 compat ไม่ถูกดัก | verified | — |
+| F-005 | 72–76 | D trust | passed behavior | แก้ prompt/context ตอบ authenticity/shipping/sealed/warranty; Q5,Q8,Q9 — evidence บางในบรรทัดนี้ | historical-unverified | — |
+| F-006 | 78–92 | Q14 ดึงผิดรุ่น | regression lock | root cause 4 จุด: CONV-ACTIVE หลัง history block, "ดูสินค้า" ใน new_topic_kws, `_ref_regex_products` reset, fetch_products ทับ; routing ผ่าน (products=1 BioKoop) แต่ LLM 429 → **answer ไม่ verify**. อย่าให้ active anchor ถูกทับ | historical-unverified | — |
+| F-007 | 94–113 | Order lookup | passed behavior | `order_store.py` + `extract_order_sn`/`lookup_order`/`build_order_context`; flow ผ่าน (found / not-found) แต่ LLM 429 → answer ไม่ verify | historical-unverified | — |
+| F-008 | 115–126 | Ticket panel order history | passed behavior | API orders route + `OrderHistorySection`; build ผ่าน, manual UI ไม่ verify; join `customer_id`=`buyer_user_id` (buyer_user_id 0/None เชื่อมไม่ได้) | historical-unverified | — |
+| F-009 | 128–147 | Q2/Q6/Q7 | passed behavior | desc_kw ขยาย, "เปลี่ยน" ออกจาก warranty kw, State 6 post-handoff (บอทหยุดตอบหลัง handoff), prompt อนุญาต history สินค้าเดียวกัน; Q2,Q6,Q7 ผ่าน | verified | — |
+| F-010 | 149–160 | Replay UI | passed behavior | `run_conv` + `?history=1` + 3 tabs; typecheck/build ผ่าน, ผู้ใช้ยังไม่ทดสอบจริง | historical-unverified | — |
+| F-011 | 162–188 | Phase 2Z++++ 2026-09-07 | regression lock | `is_target_device_kw` เพิ่ม regex `^1[1-7][฀-๿]+$` + `ไอโฟน\s*\d+` กัน "13คะ" ทำให้ข้าม CONV-ACTIVE; unit 14 cases ผ่าน, replay จริงยังไม่ verify. **ประวัติขยาย regex/keyword เฉพาะ case — สนับสนุนกฎ: ห้ามเพิ่ม semantic table/regex โดยไม่ขออนุญาต** (ดูเพิ่ม F-006 `new_topic_kws`, F-009 `desc_kw`) | historical-unverified | — |
+| F-012 | 190–216 | Phase 2Z++++ (duplicate) | failed/rejected approach | เนื้อหาซ้ำ F-011 ทุกบรรทัด | superseded | superseded-by: F-011 — duplicate, ไม่มี info ใหม่ |
+| F-013 | 218–240 | Phase 3C order lookup ครบ + order anchor 2026-09-07 | pending/deferred work | `[order: sn]`, ฟิลด์ order เพิ่ม, order anchor, ส่งเลข order เฉยๆ → ตอบรับสั้นไม่เรียก LLM, `order_sn` ใน ChatRequest; py_compile/tsc/lookup ผ่าน; **หัวข้อยังต่อหลังบรรทัด 240 และยังไม่ indexed (gap ส่วน 7)** | historical-unverified | — |
+| A-001 | 10823–10832 | waythrough protocol correction 2026-11-03 | decision/approval | ผู้ใช้อนุมัติเปลี่ยนกฎข้อ 8 เป็น ledger + incremental tail; แยก integrity prefix ออกจาก semantic coverage; docs only | verified | — |
+| A-002 | 595–683 | Phase 4A/4B design 2026-10-19 | invariant | generation precedent: `exports/gen/<gid>` + `sellable_units_g<gid>` + pointer `sellable_units_meta{_id:"active"}` fenced CAS (bootstrap `$exists:false`, previous embedded = rollback target), manifest finalize+verify ก่อน CAS, verify-ก่อน-replace, `image_texts_g<gid>` per-gen published vs shared cache, grace 24h cleanup, fail-closed ห้าม fallback base coll; request snapshot resolve 1×/request | verified | — |
+| A-003 | 6490–6569 | Phase 7 R1–R3 evidence boundary | invariant | closed emit `_EVIDENCE_OUT_FIELDS`; `_EVIDENCE_TEXT_KEYS` precedence → `payload["text"]`; `_EVIDENCE_RECORD_BYTES` bound + byte-boundary cut + `evidence_truncated:*`/`record_too_large`; `request_id` attribution ก่อน compile ถูกลบออกจาก final; kinds closed รวม `"kb"`; compile owner เดียว | verified | — |
+| A-004 | 6897–6966 | master-plan backlog 2026-10-21 | decision/approval | `kb_source` = legacy\|zaapi atomic, ไม่มี both/silent fallback, inactive backend zero reads; 118 sources → `zaapi_kb_raw_sources` + `zaapi_kb_records` + immutable embedding generations; Zaapi adapter เข้า pool/selection/answer owner เดิม | verified | — |
+| A-005 | 7105–7177 | master-plan rebaseline + Phase 10B r12/final acceptance | invariant | typed `subject_refs` identity authority; per-need scope gate; structured composition provenance segments; canonical subtype owner ใช้ structured fields (precedent: typed refs เท่านั้น ไม่ parse prose) | verified | — |
+| A-006 | 7474–7609 | Phase 10B gen build + CAS preflight + rehearsal | passed behavior | NEW_GID build+validate (28,072 units/27,183 desc/13,823 it/11,792 prod); CAS BLOCKED — pointer อยู่ shared prod Mongo (digital.in.th live traffic) → disposable-only precedent; local-Docker rehearsal PASSED (fenced CAS + rollback); `_canon_iid` digit-only fail-closed | verified | regression-lock aspect: disposable-only precedent อยู่ใน summary |
+| A-007 | 10026–10117 | Mongo clean slate + workflow R2/R3 | passed behavior | user-approved Mongo write precedent (clean slate + import corpus); idempotent import `already_applied`; workflow scope เท่านั้น — ไม่กระทบ Phase 4 KB | verified | — |
+| A-008 | 10118–10181 | Workstream E P1/P2a + pool matrix | invariant | `pool_sources()`/`source_enabled()`/`kb_enabled()`/`kb_source()` (invalid→legacy); `setKbSource` CAS gated `zaapiKbReady`; legacy `zaapi_kb` = 8,600 docs บน shared digital.in.th/chatbot — Phase 4 ห้ามแตะ; `kb_zaapi.py` adapter kind `kb_zaapi` ∉ `_SUPPORTING_KINDS`; scope-gate/dead-intent findings | verified | regression-lock aspect: Phase 4 ห้ามแตะ legacy/adapter อยู่ใน summary |
+| A-009 | 10383–10426 | Zaapi-primary evidence + Task 2 | decision/approval | Zaapi KB = factual authority สเปก/compat/FAQ/troubleshooting แต่ไม่เปิดเดี่ยว (คู่ catalog+units ใน Task 5); master-plan order: typed evidence → canonical import → KB embeddings → identity-bound retrieval → source policy | verified | — |
+| A-010 | 10483–10525 | Task 3 raw+canonical impl | invariant | raw/canonical split, deterministic serialize/fingerprint, full-source validation ก่อน publish pointer, checkpoint/resume, invalid/conflicted/unresolved ไม่ publish; findings: one-shot cursor, snapshot integrity, CAS fence | verified | — |
+| A-011 | 10526–10750 | Task 3 correction/second review (อ่านใน Phase 4 dev session เดิม) | invariant | per-row checkpoint, snapshot/pointer integrity, sanitization bijection (xlsx text = exact permutation ของ field lines), CAS fence+race convergence, source replacement = full snapshot ภายใต้ selected source_id, filename = audit metadata only | verified | passed-behavior aspect อยู่ใน summary |
+| A-012 | 10751–10822 | Task 3 closeout + Phase 4 Gate 0/1 + ledger protocol | decision/approval | BSON 16MiB gate + `_id==record_id==hash`; collections: `zaapi_kb_raw_sources`/`zaapi_kb_records`/`zaapi_kb` legacy untouched/`zaapi_kb_embedding_generations` (Task 4); commits b072bd8+7a4e402; Gate 0: Docker down/ไม่มี mongod/mongomock; census 8,600 rows→112,974 deliveries, tokenizer p95 654/max 2,727/0 >8192; rev.2/3: semantic_digest ≠ content_fingerprint, reuse `KbEvidenceResult`, pin canonical gen, ไม่มี state machine, payload `{"text"}` | verified | passed-behavior aspect อยู่ใน summary |
+| A-013 | 10833–10848 | Phase 4 Gate 1 final architecture task 2026-11-03 | pending/deferred work | task appends เท่านั้น: "กำลังจะทำ" (baseline 22fdce9 + protocol verified) + closeout (targeted ranges → A-002..A-012, verdict `PHASE_4_GATE1_FINAL_ARCHITECTURE_READY_FOR_APPROVAL`, รอ independent review); ไม่มีโค้ดเปลี่ยน | historical-unverified | รอ reviewer approve รายงาน |
+| A-014 | 10849–10858 | Phase 4 Gate 1 contract correction 2026-11-03 | decision/approval | correction findings ล็อก contract: (1) manifest = `_id`/`schema_revision`/`sources`/`generation`, `generation==fingerprint(sources)` (schema.py:23,473); pin = canonical_generation/schema_revision/sources+record_set_digest (2) pointer `revision:int` ABA-fence (filter rev+gid, +1/write; matched=0→reread→conflict; no retry) (3) producer record ไม่ใส่ `request_id`/`need_indices` — pool stamp→`_attribute`→compiler ลบ (candidate_pool.py:255-259, executor:301/321, answer_context:505) (4) channel failure A–D truth table (5) artifacts = `exports/zaapi_kb_gen/<gid>/<fixed filename>` closed set (6) phases 4A mongo-fidelity/4B raw census/4C canonical corpus/4D benchmark | verified | contract findings — ไม่ใช่ test evidence |
+| A-015 | 10859–10871 | Phase 4 design spec written 2026-11-04 | decision/approval | Gate 1 review passed → design spec `docs/plans/2026-11-04-phase4-zaapi-canonical-retrieval-design.md` (532 บรรทัด, 20 sections ครบ) — docs only; record fields จริง verify แล้ว (RecordType 6 ค่า, subject_id/target_id scalar, facts={key,value} unique-key); placeholders=0, ไม่มี runtime wiring ใน scope; verdict `PHASE_4_DESIGN_SPEC_READY_FOR_USER_REVIEW` | superseded | superseded-by: A-016 — scope normalization ใน entry นี้ผิด |
+| A-016 | 10872–10889 | Phase 4 design spec contract correction 2026-11-04 | decision/approval | independent review 5 findings แก้ใน spec: (H1) `record_map` self-contained `{vector_index,text,records[{record_id,scope,item_id,model_id,subject_id,target_id}]}`, producer mapping exact (`item_id`←`item_id`, `identity`←`subject_id`→`model_id`, `target`←`target_id`, `model_codes`/`aliases` retrieval-only), canonical touch points = build+publish เท่านั้น (pinned-record = build/publish validation ไม่ใช่ runtime) (M1) scope ตาม `account_scope_fingerprint` จริง — shop `" ".join(split())` case-sensitive / platform `strip().casefold()` (schema.py:76-84) (M2) reproducibility boundary — digests/map/index deterministic, vector bytes same-runtime เท่านั้น, ไม่มี gen-doc digest (M3) manifest = 3 payload roles ไม่มี self-hash, gen doc เป็น owner ของ manifest hash, validation chain 3 ชั้น (P1) A-015 → superseded; tests §16 +7 items | verified | corrections ยังอยู่ใน spec; second review เพิ่ม findings → แก้ใน A-017 |
+| A-017 | 10890–10900 | Phase 4 design spec final boundary correction 2026-11-04 | decision/approval | second review 3 findings: (M1) query contract → `retrieve(snapshot, *, shop, platform, typed-ref kwargs, semantic_query, limit=EVIDENCE_LIMIT)` — malformed → ว่าง+`invalid_query` ไม่ raise; valid-no-input → `no_query`; whitespace-only semantic = ไม่มี channel; duplicate refs = no-op (M2) scope owner เดียว `canonical_delivery_scope` ใน `kb_zaapi_schema.py` — `account_scope_fingerprint` reuse, generation/retrieval เรียก function เดียว; budget: data-contract fn +1 / callsites −2 / trust-boundary validation +1 (P1) A-016 status นอก enum → `historical-unverified`; tests §16 +4 (28–31) | verified | historical protocol exception — raw log ขาด "กำลังจะทำ" pre-work entry (บันทึกตามจริงภายหลังใน A-018 range); ไม่อ้าง protocol ผ่าน |
+| A-018 | 10901–10918 | Phase 4 design spec typed-index/model/bootstrap/manifest correction 2026-11-04 | decision/approval | review 4 findings: (H1) `structured_index` → namespaced closed set 6 fields (`item_id`/`model_id`/`model_code`/`alias`/`subject_id`/`target_id`), channel อ่านเฉพาะ namespace ตัวเอง, posting sorted+unique (H2) model pin ครบ `{name,revision:immutable,sentence_transformers_version,dim,normalize_embeddings,output_dtype}` — build reject ถ้า revision resolve ไม่ได้, mismatch → `semantic_unavailable` (H3) bootstrap = `find_one`→validate→`insert_one` เท่านั้น ห้าม upsert — corrupt pointer fail closed ไม่ repair (M1) manifest closed schema exact per role (`schema_version`/`generation_id`/plain int/`field_count==6`/deterministic); ledger categories A-016/A-017 → `decision/approval`; tests §16 +5 (32–36) | verified | — |
+| A-019 | 10919–10934 | Phase 4 design spec model-loader/scoped-ranking/pointer-schema correction 2026-11-04 | decision/approval | review 5 findings: (H1) model compat check ครบ 6 fields รวม `name` (H2) loader contract — `embedding.py` singleton เดียว `SentenceTransformer(MODEL_NAME, revision=MODEL_REVISION)`; gen doc เก็บ identity ที่ loader ใช้จริง; ห้าม loader/resolver ที่สอง; ST pin exact (dep เดิม); SRS note; revision จริง audit+lock ก่อน 4C (H3) scoped ranking — scope filter ก่อน rank/limit; foreign scope ไม่กิน quota; `limit` ท้ายสุด (M1) pointer closed schema exact (int≥1 non-bool / GEN_ID_RE / previous None\|GEN_ID_RE / 64-char lowercase hex / UTC ISO-8601); bootstrap previous=None (M2) ledger enum cleanup — column `superseded-by/note`, composite categories → primary, annotated statuses → exact enum, A-017 protocol exception note; ลบ redundant `counts` จาก gen doc; tests §16 +3 (37–39) | verified | — |
+| A-020 | 10935–10951 | Phase 4 design spec shared-embedding compat + ledger enum correction 2026-11-04 | decision/approval | review 3 findings: (H1) shared-embedding compatibility gate — `embedding.py` = shared singleton (product_store `embed_query`/units `embed_query`/knowledge_base QA `embed_texts`+`embed_query`+lazy mtime cache/`build_embeddings`/`app` warmup/tokenizer); pin `MODEL_REVISION` เปลี่ยน vector space ของ `.npz` artifacts เดิมที่ไม่มี identity proof → gate ก่อน shared pin มีผล (resolve commit/pin ST/census callsites/rebuild-or-prove-identity/validate-ก่อน-serve/QA cache reset); Phase 4 standalone build ได้แต่ production activation block จน Task 5 gate; commit code ≠ deploy safety; unknown/mismatch → vector channel fail closed (M1) dependency packaging — exact ST version owner เดียว = `requirements.txt`, ลบ unpinned install ใน `docker/Dockerfile.chatbot`, container build พิสูจน์ installed==gen-doc, dep +0 (M2) F-012 category `superseded`→`failed/rejected approach`; tests §16 +1 (40) | verified | raw closeout census (32 rows) เป็น pre-append count — แก้โดย A-021 โดยไม่เปลี่ยน raw history |
+| A-021 | 10952–10958 | ledger census accuracy correction 2026-11-04 | decision/approval | correction note: closeout A-020 เขียน census = 32 rows (pre-append count — นับก่อนเพิ่ม entry) — post-A-020 จริง = 33 rows {categories: decision/approval 12, failed/rejected approach 1, invariant 6, passed behavior 10, pending/deferred work 2, regression lock 2} {statuses: verified 18, historical-unverified 13, superseded 2}; BAD = 0 — enum validity เดิมยังถูกต้อง; แก้เฉพาะ census count + metadata, ไม่เปลี่ยน architecture/spec, ไม่แก้ raw log ย้อนหลัง | verified | historical protocol exception — raw entry รวม "กำลังจะทำ + ผ่านแล้ว" ไว้ block เดียว ไม่พิสูจน์ลำดับ 8H; ไม่อ้าง protocol รอบนี้ผ่าน; corrected-by: A-022 |
+| A-022 | 10959–10970 | waythrough protocol closeout correction 2026-11-04 | decision/approval | แก้เฉพาะ protocol bookkeeping: A-021 raw entry รวม pre-work/closeout block เดียว (ไม่พิสูจน์ลำดับ 8H) → A-021 note = historical protocol exception; รอบนี้ append "กำลังจะทำ" (10959–10963) ก่อนแก้ ledger และ "ผ่านแล้ว" (10964–10970) หลังตรวจ — แยก heading/ช่วงเวลาจริง; ไม่แก้ raw ย้อนหลัง, ไม่เปลี่ยน spec/architecture; raw closeout ไม่เขียนตัวเลข census (เลิก off-by-one loop) | verified | — |
 
 ## 7. Known semantic coverage gaps
 
 - frozen 241–8624 ไม่ได้ index (F-013 ปิดที่ 240 แต่หัวข้อ Phase 3C ยังต่อหลัง 240)
-- active 1–10822 ไม่ได้ index
+- active gap ที่ยังไม่ได้ index: 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 — targeted coverage เท่านั้น ห้ามอ้าง full audit
 - Q14 / order (F-006, F-007) ระดับ answer ไม่ verify เพราะ provider 429
 - ไม่ใช้ `/tmp/p4ledger/ledger.md` (ไม่ได้ตรวจ checksum/ต้นฉบับ)
 
@@ -107,4 +149,3 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 - [ ] tail ถูกอ่านและสรุปเป็น entry ก่อนเลื่อน integrity prefix
 - [ ] ทุก entry เป็น exact inclusive range + category + status; `verified` มี evidence ใน raw log
 - [ ] ก่อน `coverage: complete`: union ของ coverage ranges ครบทุกบรรทัดของ frozen และ active ไม่มี gap/overlap ที่อธิบายไม่ได้, integrity ทั้งสองตรง, independent review ผ่าน
-

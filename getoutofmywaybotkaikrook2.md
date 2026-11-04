@@ -10830,3 +10830,153 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - **ปัญหา:** candidate ใช้ `indexed_prefix_lines` ทั้งเป็น append-only integrity cursor และ semantic coverage cursor → ตั้ง 0 แล้วทุก task ต้องอ่าน active ทั้งไฟล์ ปัญหาเดิมไม่หาย
 - **แก้:** แยกเป็น active integrity prefix (ยืนยันไม่ถูก rewrite, ตั้งที่ EOF ได้) กับ semantic coverage ranges (ranges ที่อ่าน+สรุปจริง, partial ได้); F-013 เป็น exact range 218–240; หลังงานต้องสรุป tail เข้า ledger + เลื่อน integrity prefix (บังคับ ไม่ optional)
 - **หมายเหตุ:** บรรทัดนี้เป็น append สุดท้ายของ task; ledger integrity baseline วัดหลังจุดนี้
+
+## กำลังจะทำ — Phase 4 Gate 1 final architecture (2026-11-03)
+
+- Baseline: branch feature-botlogic-kb-workflow @ 22fdce9, staging ว่าง, working tree clean, git diff --check ผ่าน
+- Protocol: ledger ตรวจแล้ว — frozen sha ตรง, active prefix 10832 sha ตรง, tail หลัง prefix = 0 บรรทัด
+- ขอบเขต: audit/design only — ไม่แก้ production code, ไม่ Mongo/provider/web/Docker, ไม่ stage/commit/push
+- วิธี: targeted search + อ่าน exact ranges ที่ Gate 1 พึ่ง → สรุปเข้า ledger → รายงาน final architecture รอ reviewer
+
+## ผ่านแล้ว (report sent — รอ independent review) — Phase 4 Gate 1 final architecture (2026-11-03)
+
+- อ่าน targeted ranges ของ active log: 595-683, 6490-6569, 6897-6966, 7105-7177, 7474-7609, 10026-10181, 10383-10426, 10483-10525, 10526-10750 (อ่านใน session นี้ช่วงก่อนหน้า), 10751-10822 -> ledger entries A-002..A-012
+- รายงาน Gate 1 final architecture (17 sections) ส่งใน chat: query contract = typed refs + semantic_query (strip() สมมาตร, ไม่มี keyword/regex/fuzzy); vector identity = semantic_text+semantic_digest ไม่ใช่ content_fingerprint; reuse KbEvidenceResult kind="kb" payload {"text"}; dedicated kb_zaapi_generation.py lifecycle (build->validate->ready doc->fenced CAS->readback->rollback); active gen pin canonical+record_ids ไม่อ่าน latest manifest ต่อ request; CAS race contract มี newer_canonical_pending ไม่ auto-rollback; decision owners 2 ตัว (generation lifecycle + retrieval)
+- mechanism delta: public result type +0, keyword/regex/heuristic/flags/deps/normalization helper/truncation owner/pointer cache +0, CAS impl +1 เฉพาะ Zaapi owner
+- coverage: targeted เท่านั้น — ห้ามอ้าง full historical audit (gaps ใน ledger ส่วน 7)
+- ข้อห้ามคงครบ: ไม่แก้ production code, ไม่สร้าง retrieval/generation files, ไม่ Docker/Mongo/provider/web, ไม่ .env/มาแล้วจ้า.md, ไม่ stage/commit/push
+- Verdict: PHASE_4_GATE1_FINAL_ARCHITECTURE_READY_FOR_APPROVAL — หยุดรอ independent reviewer
+
+## กำลังจะทำ — Phase 4 Gate 1 contract correction (2026-11-03)
+
+- Correction-only: canonical manifest fields, ABA pointer revision, producer authority, channel failure, artifact paths, phase labels — ไม่แก้โค้ด ไม่ stage/commit
+
+## ผ่านแล้ว — Phase 4 Gate 1 contract correction (2026-11-03, docs only, รอ independent review)
+
+- แก้รายงานเฉพาะ findings: (1) canonical pin ใช้ manifest fields จริง generation/schema_revision/sources — generation=fingerprint(sources) verify กับ kb_zaapi_schema.py:23,473; ลบ manifest_sha256/manifest_revision (2) pointer เพิ่ม revision:int เป็น ABA fence (CAS filter revision+generation_id, +1 ต่อ write; bootstrap เฉพาะ no-rev/no-gen; matched=0 → reread ครั้งเดียว → conflict; ไม่ retry) + ABA truth table (3) producer record ไม่ใส่ request_id/need_indices — pool stamp จาก res.request_id -> _attribute -> compiler ลบ (verify candidate_pool.py:255-259, retrieval_executor.py:301/321, answer_context.py:505) (4) channel failure A-D truth table + test requirements (5) artifact paths = exports/zaapi_kb_gen/<gid>/<fixed filename> closed set (6) phase labels 4A mongo-fidelity / 4B raw census / 4C canonical corpus / 4D benchmark — semantic_digest วัดหลัง 4C
+- ไม่มีโค้ดเปลี่ยน; staging ว่าง; ไม่ commit/push
+- Verdict: PHASE_4_GATE1_CONTRACT_CORRECTED_READY_FOR_APPROVAL
+
+## กำลังจะทำ — Phase 4 design spec draft หลัง Gate 1 approval (2026-11-04)
+
+- Reviewer verdict: PHASE_4_GATE1_INDEPENDENT_REVIEW_PASSED_DESIGN_APPROVAL_REQUIRED — architecture ผ่านแล้ว gate ถัดไป = design spec
+- ขอบเขต: docs-only spec draft ใน chat รอ user approval — ไม่แก้โค้ด ไม่สร้างไฟล์ spec จนกว่าอนุมัติ ไม่ stage/commit
+
+## ผ่านแล้ว — Phase 4 design spec written (2026-11-04, docs only, รอ user review)
+
+- Spec: `docs/plans/2026-11-04-phase4-zaapi-canonical-retrieval-design.md` (532 บรรทัด, 20 sections ครบตาม mandate — purpose/success/scope/reuse/owners/canonical pin/semantic serialization/query/evidence/artifacts/gen doc/pointer/lifecycle/failure/phase gates 4A-4D/tests/complexity/security/deferred/decisions)
+- Self-review: placeholders=0 (TBD/TODO ไม่มี — กล่าวถึง manifest_sha256/revision เฉพาะในบริบทห้ามใช้), sections 20/20, field names ตรง schema จริง (RecordType 6 ค่า, subject_id/target_id scalar, facts={key,value}), phase labels 4A-4D ตรง corrected ordering, ไม่มี runtime wiring หลุดเข้า scope
+- Verify ก่อนเขียน: manifest fields จริง (schema.py MANIFEST_FIELDS), generation==fingerprint(sources), request_id flow (candidate_pool.py:255-259, answer_context.py:505), ZaapiKnowledgeRecord dataclass fields
+- ไม่แก้ production code, ไม่สร้าง module/test, ไม่ Docker/Mongo/provider/web, ไม่ stage/commit
+- Verdict: PHASE_4_DESIGN_SPEC_READY_FOR_USER_REVIEW
+
+## กำลังจะทำ — Phase 4 design spec contract correction ตาม independent review (2026-11-04)
+
+- Findings: H1 record_map ไม่ self-contained (ขาด text/projections + producer mapping กำกวม "ตามบริบท"), M1 scope normalization ผิด (shop ต้อง whitespace-collapse case-sensitive / platform strip+casefold ตาม account_scope_fingerprint), M2 reproducibility overclaim (gen doc digest ไม่มี), M3 manifest self-hash ambiguity, P1 ledger A-015 status ขัดกัน
+- Verify แล้ว: schema.py:76-84, answer_context.py:385-522 (_norm_ref/_norm_target/_attribute/_cand_keys/ref_needs/_EVIDENCE_OUT_FIELDS), record dataclass fields
+- แก้เฉพาะ spec + ledger + append log — ไม่แตะ production code/test/SRS ไม่ stage/commit
+
+## ผ่านแล้ว — Phase 4 design spec contract correction (2026-11-04, docs only, รอ second review)
+
+- แก้ `docs/plans/2026-11-04-phase4-zaapi-canonical-retrieval-design.md` ตาม independent review 5 findings:
+- H1: record_map → self-contained {vector_index,text,records[record_id,scope,item_id,model_id,subject_id,target_id]}; text ครั้งเดียว/digest; producer mapping exact (item_id←item_id, identity←subject_id→model_id, target←target_id, model_codes/aliases retrieval-only); canonical touch points = build+publish เท่านั้น; pinned-record เป็น build/publish validation ไม่ใช่ runtime
+- M1: scope ตาม account_scope_fingerprint จริง — shop " ".join(split()) case-sensitive / platform strip().casefold() (verify schema.py:76-84) แก้ §8/§17/§20 + test truth table
+- M2: reproducibility boundary — digests/map/index/row order deterministic; vector bytes เฉพาะ same-runtime ที่วัด; gid/created_at/path = attempt metadata ไม่มี gen-doc digest
+- M3: manifest = 3 payload roles ไม่มี self-hash; gen doc เจ้าของ manifest {file,sha256,size,format}; validation chain 3 ชั้น
+- P1: ledger A-015 → superseded; A-016 = correction entry (draft รอ second review)
+- Tests เพิ่ม §16 items 21-27 (artifact self-containment, materialization, shared digest, scope truth table, reproducibility, manifest chain)
+- Self-review: อ่าน spec ใหม่ทั้งฉบับ — แก้ §10 stale "ตรง gen doc" → chain ref, test17 เพิ่ม linked_candidate/subject_refs, index-corrupt row แยก load vs build/publish, diagram box ปรับ
+- ไม่แตะ production code/test/SRS, ไม่ stage/commit — verdict: PHASE_4_DESIGN_SPEC_CONTRACT_CORRECTED_READY_FOR_SECOND_REVIEW
+
+## ผ่านแล้ว — Phase 4 design spec final boundary correction (2026-11-04, docs only, รอ final review)
+
+- แก้ spec ตาม second independent review 3 findings:
+- M1: query contract → single signature `retrieve(snapshot, *, shop, platform, typed-ref kwargs, semantic_query, limit=EVIDENCE_LIMIT)` — ไม่มี query type ใหม่; boundary validation table (scope str+normalized nonempty, containers tuple/list of str, ref strip+nonempty, duplicates no-op, semantic str|None/whitespace-only→no channel, limit int non-bool 1..8); malformed → ว่าง + invalid_query (ห้าม raise); valid-no-input → no_query
+- M2: scope normalization owner เดียว `canonical_delivery_scope(shop, platform)` ใน kb_zaapi_schema.py — account_scope_fingerprint reuse, generation/retrieval เรียก function เดียว ห้าม inline ซ้ำ; budget อัปเดตซื่อสัตย์: data-contract fn +1 / duplicated callsites −2 / trust-boundary validation +1 กลุ่ม / decision owner +0 / heuristic +0
+- P1: ledger A-016 status draft (นอก enum) → historical-unverified; A-017 = correction entry
+- Tests §16 +4 (28-31): query truth table ครบ, whitespace-only semantic→None, duplicate refs→dedupe-equal, scope-owner parity
+- เก็บ correction เดิมครบ (record_map self-contained, producer mapping, artifact-only retrieval, manifest chain, reproducibility boundary, ABA CAS)
+- Self-review: query contract/failure table/test design ตรง; normalization owner เดียว; ledger status ใน enum; ไม่มี TBD/ตามบริบท
+- ไม่แตะ production code/test/SRS, ไม่ stage/commit — verdict: PHASE_4_DESIGN_SPEC_FINAL_BOUNDARIES_CORRECTED_READY_FOR_FINAL_REVIEW
+
+## กำลังจะทำ — Phase 4 design spec typed-index/model/bootstrap/manifest correction (2026-11-04)
+
+- Protocol note ตามจริง: รอบ correction ก่อน (final boundary, A-017) ขาด "กำลังจะทำ" entry — บันทึกเฉพาะ "ผ่านแล้ว" ที่ 10890–10900; ไม่ย้อนแก้ raw log ตาม append-only contract
+- Findings: H1 structured_index ขาด typed namespace (cross-field collision), H2 model identity pin เพียง name+dim (ไม่มี revision/ST version/normalize/dtype), H3 bootstrap upsert overwrite corrupt pointer, M1 manifest schema กำกวม (rows/count, dim?, dtype รวมทุก role), M2 ledger category `correction` นอก enum
+- แก้เฉพาะ spec + ledger + append log — ไม่แตะ production code/test/SRS
+
+## ผ่านแล้ว — Phase 4 design spec typed-index/model/bootstrap/manifest correction (2026-11-04, docs only, รอ final review)
+
+- แก้ spec ตาม review 4 findings + protocol:
+- H1: `structured_index` → field-namespaced closed set 6 fields (item_id/model_id/model_code/alias/subject_id/target_id) — channel อ่านเฉพาะ namespace ตัวเอง, posting sorted+unique, ห้าม cross-field/union-all
+- H2: model pin ครบ {name,revision(immutable),sentence_transformers_version,dim,normalize_embeddings,output_dtype} — build reject ถ้า revision resolve ไม่ได้; mismatch → semantic_unavailable (exact ยังคืน); ห้าม silently load latest; report จริงที่ gate 4C
+- H3: bootstrap → find_one→validate→insert_one เท่านั้น — ห้าม upsert; corrupt pointer fail closed ไม่ repair ไม่ overwrite
+- M1: manifest closed schema (schema_version/generation_id/3 role objects, exact keys, plain int, counts≥0, field_count=6, deterministic serialization)
+- M2: ledger categories A-016/A-017 `correction` → `decision/approval`; log note ตามจริงเรื่องขาด pre-work entry รอบก่อน
+- Tests §16 +5 (32-36): namespace isolation, index malformed, model compat 7 เคส, bootstrap 7 เคส, manifest closed schema
+- Self-review: 6 channels ↔ 6 namespaces ตรง; model pin build→doc→load ครบ; corrupt pointer เข้า bootstrap ไม่ได้; manifest exact per role; ledger categories/status ใน enum
+- ไม่แตะ production code/test/SRS — verdict: PHASE_4_DESIGN_SPEC_TYPED_INDEX_AND_LIFECYCLE_CORRECTED_READY_FOR_FINAL_REVIEW
+
+## กำลังจะทำ — Phase 4 design spec model-loader/scoped-ranking/pointer-schema correction (2026-11-04)
+
+- Findings: H1 model compat check ขาด `name` (ต้องครบ 6 fields), H2 revision บันทึกแต่ loader ไม่ผูก — `SentenceTransformer(MODEL_NAME)` ยัง mutable; ต้อง `MODEL_REVISION` pin ใน `embedding.py` singleton เดิม, H3 scope filter ต้องก่อน top-k/limit (foreign scope ห้ามกิน quota), M1 pointer closed schema exact + bootstrap previous=None, M2 ledger category/status ต้อง exact enum + A-017 protocol exception note + ลบ redundant `counts` จาก gen doc
+- แก้เฉพาะ spec + ledger + append log — ไม่แตะ production code/test/SRS ไม่ stage/commit
+
+## ผ่านแล้ว — Phase 4 design spec model-loader/scoped-ranking/pointer-schema correction (2026-11-04, docs only, รอ pre-commit review)
+
+- แก้ spec ตาม review 5 findings:
+- H1: model compat check ครบ 6 fields รวม `name` (§11/13/14/16/20 ตรงกัน)
+- H2: loader contract — `embedding.py` singleton เดียว `SentenceTransformer(MODEL_NAME, revision=MODEL_REVISION, device=DEVICE)`; gen doc เก็บ identity ที่ loader ใช้จริง; ห้าม loader/resolver/factory ที่สอง; ST version pin exact (dep เดิม); SRS note; revision จริง audit+lock ก่อน 4C
+- H3: scoped ranking ล็อก — scope filter ก่อน rank/limit; structured (namespace→projections→scope filter→sort) + semantic (score→eligible digests→rank→eligible projections); foreign scope ไม่กิน quota; limit ท้ายสุด
+- M1: pointer closed schema exact (revision int≥1 non-bool / generation_id GEN_ID_RE / previous None|GEN_ID_RE / canonical_generation 64-char lowercase hex / activated_at UTC ISO-8601); bootstrap previous=None; stdlib parsing
+- M2: ledger enum cleanup — เพิ่ม column superseded-by/note; composite categories → primary หนึ่งค่า (A-002→invariant, A-006→passed behavior, A-008→invariant, A-011→invariant, A-012→decision/approval); annotated statuses → exact enum + note; A-017 protocol exception note; แก้บรรทัดอธิบาย A-xxx หลายช่วง; ลบ redundant `counts` จาก gen doc (authority = manifest roles + record_count)
+- Tests §16 +3 (37-39): loader pin, scoped ranking, pointer schema
+- ไม่แตะ production code/test/SRS — verdict: PHASE_4_DESIGN_SPEC_FINAL_CONTRACTS_CLOSED_READY_FOR_PRECOMMIT_REVIEW
+
+## กำลังจะทำ — Phase 4 design spec shared-embedding compat + ledger enum correction (2026-11-04, docs only)
+
+- แก้ spec ตาม review 3 findings (reproduce จากไฟล์จริงแล้ว):
+- H1: embedding.py เป็น shared singleton — consumers จริง: product_store.embed_query (product_embeddings.npz), units.embed_query (unit_embeddings.npz), knowledge_base embed_texts/embed_query (qa_embeddings.npz + lazy cache auto-reload), scripts/build_embeddings.embed_texts, app.py _get_model warmup, tokenizer สำหรับ desc chunks — pin MODEL_REVISION เปลี่ยน vector space ของ artifacts เดิม → ต้องมี shared-vector compatibility gate: census/rebuild-identity-match/fail-closed-unknown ก่อน shared pin มีผล; Phase 4 standalone build ได้ แต่ production activation ยัง block จน gate ผ่าน
+- M1: docker/Dockerfile.chatbot ติดตั้ง sentence-transformers unpinned แยกหลัง requirements.txt → implementation contract: pin exact ใน canonical manifest เดียว ลบ duplicate install, container build พิสูจน์ version ตรง gen-doc
+- M2: ledger F-012 category "superseded" นอก enum → "failed/rejected approach" (status คง superseded + note superseded-by F-011)
+- ห้าม flag/fallback-latest/second-loader/heuristic; staging ว่าง; ไม่ stage/commit
+
+## ผ่านแล้ว — Phase 4 design spec shared-embedding compat + ledger enum correction (2026-11-04, docs only, รอ final review)
+
+- แก้ spec ตาม review 3 findings:
+- H1: เพิ่ม shared-embedding compatibility gate — embedding.py เป็น shared singleton (product_store/units/knowledge_base QA lazy cache/build_embeddings/app warmup/tokenizer); pin MODEL_REVISION เปลี่ยน vector space ของ artifacts .npz เดิมที่ไม่มี identity proof → shared pin มีผลเฉพาะหลัง gate ครบ (resolve commit/pin ST/census callsites/rebuild-or-prove-identity/validate-ก่อน-serve/QA cache reset); Phase 4 standalone build ได้ แต่ production activation block จน Task 5 gate ผ่าน; commit code != deploy safety; artifact unknown/mismatch → vector channel fail closed ไม่ silent
+- M1: dependency packaging contract — exact ST version owner เดียว = requirements.txt; ลบ unpinned pip install ใน docker/Dockerfile.chatbot; container build พิสูจน์ installed==gen-doc; dep +0 version contract เปลี่ยน; ห้าม placeholder
+- M2: F-012 category superseded → failed/rejected approach (status คง superseded + note); enum census ผ่าน: categories {decision/approval 11, failed/rejected 1, invariant 6, passed 10, pending 2, regression lock 2}, statuses {verified 18, historical-unverified 12, superseded 2} — 32 rows ครบ enum
+- Tests §16 +1 (40 shared-vector gate); §14 +1 failure row; §19 deferred +shared-vector migration gate; §20 +2 decisions
+- ไม่แตะ production code/test/SRS — verdict: PHASE_4_SHARED_EMBEDDING_COMPATIBILITY_AND_LEDGER_ENUM_CORRECTED_READY_FOR_FINAL_REVIEW
+
+## กำลังจะทำ + ผ่านแล้ว — ledger census accuracy correction (2026-11-04, docs only)
+
+- correction note (ไม่แก้ raw history ย้อนหลัง): closeout รอบ A-020 เขียน census = 32 rows ซึ่งเป็น pre-A-020 count — root cause: นับก่อนเพิ่ม entry แล้วนำตัวเลขไปเขียน
+- ตัวเลขจริง post-A-020 นับจากไฟล์ = 33 rows: categories {decision/approval 12, failed/rejected approach 1, invariant 6, passed behavior 10, pending/deferred work 2, regression lock 2}; statuses {verified 18, historical-unverified 13, superseded 2}; BAD rows = 0 — enum validity เดิมยังถูกต้อง
+- parser นับจากไฟล์จริง รองรับ escaped pipe ใน markdown cells แล้ว
+- แก้เฉพาะ census count + ledger metadata — ไม่เปลี่ยน architecture/spec; ไม่แตะ production code
+
+## กำลังจะทำ — waythrough protocol closeout correction (2026-11-04, docs only)
+
+- แก้ protocol bookkeeping เท่านั้น: raw A-021 (บรรทัด 10952) รวม heading "กำลังจะทำ + ผ่านแล้ว" ไว้ block เดียว — ไม่พิสูจน์ลำดับ mandatory ข้อ 8H; รอบนี้ append แยก block จริง
+- จะแก้ A-021 note เป็น historical protocol exception + corrected-by A-022; ไม่แก้ raw ย้อนหลัง; ไม่แตะ spec/production/tests/SRS
+
+## ผ่านแล้ว — waythrough protocol closeout correction (2026-11-04, docs only, รอ pre-commit review)
+
+- แก้ protocol bookkeeping: A-021 note → historical protocol exception (raw รวม pre-work/closeout block เดียว ไม่พิสูจน์ลำดับ 8H; ไม่อ้าง protocol ผ่าน; corrected-by A-022)
+- รอบนี้ append "กำลังจะทำ" (10959–10963) และ "ผ่านแล้ว" (block นี้) แยก heading/เวลาจริงตามข้อ 8H
+- A-022 ledger entry ครอบ exact range รอบนี้; ไม่เขียนตัวเลข census ลง raw closeout (เลิก off-by-one loop)
+- ไม่แตะ spec/production/tests/SRS; staging ว่าง; verdict: PHASE_4_WAYTHROUGH_PROTOCOL_CLOSEOUT_CORRECTED_READY_FOR_PRECOMMIT_REVIEW
+
+## กำลังจะทำ — บันทึก independent pre-commit review verdict + commit design spec (2026-11-04)
+
+- verdict ได้รับ: PHASE_4_DESIGN_SPEC_INDEPENDENT_PRECOMMIT_REVIEW_PASSED — เงื่อนไข "reviewer ผ่าน" ของ entries รอนี้ครบแล้ว
+- จะ: append verdict receipt + A-023 ledger entry + upgrade statuses ของ correction entries ที่รอ review + commit เฉพาะไฟล์ design spec ตาม gate เดิม
+- ไม่แตะ production code/test/SRS; ledger/log คง dirty ตาม protocol
+
+## ผ่านแล้ว — independent pre-commit review verdict recorded + spec commit (2026-11-04)
+
+- verdict received: PHASE_4_DESIGN_SPEC_INDEPENDENT_PRECOMMIT_REVIEW_PASSED — design spec ผ่าน independent review
+- A-016..A-022 statuses → verified (เงื่อนไข "reviewer ผ่าน" ครบ); A-017/A-021 notes เก็บ protocol exception ไว้ตามจริง; A-013 คง historical-unverified (scope ต่าง verdict), A-015 คง superseded
+- commit เฉพาะไฟล์ design spec ตาม gate เดิม (staging เฉพาะ spec); ledger/log ยัง dirty ตาม protocol
