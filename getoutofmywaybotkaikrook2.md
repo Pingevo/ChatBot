@@ -11168,3 +11168,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: +6 fns +1 script — ไม่มี callsite เดิมถูกแตะ; CAS impl +1 (budgeted ที่ owner เดียว)
 - verify: gen suite 25/25 (bootstrap 7 เคส, stale writer, ABA fence, rollback ครบ, canonical drift, readback invalid, canary gate, disposable gate matrix ~20 เคส 0 MongoClient calls, pointer schema write path); regression 787/0; `grep upsert` ไฟล์ → ไม่มี; py_compile+diff --check OK
 - งานค้าง: T11 (attribution contract test) → T12 (isolation+regression matrix)
+
+## ผ่านแล้ว — Phase 4 Task 11: producer→pool→compiler attribution contract (2026-11-04)
+
+- error: contract ที่ producer record ของ retrieve() ผ่าน executor→pool→compiler ได้ยังไม่พิสูจน์
+- cause: T11 contract test เดียว (test-only — spec §16.17,18)
+- แก้ด้วย: สร้าง `docs/test/test_phase4_zaapi_attribution.py` — snapshot จริงผ่าน write_gen_dir+load_active_generation → retrieve() → ห่อ RetrievalExecutionResult(request_id=r1) → build_candidate_pool (stamp request_id) → _compile_evidence กับ req_needs/idx_of seam — assert: producer fields ≤ closed set, request_id ถูกลบ, need_indices เติมจาก request_id, item_id/identity/target verbatim, payload plain str, ≤_EVIDENCE_RECORD_BYTES
+- ผลกระทบเคสอื่น: 0 — test file เดียว ไม่มี production byte; producer contract ผ่านครั้งแรก (ไม่ต้องแก้ retrieval owner — spec §9 mapping ตรง compiler seam)
+- verify: attribution 1/1, compile emit ตรง closed schema, regression จะรันรวมใน T12 matrix
+- งานค้าง: T12 (isolation + regression matrix + SRS completeness) → T13+ gates

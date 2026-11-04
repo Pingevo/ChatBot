@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 11170 |
-| active_integrity_prefix_sha256 | `1901d3788892edaaf0f2d3528021d2f6807ebfaecea5539d898e1ce410bf6e49` |
-| active_line_count_at_baseline | 11170 (bytes 2146717) |
-| active_integrity_recorded_at | 2026-11-04T11:52+0700 |
+| active_integrity_prefix_lines | 11179 |
+| active_integrity_prefix_sha256 | `7a69cea9f94a58eb13b672b8d764070be58d0478c7f9459c438a7f7e9eb0f219` |
+| active_line_count_at_baseline | 11179 (bytes 2148057) |
+| active_integrity_recorded_at | 2026-11-04T11:53+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -90,6 +90,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11144–11152 | read + indexed (A-037) |
 | 11153–11161 | read + indexed (A-038) |
 | 11162–11170 | read + indexed (A-039) |
+| 11171–11179 | read + indexed (A-040) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -150,6 +151,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-037 | 11144–11152 | Phase 4 Task 8 implementation — retrieve() + retrieve_active() 2026-11-04 | passed behavior | `retrieve` full query contract (boundary group เดียว, scoped structured+semantic merge, limit ท้ายสุด, `_evidence_record` §9), `retrieve_active` §14 boundary (None→empty+generation_unavailable); trace: invalid_query/no_query/semantic_unavailable/generation_unavailable; verify: retrieval 18/18 (ทุก cluster §16), regression 775/0 | verified | งานค้าง = T9→T18 |
 | A-038 | 11153–11161 | Phase 4 Task 9 implementation — build/validate orchestration 2026-11-04 | passed behavior | `_model_pin` (immutable-commit gate ก่อนเขียน), `build_generation` (load_active_state→builders→.tmp-<gid>→validate→rename→insert_one), `validate_generation` (doc→artifacts→canonical pin cross-checks); helpers +`seed_canonical_state`; verify: gen 18/18, regression 780/0 | verified | งานค้าง = T10→T18 |
 | A-039 | 11162–11170 | Phase 4 Task 10 implementation — publish/rollback CAS + thin CLI 2026-11-04 | passed behavior | `_cas_swap` ABA fence (rev+gid, matched=0→reread ครั้งเดียว), `_resolve_and_cas` bootstrap find→validate→insert_only (corrupt→raise ไม่ repair), `_run_canary`, `publish` (drift pre-check→canary→CAS→readback→newer_canonical_pending), `rollback` (CAS owner เดียว, no-previous→conflict); CLI `zaapi_kb_gen.py` + `require_disposable_target` (loopback+non-27017+no creds/db-path, db_name pattern — gate ก่อน MongoClient เสมอ); verify: gen 25/25, regression 787/0, no upsert in source | verified | งานค้าง = T11→T18 |
+| A-040 | 11171–11179 | Phase 4 Task 11 implementation — producer→pool→compiler attribution contract 2026-11-04 | passed behavior | test-only `test_phase4_zaapi_attribution.py`: retrieve() producer records → RetrievalExecutionResult(request_id) → build_candidate_pool stamp → _compile_evidence — closed schema hold, request_id ถูกลบ, need_indices จาก request_id, verbatim identity/target, payload plain str ≤ byte budget — ผ่านครั้งแรก 0 production byte | verified | งานค้าง = T12→T18 |
 
 ## 7. Known semantic coverage gaps
 
