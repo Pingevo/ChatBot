@@ -702,3 +702,20 @@ def test_pointer_schema_write_path(tmp_path):
     db = _built_db(tmp_path)
     gen.publish(db, GID, exports_root=tmp_path)
     assert schema.validate_gen_pointer(_pointer(db))
+
+
+def test_build_missing_manifest_fails_closed(tmp_path):
+    """§14: ไม่มี active manifest → ValueError (ไม่ใช่ TypeError) —
+    fail closed ก่อนเขียน artifact/doc/pointer ใด ๆ (T13 fidelity found)"""
+    gen = _import_gen()
+    from mongo_doubles import GenDb
+    db = GenDb()                                   # ว่าง — ไม่มี manifest
+    import pytest as _pt
+    with _pt.raises(ValueError, match="active manifest"):
+        gen.build_generation(db, embed=stub_embed,
+                             exports_root=tmp_path, gid=GID)
+    assert db["zaapi_kb_embedding_generations"].find_one(
+        {"_id": f"gen:{GID}"}) is None
+    assert db["zaapi_kb_embedding_generations"].find_one(
+        {"_id": "active"}) is None
+    assert not (tmp_path / "zaapi_kb_gen" / GID).exists()

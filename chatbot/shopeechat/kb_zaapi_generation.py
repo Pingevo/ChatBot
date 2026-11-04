@@ -197,6 +197,8 @@ def build_generation(db, *, embed=None, exports_root=None, gid=None,
     gid = gid or mint_generation_id(now)
     records_coll, raw_coll = db[RECORDS_COLL], db[RAW_COLL]
     manifest = records_coll.find_one({"_id": MANIFEST_ID})
+    if manifest is None:
+        raise ValueError("active manifest missing for canonical check")
     canonical_sources = manifest["sources"]       # validate_manifest ใน load
     records = load_active_state(records_coll, raw_coll, manifest)
 

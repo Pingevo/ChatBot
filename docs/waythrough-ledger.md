@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 11215 |
-| active_integrity_prefix_sha256 | `4fb00b31241dbe0ca765a63fdce5ea02857522d88b5afe451e21a56bfa7eeef2` |
-| active_line_count_at_baseline | 11215 (bytes 2154025) |
-| active_integrity_recorded_at | 2026-11-04T12:00+0700 |
+| active_integrity_prefix_lines | 11225 |
+| active_integrity_prefix_sha256 | `33a487b15abec17528b0c4f3eda7ce3d22c41e019f4872fa15fc91885329bc49` |
+| active_line_count_at_baseline | 11225 (bytes 2155506) |
+| active_integrity_recorded_at | 2026-11-04T12:04+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -95,6 +95,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11189–11197 | read + indexed (A-042) |
 | 11198–11206 | read + indexed (A-043) |
 | 11207–11215 | read + indexed (A-044) |
+| 11216–11225 | read + indexed (A-045) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -160,6 +161,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-042 | 11189–11197 | Phase 4 Task 14 implementation — Gate 4B census tool (file-only) 2026-11-04 | passed behavior | `phase4b_census.py` — `_build_docs`+schema owners เดิม, validate_raw_row gate ทุก row; ผลจริง 118/8,600/112,974 deliveries/8,597 cfp ตรง prior เป๊ะ, 0 malformed, report gitignored | verified | งานค้าง = T13/T13B+T15/T16 (approvals), T17, T18 |
 | A-043 | 11198–11206 | Phase 4 Task 17 gate — shared-vector compatibility report 2026-11-04 | passed behavior | byte-compare pinned BGE-M3 vs stored vectors: legacy product/unit = bit-identical, gen-paired = fp32-noise identical → proven-compatible; **qa_embeddings.npz ไม่มี texts → unprovable → needs-rebuild**; report `phase4_shared_vector_gate.md` gitignored | verified | งานค้าง = T13/T13B+T15/T16 approvals, T18 |
 | A-044 | 11207–11215 | Phase 4 Task 18 closeout — budget reconciliation + acceptance 2026-11-04 | passed behavior | `phase4_acceptance.md`: budget table ทุกแถว actual ≤ budget (ไม่มี over), acceptance matrix 17 รายการ (13 done/4 blocked-by-gates), final regression 902/0, staging ว่าง | verified | งานค้าง = T13/T13B+T15/T16 approvals เท่านั้น |
+| A-045 | 11216–11225 | Phase 4 Task 13 gate — 4A disposable real-Mongo fidelity 2026-11-04 | passed behavior | `PHASE_4A_DISPOSABLE_MONGO_FIDELITY_PASSED` 19/19 — refusal 15/15, ambient URI unread, lifecycle rev1→4, real DuplicateKeyError/matched_count/16MiB/readback/CLI; **fix พบโดย gate**: build_generation manifest=None → TypeError → ValueError (TDD); evidence phase4a_*.md/json; cleanup 0/0 | verified | งานค้าง = T13B (network approval), T15/T16 (provider+approval) |
 
 ## 7. Known semantic coverage gaps
 

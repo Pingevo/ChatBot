@@ -11213,3 +11213,13 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: 0 — closeout only; **ทุก actual อยู่ใน budget — ไม่มี over-budget row**
 - verify: regression matrix รอบสุดท้าย **902/0**; `git diff --check` OK; `git status` staging ว่าง; SRS census = 0 missing
 - งานค้าง: T13/T13B (Docker approval), T15/T16 (provider+Docker approval) — gates เท่านั้น
+
+## ผ่านแล้ว — Phase 4 Task 13: Gate 4A disposable real-Mongo fidelity (2026-11-04)
+
+- error: mechanics จริงบน real Mongo ยังไม่พิสูจน์ (MemoryCollection/GenColl เป็น simulator)
+- cause: T13 gate — disposable mongo:7 container + fidelity matrix
+- แก้ด้วย: spin `zaapi-p4-test` (mongo:7, --tmpfs, loopback) → matrix 19 rows ผ่าน script /tmp/phase4a_matrix.py — refusal 15/15 (0 socket attempts), ambient ADMIN_MONGO_URI ไม่ถูกอ่าน, import_source raw+canonicalize(stub) publish จริง, build→publish→rollback→republish→CAS conflict (rev 1→4), real DuplicateKeyError/matched_count/16MiB BSON gate/readback/CLI validate → **PHASE_4A_DISPOSABLE_MONGO_FIDELITY_PASSED 19/19**
+- **fix จริงที่ gate พบ (TDD):** `build_generation` บน manifest ว่าง → TypeError → แก้เป็น `ValueError("active manifest missing for canonical check")` (contract เดียวกับ validate_generation) + regression test — gen suite 26/26
+- ผลกระทบเคสอื่น: production fix 1 บรรทัด guard boundary เดิม — เคสปกติไม่แตะ
+- verify: evidence `docs/test/results/phase4a_mongo_fidelity.md` + `phase4a_matrix.json`; cleanup proof ps/volume filter = 0/0
+- งานค้าง: T13B (packaging py3.11 — image local แล้ว), T15/T16 (provider approval)
