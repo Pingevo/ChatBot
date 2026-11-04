@@ -147,3 +147,37 @@ def test_load_active_state_behavioral():
                          )["zaapi_kb_records"]
     docs = schema.load_active_state(records_coll, raw_coll, manifest)
     assert len(docs) == 1 and docs[0]["item_id"] == "IT-1"
+
+
+def test_loader_uses_immutable_revision(monkeypatch):
+    """§16.37 build-side: the existing lazy singleton must pass
+    `revision=MODEL_REVISION` (immutable 40-hex commit) — no name-only/latest
+    path, no second loader."""
+    captured = {}
+    import shopeechat.embedding as emb
+    import sentence_transformers
+    monkeypatch.setattr(emb, "_model", None)
+    monkeypatch.setattr(
+        sentence_transformers, "SentenceTransformer",
+        lambda *a, **kw: captured.update(kw) or object())
+    emb._get_model()
+    assert captured.get("revision") == emb.MODEL_REVISION
+    assert len(emb.MODEL_REVISION) == 40
+    assert set(emb.MODEL_REVISION) <= set("0123456789abcdef")
+
+
+def test_model_identity_six_fields():
+    """§13 locked identity — gen doc pin source; ST version resolves via
+    importlib.metadata (no model load, no hardcode)."""
+    from importlib.metadata import version
+    import shopeechat.embedding as emb
+    ident = emb.model_identity()
+    assert set(ident) == {"name", "revision", "sentence_transformers_version",
+                        "dim", "normalize_embeddings", "output_dtype"}
+    assert ident["name"] == "BAAI/bge-m3"
+    assert ident["revision"] == emb.MODEL_REVISION
+    assert ident["sentence_transformers_version"] == version(
+        "sentence-transformers")
+    assert ident["dim"] == 1024
+    assert ident["normalize_embeddings"] is True
+    assert ident["output_dtype"] == "float32"

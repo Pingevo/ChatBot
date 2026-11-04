@@ -11105,3 +11105,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: ไม่มี — verbatim move + `is`-identity (`imp.load_active_state is schema.load_active_state`, `exp.…` เช่นกัน); `def load_active_state` เหลือ 1 impl ทั้ง repo (schema:527)
 - verify: scope 6/6 pass; regression scope+import+phase4b+isolation = 427 passed/0 failed; py_compile 3 ไฟล์ OK; diff --check OK; SRS §6.34c อัปเดต owner
 - งานค้าง: T4 (model pin) → T5 → … (ต่อเนื่อง); delta: owners +0 (move), functions +0 net
+
+## ผ่านแล้ว — Phase 4 Task 4: model identity audit + pin (2026-11-04)
+
+- error: `embedding.py` loader ไม่มี immutable revision (`SentenceTransformer(MODEL_NAME, device=…)` — resolve refs/main ตามสภาพ cache แต่ละเครื่อง) + ไม่มี single identity source สำหรับ gen-doc pin + `sentence-transformers` unpinned ใน Dockerfile
+- cause: model identity ไม่เคยถูก pin เป็น contract — Phase 4 §13 ต้องการ 6-field identity เดียวกันทั้ง build/serve
+- แก้ด้วย: audit ก่อน (ห้าม placeholder — user-locked): ST `5.7.0` จริง; `snapshot_download(local_files_only=True)` → snapshot `5617a9f61b028005a4858fdac845db406aefb181`; offline load proof `HF_HUB_OFFLINE=1 SentenceTransformer(revision=<commit>)` → LOADED 1024d; RED 2 tests (AttributeError จริง); GREEN: `MODEL_REVISION` (40-hex), `_get_model` +`revision=` (loader เดียว), `model_identity()` 6 fields จาก importlib.metadata; `requirements.txt` +`sentence-transformers==5.7.0` (dep +0 — owner เดียว); Dockerfile ลบ ST ออกจาก unpinned line (คง pythainlp rapidfuzz)
+- ผลกระทบเคสอื่น: loader เดียวกัน +revision kwarg — `embed_*` behavior เดิม (revision เดียวกับ cache ที่เคยใช้); callers (units/knowledge_base/product_store/build_embeddings/app warmup) ไม่ต้องแก้ — singleton เดิม
+- verify: scope 8/8; regression 571 passed/0 failed (incl. description_builder + replay + baseline 416); `model_identity()` live = {name:bge-m3, rev:5617a9f6…, st:5.7.0, dim:1024, normalize:true, dtype:float32}; ST อยู่เฉพาะ requirements.txt (pinned) — Dockerfile เหลือ comment อย่างเดียว; py_compile+diff --check OK; delta: constant +1, model-identity accessor +1, dep +0
+- งานค้าง: T5 (validators) → …

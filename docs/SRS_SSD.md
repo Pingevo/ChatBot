@@ -744,7 +744,9 @@ listing path:
 
 | ฟังก์ชัน | Purpose | Input | Output | Calls | Called by | How it works | Side effects / Error |
 |---|---|---|---|---|---|---|---|
-| `_get_model` | lazy embedding model | — | model | sentence-transformers, `EMBEDDING_DEVICE` | embed_* | load once cache | model load |
+| `MODEL_REVISION` (constant, `embedding.py`) | immutable BGE-M3 commit pin — Phase 4 §13 identity source เดียว | — | 40-hex `str` | — | `_get_model`, `model_identity`, Phase 4 gen-doc pin | audited 2026-11-04 + offline-load proven (`HF_HUB_OFFLINE=1` + `SentenceTransformer(revision=…)` load จริง 1024d); ห้าม tag/refs-main | — |
+| `_get_model` | lazy embedding model | — | model | sentence-transformers, `EMBEDDING_DEVICE` | embed_* | load once cache — **pinned**: `SentenceTransformer(MODEL_NAME, revision=MODEL_REVISION, device=DEVICE)` (loader เดียว ไม่มีตัวที่สอง; ไม่มี latest/fallback path) | model load; revision mismatch → ST resolve error propagate |
+| `model_identity` | single model-identity accessor (6 fields — gen-doc pin contract) | — | `{name, revision, sentence_transformers_version, dim, normalize_embeddings, output_dtype}` | `importlib.metadata.version` | Phase 4 `kb_zaapi_generation` (build pin), `kb_zaapi_retrieval` (compat check) | อ่าน pin + metadata — ไม่โหลด model; ST version จาก package metadata จริงไม่ hardcode | `PackageNotFoundError` propagates ถ้า ST resolve ไม่ได้ |
 | `embed_texts` | encode docs | texts, batch_size=32 | np.ndarray | _get_model | build scripts, _qa_embed_missing | normalized emb | — |
 | `embed_query` | encode query | text | np.ndarray | _get_model | vector_search (products/units/QA) | single emb | — |
 | `clean_item_name` | clean ชื่อก่อน embed | name | str | regex | build_doc_text | — | — |
