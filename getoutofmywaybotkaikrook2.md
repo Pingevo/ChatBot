@@ -11223,3 +11223,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: production fix 1 บรรทัด guard boundary เดิม — เคสปกติไม่แตะ
 - verify: evidence `docs/test/results/phase4a_mongo_fidelity.md` + `phase4a_matrix.json`; cleanup proof ps/volume filter = 0/0
 - งานค้าง: T13B (packaging py3.11 — image local แล้ว), T15/T16 (provider approval)
+
+## ผ่านแล้ว — Phase 4 Task 13B: packaging verification py3.11 (2026-11-04)
+
+- error: ST pin + module import บน production Python 3.11 ยังไม่พิสูจน์ (dev venv = 3.14)
+- cause: T13B gate — wheelhouse ไม่มี → path (b) online หลัง network approval (user อนุมัติ 2026-11-04)
+- แก้ด้วย: `docker run --rm python:3.11-slim pip install -r requirements.txt` → `sentence_transformers.__version__==5.7.0` + `import shopeechat.kb_zaapi_generation/kb_zaapi_retrieval` OK
+- ผลกระทบเคสอื่น: 0 — evidence เท่านั้น (gitignored)
+- verify: `docs/test/results/phase4_packaging.md`; image sha256:e88e9763 local; ephemeral container
+- งานค้าง: T15 (4C provider corpus — approved), T16 (4D benchmark)
