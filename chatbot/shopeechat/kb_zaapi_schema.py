@@ -538,3 +538,130 @@ def load_active_state(records_coll, raw_coll, manifest: dict) -> list[dict]:
         for row in raw_coll.find({"source_id": source_id}))
     validate_manifest_records(sources, revisions, docs, index)
     return docs
+
+
+# --- Phase 4: generation lifecycle closed schemas (spec §10–§12) ---
+
+from .generation_pointer import GEN_ID_RE  # noqa: E402 — reuse, ห้าม regex ใหม่
+
+
+def _sha256_hex(value: Any) -> bool:
+    return (isinstance(value, str) and len(value) == 64
+            and all(c in "0123456789abcdef" for c in value))
+
+
+def validate_gen_pointer(doc: dict) -> dict:
+    """Validate the closed `{_id:"active"}` pointer document (spec §12)."""
+    if (not isinstance(doc, dict)
+            or set(doc) != {"_id", "revision", "generation_id",
+                            "previous_generation_id", "canonical_generation",
+                            "activated_at"}
+            or doc["_id"] != "active"
+            or not _plain_int(doc["revision"])
+            or doc["revision"] < 1
+            or not isinstance(doc["generation_id"], str)
+            or not GEN_ID_RE.match(doc["generation_id"])
+            or not (doc["previous_generation_id"] is None
+                    or (isinstance(doc["previous_generation_id"], str)
+                        and GEN_ID_RE.match(doc["previous_generation_id"])))
+            or not _sha256_hex(doc["canonical_generation"])
+            or not _nonempty_str(doc["activated_at"])):
+        raise ValueError("invalid generation pointer")
+    from datetime import datetime, timezone
+    try:
+        activated = datetime.fromisoformat(doc["activated_at"])
+    except ValueError:
+        raise ValueError("invalid generation pointer") from None
+    if activated.tzinfo is None or activated.utcoffset() != timezone.utc.utcoffset(activated):
+        raise ValueError("invalid generation pointer")
+    return doc
+
+
+def validate_gen_doc(doc: dict) -> dict:
+    """Validate the closed `{_id:"gen:<gid>"}` generation document (spec §11)."""
+    model_fields = {"name", "revision", "sentence_transformers_version",
+                    "dim", "normalize_embeddings", "output_dtype"}
+    if (not isinstance(doc, dict)
+            or set(doc) != {"_id", "generation_id", "status", "created_at",
+                            "canonical_generation", "canonical_schema_revision",
+                            "canonical_sources", "record_set_digest",
+                            "record_count", "serialization", "model",
+                            "artifacts"}
+            or not isinstance(doc["generation_id"], str)
+            or not GEN_ID_RE.match(doc["generation_id"])
+            or doc["_id"] != f"gen:{doc['generation_id']}"
+            or doc["status"] != "ready"
+            or not _nonempty_str(doc["created_at"])
+            or not isinstance(doc["canonical_sources"], dict)
+            or doc["canonical_generation"] != fingerprint(doc["canonical_sources"])
+            or not _plain_int(doc["canonical_schema_revision"])
+            or doc["canonical_schema_revision"] != SCHEMA_REVISION
+            or not _sha256_hex(doc["record_set_digest"])
+            or not _plain_int(doc["record_count"])
+            or doc["record_count"] < 0
+            or doc["serialization"] != {"version": "semantic_text/v1"}
+            or not isinstance(doc["model"], dict)
+            or set(doc["model"]) != model_fields
+            or not _nonempty_str(doc["model"]["name"])
+            or not _nonempty_str(doc["model"]["revision"])
+            or not _nonempty_str(doc["model"]["sentence_transformers_version"])
+            or not _plain_int(doc["model"]["dim"])
+            or doc["model"]["dim"] < 1
+            or not isinstance(doc["model"]["normalize_embeddings"], bool)
+            or not _nonempty_str(doc["model"]["output_dtype"])):
+        raise ValueError("invalid generation document")
+    manifest = doc["artifacts"]
+    if (not isinstance(manifest, dict)
+            or set(manifest) != {"manifest"}
+            or not isinstance(manifest["manifest"], dict)
+            or set(manifest["manifest"]) != {"file", "sha256", "size_bytes",
+                                            "format"}
+            or not _nonempty_str(manifest["manifest"]["file"])
+            or not _sha256_hex(manifest["manifest"]["sha256"])
+            or not _plain_int(manifest["manifest"]["size_bytes"])
+            or manifest["manifest"]["size_bytes"] < 0
+            or not _nonempty_str(manifest["manifest"]["format"])):
+        raise ValueError("invalid generation document")
+    return doc
+
+
+_ARTIFACT_ROLE_FIELDS = {
+    "vectors": {"file", "sha256", "size_bytes", "format", "row_count", "dim",
+                "dtype"},
+    "record_map": {"file", "sha256", "size_bytes", "format", "digest_count",
+                   "record_count"},
+    "structured_index": {"file", "sha256", "size_bytes", "format",
+                         "field_count", "key_count", "posting_count"},
+}
+_ARTIFACT_COUNT_KEYS = {
+    "vectors": ("row_count", "dim"),
+    "record_map": ("digest_count", "record_count"),
+    "structured_index": ("field_count", "key_count", "posting_count"),
+}
+
+
+def validate_artifact_manifest(obj: dict) -> dict:
+    """Validate the closed `manifest.json` object covering 3 payload roles (spec §10)."""
+    if (not isinstance(obj, dict)
+            or set(obj) != {"schema_version", "generation_id", "vectors",
+                            "record_map", "structured_index"}
+            or not _plain_int(obj["schema_version"])
+            or obj["schema_version"] != 1
+            or not isinstance(obj["generation_id"], str)
+            or not GEN_ID_RE.match(obj["generation_id"])):
+        raise ValueError("invalid artifact manifest")
+    for role, fields in _ARTIFACT_ROLE_FIELDS.items():
+        entry = obj[role]
+        if (not isinstance(entry, dict)
+                or set(entry) != fields
+                or entry["file"] != f"{role}.{entry['format']}"
+                or not _sha256_hex(entry["sha256"])
+                or not _plain_int(entry["size_bytes"])
+                or entry["size_bytes"] < 0
+                or not _nonempty_str(entry["format"])
+                or any(not _plain_int(entry[key]) or entry[key] < 0
+                       for key in _ARTIFACT_COUNT_KEYS[role])):
+            raise ValueError("invalid artifact manifest")
+    if obj["structured_index"]["field_count"] != 6:
+        raise ValueError("invalid artifact manifest")
+    return obj

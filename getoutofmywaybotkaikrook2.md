@@ -11114,3 +11114,12 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ผลกระทบเคสอื่น: loader เดียวกัน +revision kwarg — `embed_*` behavior เดิม (revision เดียวกับ cache ที่เคยใช้); callers (units/knowledge_base/product_store/build_embeddings/app warmup) ไม่ต้องแก้ — singleton เดิม
 - verify: scope 8/8; regression 571 passed/0 failed (incl. description_builder + replay + baseline 416); `model_identity()` live = {name:bge-m3, rev:5617a9f6…, st:5.7.0, dim:1024, normalize:true, dtype:float32}; ST อยู่เฉพาะ requirements.txt (pinned) — Dockerfile เหลือ comment อย่างเดียว; py_compile+diff --check OK; delta: constant +1, model-identity accessor +1, dep +0
 - งานค้าง: T5 (validators) → …
+
+## ผ่านแล้ว — Phase 4 Task 5: closed-schema validators ×3 (2026-11-04)
+
+- error: ไม่มี validator ของ generation lifecycle docs — gen pointer `{_id:"active"}`/gen doc `{_id:"gen:<gid>"}`/artifact manifest.json ยังไม่มี owner → publish/retrieval ใน task ถัดไปไม่มี fail-closed boundary
+- cause: Phase 4 schema contracts (spec §10–§12) ยังไม่ได้ implement
+- แก้ด้วย: RED 4 tests (AttributeError/TypeError จริง) → GREEN: `validate_gen_pointer` (exact 6 keys, revision plain int ≥1 ห้าม bool, gid GEN_ID_RE reuse จาก generation_pointer ไม่สร้าง regex ใหม่, prev None|gid, canonical_generation 64-hex, activated_at stdlib ISO UTC เท่านั้น), `validate_gen_doc` (exact 12 keys, _id==gen:<gid>, status=="ready" เดียว, canonical_generation==fingerprint(canonical_sources), schema_revision==SCHEMA_REVISION, serialization pin, model exact 6 fields, artifacts.manifest exact 4 fields), `validate_artifact_manifest` (exact 5 keys, 3 roles exact key sets, file==role.format, sha256/ints, field_count==6, ไม่มี self-entry) + `_sha256_hex` primitive + `_ARTIFACT_ROLE/_COUNT_KEYS` tables (declared data ไม่ใช่ heuristic)
+- ผลกระทบเคสอื่น: schema module +3 public validators, +1 private primitive, +2 constant tables — pure, ไม่มี DB/env/network; `load_active_state` เดิมไม่ถูกแตะ
+- verify: generation suite 12/12 (truth tables ครบ missing/extra/bool/uppercase/naive-tz/non-UTC/wrong-file/field_count); regression 748 passed/0 failed; py_compile + diff --check OK
+- งานค้าง: T6 (generation owner builders+artifact writers)

@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 11116 |
-| active_integrity_prefix_sha256 | `c03c98327ba8d80c750c586b2f3c1d87f2deebc0267730988a380b1d8e371d25` |
-| active_line_count_at_baseline | 11116 (bytes 2136599) |
-| active_integrity_recorded_at | 2026-11-04T11:34+0700 |
+| active_integrity_prefix_lines | 11125 |
+| active_integrity_prefix_sha256 | `78a79c12f4cc8ac9b77f42e69996795b9efd08ffc9d48cc358d16a02b27bb459` |
+| active_line_count_at_baseline | 11125 (bytes 2138405) |
+| active_integrity_recorded_at | 2026-11-04T11:41+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -84,6 +84,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 11077–11093 | read + indexed (A-031) |
 | 11094–11107 | read + indexed (A-032) |
 | 11108–11116 | read + indexed (A-033) |
+| 11117–11125 | read + indexed (A-034) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -138,6 +139,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-031 | 11077–11093 | Phase 4 Task 2 implementation — `canonical_delivery_scope` owner consolidation 2026-11-04 | passed behavior | RED 4 tests → 2 failed จริง (ImportError/AttributeError) + 2 passed parity/boundary locks; GREEN: `canonical_delivery_scope` (pure — callers validate types) เพิ่มใน `kb_zaapi_schema.py` + แทน inline normalization 2 จุดใน `account_scope_fingerprint` (`*`-unpack คง identity triple); uses-owner spy พิสูจน์ rewire จริง (2 calls/account); fingerprint parity คงเดิม — normalization bytes-identical; SRS §6.34c +row + Calls cell; verify: scope 4/4, regression 425 passed/0 failed, baseline 416 คง, py_compile/diff --check OK, `" ".join` เหลือเฉพาะ owner fn; delta: normalization fn +1 (budgeted), callsites −2, owners +0; production delta = schema ไฟล์เดียว +11/−4; ยังไม่ commit — รอ independent review | verified | งานค้าง = Task 3 (`load_active_state` move) เท่านั้น |
 | A-032 | 11094–11107 | Phase 4 Task 3 implementation — `load_active_state` owner move importer→schema 2026-11-04 | passed behavior | RED 2 tests → `AttributeError` จริง; GREEN: ย้าย verbatim → `kb_zaapi_schema.py:527` (deps same-module), importer re-export (`is`-identity), exporter import ตรงจาก schema; behavioral test = GenDb-seeded coherent state (GenColl read path รองรับ `find`/`$in`; `$setOnInsert` ขาด → seed ตรงไม่รัน import_source); `def load_active_state` = 1 impl ทั้ง repo; verify: scope 6/6, regression 427/0, py_compile ×3, SRS owner updated; delta: owners +0 (move) functions +0 net; commit `…` | verified | งานค้าง = T4→T18 |
 | A-033 | 11108–11116 | Phase 4 Task 4 implementation — model identity audit + pin 2026-11-04 | passed behavior | audit evidence จริง (ห้าม placeholder): ST `5.7.0`, snapshot_download local-only → `5617a9f61b028005a4858fdac845db406aefb181`, `HF_HUB_OFFLINE=1` offline load proven 1024d; RED 2 (AttributeError) → GREEN: `MODEL_REVISION` 40-hex, `_get_model` +`revision=` (loader เดียว), `model_identity()` 6 fields ผ่าน importlib.metadata; requirements.txt +`sentence-transformers==5.7.0` (owner เดียว dep +0), Dockerfile ลบ unpinned ST (คง pythainlp/rapidfuzz); verify: scope 8/8, regression 571/0, live identity check OK; delta: constant +1, accessor +1, dep +0 | verified | งานค้าง = T5→T18 |
+| A-034 | 11117–11125 | Phase 4 Task 5 implementation — closed-schema validators ×3 2026-11-04 | passed behavior | RED 4 → GREEN: `validate_gen_pointer`/`validate_gen_doc`/`validate_artifact_manifest` ใน `kb_zaapi_schema.py` (spec §10–§12) — exact key sets, `GEN_ID_RE` reuse (ไม่มี regex ใหม่), revision ABA int≥1, ISO-8601 UTC stdlib, canonical_generation==fingerprint(sources), model 6-field pin, file==role.format, field_count==6; +`_sha256_hex` primitive +2 constant tables; verify: gen suite 12/12, regression 748/0 | verified | งานค้าง = T6→T18 |
 
 ## 7. Known semantic coverage gaps
 
