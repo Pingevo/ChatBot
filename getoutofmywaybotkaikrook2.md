@@ -11267,3 +11267,451 @@ Branch `feature-phase3-aswer-quality` @ `b31cc7f` (merge origin/main OK, dirty �
 - ลบ lazy `from . import embedding` ซ้ำใน `retrieve` (top-level มีอยู่)
 - `re.match($)` → `re.fullmatch` ปิด quirk trailing `\n` ใน db_name gate
 - verify: RED 4 tests → GREEN; regression 905/0; py_compile OK
+
+## Task 5 (Zaapi-primary evidence) — design contract round-4 [ออกแบบแล้ว ยังไม่ implement]
+- สถานะ: design review เท่านั้น — ยังไม่แตะ production code, ไม่ stage/commit; รอ independent review
+- missing contract ที่พิสูจน์แล้ว (docs/test/test_zaapi_task5_contract.py, offline, exit 1, 4 RED/1 PASS):
+  - S1 [SCHEMA]: artifact projections มีแค่ 7 fields — ขาด record_type/topic/readiness/fact_fields/answer_text/steps → ต้องตรึงใน immutable artifact (P1), ห้าม canonical-DB lookup ตอน runtime (ยกเลิก P2)
+  - R1 [BEHAV]: _compile_evidence union ผ่าน request_id+identity → record ของ subject เดียวกันคนละ fact ไหลข้าม need → ต้องมี typed gate ใน _attribute (owner เดิม, ใช้ _REQUESTED_FACT_KEYS เดิม — ตารางจริงชื่อนี้ ไม่ใช่ _SPEC_FACT_ALIASES)
+  - R3 [BEHAV]: model-domain v:iid#mid join variant ตรงผ่านแล้ว; item-domain join ทุก variant; KB-only → 0 candidates, attachments unlinked (ไม่สร้างการ์ด/สต็อก)
+  - R4 [SCHEMA]: score/record_id ไม่ถูก emit — semantic relevance ตรวจไม่ได้; ถอน score threshold ที่ยังไม่ calibrate ออก (เสนอ measurement gate แทน)
+  - R5 [SCHEMA]: record_type/answer_text/steps ไม่ถูก emit — troubleshoot tips owner เลือก record ด้วย typed fields ไม่ได้
+- troubleshoot call graph จริง: qa_troubleshoot_tips → warranty_flow:1760 เท่านั้น (claim-first); คำถามทั่วไป → need troubleshoot → task.deferred → policy_decision/policy_resolver (app.py ~1996-2148) — สอง owner/seam
+- migration (P1): _PROJECTION_FIELDS + manifest schema_version 1→2 + serialization semantic_text/v1→v2; validator set(p) exact-match → branch ตาม schema_version หรือบังคับ rebuild; publish()/previous_generation_id มีอยู่แล้วสำหรับ rollback
+
+## Task 5 design round-5 [ออกแบบแล้ว ยังไม่ implement — รอ review]
+- probe ผ่าน production owners จริง offline (exit 1, 2 PASS/6 RED): needs_for_request(bare ch:kb)→[0,1] broadcast จริง; _compile_evidence union (0,1); empty-fact_fields FAQ รั่วเข้า spec-fact need; manifest schema_version=1; projections ขาด typed fields; score/record_id/record_type ไม่ถูก emit
+- R7 PASS จริง: rollback() CAS → 'rolled-back', pointer กลับ previous_generation_id — rollback contract ใช้ได้จริงบน loader ที่อ่าน v1+v2 (design: v1=degraded ไม่ใช่ fail-closed → ไม่ขัดกัน)
+- version split: semantic_text/v1 คงเดิม (renderer ไม่เปลี่ยน); artifact version อยู่ที่ manifest schema_version 1→2; loader branch _PROJECTION_FIELDS ตาม schema_version
+- troubleshoot gap จริง: policy_resolver ไม่มี troubleshoot branch → general troubleshoot needs (deferred) ไม่มี evidence owner วันนี้ → unresolved, ไม่อ้างปิด; claim-first ผ่าน qa_troubleshoot_tips seam (rank-bounded, ไม่ใช้ min_sim)
+
+## Task 5 design round-6 [design เท่านั้น — รอ review]
+- probe 11 ตัว offline (exit 1, 3 PASS/8 RED): R8 PASS วันนี้ — corrupt schema_version=99 → publish reject + pointer ไม่ขยับ; R9 RED ตรงจุด — v1 active อ่านได้แต่ v2 fixture (typed projections + schema_version=2) ถูก manifest validator reject → ต้อง loader branch ตาม schema_version; R7 PASS = v1→v1 baseline เท่านั้น ไม่ใช่ cross-version proof
+- R10 RED: FAQ topic matrix 6 เคสผ่าน needs_for_request→pool→compile จริง — ทุกเคส union (0,) วันนี้; typed authority ที่เลือก: fact_fields(keys ของ facts) เป็น topic binding หลัก + rec.topic ∈ requested_facts (exact enum membership) + broad/ask clauses — ไม่มี keyword/regex/alias table ใหม่
+- คง unresolved ตามจริง: general troubleshoot ไม่มี evidence owner, top-K ยังไม่พิสูจน์ symptom relevance
+
+## Task 5 design round-7 [design เสร็จ — ขอ authorization implement]
+- root cause จริง: topic/facts.key เป็น LLM-extracted free strings (from_extraction validate แค่ format); record_type เท่านั้นที่ closed enum → ต้องมี routing key ที่ validate vocabulary ตอน ingest
+- data contract ที่เสนอ: canonical field `topic_key` (closed enum, extractor emits + schema validates; vocab = REQUESTED_FACTS ∪ {shipping,claim,usage,spec,general}); enum พิสูจน์ format+provenance ไม่ใช่เนื้อหา → ต้อง sample review/canary
+- probe 12 ตัว offline (exit 1, 4 PASS/8 RED): R10 matrix 9 เคสครอบ topic_key/missing/bogus/free-string/fact_fields/broad/asks ผ่าน production chain; R11 PASS บันทึก v1 degraded = union ปัจจุบัน; R8/R9 ครอบ corrupt reject + v2 lifecycle
+- v1 degraded contract: untyped records attribute ตาม identity scope (เท่าปัจจุบัน ไม่แย่กว่า); typed gates ใช้เฉพาะ v2
+- ค้างเปิด: general troubleshoot owner, top-K symptom relevance, v1 degraded-vs-rebuild, topic_key vocab approval
+
+## Task 5 design round-8 [แก้ 3 HIGH contradictions — ยังไม่ implement]
+- H1 record_id: canonical_record_id hash ทุก payload field → ย้าย topic_key ไป derive ตอน BUILD (`topic if topic ∈ REQUESTED_FACTS else None` ใส่ v2 projection) — canonical record/ID/revision/manifest ไม่แตะ ไม่ต้อง migration; vocabulary = REQUESTED_FACTS เดิม (zero new vocab)
+- H2 conflict: declared topic governs — topic_key∈rf→accept; declared non-enum topic→reject need เฉพาะหัวข้อ; fact_fields ช่วยได้เฉพาะเมื่อไม่มี declared topic (case3 shipping+warranty-facts→reject)
+- H3 v1: loadable≠eligible — v1 record ไม่มี typed routing → adapter declines → Zaapi silent = สถานะปัจจุบัน ไม่ใช่ regression; R11 แก้เป็น RED (assert ไม่เข้า answers)
+- probe 12 ตัว offline exit 1: 3 PASS (R3 join, R7 v1→v1 baseline, R8 corrupt reject) / 9 RED
+
+## Task 5 design round-9 [source ownership audit — ยังไม่ implement]
+- audit จริง: legacy supporting app.py:2818 = {kind:"kb",request_id:"ch:kb"} ไม่มี typed fields; legacy attachment = kb_product ผ่าน kb_product_evidence; zaapi adapter = zaapi_kb_evidence (kb_zaapi.py:54) emit kind="kb_zaapi" แต่ไม่อยู่ใน _SUPPORTING_KINDS → drop ที่ emit อยู่แล้ว + อ่าน canonical coll.find ต่อคำถาม (ขัด Phase 4, live วันนี้)
+- request_id/kind "kb" แยก source ไม่ได้ (legacy ใช้ ch:kb ด้วย) → marker = kind=="kb_zaapi" (producer value เดิม ไม่เพิ่ม field ใหม่); gate ใน _attribute ครอบเฉพาะ kb_zaapi; +kb_zaapi เข้า _SUPPORTING/_ATTACHMENT_KINDS (emitted-schema delta ประกาศไว้)
+- v1 decline ย้ายไป adapter: active gen schema_version<2 → zaapi_kb_evidence คืน empty; loadable≠eligible แยกชัด
+- probe 14 ตัว offline exit 1: 5 PASS (R3,R7,R8,R12 legacy lock,R13 isolation) / 9 RED — R11 ใหม่พิสูจน์ adapter emit 1 record ใต้ v1 (canonical read, no version check)
+
+## Task 5 design round-10 [attachment data-contract — ยังไม่ implement]
+- HIGH#4: EvidenceAttachment (frozen) เก็บ 7 fields — conversion pool:384 ทิ้ง record_type/topic_key/fact_fields/request_id; rec rebuild ที่ answer_context:814 untyped → gate ตรวจ attachment ไม่ได้ → same-subject leak ผ่าน attachment path
+- contract: +`meta: dict|None` บน EvidenceAttachment (additive, legacy meta=None → skip gate); adapter ใส่ meta={record_type,topic_key,fact_fields,request_id,readiness,record_id}; rec.update(att.meta) ก่อน _attribute; boundary = meta ไม่อยู่ใน _EVIDENCE_OUT_FIELDS → drop ที่ emit
+- R14 ใหม่ RED ตรงจุด: attachment join i:111→v:111#88 สำเร็จแต่ topic_key หายที่ conversion → compiled evidence ไม่มี kb_zaapi (whitelist+meta-loss สองจุด)
+- R13 ขยายสองทิศด้วย kb_source() จริง: legacy→zaapi reads 0; zaapi→legacy calls 0 — PASS
+- app.py:1220 เข้า manifest (lambda เดียว → per-need fetcher factory)
+- probe 15 ตัว offline exit 1: 5 PASS / 10 RED
+
+## Task 5 design round-11 [meta contract แก้ตาม review]
+- R14 fixture ใช้ meta={...} shape เดียวกับ design + poison keys (kind/item_id/linked_candidate/need_indices) — post-impl GREEN ต้อง identity คง i:111 + needs (0,) เท่านั้น → blanket update จะถูกจับ
+- meta contract final: _ROUTING_META_KEYS closed set {record_type,topic_key,fact_fields,request_id,readiness,record_id,answer_text,steps,score}; consumer select-copy per-key ห้าม update ทั้ง dict; routing-only {topic_key,fact_fields,request_id} ไม่อยู่ใน _EVIDENCE_OUT_FIELDS → drop ที่ emit; emitted subset {record_type,record_id,score,answer_text,steps,readiness} ประกาศเพิ่ม — ขัดแย้ง routing-vs-emit หาย
+- R13 scope: adapter-level isolation จริงเท่านั้น — ไม่มี app.chat() test (คงเป็น open finding)
+- probe 15 ตัว: 5 PASS / 10 RED, exit 1
+
+## Task 5 design round-12 [meta acceptance criteria locked]
+- R15 malformed meta: topic_key=123/fact_fields="warranty"(str)/record_type=42 → RED; impl ต้อง _validate_meta shape+type (enum membership, tuple[str], str, numeric) → malformed decline, valid bind (0,)
+- R16 byte-cap: answer_text+steps อยู่ใน payload.text อยู่แล้ว (gen:38) → ห้ามอยู่ใน _EVIDENCE_OUT_FIELDS → tips owner กิน pre-compile จาก meta; emitted = payload.text ครั้งเดียว + fields เล็ก (record_type,record_id,score,readiness)
+- R5 แก้ตาม contract: typed fields ทั้งหมดอยู่ใน meta (supporting+attachment channel เดียว)
+- probe 17 ตัว offline exit 1: 5 PASS / 12 RED — RED ทุกตัวตรง contract point
+
+## Task 5 design round-13 [probe-contract alignment 3 จุด]
+- R16: troubleshooting→faq บน broad need (gate เดิม reject troubleshooting บน productish — test เดิมขัด contract); long tips อยู่ meta เดียวกัน → cap semantics เหมือนกัน ณ tips owner
+- R5: score optional — exact hit dedupe ก่อน ไม่มี score; semantic hit ต้อง numeric; fixture +record item 222 semantic-only แยกทดสอบ
+- R15: +trace assertion zaapi_meta_invalid; meta contract: required={record_type:str∈RecordType, request_id:str}, optional 8 keys type-checked when present
+- probe 17 ตัว: 5 PASS / 12 RED, exit 1
+
+## Task 5 implementation [ผ่านแล้ว — รอ independent review ก่อน stage/commit]
+- PART 0 baseline: HEAD 7fabb04, เฉพาะ probe/log ค้าง, diff --check ผ่าน
+- artifact v2: kb_zaapi_generation +_PROJECTION_FIELDS_V1/14f v2 (record_type,topic,topic_key,fact_fields,readiness,answer_text,steps), topic_key derive จาก topic∈REQUESTED_FACTS เท่านั้น (canonical records/IDs ไม่แตะ), manifest schema_version=2; kb_zaapi_schema validator รับ {1,2}; retrieval loader versioned projection-set (v1 loadable สำหรับ rollback); snapshot +schema_version
+- adapter rewrite: artifact-only (ลบ _zaapi_coll/_shop_clause/keyword-scan), need gate ก่อน artifact load (zaapi_no_productish_need — non-productish turn ไม่เสีย load), v1 decline zaapi_v1_ineligible, per-need retrieve, dedupe record_id, resolved item→attachment identity_domain=item meta+payload คง
+- per-need KB channels: retrieval_runtime แตก ch:kb:<i> ต่อ productish need เมื่อ zaapi (refs ติด request = identity scope; fetcher ผูก need+request_id); legacy → bare ch:kb คงเดิม; needs_for_request kb+refs branch = identity-scoped coverage; app.py fetcher *a/**k + need/request_id kwargs (executor convention จริง — latent bug เดิม: 0-arg lambda ตายเงียบใน _run_attempt)
+- meta contract: answer_context _ROUTING_META_KEYS(10)/_META_REQUIRED(4)/_META_EMIT_KEYS(4) + _validate_meta (shape+type, malformed→None+trace zaapi_meta_invalid) + _kb_zaapi_need_ok (declared-topic governs: troubleshooting→False, compatibility→target_refs, note→broad, topic_key→broad|∈rf, non-enum topic→broad, else fact_fields∩rf); _attribute +need_by_idx; EvidenceAttachment +meta; emitted = _META_EMIT_KEYS flat (record_type/readiness/record_id/score) — answer_text/steps อยู่ meta ให้ tips owner ไม่ emit (อยู่ payload.text แล้ว)
+- _attribute fix: idx_of = {id(n):i} ไม่ใช่ {i:id(n)} — เดิม inv[i] ได้ int → gate ไม่ทำงาน; ส่ง need_by_idx จริงทุก callsite (_compile_evidence + _verdict_target_decisions)
+- probe: 17/17 PASS exit 0; pytest: phase4 zaapi 6 files 328 passed, source_union 41, selection 13, selection_runtime 15, executor 12, requests 10, answer_context 51, zaapi_scope 93, pool_sources_admission script exit 0; py_compile OK; git diff --check OK
+- test updates ตาม contract ใหม่ (ไม่ใช่ assertion bending): source_union assert needs kwarg; zaapi_kb_import flip _zaapi_coll expectation (runtime ไม่อ่าน canonical ตาม contract); retrieval truth-table v1-only→v{1,2} boundary; fixtures meta-shape+required fields+normalized ref keys
+- open findings: (1) legacy kb_fetcher 0-arg lambda ที่ app.py:2457 ตายเงียบภายใต้ executor calling convention (pre-existing ไม่ใช่ Task 5 — ไม่แตะตาม คง legacy behavior); (2) needs_for_request per-need channel coverage = identity-scope (subject เดียวกันหลาย need ยัง overlap ที่ coverage แต่ typed gate คัดสุดท้าย); (3) general troubleshoot ไม่มี evidence owner; (4) top-K symptom relevance ไม่พิสูจน์; (5) app.chat()-level isolation test ยังไม่มี (R13 ครอบ adapter-level เท่านั้น)
+- ยังไม่ stage/commit — หยุดรอ independent review ตามกฎข้อ 10
+
+## Task 5 correction round [PART 0 baseline — กำลังจะทำ]
+- frozen state verified: branch feature-botlogic-kb-workflow, HEAD 7fabb04, staging ว่าง, Task 5 candidate uncommitted 17 modified + 1 untracked probe
+- integrity: frozen sha256 ตรง, active prefix 1..11269 sha256 ตรง, tail 11270..11348 = Task 5 impl entry เดิม
+- findings ที่จะแก้ (user-approved scope): H1 fact vocabulary disconnect (_REQUESTED_FACT_KEYS mapping มีอยู่ใน answer_context แต่ gate ไม่ใช้), H2 subject/target refs ปะปน (kb_zaapi รวม subject+target ไม่ส่ง target_ids), M1 _validate_meta อ่อนกว่า contract (ไม่เช็ค enum/finite), M2 12-file pytest batch hang ยังไม่รู้สาเหตุ
+- gates ที่ต้องผ่าน: probe 17, regression batch ไม่ hang, customer-visible answer QA (PART 9 mandatory)
+
+## Task 5 correction round [DONE — รอ independent review]
+
+### H1 fact vocabulary disconnect — FIXED
+- error: need `charging_speed` ได้ spec `output_power_w` ไม่ถึง (R17 RED: `output_power_w spec did not reach charging_speed need`); adapter emit ถูกแต่ gate ทิ้ง
+- cause: `_kb_zaapi_need_ok` เทียบ `need.requested_facts` กับ `meta.fact_fields` ตรงตัว — คนละ vocabulary (fact key vs canonical field) — `_REQUESTED_FACT_KEYS` mapping owner มีอยู่ในไฟล์เดียวกันแต่ gate ไม่ได้ใช้
+- fix: expand `requested_facts` ผ่าน `_REQUESTED_FACT_KEYS` ก่อน ∩ `fact_fields` — owner เดิม ไม่สร้าง mapping ที่สอง
+- impact ต่อเคสอื่น: `data_transfer_speed`↔`data_transfer_mbps` positive control ผ่าน; wrong-topic record (`capacity_mah`) ยัง reject; broad describe need ไม่เปลี่ยน
+
+### H2 subject/target role confusion — FIXED (2 จุด)
+- error: R18 RED `target_id-only match lost — target ref never queried as target`; + compat record ผิดอุปกรณ์ (iphone แทน xiaomi) รั่วเข้า ctx ได้
+- cause: (a) `kb_zaapi.zaapi_kb_evidence` รวม subject+target refs แล้วส่ง non-digit ไป `model_codes`/`aliases`/`subject_ids` — target ถูกค้นเป็น subject และ `target_ids` namespace ไม่เคยถูกใช้; (b) `_kb_zaapi_need_ok` compat branch เช็คแค่ `bool(need.target_refs)` ไม่เทียบ record target กับ need target
+- fix: (a) แยก subject_refs → item_ids/model_codes+aliases+subject_ids, target_refs → item_ids/target_ids ก่อน retrieve ต่อ need; (b) `_kb_zaapi_need_ok(meta, n, rec_target)` compat branch เทียบ `_norm_target(rec_target) ∈ _norm_target(need.target_refs)` — `_attribute` ส่ง record target จาก payload/meta
+- impact ต่อเคสอื่น: subject_id-only lookup เดิมไม่เปลี่ยน; mixed subject+target ค้นทั้งสอง namespace พร้อมกัน; wrong-device compat drop ที่ gate ก่อน emit
+
+### M1 _validate_meta อ่อนกว่า contract — FIXED
+- error: R19 RED — `record_type="bogus"`, `readiness="draft"`, `topic_key="not_a_fact"`, `score=NaN/inf/True` ผ่าน validator ทั้งหมด
+- cause: validator เช็คแค่ shape/type ไม่เช็ค enum membership และ finite value
+- fix: เพิ่ม `record_type ∈ RecordType`, `readiness == Readiness.RESOLVED` (canonical active filter รับเฉพาะ resolved), `topic_key ∈ REQUESTED_FACTS`, `score` ต้อง `math.isfinite` — ทั้งหมดที่ boundary เดิม ไม่เพิ่มชั้น validator; legacy `kind="kb"` ไม่ผ่าน gate นี้ (path แยกอยู่แล้ว)
+- impact ต่อเคสอื่น: exact hit ไม่มี score → accept เหมือนเดิม; semantic hit finite score → accept; R19 truth table 15 เคสตรง contract
+
+### M2 12-file regression batch hang — RESOLVED (root cause = test env ไม่ใช่ app code)
+- error: batch ค้าง ~19min ที่ 77-83% แม้แยกไฟล์ผ่าน 470 — CPU 0% process alive
+- cause: `retrieval_executor.execute_grouped_retrieval_requests → runtime_config.source_enabled → pool_sources → get_runtime_config → knowledge_base._admin_db()["system_configs"].find_one` — PyMongo serverSelectionTimeoutMS default 30s × retries ~60s/call; TTL cache 5s → หลายไฟล์ block ซ้ำ; faulthandler stack ชี้ `select_servers/_cond_wait` ชัด — **ไม่มี mongod และไม่มี offline boundary เลยยิง Mongo จริง**
+- fix: เพิ่ม `docs/test/conftest.py` — stub `_cached_admin_client` (client-level, ให้ per-test `_install` override ทำงานต่อ) คืน empty-collection semantics + `sys.path` เพิ่ม `chatbot/` — ไฟล์ที่ stub `_admin_db` เองไม่เปลี่ยนพฤติกรรม
+- evidence: batch forward 469 passed/1 skipped/6.05s, reverse 469/1/5.79s (เดิม ~19min+); live smoke skip 0.06s ถูกต้อง (no Mongo → exception → skip); conftest fix แรก stub `_admin_db` แคบเกิน → 6 failures (`_OfflineAdminColl` ไม่มี find) → แก้ stub client-level → ผ่าน
+- impact ต่อเคสอื่น: tests เดิมที่ stub เอง override ชนะ (monkeypatch setattr ภายหลัง); ไม่มี app code เปลี่ยนจาก fix นี้
+
+### GREEN + acceptance
+- probe `test_zaapi_task5_contract.py` R1-R19 (+schema/rollback): **20/20 PASS exit 0** (เดิม 17/17 + 3 RED ใหม่)
+- customer replay `/tmp/task5_customer_replay.py` ผ่าน decide_turn→run_grouped_selection→compile_answer_context จริง: A(xiaomi compat+charging) B(ATC310N pairing) C1(-2Y→2ปี) C2(2m≠2เดือน) D(multi-need isolation) E(legacy kb) = **6/6 PASS exit 0**
+- conftest ใหม่ทำให้ offline suite ไม่แตะ Mongo — `test_live_units_fetch_smoke` skip ตามเดิม
+- ยังไม่ stage/commit — หยุดรอ independent review ตามกฎข้อ 10
+
+## Task 5 correction round 2 [PART 0 baseline — กำลังจะทำ]
+- frozen state verified: branch feature-botlogic-kb-workflow, HEAD 7fabb04, staging ว่าง, manifest = 17 modified + conftest.py/contract probe untracked (ตรง dirty candidate เดิม)
+- findings ที่จะแก้ (user-approved): H1 compat `target` หายใน attachment path (item_id → EvidenceAttachment ไม่ copy target → rec_target=None → `not tn` branch ผ่านทุก target_refs need — wrong-device leak), H2 replay 6/6 หยุดที่ compile_answer_context (context-level ไม่ใช่ final answer), M1 conftest import knowledge_base → `_load_env()` → `load_dotenv(.env)` ตอน collection + autouse stub อาจ mask DB-failure tests
+- gates: R20 attachment-target RED, final-answer acceptance ผ่าน compose_answer/_render_composition (+app.chat smoke), conftest .env tripwire + scope, regression สองลำดับ
+
+### R2 GREEN — H1 attachment target integrity — FIXED
+- error: R20 RED — item-bound compat record (target=iphone) รั่วเข้า xiaomi need เพราะ `target` หายตอน record→EvidenceAttachment; emitted evidence ไม่มี target
+- cause: adapter `zaapi_kb_evidence` สร้าง attachment dict ไม่ใส่ `target`; `EvidenceAttachment`/conversion ไม่มี field; `_compile_evidence` สร้าง rec ไม่ส่ง target เข้า gate
+- fix: (a) `candidate_pool.EvidenceAttachment` + `target` field; (b) adapter ส่ง `ev.get("target")` (canonical target_id verbatim); (c) `_compile_evidence` emit `rec["target"]=att.target` ก่อน `_attribute`; (d) `_kb_zaapi_need_ok` compat branch รับ `rec_target` เทียบ `_norm_target` กับ `need.target_refs` (schema บังคับ target_id สำหรับ resolved compat อยู่แล้ว → no-target = crafted → fail closed)
+- impact: wrong-device compat ที่มี item_id ตัดที่ gate (`post-gate=[]`); positive control bind ถูก need; R20 + contract 21/21 PASS
+
+### R2 GREEN — final-answer path (H2 + H1b)
+- error: app.chat() จริงให้คำตอบ "ไม่มีข้อมูลยืนยัน…ไม่สามารถยืนยันได้" ทั้งที่ typed ctx มี compat evidence (xiaomi) — customer-visible contradiction
+- cause 2 ชั้น: (1) compat need พก external target ใน `request.target_device`/`profile.target_device` ไม่ใช่ `need.target_refs` → gate เก่าเทียบ `target_refs` ว่าง → compat evidence ถูกปฏิเสธ bind ที่ compat need → need ตก uncovered → evidence trim → cannot-confirm; (2) subject coverage ของ unresolved ref ผูกผ่าน pooled-candidate keys เท่านั้น — item-bound evidence ไม่มี key ตรงชื่อ subject
+- fix: (a) `_kb_zaapi_need_ok(meta, n, rec_target, need_target=None)` — trs fallback = `target_of[i]` (typed เดียวกับ verdict loop เมื่อ target_refs ว่าง); `_attribute` ส่ง `need_target=target_of.get(i)`; (b) compat-rescue ใน compile loop: evidence-bound compat need ที่ subject ครอบผ่าน typed chain (evidence keys ∩ pooled-candidate keys ที่ request carry subject_ref) → ออกจาก uncovered/dropped → task+evidence kept; (c) typed `facts` ไหล record→projection→meta→emitted→`spec_measured_facts` → `_spec_fact_grounded` ground spec claim (source="kb_zaapi" ≠ kb_inherit)
+- evidence: `/tmp/task5_answer_acceptance.py` ผ่าน `app.chat()` จริง — final text "ใช้ได้ค่ะ CTC620P ใช้กับ Xiaomi 17 Ultra ได้ค่ะ รองรับสูงสุด 120W ค่ะ" (positive compat + grounded spec), iPhone record ถูกตัด, ctx evidence bind (0,1), no cannot-confirm tail; legacy case คง output เดิม
+- หมายเหตุ: รายงานรอบก่อน "6/6 customer-visible PASS" แก้คำเป็น "6/6 context replay PASS" — final-output ที่พิสูจน์จริงรอบนี้ = A/E ผ่าน app.chat() (model stub — deterministic pipeline ครบ; Gemini live QA pending)
+
+### R2 GREEN — M1 offline boundary — FIXED
+- error: conftest เดิม import `shopeechat.knowledge_base` ตอน collection → `_load_env()` → `load_dotenv(.env)` อ่านไฟล์จริง + autouse stub อาจ mask DB-failure tests
+- fix: `docs/test/conftest.py` stub `dotenv.load_dotenv` เป็น recording no-op ก่อน import ใดๆ (calls → `DOTENV_CALLS`) + `_OfflineClient` empty-collection floor (opt-out ผ่าน `OFFLINE_MONGO=False` ต่อ module; per-test monkeypatch ชนะ floor) + `test_offline_boundary.py` (assert kb-bound alias = stub + calls recorded + overridable)
+- residual found+fixed: `test_phase4b_refresh._install_script_stubs` rebind global dotenv หลัง collection — assertion แก้เป็นตรวจ bound alias `knowledge_base.load_dotenv is _dotenv_stub` (callsite อันตรายจริง) + behavioral no-open check — ไม่ลด contract
+- evidence: forward 842 passed/20 skipped/4 xfailed/7.4s exit 0; reverse เดียวกัน/8.1s exit 0 (file set 24 ไฟล์: zaapi×7, grouped/executor/requests, selection×2, pool×2, answer_context/boundary, warranty×2, offline, fail_closed, phase10b×3, incident_replay, phase6)
+- probes standalone: contract 21/21 exit 0; pool admission รันแยก (module sys.exit)
+
+### งานค้าง (residual — ไม่แตะตาม scope)
+- Gemini live QA pending — ไม่มี authorized live harness; offline deterministic path พิสูจน์แล้ว
+- legacy `kb_fetcher` 0-arg lambda ที่ app.py — pre-existing
+- free-topic spec record ผูก broad compat need ได้ตาม gate เดิม (rejected เฉพาะ narrow need) — replay assertion แก้เป็นตรวจ narrow-need isolation ตาม contract
+- v1 rollback loadable-ไม่-eligible ยังอยู่ใน probe (zaapi_v1_ineligible)
+
+## Task 5 round 3 [PART 0 baseline — กำลังจะทำ]
+- frozen verified: branch feature-botlogic-kb-workflow, HEAD 7fabb04, staging ว่าง, dirty candidate = 18 modified + 3 untracked (conftest/offline_boundary/contract probe); integrity SHA ตรง ledger
+- findings ที่จะแก้ (user-approved): H1 compat rescue นับ record_type-only เป็น answer โดยไม่ตรวจ typed verdict (compatible/incompatible/unknown); H2 cable `output_power_w` ถูกใช้เป็น actual-charging proof ผ่าน spec_measured; M1 answer acceptance อยู่ /tmp ไม่ใช่ repo gate และยังไม่ครบเคส; M2 offline fixture ยังไม่มี behavioral proof ว่าไม่กลบ DB failure
+- gates: typed verdict truth table (compat facts→verdict→final answer), cable capacity vs actual speed, final-answer tests เข้า docs/test, offline boundary behavioral proof
+
+### R3 GREEN — H1 typed compat verdict — FIXED
+- error: compat rescue (R2) นับ record_type=compatibility + target/subject match เป็น answer โดยไม่ตรวจ verdict — record facts ว่าง/incompatible อาจให้ model ตอบ "ใช้ได้"
+- fix: covered subject ต้องผ่าน owner เดิม — facts[compatible]=bool → compat_proof_from_dict (COMPAT_PROOF_SOURCES +="kb_zaapi") → resolve_compat declared → compatible|incompatible → decided[i] CompatVerdict → deterministic _compat_segment; ว่าง/malformed/conflict → unknown/admin_review → คง no_evidence (fail closed)
+- evidence: docs/test/test_task5_final_answer.py ผ่าน app.chat จริง — positive "CTC620P ใช้งานร่วมกับ xiaomi 17 ultra ได้ค่ะ"; incompatible→"ใช้งานร่วมกับ…ไม่ได้ค่ะ" (adversarial canned-positive flip ไม่ได้ — decided-pair dedup); empty/malformed/conflict → cannot-confirm; iphone target ไม่รั่ว; legacy คงเดิม — 7 tests
+
+### R3 GREEN — H2 cable capacity semantics — FIXED
+- error: cable spec record ใช้ output_power_w (charger-output key) ผิดชนิด + charging_speed map ไม่รู้ canonical cable key
+- fix: canonical keys ของสาย = power_capacity_w/max_current_a (Task 2 vocab เดิม); _FIELD_UNITS +2 keys (ground spec-number claim เป็น capacity terms); _REQUESTED_FACT_KEYS charging_speed += 2 keys; wattage eval extract เป็น _wattage_rc (owner-internal) — declared-compatible+charges ใช้ caveat เดียวกับ connector-match path (declared proof พิสูจน์ connect เท่านั้น)
+- evidence: final = "สาย CTC620P รองรับกำลังไฟสูงสุด 120W / 6A ค่ะ" + verdict segment — capacity บอกเป็น capacity, compat จาก typed verdict
+
+### R3 GREEN — M1/M2 — FIXED
+- M1: final-answer acceptance เข้า repo docs/test/test_task5_final_answer.py (7 tests ผ่าน app.chat); replay /tmp ยังเป็น context replay A–E ผ่าน
+- M2: test_offline_boundary +2 behavioral proofs (pinned raising client → RuntimeError propagate ไม่ใช่ empty-success; floor empty-not-doc + write/drop raise) + dotenv assertion robust ต่อ polluter order (ไม่ผูก identity กับ stub เดียว — ตรวจไม่ใช่ real loader + no-op behavior)
+- regression: batch 25 ไฟล์ 1035 passed/20 skipped/4 xfailed forward+reverse exit 0 ~5.5s; contract probe 21/21; pool admission 28/28; py_compile+diff-check OK
+- งานค้าง: Gemini live QA pending; B(ATC310N pairing)/C(warranty)/D(multi-need) พิสูจน์ที่ context replay เท่านั้น (final-answer repo test ยังไม่ครอบ)
+
+## TASK5-ROUND4 (2026-11) — compatibility variant binding + charging-speed evidence
+
+### กำลังทำ/ทำแล้ว
+- finding A (reproduced): `_covers` ให้ item card (model_codes ครบทุกรุ่น) match ekey ของ model-bound record → verdict `subject_id='i:i-mix'` render positive compat ให้รุ่นผิด — adapter ก็ flatten identity เป็น `i:item` เสมอทำให้ variant scope หาย
+- finding B (reproduced): typed verdict path ส่ง `target_facts=()` + subject facts ไม่มี card → caveat ไม่เคย eval
+- แก้: (1) adapter `kb_zaapi.zaapi_kb_evidence` — model-bound record → identity=variant identity + identity_domain="model"; (2) `answer_context._covers` — model-bound record นับ coverage เฉพาะ candidate card.model_id ตรง variant หรือ subject_ref ตรง record identity; (3) verdict loop — same-scope kb_zaapi facts (source=kb_zaapi) + covering-card subject facts + device_spec/web target facts เข้า `resolve_compat`; (4) `_evidence_record` ใช้ projection.get("model_id") (v1-shape tolerance); (5) `guards._spec_fact_grounded` consume spec_measured เฉพาะ `source=="kb_zaapi"` (compile tag source — R12 lock คงเดิม: card-derived measured ไม่ใช่ guard authority)
+- rejected: `power_capacity_w` fact เป็น cable-type proof → revert (18 regression locks ใน test_phase10b_zaapi_primary_evidence บังคับ product_type ต้องมาจาก card เท่านั้น — charger record พก capacity key ห้าม impersonate cable); `category`→product_type mapping → reject (cat_name = broad Shopee category ไม่ใช่ classifier output)
+- tests ใหม่: test_variant_scoped_proof_never_decides_sibling (RED→GREEN), test_variant_scoped_proof_decides_own_variant (positive control), capacity-caveat assertion
+- ผล: 9/9 final-answer · contract probe 21/21 · offline boundary 4/4 · pool admission 28/28 · batch 48 ไฟล์สองลำดับ 1816 passed/21 skipped/6 xfailed ทั้งคู่ · A/E harness PASS · py_compile+diff --check OK · SRS rows อัปเดต (zaapi_kb_evidence, _spec_fact_grounded, compile_answer_context)
+### งานค้าง
+- Gemini live QA pending (ไม่มี authorized harness) · ledger/integrity prefix update + commit รอ user approval (no-commit stop) · coverage ledger ยัง partial
+
+## TASK5-ROUND5 — ปิดช่อง evidence รุ่นอื่นรั่วเข้า AnswerContext/LLM
+
+### กำลังจะทำ
+- independent review: record MB200 ยังเข้า ctx.evidence/typed LLM input ของ need MA100 (need_indices=(0,)) + duplicate x2 แม้ verdict ถูกแล้ว — ไล่ _join_attachment → _attribute → _compile_evidence → model input
+- root cause (2 ชั้น): `_join_attachment` domain=model fallback ไป `i:item` listing เมื่อไม่มี variant candidate (units fail-closed → item card เดียว) + `_attribute` ใช้ item keys (`i:i-mix`/`linked_candidate`) ผูก record เข้า need 0 ของ MA100 — payload "MB200 ใช้กับ…" ไหลเข้า typed LLM input; duplicate x2 = record ถูกแนบผ่าน ch:kb:0+ch:kb:1 ทั้งคู่ attribute เข้า need 0
+- แก้ (owner เดิม): `_join_attachment` — `att.model_id` ตั้ง → ข้าม item-listing fallback; `_attribute` — kb_zaapi model-bound → post-filter idxs เหลือ need ที่ subject_refs ∩ {identity,model_id}; duplicate หายโดย root cause เดียวกัน ไม่เพิ่ม dedupe
+- RED→GREEN: +5 tests (sibling LLM-input isolation, own-variant control, join-fallback unit, item-level contract, dual-variant separation) — 14/14
+- ผล: final-answer 14/14 · contract 21/21 · offline 4/4 · pool 28/28 · batch 48 ไฟล์สองลำดับ 1821 passed/21 skipped/6 xfailed · replay A–E PASS · A/E harness PASS · py_compile+diff --check OK
+- ค้าง: per-channel x2 emission ของ variant เดียวกัน = architecture emission (pre-existing, ถูก scope) — ไม่ใช่ leak; Gemini live QA pending; ledger/integrity update รอ commit approval
+
+## TASK5-ROUND6 — customer answer acceptance closeout (B/C/D + source switch + live QA)
+
+### กำลังจะทำ
+- ย้าย B (ATC310N pairing)/C (warranty -2Y/-24M + 2m)/D (multi-need) จาก context replay → final-answer repo tests (app.chat → ChatResponse.answer + products + typed LLM input)
+- ลอง live QA ผ่าน Gemini ด้วย harness/credential ที่ process จัดให้เท่านั้น (ห้ามอ่าน .env)
+- หมายเหตุ regression: ผล 48-file/1821 รอบก่อน = หลักฐานรอบก่อน ต้องรันใหม่หลังแก้
+
+━━━━━━━━━━ TASK 5 — Customer Answer Acceptance Closeout (B/C/D + source switch) — ผ่านแล้ว ━━━━━━━━━━
+[งาน] app.chat()→ChatResponse acceptance สำหรับ B (ATC310N charger pairing), C (warranty -2Y/-24M vs 2m), D (multi-need claim isolation)
+[สาเหตุ/วิธีแก้]
+- C RED จริง: claim "2 ปี"/"24 เดือน" ungrounded → root cause `_TOK_NUM_RE` รับแค่ ASCII unit → ขยาย unit vocab ใน owner เดิม (policy_resolver `_FIELD_UNITS` + `_TOK_NUM_RE`): warranty → y/ปี×12, เดือน×1; `m` ไม่รวม (ชนเมตร) → "2 เดือน"≠24M reject ถูก, 2m คงเป็นเมตร
+- ชื่อ fixture ต้องตาม `_TAIL_PATTERN` production (suffix ท้ายชื่อ): "หัวชาร์จ 65W AC65B-2Y" — "AC65B-2Y หัวชาร์จ" ไม่ match (แก้ fixture ไม่แก้ parser)
+- D: warranty need=kind policy (non-productish) → Zaapi faq bind ไม่ได้ตาม design; "12 เดือน" string fact ไม่มี numeric ground → guard rewrite เป็น cannot-confirm = ผล fail-closed ที่ถูก (ไม่แก้ guard/test ให้หลอก)
+- D: compat need relation unproven → cannot-confirm โดยไม่กลืน need ที่ตอบได้ (120W capacity claim คงอยู่)
+- B: ไม่มี charger ที่มี typed USB-A port evidence → ตอบข้อจำกัดตรงๆ (cannot-verify pairing) — ไม่วนขายสายอย่างเดียว ไม่เสนอ USB-C-to-C เป็นคู่ยืนยัน
+[ผล] docs/test/test_task5_final_answer.py 18/18 (เพิ่ม B/C/D app.chat tests 4 ตัว); batch 48 ไฟล์ทั้งสองลำดับ 1825 passed/21 skipped/6 xfailed ทั้งคู่; py_compile+diff --check ผ่าน
+[mechanism delta] owner+0, helper+0, guard+0, regex+1 ขยาย scope (_TOK_NUM_RE รับ ปี/เดือน), keyword table+1 entry (_FIELD_UNITS[warranty]), heuristic+0, decision owner+0
+[งานค้าง] Gemini live QA = pending (ไม่มี credential ใน process env — env grep 0 hits; ไม่อ่าน .env ตามกฎ); ledger summary/integrity prefix update รอ commit เดียวตาม ข้อ8H; ห้าม stage/commit/push/PR/deploy
+
+## TASK5-ROUND7 — Customer Answer Acceptance Correction (negative controls B/C/D)
+
+### กำลังจะทำ
+- independent review พบ: B2 pairing ยืนยันด้วย canned LLM แม้การ์ดจริง USB-C only; C1 ตอบ 2 ปีโดยไม่มี Zaapi record (title path ต้องแยกชัด); D ผ่านเพราะ cannot-confirm ทั้งหมด; `_TOK_NUM_RE`/`_FIELD_UNITS[warranty]` ที่เพิ่มรอบก่อนยังไม่ได้รับอนุมัติตามข้อ 9 — ต้องแยก change พิสูจน์เส้นทาง typed warranty owner แทน หรือหยุดขออนุมัติ
+
+### วิเคราะห์ root cause (instrumentation จริง ไม่ patch ผิว)
+- B: recommend/describe need ไม่มี typed connector-claim channel — "USB-A เข้าคู่" เป็น LLM prose ดิบ, `_SPEC_CLAIM_RE` ไม่ครอบ connector semantics → guard ปล่อย claim ที่ขัดการ์ด
+- C: `warranty.py` เป็น owner เดิมของ months semantics (`extract_warranty_from_name`/`_unit_to_months`/`_NEAR_WARRANTY_PATTERN`) — `_FIELD_UNITS["warranty"]`+`ปี|เดือน` ใน `_TOK_NUM_RE` = owner ซ้ำที่ไม่ได้อนุมัติ; Zaapi "24 months" fact ถึง spec_measured แต่ numeric parse fail → ground ไม่ได้ (normalization gap ใน owner)
+- D: compat verdict ต้องมี typed relation จาก `compat_mode` บน request — msg ไม่มี charging literal → 'none'→ไม่ decide = fail-closed ถูกต้อง; ใส่ "สาย" → connector_required→charges → decide
+- error → cause → fix: (a) USB-C-only head ยืนยัน USB-A เข้าคู่ → connector claims ไม่มี channel → เพิ่ม connector_claim tier ใน enforce (device_compat vocab เดิม ไม่สร้าง enum ใหม่); (b) "24 months" ground ไม่ได้ → owner `_unit_to_months` ไม่รับ plural + ไม่มี typed-value helper → bugfix plural + `warranty_value_months` ใน owner; (c) title -2Y ตายใน multi-need → `_spec_fact_grounded` ไม่ส่ง clause context เข้า warranty parser → `raw_ctx` param + owner path; (d) stub แอบยืนยัน compat ใน unanswered need → co-mention dedupe ครอบแค่ decided → ขยาย `_pairs` รวม unanswered compat (typed fields)
+- ผลกระทบเคสอื่น: clause ที่มี negation marker ไม่นับ positive pairing (cannot-confirm "เข้ากัน...ไม่มีข้อมูล" รอด); สาย "A to C" host-side นับทั้งสองฝั่งผ่าน `_surface_connectors` ไม่ over-block; warranty claim ตก grounding_text channel เดิม (test_issue_5f regression ถูกแก้หลังจับได้ใน batch)
+[ผล] test_task5_final_answer.py 26/26 (RED 7→GREEN); batch 79 ไฟล์สองลำดับ 2465 passed/21 skipped/6 xfailed + pre-existing flake `test_load_dotenv_aliases_restored_after_import` (พิสูจน์บน clean HEAD worktree 7fabb04: 2439+1 ล้มตัวเดียวกัน — test-ordering dotenv stub ไม่ใช่ regression); pool admission script 28/28; zaapi contract probe 21/21; py_compile+diff --check ผ่าน; SRS rows อัปเดต (_unit_to_months, warranty_value_months+new, _spec_fact_grounded, _clause_span+_subject_cards+_connector_grounded+new, _surface_connectors+new, claim_supported, _tok_field_value, compose_answer, enforce)
+[mechanism delta] owner+0 · helper+4 (_clause_span/_subject_cards/_connector_grounded ใน guards, _surface_connectors/_CONN_SURFACE ใน device_compat, warranty_value_months ใน warranty owner) · guard tier+1 (connector_claim — claim-detection surface ที่จำเป็นเพราะ connector claims ไม่มี typed channel อื่น; flag ไว้ตามแผน) · regex+2 (_PAIRING_RE/_CONN_CLAIM_RE — reuses device_vocab surface patterns เดิม ไม่ใช่ vocab ใหม่; _TOK_NUM_RE revert เป็น [a-z]+ เหมือนเดิม) · keyword table+0 (_FIELD_UNITS[warranty] ถอนแล้ว) · heuristic+0 · decision owner+0
+[งานค้าง] Gemini live QA pending (ไม่มี credential ใน process env; ไม่อ่าน .env); ledger summary/integrity prefix update รอ commit เดียวตาม ข้อ8H; ห้าม stage/commit/push/PR/deploy; pre-existing dotenv flake เป็น test-infra issue แยกงาน
+
+## TASK5-ROUND8 — Pairing Evidence Root-Cause + Complexity Containment (independent review ใหม่)
+
+### กำลังจะทำ
+- independent review พบ B-variant ใหม่: การ์ด "AD1404T หัวชาร์จ USB-C only ไม่รองรับ USB-A" + stub "USB-A เข้าคู่" → final answer ยืนยัน pairing + guard_rewritten=None — `_connector_grounded` นับ text mention "USB-A" บน card (รวมประโยคปฏิเสธ) เป็น proof และ pairing check ไม่พิสูจน์ relation สาย↔หัว
+- ต้อง: trace owner ของ pairing (PART 1), audit KEEP/DELETE/MOVE กลไกรอบก่อน (_CONN_SURFACE/_surface_connectors/_PAIRING_RE/_CONN_CLAIM_RE/connector_claim tier/warranty_value_months), RED B1–B6, GREEN ที่ decision owner เดิม, C1–C3/D1–D2 regression, ห้ามเพิ่ม negation regex/keyword table/heuristic/guard tier ใหม่
+
+### วิเคราะห์ root cause + วิธีแก้ (owner เดิม ไม่เพิ่ม tier/regex)
+- error → cause → fix: (a) final answer ยืนยัน USB-A pairing ทั้งที่การ์ด "ไม่รองรับ USB-A" → `_connector_grounded` นับ surface mention บน card text (รวม negated) เป็น proof + pairing guard เช็กแค่ connector ถูกกล่าวถึงไม่พิสูจน์ relation → ย้ายหลักฐาน pairing ไป typed `pair_verdicts` จาก `resolve_compat` (owner เดิม) + `_connector_grounded` เหลือ typed surface เท่านั้น (host_connector ∪ structured-source connector — card_text ไม่นับ); (b) cable (subject pin) ไม่ถึง guard → `_rd_extra` compute connects verdict ที่จุดเดียวที่ card สองฝั่งอยู่ด้วยกัน + fold unit `canonical_specs` เป็น `_pfacts` ให้ head-side declared evidence ถึง owner; (c) typed connector fact ปนจาก name-scan ("ไม่รองรับ USB-A" → connector usb-a) → แยก host-side `_extract_product_host_connectors` (positional X-to-Y grammar เท่านั้น bare keyword/negated ไม่ใช่ host proof) และ `_pair_conn_vals` surface สำหรับ product↔product connects (host_connector ก่อน else structured connector เท่านั้น); (d) regression self_compat ที่ตัด card_text → แยก surface rule ตาม target: product target = typed surfaces, `device:` target = legacy เดิม
+- KEEP: `_surface_connectors`(claim-side เท่านั้น)/`_CONN_SURFACE`/`_PAIRING_RE`/`_CONN_CLAIM_RE`/connector_claim tier/`_clause_span`/`_subject_cards`/`warranty_value_months` · DELETE: card-text surface proof ใน `_connector_grounded` · MOVE: pairing proof จาก prose-level guard check → `resolve_compat` owner ผ่าน `pair_verdicts` channel
+- verdict provenance ใน test: B1 typed facts cable{host usb-a}+head{structured usb-a}→compatible, final claim อยู่; B2/B3 unknown→defer+การ์ดจริง; B4 negated card→unknown→ไม่ยืนยัน (การ์ดแนบได้ไม่ใช่ endorsement); B5/B6 typed truth ชนะ text/canned
+[ผล] test_task5_final_answer.py 30/30 (RED B1–B6 verdicts ว่าง → GREEN); batch 78 ไฟล์สองลำดับ 2442 passed/21 skipped/6 xfailed + pre-existing flake dotenv เดิมทั้งสองลำดับ (test_comprehensive = live-HTTP script ตัดออกจาก batch — เคยค้าง server-selection); ก่อนหน้า: compat mode filter 144/144 (self_compat regression แก้ด้วย target-type split), guards/phase5/phase10/issue_5f suites ผ่าน; py_compile 8 ไฟล์+diff --check ผ่าน; safety scan สะอาด; stash@{0} intact; SRS อัปเดต rows _rd_extra/_extract_product_host_connectors/extract_field_facts/resolve_compat/_pair_conn_vals/_connector_grounded/enforce
+[mechanism delta corr5] owner+0 · helper+2 (`_extract_product_host_connectors` device_compat, `_pair_conn_vals` policy_resolver) · fact+1 (`host_connector`) · channel+1 (`rd["pair_verdicts"]`) · guard tier+0 · regex+0 · keyword table+0 · heuristic+0 · decision owner+0 (resolve_compat เดิม — connects product-target sub-branch, device: target legacy) · structured-source set+2 (`_DEVICE_STRUCTURED_SOURCES` +canonical_specs/kb_zaapi — product-target scope เท่านั้น, flag ไว้ตามแผน)
+[งานค้าง] Gemini live QA pending (ไม่มี credential ใน process env; ไม่อ่าน .env); ห้าม stage/commit/push/PR/deploy — รอ independent review; pre-existing dotenv flake = test-infra issue แยกงาน
+
+## TASK5-ROUND9 — Variant-Scoped Pairing Facts + Mechanism Containment (independent review ใหม่)
+
+### กำลังจะทำ
+- reviewer พบ: card AD1404T USB-C only + sibling unit item เดียวกันมี canonical_specs.connector=usb-a → `pair_verdicts` คืน compatible:usb-a + ยืนยัน "หัวชาร์จ USB-A เข้าคู่กับ ATC310N" พร้อมการ์ด USB-C only — `_rd_extra._pfacts` อ่านทุก unit ตาม item_id แล้ว rebind facts ไปยัง subject identity เดียวกัน
+- ต้อง: reproduce + trace provenance สองฝั่ง (PART 1), แก้ที่ facts/identity path เดิม (PART 2: unit specs ผูก unit/variant ที่ identity ตรงเท่านั้น, item-level multi-variant พอร์ตต่างกัน = fail closed), RED A–F, GREEN + คืน `_DEVICE_STRUCTURED_SOURCES` trust scope ของ `device:` ตาม contract เดิม, census regex/guard ทั้ง candidate (ข้อ 9 — ห้ามอ้าง regex-extracted เป็น structured proof เงียบ ๆ), verification + ledger
+
+### วิเคราะห์ root cause + วิธีแก้ (R9 — identity owner + approved structured-only)
+- error → cause → fix: (a) sibling USB-A unit → verdict compatible:usb-a บน USB-C card → `_pfacts` วนทุก unit ตาม item_id แล้ว rebind facts เป็น sid เดียว → variant scoping: u:/v: = unit/model ที่ identity ตรง · i: = เฉพาะ canonical_specs pairs ที่ identical ทุก unit (sibling พอร์ตต่าง → drop → fail closed) · n: = ไม่ผูก unit; pseudo-card ไม่ส่ง name → unit fold ไม่ผลิต card_text facts เลย (ปิดช่องรั่ว model_name); (b) `_DEVICE_STRUCTURED_SOURCES` +canonical_specs/kb_zaapi ของ R8 กระทบ device: H6 path เงียบ ๆ (รายงานอ้าง product scope) → split: device set คืน {spec-db, web-structured} เดิม + `_PRODUCT_PAIR_STRUCTURED_SOURCES` เฉพาะ `_pair_conn_vals`; (c) **user อนุมัติ structured-only ทั้งสองฝั่ง** → `_pair_conn_vals` host_connector นับเฉพาะ structured source (X-to-Y name grammar = card_text ไม่ใช่ proof — `_extract_product_host_connectors` ยัง emit fact provenance ตรง ๆ แต่ไม่กระทบ verdict); B1 fixture เติม cable_specs structured host + test ใหม่ name-only cable → unknown
+- RED: A/B/D/E fail ตามคาด (sibling leak ผ่าน folded facts) → GREEN 36/36; reviewer case verdict unknown + defer + card แนบ
+[ผล] test_task5_final_answer.py 36/36; batch 78 ไฟล์สองลำดับ 2448 passed/21 skipped/6 xfailed + pre-existing dotenv flake เดิม (clean-HEAD proven); compat_mode_filter 144/144; pool admission 28/28; zaapi contract 21/21; offline boundary 4/4; issue_5f 38; phase10 35; phase5 124; warranty 22; guards 27/27; py_compile+diff --check ผ่าน; safety scan สะอาด; pytest processes=0; SRS rows อัปเดต (_rd_extra/_pfacts variant scoping, _pair_conn_vals structured-only, _extract_product_host_connectors card_text-grade, _connector_grounded, resolve_compat, extract_field_facts)
+[mechanism delta R9] owner+0 · helper+0 · fact+0 · channel+0 · guard tier+0 · regex+0 · keyword table+0 · heuristic+0 · source trust: device set คืนเดิม + product-pair set ใหม่ (scope เฉพาะ pair surface); demote: card_text host_connector ออกจาก pair surface (structured-only approved); `_pfacts` +variant scoping logic; net correction = facts/identity path เดิม ไม่เพิ่มกลไก
+[งานค้าง] **pairing production readiness: NOT READY** — ต้องตรวจ+เติม structured host_connector/connector ใน units/Zaapi data จริงก่อน (สายที่ประกาศในชื่ออย่างเดียวตอนนี้ → unknown โดย design); Gemini live QA pending; pre-existing dotenv flake = test-infra issue แยกงาน; ห้าม stage/commit/push/PR/deploy — รอ independent review
+
+## TASK5-ROUND10 — Product-Bound Pairing Verdict + Deterministic Answer Ownership (independent review ใหม่)
+
+### กำลังจะทำ
+- reviewer พบ: pair_verdicts มี AD1404T=compatible + BAD999=unknown ถูกต้อง แต่ answer ยัง "แนะนำ BAD999 หัวชาร์จ USB-A เข้าคู่กับสาย ATC310N" — pairing guard เช็กแค่ "มี compatible verdict สักตัวใน products" ไม่ได้ผูก claim กับ target ของ verdict
+- ต้อง: reproduce + trace จุดที่ compatible ของ AD1404T authorize claim BAD999 (PART 1), audit ทิศทาง deterministic composition owner เดิม (`_compat_segment`/CompatVerdict/answer segments provenance) — verdict ต้องผูก (subject,target) ไม่ใช่ turn-level authorization; ห้ามเพิ่ม name-matching regex ใน prose; ถ้า answer contract เดิมผูก model prose กับ product identity ไม่ได้ → รายงาน missing typed answer contract + เสนอ minimal contract ก่อนแก้ (PART 2), RED A–G, GREEN ที่ composition owner, census mechanisms, verification + ledger
+
+### วิเคราะห์ root cause + วิธีแก้ (R10 — deterministic answer ownership ไม่เพิ่ม regex/tier)
+- error → cause → fix: verdict AD1404T compatible + BAD999 unknown แต่ claim "BAD999 เข้าคู่" ผ่าน → guard loop เช็กแค่ "มี compatible verdict ที่ target ∈ attached products" — ไม่เคยผูก clause กับ target → model prose pairing ไม่มี typed target binding โดยนิยาม → ลบ verdict authorization loop ทั้งหมด: pairing conclusion ย้ายไป deterministic owner — `_rd_extra` stamp `subject_name`/`target_name` ลง verdict entry → `_pair_segment` (answer_context, mechanism class เดียวกับ `_compat_segment`) render compatible เท่านั้น → `_finalize_answer` append เข้า answer + composition marker (domain=compat, origin=deterministic, subject_ids=[sid,tid] — validator/exemption เดิม); model pairing clause → ungrounded เสมอ: drop ถ้ามี compatible verdict (deterministic segment ครอบ conclusion) หรือ defer ถ้าไม่มี — ไม่เดาชื่อจาก prose, ไม่มี name-matching regex
+- RED: A/C/G fail ตามคาด (cross-product leak), B/D/E/F pass control → แก้ test bug 2 จุด (verdict order compare → sorted; G assert claim text ไม่ใช่ det segs) → GREEN 43/43; reviewer case: claims = deterministic "AD1404T เข้าคู่กับสาย ATC310N" เท่านั้น, BAD999 claim หาย (card ยังแนบเป็น explanation)
+[ผล] test_task5_final_answer.py 43/43 (R10 A–G + R9 36); batch 78 ไฟล์สองลำดับ 2455 passed/21 skipped/6 xfailed + pre-existing dotenv flake เดิม; compat_mode_filter 144/144; pool admission 28/28; zaapi contract 21/21; guards script ALL PASS; issue_5f 38; phase10 35; phase5 124; warranty 22; phase8 51; phase10b 23; phase11 20+1xf; offline 4; py_compile+diff --check ผ่าน; safety scan สะอาด; pytest processes=0; stash@{0} intact; SRS rows อัปเดต (_pair_segment ใหม่/_finalize_answer/_rd_extra pair_verdicts names/enforce connector_claim R10)
+[mechanism delta R10] owner+0 (composition/finalizer เดิม) · helper+1 (`_pair_segment` — deterministic verdict→sentence renderer class เดียวกับ `_compat_segment`) · guard authorization loop **ลบ** (turn-level "any compatible verdict" ออก — pairing claim ไม่มี prose-level authorization อีกต่อไป) · regex+0 · keyword table+0 · heuristic+0 · tier+0 · channel: verdict entries +subject_name/target_name (typed fields)
+[งานค้าง] pairing production NOT READY เหมือน R9 (structured host_connector ใน data จริง); Gemini live QA pending; dotenv flake = infra issue แยกงาน; ห้าม stage/commit/push/PR/deploy — รอ independent review
+
+### กำลังจะทำ (R11 — Structural Pairing Composition Ownership Correction)
+- reviewer finding: model pairing prose ใช้ถ้อยคำนอก `_PAIRING_RE` (เหมาะสำหรับใช้กับ/รองรับการใช้งานกับ/เสียบกับ) ยัง claim สินค้า verdict=unknown ได้ — guard regex-based detection รั่วโดยนิยาม
+- แก้ที่ typed composition owner: pairing need ที่มี typed pair_verdicts → conclusion มาจาก `_pair_segment` เท่านั้น; model result ของ pairing need ไม่เข้า final; unknown → defer contract เดิม; preserve need อื่นด้วย typed need_indices ห้าม parse prose
+- ห้ามเพิ่ม regex/keyword/guard tier/synonym/name-matching; ห้าม decision owner ใหม่; RED→GREEN→regression สองลำดับ
+
+### วิเคราะห์ root cause + วิธีแก้ (R11 — typed composition ownership ไม่เพิ่ม mechanism)
+- error → cause → fix: model pairing prose ถ้อยคำนอก `_PAIRING_RE` claim สินค้า verdict=unknown รั่ว → verdict คำนวณ post-model ใน `_rd_extra` (need_indices ว่าง) + pairing relation ถูก encode ใน need แต่ไม่มี verdict binding → pairing need ยังเป็น model task → prose อยู่ blob เดียวแยกไม่ได้ → (a) verdict ต้องคำนวณ pre-model: `_pfacts`+verdict loop ย้ายเป็น module helpers `_pair_facts`/`_subject_pins`/`_pair_verdicts` (computation site เดียว shared `_rd_extra`+boundary, resolve_compat owner เดิม); (b) `AnswerContext.pair_verdicts` field ใหม่ (พี่น้อง compat_verdicts) — verdict ผูก `need_index` ต้นทางโดยตรง ไม่ derive จาก card; (c) boundary gate: need ที่ `requested_facts`==("compatibility",) + productish + subject_refs + ไม่มี capability_asks + products ทุกใบมี verdict → ถอดจาก task.tasks (model ไม่ถูกถาม pairing เลย — exclusion typed ตาม need_index, products ของ need อื่นอยู่ครบ); (d) `compose_answer` render `ctx.pair_verdicts` → compat DomainResult ต่อ verdict (compatible/incompatible/cannot-confirm) subject_ids=(sid,tid), sort ด้วย typed identity → order-independent; (e) `_finalize_answer` ลบ R10 ad-hoc append (compose = owner เดียว); (f) `_pair_segment` ขยาย outcome (unknown→cannot-confirm, incompatible→negative)
+- subject-ref→pin binding: materialized card ไม่มี model_codes → `_cand_keys` ไม่พอ → เพิ่ม `product_store._model_token_in_name` (bounded token owner เดิมของ subject resolution ไม่ใช่ name-regex ใหม่)
+- mixed/multi-ask need (requested_facts ปน compatibility+ask อื่น) ไม่เข้า scope ตามที่อนุมัติ — open contract ค้าง ห้าม parse prose
+- ผลกระทบเคสอื่น: pairing-only turn = 0 model call เลย (ctx.tasks ว่าง → compose-only); multi-need verified จริง — need 0 pairing excluded + need 1 compat (wattage) ยังเป็น model task → answer ครบ "AD1404T รองรับ 65 วัตต์ค่ะ" + BAD999 clause ใน blob ถูก guard rewrite defer ตามเดิม; การ์ดทั้งคู่แนบ (attachment ≠ endorsement); unknown ตั้งชื่อใน cannot-confirm เท่านั้น
+[ผล] test_task5_final_answer.py 104/104 (R11 A–E + R10 43 + R9/B-series); batch 79 ไฟล์สองลำดับ 2488 passed/21 skipped/6 xfailed + pre-existing dotenv flake เดิม (clean-HEAD proven รอบก่อน); compat_mode_filter 144/144; pool admission 28/28; zaapi contract PASS; guards script ALL PASS; py_compile 3 ไฟล์+diff --check ผ่าน; safety scan สะอาด; pytest processes=0; stash@{0} intact; SRS rows อัปเดต (_typed_answer_boundary sig+R11 gate, _finalize_answer ลบ append, _rd_extra shared helper, _pair_segment ทุก outcome+compose caller, compose_answer pair_verdicts, AnswerContext+pair_verdicts, +rows _pair_facts/_subject_pins/_pair_verdicts/_pair_subject_pins/_pair_verdict_fn)
+[mechanism delta R11] decision owner +0 (resolve_compat เดิม) · composition owner +0 (compose_answer เดิม — pairing segment ย้ายเข้า composition จาก finalizer append) · helper +3 module (_pair_facts/_subject_pins/_pair_verdicts — MOVE ไม่ใช่ logic ใหม่) +2 closures (_pair_subject_pins/_pair_verdict_fn — scope/binding เท่านั้น) · field +1 (AnswerContext.pair_verdicts) · boundary param +1 · regex +0 · keyword table +0 · guard tier +0 · heuristic +0 · synonym +0 · ลบ: `_pfacts` ใน _rd_extra (ย้าย) + R10 append block (~21 บรรทัด)
+[งานค้าง] mixed/multi-ask pairing need (requested_facts ปน ask อื่น) = open contract โดยการอนุมัติ — model pairing prose ใน need นั้นยังเป็น guard responsibility เดิม (ห้าม parse prose); pairing production NOT READY เหมือน R9 (structured host_connector ใน data จริง); Gemini live QA pending (ไม่มี credential ใน process env; ไม่อ่าน .env); dotenv flake = infra issue แยกงาน; ห้าม stage/commit/push/PR/deploy — รอ independent review
+
+## TASK5-ROUND11-CORRECTION — Pair Provider Failure Contract + Scope Accuracy
+
+### กำลังจะทำ
+- reviewer findings: (H1) `pair_verdict_fn` exception หลุดออก `app.chat()` — provider ถูกเรียกนอก error boundary ของ `_typed_answer_boundary`; fallback ไป model task จะเปิด pairing hallucination เดิม → provider failure/malformed output บน single-purpose pairing need ต้อง fail closed: 0 model call + deterministic cannot-confirm ผ่าน unanswered/missing-evidence owner เดิม (M1) mixed/multi-ask = open contract ค้างไว้ (M2) test count รายงานผิด — `pytest test_task5_final_answer.py` จริง 49 ไม่ใช่ 104 (104 = รวม 4 ไฟล์) (M3) `docs/test/_r11_repro.py` temporary repro ต้องจัดการ
+- แก้เฉพาะ boundary error contract เดิม — ห้ามเพิ่ม helper/field/param/guard/regex/keyword/heuristic/decision owner ใหม่; ห้ามขยาย mixed contract
+
+### ผ่านแล้ว / วิธีแก้ / งานค้าง
+- [ผ่านแล้ว] H1 closed: `pair_verdict_fn` อยู่ใน error boundary แล้ว — provider raise / units `.find` raise / malformed verdict (non-dict · need_index≠ต้นทาง · subject_id/target ว่าง · outcome นอก closed set) → need ถูกถอดจาก model tasks + `UnansweredNeed(no_evidence)` owner เดิม → "สำหรับATC310N — ไม่มีข้อมูลยืนยัน…" (0 answer call, ไม่มี model fallback); `_rd_extra` verdict read ครอบ try/except เดียวกัน (telemetry key omit — request ไม่ล้ม); diagnostic = `ctx.trace` pair_provider_error:/pair_verdicts_malformed:*
+- [ผ่านแล้ว] M2 fixed: report ใช้ count ตรง command — `pytest -q docs/test/test_task5_final_answer.py` = 55 passed (49+R11c 6); M3: `_r11_repro.py` ลบ (assertions อยู่ใน test file แล้ว — `_unit`/`_item_doc` ไม่ซ้ำ)
+- [verify] fail-closed tests 6/6 GREEN · focused file 55 pass · contract+offline 4 · admission 28 · compat+guards 159 · batch 79 files fwd+rev: 2494 pass (+dotenv flake เดิม clean-HEAD proven)
+- [mechanism delta R11c] helper +0 · field +0 · param +0 · guard +0 · regex +0 · keyword +0 · heuristic +0 · decision/composition owner +0 — เพิ่มเฉพาะ try/except + malformed-shape check ใน loop เดิม + UnansweredNeed ผ่าน owner เดิม + trace label ผ่าน contract เดิม + test seam `patch`/`calls_out` params (test file เท่านั้น)
+- [งานค้าง] MIXED_MULTI_NEED_PAIRING_OWNERSHIP_OPEN (ไม่ได้แตะในรอบนี้ — open lock test ค้างไว้จงใจ); pairing production NOT READY เหมือน R9; Gemini live QA pending (ไม่มี credential ใน env); dotenv flake = infra แยกงาน; ห้าม stage/commit/push/PR/deploy — รอ independent review
+
+## TASK5-ROUND11C — Exact Pair Verdict Scope Correction
+
+### กำลังจะทำ
+- reviewer finding: malformed pair-verdict scope ผ่าน validator — boundary เช็กเพียง expected targets ⊆ supplied targets → extra subject/target/duplicate/conflicting/wrong-relation verdict render เป็น positive claim (เช่น `EVIL999 เข้าคู่กับ ATC310N ได้`)
+- contract ใหม่: exact pair scope — expected (subject_id,target) pairs จาก matched pins × emitted product identities (ตัด self-pair เดิม) == supplied pairs; duplicate/missing/extra/relation≠connects/outcome นอก closed set → malformed → fail-closed path เดิมของ R11c (0 model call + cannot-confirm + trace)
+- แก้เฉพาะ `_pair_verdict_fn` + inline validation เดิมใน boundary — mechanism delta ต้อง +0 ทุกชนิด; mixed/multi-ask ไม่แตะ (OPEN contract)
+
+### ผ่านแล้ว / วิธีแก้ / งานค้าง
+- [ผ่านแล้ว] exact pair scope closed: extra subject/target, duplicate/conflicting pair, wrong/missing relation, missing expected pair → ทั้งหมด malformed → fail closed (0 model call + "สำหรับATC310N — ไม่มีข้อมูลยืนยัน…" + unanswered marker); valid exact pairs → behavior เดิม (compatible+unknown segments, 0 call)
+- [วิธีแก้] `_pair_verdict_fn` derive expected pairs = matched pins × emitted product identities ที่ resolve ได้ (ตัด self-pair/identity ว่าง เดิม) → validate supplied list: len+set equality (จับ extra/missing/dup/conflict/foreign) + relation=="connects" → ผิด → `[{"malformed_scope": True}]` marker → boundary malformed path เดิม; boundary เช็ก target scope เป็น exact set equality (ไม่ใช่ subset) + relation เพิ่มใน verdict contract; product ไม่มี identity → ไม่สร้าง expected pair → valid-incomplete เดิม
+- [verify] scope tests 8/8 GREEN (RED 7/1) · focused file 63 pass (55+R11C 8) · contract+offline 4 · admission 28 · batch 79 files fwd+rev: 2502 pass + dotenv flake เดิม (isolated file 30 pass — order-dependent env leak, clean-HEAD proven รอบก่อน)
+- [mechanism delta R11C] helper +0 · field +0 · param +0 · guard tier +0 · regex +0 · keyword +0 · heuristic +0 · decision/composition owner +0 — validation อยู่ owner เดิม 2 จุด (`_pair_verdict_fn` scope-check + boundary inline check ที่ขยายเป็น exact set)
+- [งานค้าง] MIXED_MULTI_NEED_PAIRING_OWNERSHIP_OPEN (ไม่แตะ); pairing production NOT READY เหมือน R9; Gemini live QA pending; dotenv flake = infra แยกงาน; ห้าม stage/commit/push/PR/deploy — รอ independent review
+
+## TASK5-ROUND11D — Pair Verdict Display-Name Identity Binding
+
+### กำลังจะทำ
+- reviewer finding: R11C ปิด exact pair IDs แล้ว แต่ `_pair_segment` render `subject_name`/`target_name` จาก verdict โดยตรง — validator ไม่ตรวจชื่อกับ canonical card ของ identity เดียวกัน → spoofed name (`i:i-ad` + `target_name="EVIL999"`) render `EVIL999 เข้าคู่กับ ATC310N ได้` ทั้งที่ composition marker อ้าง `i:i-ad`
+- contract: names ต้องตรง canonical display name ของ card ที่ identity เดียวกันเป๊ะ (foreign/swapped/empty/non-string → reject ทั้งชุด → fail-closed path เดิม); name precedence reuse จาก `_pair_verdicts` owner เดิม (item_name→name→model_name); ห้าม fuzzy/repair; mechanism delta ต้อง +0
+
+### ผ่านแล้ว / วิธีแก้ / งานค้าง
+- [ผ่านแล้ว] display-name binding closed: exact IDs + spoofed `target_name="EVIL999"` / foreign subject_name / swapped / empty / whitespace / non-string / sibling-name (BAD999 บน verdict i:i-ad) → reject ทั้งชุด → cannot-confirm + unanswered marker + 0 model call; valid exact (IDs+canonical names) → segments ถูก text/identity aligned
+- [วิธีแก้] `_pair_verdict_fn` สร้าง expected names ต่อ exact pair จาก card ของ identity เดียวกัน (canonical precedence เดียวกับ `_pair_verdicts`: item_name→name→model_name — reuse owner เดิม); validate supplied names = str + strip ไม่ว่าง + ตรง expected พอดี → ผิด → malformed marker เดิม → boundary fail-closed จุดเดียว; `_pair_segment` ยัง pure renderer; `_scope_vs` fixture แก้ subject_name ให้ตรง canonical card ("…60W")
+- [verify] name tests 11/11 GREEN (RED 10/1) + scope 8/8 + file 74 pass · contract+offline 4 · admission 28 · batch 79 files fwd+rev: 2513 pass + dotenv flake เดิม (isolated file 30 pass — pre-existing infra)
+- [mechanism delta R11D] helper +0 · field +0 · param +0 · guard tier +0 · regex +0 · keyword +0 · heuristic +0 · decision/composition owner +0 — validation ขยายใน owner เดิม (`_pair_verdict_fn` name check เพิ่มใน malformed condition เดิม)
+- [งานค้าง] MIXED_MULTI_NEED_PAIRING_OWNERSHIP_OPEN (ไม่แตะ); pairing production NOT READY เหมือน R9; Gemini live QA pending; dotenv flake = infra แยกงาน; หลัง independent review ผ่าน → หยุดแก้ pairing เข้าสู่ whole-candidate audit; ห้าม stage/commit/push/PR/deploy
+
+## TASK5-WHOLE-CANDIDATE — Simplification + Core-Scope Audit (audit-only)
+
+### กำลังจะทำ
+- หยุด pairing corrections แล้ว — audit-only รอบนี้: แยก Zaapi KB core (legacy|zaapi strict, zero reads, artifact-backed, pool attribution, fail closed) ออกจาก pairing/customer-answer scope ที่ขยายเกิน master plan; วัด whole dirty candidate vs HEAD จริง; hunk-level KEEP/MERGE/DELETE/DEFER + function/owner census; simplification plan → หยุดรอ user approval (ห้ามแก้ production/test code)
+
+## TASK 5 WHOLE-CANDIDATE SIMPLIFICATION AUDIT — AUDIT ONLY (closeout 2026-11-05)
+
+- วัด candidate จริง vs HEAD 7fabb04: production py +1469/−228 (net +1241), 13 ไฟล์; new defs 16 (13 top + 3 nested); if +123; try +7; semantic regex +3 (CONN_SURFACE/PAIRING/CONN_CLAIM — ทั้งหมด pairing); frozenset/table +7; dataclass field +1 (AnswerContext.pair_verdicts); boundary param +1; flags +0; deps +0
+- test additions: 3039 LOC untracked (final_answer 1672 / contract 1156 / conftest 115 / offline_boundary 96) + ~49 modified; 67 test defs
+- reconstruct approved core scope จาก master plan Stage 2.6–10 + Phase 4 design + legacy plan gates + ledger A-008/009/A-023–A-059
+- pairing = DEFERRED — NOT PRODUCTION READY (ไม่ใช่ hidden incomplete feature)
+- function census 18 names: KEEP 5 (_validate_meta→MERGE, _kb_zaapi_need_ok, _covers, _wattage_rc, warranty_value_months-KEEP-evidence) · DELETE/DEFER 13 (pairing subsystem ~349 LOC funcs + ~300 wiring)
+- hunk manifest: KEEP ~550 / MERGE meta-keysets ~30 / DELETE-DEFER ~650–750 → production net target ~+440–560
+- edit order: 1) DELETE pairing subsystem 2) MERGE meta keysets 3) defer pairing tests → backlog 4) re-measure+SRS+ledger
+- plan doc เดียวที่สร้าง: docs/plans/task5-core-simplification-plan.md
+- ไม่มี production/test code เปลี่ยน · ไม่มี stage/commit/push/PR/deploy
+- verdict: TASK_5_CORE_SIMPLIFICATION_PLAN_READY_FOR_USER_APPROVAL · MIXED_MULTI_NEED_PAIRING_OWNERSHIP_OPEN
+
+## TASK 5 CORE SIMPLIFICATION PLAN CORRECTION — DOCUMENT/AUDIT ONLY
+
+### กำลังจะทำ
+- แก้ plan doc เท่านั้น: (1) factual inconsistencies (file count 13, census KEEP4/MERGE1/DELETE13, frozenset count, def-type split) (2) scope matrix → CORE / CONDITIONAL SAFETY CARRYOVER / DEFERRED (3) pairing = negative safety gate ไม่ใช่ free model answer (4) hunk manifest + caller-verified projections (5) test backlog = non-executable spec + executable negative canaries (6) 8-step sequence ใหม่ — ห้ามแตะ production/test/SRS ห้าม commit/push/deploy
+
+## TASK 5 CORE SIMPLIFICATION PLAN CORRECTION — closeout 2026-11-05
+
+- แก้ plan doc เดียว → v2 (182 บรรทัด): corrected census (13 files · defs 18 = 15 top + 3 nested · bindings 16 · regex +3 · frozenset 6+modified) · scope matrix 3 ชั้น (CORE / CONDITIONAL KEEP×2 evidence-passed / DEFER) · negative pairing safety contract (0 unsupported positive · 0 wrong-item · canary executable ใน QA — pairing ไม่ใช่ feature gate แต่เป็น safety gate) · manifest caller-verified (_PROJECTION_FIELDS_* dup copy ยืนยัน → merge เข้า kb_zaapi_schema) · test strategy 4 ชั้น (core ~1900 / conditional ~200 / negative canaries ~150 / deferred → docs/plans non-executable spec −900-1000) · edit order 8 steps มี gate
+- unresolved decisions 5 ข้อรอ user: conditional-keep confirm · canary-fail ทางเลือก · merge destination · cannot-confirm threshold · spec filename
+- ไม่แตะ production/test/SRS/fixture — ไม่มี stage/commit/push/PR/deploy
+- verdict: TASK_5_CORE_SIMPLIFICATION_PLAN_CORRECTED_READY_FOR_USER_APPROVAL · MIXED_MULTI_NEED_PAIRING_OWNERSHIP_OPEN
+
+## TASK 5 CORE SIMPLIFICATION IMPLEMENTATION — user approved plan v2 + 5 locked decisions
+
+### กำลังจะทำ
+- implement: PART 2 delete pairing subsystem (app/answer_context/guards/device_compat/policy_resolver ตาม manifest) → PART 3 STOP gate (canaries + core + legacy) → PART 4 meta/projection merge (generation constants DELETE ถ้าไม่มี consumer · retrieval KEEP) → PART 5 conditional KEEP verify → PART 6 deferred spec + test cleanup → PART 7 full verify+docs — locked decisions: KEEP _wattage_rc/warranty_value_months · canary fail = BLOCK ACTIVATION ห้ามสร้าง decline mechanism · no shared abstraction single-consumer · cannot-confirm = per-case-type (gold ≤ legacy, unsupported expected) · spec = docs/plans/deferred-pairing-contract.md
+
+## TASK 5 CORE SIMPLIFICATION — STOP GATE HIT: PAIRING SAFETY (closeout 2026-11-05)
+
+- PART 2 เสร็จ: ลบ pairing subsystem ตาม manifest — app.py (boundary block ~81 + 3 module fns ~112 + _rd_extra pair + 2 closures ~118 + param+calls), answer_context (field+_pair_segment+compose loop ~59), guards (_PAIRING_RE/_conn_claim_re/_connector_grounded/tier ~155), device_compat (4 pieces ~57), policy_resolver (_pair_conn_vals+_PRODUCT_PAIR_STRUCTURED_SOURCES+pair branch+host_connector fold ~77) — py_compile ผ่านทุกไฟล์, ไม่มี dangling refs; KEEP _subject_cards/_clause_span (caller _spec_fact_grounded/_replace_clause เป็น core) + _wattage_rc + warranty_value_months ตาม lock
+- PART 3 STOP GATE: canaries 3/4 FAIL — 'แนะนำ AD1404T หัวชาร์จ USB-A เข้าคู่กับสาย ATC310N ได้เลยค่ะ' render verbatim จาก model prose โดยไม่มี structured evidence (pre-deletion machinery เคย drop มัน) → unsupported positive pairing claim ≠ 0
+- locked decision 2 → activation = BLOCKED · หยุดทันที · ไม่ทำ PART 4-7 · ไม่สร้าง decline mechanism/helper/guard/regex
+- verdict: TASK_5_CORE_SIMPLIFICATION_BLOCKED_BY_PAIRING_SAFETY · MIXED_MULTI_NEED_PAIRING_OWNERSHIP_OPEN
+
+## TASK 5 MINIMAL TYPED DECLINE — user approved option (c)
+
+### กำลังจะทำ
+- typed decline ใน compile_answer_context owner เดิมเท่านั้น: productish need + "compatibility"∈requested_facts + subject_refs + ไม่มี authoritative typed compat result + ไม่มี device-target path → UnansweredNeed(no_evidence) + drop จาก task.tasks — mechanism delta คาด: +1 branch invariant เท่านั้น ไม่มี helper/guard/regex/table/field/param/owner ใหม่ — ห้าม revert R11D ห้ามคืน subsystem
+
+## ผ่านแล้ว — TASK 5 CORE SIMPLIFICATION + TYPED UNSUPPORTED RELATION DECLINE (2026-11-05)
+
+- **สาเหตุ**: หลังลบ pairing subsystem (A-062 STOP gate) unsupported product↔product compatibility need กลับเป็น model task → model positive prose render ผ่าน unguarded (3/4 canaries fail)
+- **Root cause (trace verified)**: need(0,'product','describe', refs=('ATC310N',), facts=('compatibility',), target=None) + compat_verdicts=[] + task.tasks=[0] → `answer_typed` ถูกเรียก → stub `_PAIR_REPLY` render verbatim + card attach
+- **Fix (option c — typed decline จำกัดขอบเขต, user locked)**: `answer_context.compile_answer_context` จุดเดียว — productish need + `compatibility` ∈ requested_facts + subject_refs ไม่ว่าง + ไม่มี `target_of` + ไม่อยู่ใน decided/uncovered/no_match/clarify/no_emit/`_ask_unanswered` → append `UnansweredNeed(no_evidence)` + index เข้า `dropped` ก่อน task/evidence filter — model ไม่เห็น need, cards ไม่เป็น endorsement, mixed turn ไม่ถูกกลืน
+- **Mechanism delta**: +0 helpers/guards/regex/keyword/fields/params/owners — branch เดียวใน owner เดิม; ห้าม revert R11D ทำสำเร็จ (ไม่มี `_pair_*`/`pair_verdict_fn`/`_connector_grounded`/`_PAIRING_RE` เหลือใน production)
+- **PART 6 done**: meta keysets merge (`_META_ACCEPTED` closed contract — emit ⊆ accepted by construction) · generation `_PROJECTION_FIELDS*` dead constants deleted (retrieval sets KEEP — `_load_artifacts` consumer จริง) · `docs/plans/deferred-pairing-contract.md` สร้าง (non-executable spec + R7–R11D traceability + re-entry criteria) · deferred executable tests ถูกลบ 56 defs/~730 LOC (retained: core 26 + canary 4) · SRS section 6 อัปเดต (10 dead rows ลบ, 7 live rows patch)
+- **Verification**: canaries 4/4 · task5 retained 26 · zaapi focused battery 229 · batch 2465 passed/21 skip/6 xfail (dotenv flake เดิม pass standalone) · pool admission 28/0 · py_compile+diff --check clean
+- **Metrics (vs HEAD)**: production +800/−202 = net +598 (over range +38 — typed decline +26, `_wattage_rc` keep — ไม่มี patch เลขสวย) · app +3 · defs +6 (`_covers`/`_kb_zaapi_need_ok`/`_validate_meta`/`_wattage_rc`/`_clause_span`/`_subject_cards`) · pairing regex 0 · guard tier 0 · pair field/param 0
+- **งานค้าง**: independent review + activation decision; `MIXED_MULTI_NEED_PAIRING_OWNERSHIP_OPEN` คงเปิดใน deferred spec
+- **Verdict**: `TASK_5_CORE_SIMPLIFIED_WITH_TYPED_UNSUPPORTED_RELATION_DECLINE_READY_FOR_INDEPENDENT_REVIEW`
+
+## กำลังจะทำ — TASK 5 final test-contract & report accuracy correction (bounded: no production behavior change)
+
+## ผ่านแล้ว — TASK 5 test-contract & report accuracy correction (bounded, 2026-11-05)
+
+- **Correction notes**: report รอบก่อนนับ canary ซ้ำ — จริง = task5 file 22 + canary file 4 = **26** (ไม่ใช่ "core 26 + canary 4"); หลัง correction = **ไฟล์เดียว 28** (22 core + 4 canary + 2 positive control)
+- **Test-module dependency removed**: canary 4 tests ย้ายเข้า `test_task5_final_answer.py` เป็น file-local (`_chat`/`_pairing_fx`/`_PAIR_*` เดิม) — `docs/test/test_pairing_safety_canary.py` ถูกลบ (test modules −1)
+- **Root-behavior lock**: canary ทุกตัวใช้ `calls_out` — assert `"answer_typed" not in calls` + cannot-confirm (`ไม่มีข้อมูลยืนยัน`/`ไม่สามารถยืนยัน`) + no pairing/foreign/endorsement prose
+- **Executable control พิสูจน์ decline condition เดิมผิด**: multi-fact turn สร้าง `kind='compat'` need (refs+no target+facts=()) — bypass decline เดิม → pairing prose render จริง; fix = condition `(kind=="compat" or requested_facts=={"compatibility"} exact-set)` + decline drop task แม้ unanswered มีอยู่แล้ว (skip append ซ้ำเท่านั้น) — เหตุผลเดียวที่ authorized เพราะ control พิสูจน์
+- **Consequence ตาม contract**: `test_phase8_composition::test_three_productish_needs_one_product_result` — `_need_compat(refs=AC65B)` = product↔product ask ไม่มี verdict → ภายใต้ defer contract ต้อง decline; test ถูก update ให้เข้ารหัส contract ใหม่ (tasks {0,2}, unanswered (1,'compat','no_evidence')) — core intent "productish → ONE product result" คงเดิม
+- **Positive controls เพิ่ม**: `test_control_non_compat_recommendation_calls_model` (answer_typed ×1 + reply renders) + `test_control_multi_need_pairing_declined_spec_answered` (pairing declined + spec answered — Zaapi measured channel) — external-device verdict control มีอยู่แล้ว = `test_typed_compatible_positive_segment_and_capacity` / `test_multi_need_complete_evidence_answers_each_need`
+- **Meta contract wording corrected** (doc-only): code comment + SRS — จริงคือ `required ⊆ accepted` และ `emit ⊆ accepted` (ไม่ใช่ `required ⊆ emit` — `request_id` required routing-only ไม่ emit; `score`/`facts` emitted optional ไม่ required); set definitions ไม่เปลี่ยน (byte-identical executable)
+- **Production diff รอบนี้**: `answer_context.py` เท่านั้น (decline condition + comment) — ไฟล์อื่น byte-identical กับ baseline รอบนี้ · mechanism delta +0 helpers/guards/regex/keyword/fields/params/owners
+- **SRS fixes**: decline clause ย้ายจาก row `_verdict_target_decisions` (ผิด row) → `compile_answer_context` + condition ถูกต้อง; `_META_ACCEPTED` rename (เดิม `_ROUTING_META_KEYS` stale); boundary/UnansweredNeed wording ตรง condition ใหม่
+- **Verification**: task5 file **28 passed** (`-k canary|control` = 6) · Zaapi battery + offline boundary + warranty + pool = pass · pool admission script 28/0 · batch **2467 passed** (dotenv flake เดิม pass standalone) · py_compile+diff --check clean · staging ว่าง · stash intact
+- **งานค้าง**: residual — kind='compat' need ที่อยู่ใน `_ask_unanswered` (asks-marked) ไม่เข้า decline path (edge case ยังไม่มี executable proof); `_META_ACCEPTED` merge ตาม plan
+- **Verdict**: `TASK_5_CORE_SIMPLIFICATION_TEST_CONTRACT_CORRECTED_READY_FOR_FINAL_PRECOMMIT_REVIEW`
+
+## กำลังจะทำ — TASK 5 mixed-fact unsupported relation closure (final typed-decline correction)
+
+## ผ่านแล้ว — TASK 5 mixed-fact unsupported relation closure (final typed-decline correction, 2026-11-05)
+
+- **RED A (mixed facts)**: productish need facts=('compatibility','charging_speed') + refs + target=None → compatibility อยู่ใน rendered task + `answer_typed` ถูกเรียก — pairing subclaim ถึง model จริง (stub prose โดน rewrite tier จับพอดี แต่ instruction หลุด)
+- **RED B (`_ask_unanswered`)**: reachable ผ่าน intent `capability_asks` (validated substring เช่น "กันน้ำ") — asks-marked relation need เดิม bypass decline (`i in _ask_unanswered` skip); post-fix: calls=0 + asks-named cannot-confirm + relation cannot-confirm ทั้งคู่ render ผ่าน owner เดิม
+- **Fix (compile_answer_context เท่านั้น)**: `_rel_declined` (kind=='compat' → drop ทั้ง need; pure-compatibility productish → drop) + `_rel_strip` (mixed facts → `_dc_replace` strip เฉพาะ 'compatibility' ออกจาก requested_facts — task ตอบ fact อื่นต่อ) — task transformation จุดเดียวรวม capability-ask strip เดิม; ถอด `_ask_unanswered` ออกจาก skip → ไม่ bypass; UnansweredNeed(no_evidence) append/reuse เดิม
+- **Verification**: task5 file **30 passed** (เพิ่ม `test_control_mixed_fact_strips_compatibility_only` + `test_canary_asks_marked_relation_never_reaches_model`) · phase8 ทั้งไฟล์ผ่าน · batch **2469** (dotenv flake เดิม pass standalone) · pool 28/0 · compile+diff-check clean
+- **Production diff**: `answer_context.py` เท่านั้น (+0 helpers/guards/regex/keyword/fields/params/owners — set เดิม + `_dc_replace` เดิม); ไฟล์อื่น byte-identical
+- **SRS**: decline clause อัปเดตเป็น strip/drop semantics + `_ask_unanswered` no-bypass (rows 372/1326/1341)
+- **Residual**: ไม่มีกรณีที่ pairing subclaim ถึง model — pure/mixed/asks-marked/external-verdict/non-compat ครบ executable proof
+- **Verdict**: `TASK_5_CORE_SIMPLIFICATION_MIXED_RELATION_CLOSED_READY_FOR_FINAL_PRECOMMIT_REVIEW`
+
+## กำลังจะทำ — TASK 5 final report accuracy correction + pre-commit freeze (docs/bookkeeping only)
+
+## ผ่านแล้ว — TASK 5 final report accuracy correction + pre-commit freeze (2026-11-05, docs-only)
+
+- **Fresh measurements (ไม่ใช่เลขเดิม)**: production diff vs HEAD = **+831/−205 = net +626** ตรง reviewer reference · defs +7/−2 (net +5) · regex bindings guards 19→19 / policy_resolver 2→2 · AnswerContext fields 0±0 · stale pairing scan (`_pair_`/`pair_verdict`/`_PAIRING_RE`/`connector_claim`/`host_connector`/`_pair_segment`/`_pair_facts`/`_subject_pins`/`_pair_conn_vals`/`_PRODUCT_PAIR`) = **0 hits ทุก pattern**
+- **Test census**: `test_task5_final_answer.py` = **30 tests ไฟล์เดียว** (22 core + 4 canary + 4 controls) · ไม่มี `test_pairing_safety_canary.py` ค้าง (modules −1) · focused battery = **183 passed** (exit 0) · pool admission = **28/0** · batch = 2469 candidate assertions passed, **exit code 1 เพราะ `test_load_dotenv_aliases_restored_after_import`** — order-dependent dotenv flake เดิม (fail เฉพาะใน full-batch ordering; **standalone pass**, observed ตั้งแต่ pre-candidate rounds A-062/A-063 — ไม่ใช่ candidate defect)
+- **Doc corrections รอบนี้**: plan §9 net +598→**+626** + defs census ใหม่ + test counts ล่าสุด; รายงาน batch ไม่เขียน "ผ่าน" — ระบุ exit code + flake cause + standalone proof; ledger A-063/A-065 ใส่ corrected-by
+- **Safety scan**: candidate ทั้งหมด — hits = env-var names (`.env`/`GEMINI_API_KEY`/`os.environ`) + doc references เท่านั้น ไม่มี secrets/`/Users/`/`npz`/`__pycache__`/debug-print ใน test file; uvicorn = user dev server ไม่แตะ
+- **Production behavior change รอบนี้: 0** (docs/log/ledger เท่านั้น — py_compile+diff --check clean, staging ว่าง, stash intact)
+- **งานค้าง**: pairing feature DEFERRED (deferred-pairing-contract.md อยู่ครบ ไม่กลับเข้า production) · Gemini live QA pending · dotenv ordering flake = pre-existing infra
+- **Verdict**: `TASK_5_FINAL_REPORT_ACCURACY_CORRECTED_READY_FOR_PRECOMMIT_REVIEW`
+
+## กำลังจะทำ — TASK 5 ledger enum + report wording correction (docs/metadata only)
+
+## TASK 5 — Ledger enum + report wording correction (PART 7 closeout)
+
+- ledger enum census ก่อนแก้: BAD category 10 rows (A-057..A-066 composite/non-enum) · BAD status 2 rows (A-060/A-061 `verified-audit`) + A-065 column shift (inner pipe in summary)
+- หลังแก้: **BAD category = 0 · BAD status = 0** (mapping ตาม approved table; source ranges/test evidence ไม่แตะ)
+- overclaim wording audit: `ครอบทุกรูปแบบ` / `ตอบได้เหมือนเดิม` / wildcard manifest (`kb_zaapi*.py`) — **ไม่มีใน persistent docs** (เป็น report prose เท่านั้น); ledger batch wording ถูกต้องแล้ว (exit 1 + flake ระบุชัด); correction note นี้จำกัดความ report wording เดิม
+- exact manifest แจกแจง 29 ไฟล์ใน final report — `test_pairing_safety_canary.py` ไม่มีใน candidate; `test_task5_final_answer.py` = module เดียวเก็บ canaries/controls
+- **production/tests/SRS byte changes รอบนี้ = 0** (hash verify: prod `8ea3c8e9…` · tests `6228e62c…` · SRS `d636e08a…` — identical)
+- stale pairing production scan: 0 hits / 10 patterns
+- focused battery: **183 passed, exit 0** · pool admission: **28/0, exit 0** · `git diff --check` clean
+- mechanism delta ทุกหมวด = **0** (helpers/guards/regex/keywords/fields/params/owners)
+- residual: pairing feature deferred · Gemini live QA pending · dotenv ordering flake = known infra issue · semantic ledger coverage ยัง partial
+
+Verdict: `TASK_5_LEDGER_ENUM_AND_REPORT_WORDING_CORRECTED_READY_FOR_FINAL_PRECOMMIT_REVIEW`
+
+## กำลังจะทำ — TASK 5 two-commit closeout (approved: commit only, no push/PR/deploy)
+
+## TASK 5 — Commit 1 closeout (production/tests/SRS/plans)
+
+- `TASK5_CODE_COMMIT` = `675686330265681bf0daf585a92363f8c53127aa` — `feat: integrate Zaapi KB with evidence pool` — 27 files, +3571/−266
+- focused battery: **183 passed, exit 0** · pool admission: **28/0, exit 0** · py_compile 13/13 OK · `diff --check` clean
+- safety scan: 0 secrets/URIs/paths · 0 added prints · 0 new coll writes · stale pairing 0/10 patterns
+- mechanism delta vs HEAD~: ตาม approved manifest เท่านั้น — ไม่มี business logic เพิ่มในรอบนี้
+- residual: product↔product pairing feature **deferred** (contract doc only) · Gemini live QA **pending** · dotenv ordering flake = known infra issue · semantic ledger coverage **partial**
+- **ไม่มี push/PR/merge/deploy** — commit อยู่ local เท่านั้น
