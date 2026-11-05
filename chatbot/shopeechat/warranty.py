@@ -57,11 +57,27 @@ _FALSE_POSITIVE_PATTERN = re.compile(
 def _unit_to_months(value: int, unit: str) -> int:
     """แปลง unit Y/M หรือ ปี/เดือน เป็นจำนวนเดือน."""
     u = unit.lower()
-    if u in ("y", "year", "ปี"):
+    if u in ("y", "year", "years", "ปี"):
         return value * 12
-    if u in ("m", "month", "เดือน"):
+    if u in ("m", "month", "months", "เดือน"):
         return value
     return 0
+
+
+def warranty_value_months(value) -> int | None:
+    """normalize typed warranty fact value → เดือน (owner เดียวของ
+    months semantics): int/float ผ่านตรง, str "24"/"24 months"/
+    "2 years" → months; รูปแบบอื่น → None (unknown ไม่ใช่ negative)"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    m = re.match(r"^\s*(\d{1,3})\s*([a-zA-Z]+|ปี|เดือน)\s*$",
+                 str(value or ""))
+    if not m:
+        return None
+    months = _unit_to_months(int(m.group(1)), m.group(2))
+    return months or None
 
 
 def extract_warranty_from_name(item_name: str) -> Optional[dict]:

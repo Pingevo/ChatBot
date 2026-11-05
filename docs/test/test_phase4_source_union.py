@@ -650,8 +650,12 @@ def test_main_grouped_zaapi_wires_selected_kb_fetcher(monkeypatch):
     fetcher = calls["kwargs"][0].get("kb_fetcher")
     assert callable(fetcher)
     assert fetcher() is sentinel
-    assert seen == [{"shop": SHOP, "platform": "shopee",
-                     "message": "มี WPB100L ไหม"}]
+    assert len(seen) == 1
+    kw = seen[0]
+    assert (kw["shop"], kw["platform"], kw["message"]) \
+        == (SHOP, "shopee", "มี WPB100L ไหม")
+    # per-need contract (Task 5): adapter retrieves by turn needs
+    assert isinstance(kw.get("needs"), tuple) and kw["needs"]
 
 
 def test_main_grouped_legacy_without_hit_never_falls_through_to_zaapi(

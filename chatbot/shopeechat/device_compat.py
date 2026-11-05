@@ -596,7 +596,6 @@ _CONN_QUERY_KW = {
     "micro-usb": ["micro usb", "micro-usb"],
 }
 
-
 def _device_mentioned(device_name: str, products: list[dict]) -> bool:
     """catalog evidence — สินค้าระบุชื่อ target_device ตรงใน name/description
     → ร้านมีสินค้า declared-compat อยู่แล้ว (เช่น "สำหรับ iPhone 18")

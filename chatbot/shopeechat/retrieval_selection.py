@@ -215,8 +215,17 @@ def needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
     elif req.source in ("slot", "relation_target"):
         out = [n for n in prodish
                if not _need_scope(n) or _need_scope(n) & _req_scope(req)]
+    elif req.source == "kb" and (req.subject_refs or req.target_refs):
+        # per-need zaapi channel (ch:kb:<i> ติด refs ของ need มา) —
+        #   identity-scoped coverage: เฉพาะ need ที่ refs ตรงกันเป๊ะ;
+        #   typed topic gate ที่ compiler คัดหัวข้อขั้นสุดท้าย
+        srefs = (frozenset(req.subject_refs or ())
+                 | frozenset(req.target_refs or ()))
+        out = [n for n in prodish
+               if (frozenset(n.subject_refs or ())
+                   | frozenset(n.target_refs or ())) == srefs]
     else:
-        out = list(needs)  # kb/อื่นๆ = context channel ทุก need
+        out = list(needs)  # bare kb/อื่นๆ = context channel ทุก need
     return tuple(out)
 
 

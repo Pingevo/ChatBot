@@ -728,8 +728,8 @@ def _typed_answer_boundary(sel: dict, *, needs: tuple, profile,
     except Exception:
         return _done(adm=adm, web=web_used)
     # model ถูกเรียกเฉพาะเมื่อมี task ที่ต้องตอบจริง — ctx ว่าง หรือ turn
-    # มีแต่ typed deterministic results (compat verdict / deferred) →
-    # composition อย่างเดียว, 0 answer-model call
+    # มีแต่ typed deterministic results (compat verdict / deferred)
+    #   → composition อย่างเดียว, 0 answer call
     if ctx.is_empty or not ctx.task.tasks:
         return _done(ctx=ctx, adm=adm, web=web_used)
     answer, usage = llm.answer_typed(
@@ -1217,9 +1217,12 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             _sel_flag = False
         if _sel_flag and _rcfg.kb_source() == "zaapi":
             from . import kb_zaapi as _kbz
-            _grouped_kb_fetcher = lambda: _kbz.zaapi_kb_evidence(
+            _grouped_kb_fetcher = lambda *a, need=None, request_id="ch:kb", \
+                **k: _kbz.zaapi_kb_evidence(
                 shop=req.shop, platform=req.platform or "shopee",
-                message=req.message)
+                message=req.message, request_id=request_id,
+                needs=((need,) if need is not None
+                       else (_turn_plan.needs if _turn_plan else ())))
         _tagged_item_id = req.item_id or _extract_item_id_tag(req.message)
         _is_from_history_anchor = False
         _hybrid_anchor_card = None  # ⚡ 2026-09-12 — anchor สำหรับ hybrid merge (compat+target_device)

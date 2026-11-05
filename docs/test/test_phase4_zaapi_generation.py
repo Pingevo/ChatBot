@@ -139,12 +139,18 @@ def test_validate_gen_doc_truth_table():
 def test_validate_artifact_manifest_truth_table():
     ok = _valid_manifest()
     assert schema.validate_artifact_manifest(ok) is ok
+    # v2 = supported projection shape (Task 5 typed fields); unsupported
+    # versions still fail closed
+    assert schema.validate_artifact_manifest({**ok, "schema_version": 2})
 
     bad = [
         {**{k: v for k, v in ok.items() if k != "vectors"}},           # missing role
         {**ok, "manifest": {}},                                        # extra role (self-ref)
         {**ok, "schema_version": True},
-        {**ok, "schema_version": 2},
+        {**ok, "schema_version": 0},
+        {**ok, "schema_version": 3},                                   # unsupported
+        {**ok, "schema_version": "2"},                                 # non-int
+        {**ok, "schema_version": None},
         {**ok, "generation_id": "bad"},
         {**ok, "vectors": {**ok["vectors"], "file": "vec.npz"}},       # wrong file
         {**ok, "vectors": {**ok["vectors"], "sha256": "D" * 64}},      # uppercase
@@ -234,7 +240,8 @@ def test_record_set_digest_ordered():
 
 def test_record_map_self_contained():
     """spec §16.24: text ครั้งเดียวต่อ digest; sorted by record_id;
-    projections 7 fields; scope normalize ผ่าน canonical_delivery_scope"""
+    projections = v2 field set (v1 7 + typed routing/content);
+    scope normalize ผ่าน canonical_delivery_scope"""
     gen = _import_gen()
     r1, r2 = record(item_id="I-1", shop="  Shop  A "), record(item_id="I-1")
     r3 = record(item_id="I-2")
@@ -251,7 +258,13 @@ def test_record_map_self_contained():
     assert ids == sorted(ids) and len(ids) == 2        # sorted, dedup-free
     for p in entry["records"]:
         assert set(p) == {"record_id", "shop", "platform", "item_id",
-                          "model_id", "subject_id", "target_id"}
+                          "model_id", "subject_id", "target_id",
+                          "record_type", "topic", "topic_key",
+                          "fact_fields", "readiness", "answer_text",
+                          "steps", "facts"}
+        # topic_key derive เฉพาะจาก REQUESTED_FACTS enum (topic "t"
+        #   non-enum → None = declared-unverifiable at the gate)
+        assert p["topic_key"] is None and p["topic"] == "t"
     shops = {p["shop"] for p in entry["records"]}
     assert shops == {"Shop A", "ShopA"}                # normalized ผ่าน owner
     plats = {p["platform"] for p in entry["records"]}

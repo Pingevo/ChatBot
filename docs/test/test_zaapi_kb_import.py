@@ -2818,8 +2818,10 @@ def test_runtime_corpus_stays_legacy_collection_and_is_never_a_raw_target(admin)
         assert kb_zaapi._COLL == "zaapi_kb"
         assert importer.ZA_KB_RAW_COLL == "zaapi_kb_raw_sources"
         assert importer.ZA_KB_RAW_COLL != kb_zaapi._COLL
-        assert kb_zaapi._zaapi_coll() is admin.store["zaapi_kb"]
-        assert admin.trace == ["zaapi_kb"]
+        # Task 5: runtime = immutable Phase 4 artifacts only — canonical
+        #   collection must have no per-request reader on the adapter
+        assert not hasattr(kb_zaapi, "_zaapi_coll")
+        assert admin.trace == []
     importlib.reload(kb_zaapi)
 
 

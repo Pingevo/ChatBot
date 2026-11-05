@@ -35,8 +35,12 @@ ROOT = Path(__file__).resolve().parent.parent.parent
 EMBEDDING_DIM = embedding.EMBEDDING_DIM
 _STRUCTURED_FIELDS = ("item_id", "model_id", "model_code", "alias",
                       "subject_id", "target_id")
-_PROJECTION_FIELDS = {"record_id", "shop", "platform", "item_id", "model_id",
-                      "subject_id", "target_id"}
+_PROJECTION_FIELDS_V1 = {"record_id", "shop", "platform", "item_id",
+                         "model_id", "subject_id", "target_id"}
+# v2 = v1 + typed routing/content fields (Task 5 gate/meta contract)
+_PROJECTION_FIELDS = _PROJECTION_FIELDS_V1 | {
+    "record_type", "topic", "topic_key", "fact_fields", "readiness",
+    "answer_text", "steps", "facts"}
 _MODEL_FIELDS = ("name", "revision", "sentence_transformers_version", "dim",
                  "normalize_embeddings", "output_dtype")
 
@@ -53,6 +57,7 @@ class ZaapiKbSnapshot:
     model_compatible: bool           # runtime identity == pin (exact ไม่พึ่ง flag)
     canonical_generation: str
     record_count: int
+    schema_version: int = 1          # manifest artifact shape version
 
 
 def _sha256_file(path: Path) -> str:
@@ -116,6 +121,9 @@ def _load_artifacts(gen_dir: Path, gen_doc: dict) -> dict | None:
             return _fail(f"{role} load error ({exc})")
 
     # ชั้น 3 — shape/dim/count/dtype/cross-counts (spec §11)
+    expected = (_PROJECTION_FIELDS_V1
+                if manifest["schema_version"] == 1
+                else _PROJECTION_FIELDS)
     vectors, record_map, sindex = (payloads["vectors"],
                                    payloads["record_map"],
                                    payloads["structured_index"])
@@ -141,7 +149,7 @@ def _load_artifacts(gen_dir: Path, gen_doc: dict) -> dict | None:
                 or set(e) != {"vector_index", "text", "records"}
                 or e["vector_index"] != i
                 or not isinstance(e["text"], str)
-                or any(set(p) != _PROJECTION_FIELDS for p in e["records"])):
+                or any(set(p) != expected for p in e["records"])):
             return _fail("record_map entry/projection mismatch")
     if (set(sindex) != set(_STRUCTURED_FIELDS)
             or manifest["structured_index"]["field_count"] != len(_STRUCTURED_FIELDS)
@@ -159,7 +167,8 @@ def _load_artifacts(gen_dir: Path, gen_doc: dict) -> dict | None:
            for v in sindex.values() for ids in v.values() for rid in ids):
         return _fail("structured_index posting references unknown record_id")
     return {"vectors": emb, "digests": tuple(digests),
-            "record_map": record_map, "structured_index": sindex}
+            "record_map": record_map, "structured_index": sindex,
+            "schema_version": manifest["schema_version"]}
 
 
 def load_generation_snapshot(db, gid: str, *, exports_root=None
@@ -194,7 +203,8 @@ def load_generation_snapshot(db, gid: str, *, exports_root=None
         record_index=record_index, model=doc["model"],
         model_compatible=compatible,
         canonical_generation=doc["canonical_generation"],
-        record_count=doc["record_count"])
+        record_count=doc["record_count"],
+        schema_version=loaded["schema_version"])
 
 
 def load_active_generation(db, *, exports_root=None) -> ZaapiKbSnapshot | None:
@@ -229,24 +239,48 @@ def _empty(*trace: str):
     return KbEvidenceResult(supporting_evidence=(), raw_count=0, trace=trace)
 
 
-def _evidence_record(digest: str, projection: dict, record_map: dict) -> dict:
+def _evidence_record(digest: str, projection: dict, record_map: dict,
+                     score: float | None = None,
+                     request_id: str = "ch:kb") -> dict:
     """Producer record ตาม spec §9 — materialize จาก artifacts เท่านั้น;
-    omit field ว่าง/None; ห้ามเดา/parse prose"""
-    ev: dict = {"kind": "kb"}
+    omit field ว่าง/None; ห้ามเดา/parse prose. kind="kb_zaapi" = source
+    marker; meta = single typed channel (routing + content fields);
+    score เฉพาะ semantic-origin (exact hits ไม่มี — ไม่ invent)"""
+    ev: dict = {"kind": "kb_zaapi"}
     if projection["item_id"] is not None:
         ev["item_id"] = projection["item_id"]
+    if projection.get("model_id") is not None:
+        ev["model_id"] = projection["model_id"]
     identity = projection["subject_id"] or projection["model_id"]
     if identity is not None:
         ev["identity"] = identity
     if projection["target_id"] is not None:
         ev["target"] = projection["target_id"]
+    meta = {"record_type": projection.get("record_type"),
+            "fact_fields": tuple(projection.get("fact_fields") or ()),
+            "readiness": projection.get("readiness"),
+            "record_id": projection.get("record_id"),
+            "request_id": request_id}
+    for k in ("topic", "topic_key"):   # optional — omit เมื่อ absent
+        if projection.get(k) is not None:
+            meta[k] = projection[k]
+    if projection.get("answer_text") is not None:
+        meta["answer_text"] = projection["answer_text"]
+    if projection.get("steps"):
+        meta["steps"] = tuple(projection["steps"])
+    if projection.get("facts"):
+        meta["facts"] = tuple(projection["facts"])
+    if score is not None:
+        meta["score"] = float(score)
+    ev["meta"] = meta
     ev["payload"] = {"text": record_map[digest]["text"]}
     return ev
 
 
 def retrieve(snapshot, *, shop, platform, item_ids=(), model_ids=(),
              model_codes=(), aliases=(), subject_ids=(), target_ids=(),
-             semantic_query=None, limit=EVIDENCE_LIMIT):
+             semantic_query=None, limit=EVIDENCE_LIMIT,
+             request_id="ch:kb"):
     """Canonical-KB retrieval บน snapshot — boundary validation → scope
     normalize → structured channels → semantic channel → scoped merge →
     limit → producer records → KbEvidenceResult (fail closed เป็น empty+trace)"""
@@ -324,16 +358,17 @@ def retrieve(snapshot, *, shop, platform, item_ids=(), model_ids=(),
 
     # merge: structured ก่อน semantic (score desc, tie → record_id asc); dedupe
     seen = set(exact_ids)
-    records: list[tuple] = [(rid, snapshot.record_index[rid])
+    records: list[tuple] = [(rid, snapshot.record_index[rid], None)
                           for rid in exact_ids]
-    for _, rid, digest in sorted(semantic_hits,
-                                 key=lambda h: (-h[0], h[1])):
+    for sc, rid, digest in sorted(semantic_hits,
+                                  key=lambda h: (-h[0], h[1])):
         if rid not in seen:
             seen.add(rid)
-            records.append((rid, snapshot.record_index[rid]))
+            records.append((rid, snapshot.record_index[rid], sc))
     records = records[:limit]
-    evs = tuple(_evidence_record(digest, p, snapshot.record_map)
-                for _, (digest, p) in records)
+    evs = tuple(_evidence_record(digest, p, snapshot.record_map, score=sc,
+                                 request_id=request_id)
+                for _, (digest, p), sc in records)
     return KbEvidenceResult(supporting_evidence=evs,
                             raw_count=len(evs), trace=tuple(trace))
 

@@ -157,7 +157,6 @@ _SPEC_CLAIM_RE = re.compile(
 
 _NEGATION_RE = re.compile(r"(?:ไม่|ห้าม|มิได้|ไม่สามารถ|ไม่ได้|หมด)")
 
-
 def _pos_grounded(text: str, pos_rx) -> bool:
     """pos_rx match ใน text ที่ไม่มี negation นำหน้าในระยะใกล้ (20 chars —
     ครอบ "ไม่รับเปลี่ยน/คืน" ที่ negation ห่างจาก kw ที่สอง)."""
@@ -252,7 +251,22 @@ _CLAUSE_BOUNDARY = re.compile(
     r"\n|\|\|\||(?<=[.!?])\s|(?:ค่ะ|คะ|ครับ|ครับผม|จ้า|จ๊ะ|นะคะ|นะค่ะ|นะครับ)\s+")
 
 
-def _spec_fact_grounded(resp, tok: str) -> bool:
+def _subject_cards(resp, _cp) -> list:
+    """resp.products ผ่าน subject scope เดียวกับ _spec_fact_grounded —
+    card เจ้าของ turn เท่านั้น (>1 subject → caller fail closed ก่อน)"""
+    _rd = getattr(resp, "routing_decision", None)
+    _sids = set(_rd.get("subject_ids") or ()) if isinstance(_rd, dict) else set()
+    cards = list(getattr(resp, "products", None) or [])
+    if _sids:
+        cards = [
+            p for p in cards
+            if (_cp._identity_key(p)[0] in _sids
+                or ((_iid := _cp._card_ids(p)[2]) is not None
+                    and f"i:{_iid}" in _sids))]
+    return cards
+
+
+def _spec_fact_grounded(resp, tok: str, raw_ctx: str = "") -> bool:
     """Phase 5 H5/R2 — spec claim ต้อง ground ด้วย FieldEvidence ของ
     subject เดียวกันเท่านั้น (identity-scoped).
 
@@ -271,28 +285,70 @@ def _spec_fact_grounded(resp, tok: str) -> bool:
     _sids = set(_rd.get("subject_ids") or ()) if isinstance(_rd, dict) else set()
     if len(_sids) > 1:
         return False
-    cards = list(getattr(resp, "products", None) or [])
-    if _sids:
-        cards = [
-            p for p in cards
-            if (_cp._identity_key(p)[0] in _sids
-                or ((_iid := _cp._card_ids(p)[2]) is not None
-                    and f"i:{_iid}" in _sids))]
+    cards = _subject_cards(resp, _cp)
     for _p in cards:
         _sid = _cp._identity_key(_p)[0]
         if _sid and _pr.claim_supported(
                 _pr.extract_field_facts(_p), _sid, tok):
             return True
+    # typed measured spec facts (kb_zaapi canonical evidence — identity-
+    #   scoped เหมือน card facts: subject-scoped turn รับเฉพาะ facts ของ
+    #   subject identity เดียวกัน; source kb_zaapi ≠ _KB_INHERIT_SOURCE
+    #   → hint-grade ไม่ใช่ → ground ได้)
+    for _mf in (isinstance(_rd, dict)
+                and (_rd.get("spec_measured") or ()) or ()):
+        # canonical Zaapi facts เท่านั้นที่ ground ได้ — card-derived
+        #   measured rows (spec_measured รวม card facts ของทุก candidate
+        #   รวมตัวที่ถูก drop) ไม่ใช่ guard authority
+        if str(_mf.get("source") or "") != "kb_zaapi":
+            continue
+        _ident = str(_mf.get("identity") or "")
+        if not _ident or (_sids and _ident not in _sids):
+            continue
+        if _pr.claim_supported(
+                (_pr.FieldEvidence(
+                    subject_id=_ident,
+                    fact_key=str(_mf.get("fact_key") or ""),
+                    value=_mf.get("value"),
+                    status="known", source="kb_zaapi"),),
+                _ident, tok):
+            return True
+    # warranty claim — months semantics ผ่าน owner เดิม (warranty.py):
+    #   claim context ต้องมี ประกัน/warranty lexeme ตาม owner pattern
+    #   (context ว่าง → ไม่ใช่ warranty claim → ตก grounding path ต่อ);
+    #   เทียบ months กับ typed warranty facts — card (_warranty_months:
+    #   structured field + title tail) และ kb_zaapi measured (normalize
+    #   ผ่าน owner เดียวกัน) — ไม่ match → ตก channel เดิม (grounding_text
+    #   = evidence-backed text ที่ระบบใช้เป็นฐานคำตอบอยู่แล้ว)
+    _wm = None
+    if raw_ctx:
+        from . import warranty as _wr
+        _ext = _wr.extract_warranty_from_name(raw_ctx)
+        if isinstance(_ext, dict) and _ext.get("months"):
+            _wm = int(_ext["months"])
+    if _wm is not None:
+        for _p in cards:
+            if _pr._warranty_months(_p) == _wm:
+                return True
+        for _mf in (isinstance(_rd, dict)
+                    and (_rd.get("spec_measured") or ()) or ()):
+            if str(_mf.get("source") or "") != "kb_zaapi":
+                continue
+            if str(_mf.get("fact_key") or "") != "warranty":
+                continue
+            _ident = str(_mf.get("identity") or "")
+            if not _ident or (_sids and _ident not in _sids):
+                continue
+            if _wr.warranty_value_months(_mf.get("value")) == _wm:
+                return True
     if _sids:
         return False  # subject-scoped turn — grounding_text ไม่ผูก identity
     return tok in set(_pr._spec_tokens(_grounding_text(resp)))
 
 
-def _replace_clause(text: str, start: int, end: int, repl: str) -> str:
-    """แทนที่ clause ทั้งก้อนที่ครอบ span [start,end) ด้วย repl —
-    กันเหลือเศษข้อความของ claim เดิมค้างกลางประโยค รวมถึง sentence-final
-    particle ของ clause ที่ถูกแทน (ค่ะ/ครับ/นะคะ ไม่ใช่ประโยคใหม่ —
-    คง `|||` delimiter ไว้)"""
+def _clause_span(text: str, start: int, end: int) -> tuple[int, int]:
+    """span ของ clause ที่ครอบ [start,end) — boundary walk เดียวกับ
+    _replace_clause (owner เดียวของ clause semantics)"""
     cs = 0
     for _m in _CLAUSE_BOUNDARY.finditer(text):
         if _m.end() <= start:
@@ -300,10 +356,23 @@ def _replace_clause(text: str, start: int, end: int, repl: str) -> str:
         elif _m.start() >= end:
             break
     ce = len(text)
+    for _m in _CLAUSE_BOUNDARY.finditer(text):
+        if _m.start() >= end:
+            ce = _m.start()
+            break
+    return cs, ce
+
+
+def _replace_clause(text: str, start: int, end: int, repl: str) -> str:
+    """แทนที่ clause ทั้งก้อนที่ครอบ span [start,end) ด้วย repl —
+    กันเหลือเศษข้อความของ claim เดิมค้างกลางประโยค รวมถึง sentence-final
+    particle ของ clause ที่ถูกแทน (ค่ะ/ครับ/นะคะ ไม่ใช่ประโยคใหม่ —
+    คง `|||` delimiter ไว้)"""
+    cs, ce = _clause_span(text, start, end)
     _bm = None
     for _m in _CLAUSE_BOUNDARY.finditer(text):
         if _m.start() >= end:
-            ce, _bm = _m.start(), _m
+            _bm = _m
             break
     tail = text[ce:]
     if (_bm is not None and _bm.group(0) not in ("\n", "|||")
@@ -593,7 +662,10 @@ def enforce(resp, req):
                             if _NEGATION_RE.search(_ans[max(0, _sm.start() - 20):_sm.start()]):
                                 continue
                             _tok = re.sub(r"[\s,]+", "", _sm.group(0)).lower()
-                            if _spec_fact_grounded(resp, _tok):
+                            _cs2, _ce2 = _clause_span(
+                                _ans, _sm.start(), _sm.end())
+                            if _spec_fact_grounded(
+                                    resp, _tok, _ans[_cs2:_ce2]):
                                 continue
                             _bad_spec = _sm
                             break

@@ -33,8 +33,6 @@ from .kb_zaapi_schema import (canonical_delivery_scope, canonical_json,
 SERIALIZATION_VERSION = "semantic_text/v1"
 STRUCTURED_INDEX_FIELDS = ("item_id", "model_id", "model_code", "alias",
                            "subject_id", "target_id")
-_PROJECTION_FIELDS = ("record_id", "shop", "platform", "item_id", "model_id",
-                      "subject_id", "target_id")
 _LIST_FIELDS = {"model_code": "model_codes", "alias": "aliases"}
 
 
@@ -79,10 +77,21 @@ def build_record_map(records: list[dict], texts_by_digest: dict) -> dict:
     for rec in records:
         digest = semantic_digest(rec)
         shop, platform = canonical_delivery_scope(rec["shop"], rec["platform"])
+        from .intent_classifier import REQUESTED_FACTS
+        topic = rec["topic"]
         projection = {
             "record_id": rec["record_id"], "shop": shop, "platform": platform,
             "item_id": rec["item_id"], "model_id": rec["model_id"],
-            "subject_id": rec["subject_id"], "target_id": rec["target_id"]}
+            "subject_id": rec["subject_id"], "target_id": rec["target_id"],
+            "record_type": rec["record_type"], "topic": topic,
+            # routing key derive เฉพาะจาก closed enum เดิม — free-string
+            # topic ที่ไม่ตรง enum → None (declared-unverifiable ที่ gate)
+            "topic_key": topic if topic in REQUESTED_FACTS else None,
+            "fact_fields": tuple(f["key"] for f in rec.get("facts") or ()),
+            "facts": tuple(rec.get("facts") or ()),
+            "readiness": rec["readiness"],
+            "answer_text": rec["answer_text"],
+            "steps": tuple(rec.get("steps") or ())}
         entry = out.setdefault(digest, {
             "vector_index": sorted_digests.index(digest),
             "text": texts_by_digest[digest], "records": []})
@@ -112,7 +121,7 @@ def build_structured_index(records: list[dict]) -> dict:
 def build_manifest_payload(gid: str, roles: dict) -> dict:
     """manifest.json object ตาม spec §10 — ครอบ 3 payload roles เท่านั้น
     (ไม่มี self entry; `roles` = per-role metadata จาก `_write_artifact`)"""
-    return {"schema_version": 1, "generation_id": gid,
+    return {"schema_version": 2, "generation_id": gid,
             "vectors": roles["vectors"], "record_map": roles["record_map"],
             "structured_index": roles["structured_index"]}
 

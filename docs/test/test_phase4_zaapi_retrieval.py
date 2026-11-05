@@ -402,7 +402,8 @@ def test_scoped_ranking(tmp_path, monkeypatch):
 
 def test_materialization_and_closed_record(tmp_path):
     """§16.22,23,17: payload.text verbatim digest text; identity precedence
-    subject→model; omit empty; kind=="kb"; ห้าม request_id/need_indices"""
+    subject→model; omit empty; kind=="kb_zaapi" + typed meta channel;
+    ห้าม request_id/need_indices flat (request_id อยู่ใน meta)"""
     rec = record(item_id="I-1", subject_id="S-9", target_id="T-9",
                  answer_text="hello ans")
     snap = _snap(tmp_path, recs=[rec])
@@ -412,14 +413,20 @@ def test_materialization_and_closed_record(tmp_path):
     from shopeechat.kb_zaapi_generation import semantic_digest
     digest = semantic_digest(rec)
     assert ev["payload"]["text"] == snap.record_map[digest]["text"]
-    assert ev["kind"] == "kb"
+    assert ev["kind"] == "kb_zaapi"
     assert ev["item_id"] == "I-1"
     assert ev["identity"] == "S-9"          # subject_id precedence
     assert ev["target"] == "T-9"
+    meta = ev["meta"]
+    assert meta["record_type"] == "spec" and meta["readiness"] == "resolved"
+    assert meta["record_id"] == rec["record_id"]
+    assert meta["request_id"] == "ch:kb"
+    assert meta["answer_text"] == "hello ans"
+    assert "score" not in meta              # exact hit — no invented score
     for banned in ("request_id", "need_indices", "linked_candidate",
                    "subject_refs", "shop", "platform", "record_id",
                    "generation_id", "model_id"):
-        assert banned not in ev
+        assert banned not in ev             # typed fields live inside meta
     # model_id fallback เมื่อไม่มี subject
     rec2 = record(item_id="I-2", model_id="M-9")
     snap2 = _snap(tmp_path / "m2", recs=[rec2])

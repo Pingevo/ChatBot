@@ -311,7 +311,11 @@ class TestComposeAnswer:
 
     def test_three_productish_needs_one_product_result(self):
         """compare+compat+describe = productish → ONE product result ที่
-        attribute ทุก covered need (answer model ≤1)."""
+        attribute ทุก covered need (answer model ≤1).
+        Task5-simp: compat need ที่ subject_refs เป็น product (ไม่ใช่
+        device target) = deferred product↔product pairing ask —
+        unsupported relation decline → task dropped + UnansweredNeed
+        (no_evidence); product result covers compare+describe only."""
         needs = (_need_compare(refs=("AC65B",)), _need_compat(),
                  _need_product())
         req = _req(rid="req-0", types=("earphone", "cable"),
@@ -321,14 +325,16 @@ class TestComposeAnswer:
         ctx = _compile(needs, sel,
                        _pool((_pooled("i:1", "1", name="Earphone"),)),
                        (req,), _profile())
-        assert len(ctx.task.tasks) == 3
+        assert [t.need_index for t in ctx.task.tasks] == [0, 2]
         comp = acx.compose_answer(
             needs=needs, context=ctx, product_text="p", answer_calls=1)
         assert len(comp.results) == 1
         r = comp.results[0]
         assert r.domain == "product"
-        assert set(r.need_indices) == {0, 1, 2}
-        assert comp.unanswered_needs == ()
+        assert set(r.need_indices) == {0, 2}
+        assert [(u.need_index, u.kind, u.reason)
+                for u in comp.unanswered_needs] == [
+            (1, "compat", "no_evidence")]
 
     def test_unanswered_alongside_answered(self):
         """productish need ไร้ coverage → unanswered คงอยู่ข้าง policy result."""

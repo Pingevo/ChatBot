@@ -155,8 +155,8 @@ check("kb OFF → zaapi gate closed", "zaapi_gate_closed" in r.trace)
 
 set_cfg({"kb_source": "zaapi"})
 r = kb_zaapi.zaapi_kb_evidence(shop="s", message="สวัสดี")
-check("zaapi + ไม่มี keyword → no_keywords (ไม่ query)",
-      "zaapi_no_keywords" in r.trace)
+check("zaapi + ไม่มี productish need → no_productish_need (ไม่ query)",
+      "zaapi_no_productish_need" in r.trace)
 
 reset_cfg()
 print(f"\n=== {PASS[0]} passed, {FAIL[0]} failed ===")

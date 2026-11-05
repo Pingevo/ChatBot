@@ -1,25 +1,27 @@
 """kb_zaapi.py — Workstream E P2: Zaapi KB evidence adapter (imported corpus).
 
-อ่าน collection `zaapi_kb` ใน admin DB (importer: docs/zaapi/script/import_zaapi_kb.py)
-- doc = 1 row ของ Zaapi knowledge source (xlsx row / txt doc)
-- scope = accounts[].name เทียบ shopname (zaapi account → shop เดิม)
-- คืน supporting_evidence เท่านั้น — imported KB ไม่สร้าง sellable candidate
+Phase 4 artifact-only contract (Task 5):
+- อ่าน active generation artifacts ผ่าน kb_zaapi_retrieval เท่านั้น —
+  ห้ามอ่าน canonical `zaapi_kb` collection ต่อคำถาม
+- active gen schema_version < 2 → decline (loadable ≠ answer-eligible:
+  v1 มีไว้ rollback แต่ไม่มี typed routing fields)
+- ค้นตาม need.subject_refs/target_refs (typed index channels) และ
+  need.capability_asks (semantic) — ไม่ scan ข้อความทั้ง turn กว้าง
+- evidence kind="kb_zaapi" + meta (typed routing channel เดียว)
+- item_id resolved → item-domain attachment; ไม่มี identity → supporting
+- คืน evidence เท่านั้น — imported KB ไม่สร้าง sellable candidate
 - ทำงานก็ต่อเมื่อ runtime_config: pool_sources.kb ON และ kb_source="zaapi"
 """
 from __future__ import annotations
 
 import os
-import re
-from typing import Any
 
 from .runtime_config import kb_enabled, kb_source
 
 _COLL = os.environ.get(
     "ADMIN_MONGO_COLLECTION_ZAAPI_KB", "zaapi_kb").strip()
 
-# field ที่ใช้ match model/brand (ชื่อคอลัมน์ตาม xlsx export จริง)
-_MATCH_COLS = ("รุ่นสินค้า", "ชื่อรุ่นสินค้าย่อ", "ชื่อแบรนด์", "รุ่น",
-               "model", "brand", "ประเภทสินค้า", "คำถามเกี่ยวสินค้า")
+_PRODUCTISH = frozenset({"product", "compare", "compat"})
 
 
 def _zaapi_allowed() -> bool:
@@ -31,104 +33,102 @@ def _zaapi_allowed() -> bool:
         return False
 
 
-def _zaapi_coll():
-    from . import knowledge_base as _kb  # lazy — admin client เจ้าของเดียวกัน
-    return _kb._admin_db()[_COLL]
-
-
-def _shop_clause(shop: str | None, platform: str | None) -> dict:
-    """scope ตาม accounts: name เทียบ shopname (case-insensitive) —
-    platform ให้เป็นบวกเท่านั้น (ชื่อชนกันข้าม platform ไม่เอามา);
-    `unscoped` doc (สร้างผ่าน admin UI) ไม่ผูกร้าน → ใช้ได้ทุกร้าน"""
-    if not shop:
-        return {"$or": [{"accounts.name": {"$exists": True, "$ne": ""}},
-                        {"unscoped": True}]}
-    scoped: dict = {"accounts.name":
-                    {"$regex": f"^{re.escape(str(shop).strip())}$",
-                     "$options": "i"}}
-    if platform:
-        scoped["accounts.platform"] = platform
-    return {"$or": [scoped, {"unscoped": True}]}
-
-
 def zaapi_kb_evidence(
     *,
     shop: str | None = None,
     platform: str | None = None,
     message: str = "",
     limit: int = 20,
+    needs: tuple = (),
+    request_id: str = "ch:kb",
+    db=None,
+    exports_root=None,
 ):
-    """ค้น zaapi_kb → KbEvidenceResult (supporting rows เท่านั้น)
+    """ค้น active Zaapi generation artifacts → KbEvidenceResult
 
-    light-pass: ดึง fields เบาๆ ของ docs ที่ scope เข้าร้าน → bounded match
-    ด้วย _model_token_in_name เหมือน legacy (กันข้ามรุ่น) → ดึง text เต็ม
-    เฉพาะ top hits; ไม่มี keyword match → [] (ไม่ scan ทั้ง collection)
+    needs = TurnNeeds ของ turn (productish เท่านั้นที่ใช้); ไม่มี → ไม่มี
+    evidence (general troubleshooting ยังไม่มี owner ใน path นี้)
+    message คง signature สำหรับ callsites เดิม — ไม่ใช้ keyword scan แล้ว
+    db/exports_root = injectable สำหรับ tests; default = admin DB เดิม
     """
-    from .knowledge_base import KbEvidenceResult, extract_model_keywords
-    from . import product_store as _ps
+    from .knowledge_base import KbEvidenceResult
+    from . import knowledge_base as _kb
+    from . import kb_zaapi_retrieval as _retr
 
     if not _zaapi_allowed():
         return KbEvidenceResult(trace=("zaapi_gate_closed",))
 
-    keywords = extract_model_keywords(message or "")
-    if not keywords:
-        return KbEvidenceResult(trace=("zaapi_no_keywords",))
+    prodish = [n for n in (needs or ())
+               if getattr(n, "kind", None) in _PRODUCTISH]
+    if not prodish:
+        return KbEvidenceResult(trace=("zaapi_no_productish_need",))
 
-    coll = _zaapi_coll()
-    query = {"active": {"$ne": False}, **_shop_clause(shop, platform)}
-    light = list(coll.find(
-        query, {"fields": 1, "source_name": 1}).limit(4000))
+    try:
+        snap = _retr.load_active_generation(
+            db if db is not None else _kb._admin_db(),
+            exports_root=exports_root)
+    except Exception:
+        snap = None
+    if snap is None:
+        return KbEvidenceResult(trace=("zaapi_no_active",))
+    # v1 artifact = loadable (rollback) แต่ไม่มี typed routing —
+    # fail closed: evidence ไม่เข้า pool (เท่าสถานะก่อน integration)
+    if snap.schema_version < 2:
+        return KbEvidenceResult(trace=("zaapi_v1_ineligible",))
 
-    keywords_l = [k.lower() for k in keywords]
-    scored: list[tuple[int, dict]] = []
-    for doc in light:
-        fields = doc.get("fields") or {}
-        hay_parts = [str(fields[c]).lower() for c in _MATCH_COLS
-                     if fields.get(c)]
-        hay = " ".join(hay_parts)
-        if not hay:
-            continue
-        if not all(_ps._model_token_in_name(hay, k) for k in keywords):
-            continue
-        score = 0
-        model_cols = " ".join(
-            str(fields[c]).lower() for c in _MATCH_COLS[:3] if fields.get(c))
-        for k, kl in zip(keywords, keywords_l):
-            if _ps._model_token_in_name(model_cols, k):
-                score += 2
-            elif kl in hay:
-                score += 1
-        phrase = " ".join(keywords_l)
-        if phrase in hay or re.sub(r"\s+", "", phrase) in \
-                re.sub(r"\s+", "", hay):
-            score += 5
-        scored.append((score, doc))
-
-    if not scored:
-        return KbEvidenceResult(raw_count=len(light),
-                                trace=("zaapi_no_match",
-                                       f"scanned={len(light)}"))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    top_ids = [d["_id"] for _, d in scored[:limit]]
-    full = {d["_id"]: d for d in coll.find(
-        {"_id": {"$in": top_ids}}, {"text": 1, "fields": 1,
-                                   "source_name": 1, "row_index": 1})}
-
-    sup = []
-    for _, d in scored[:limit]:
-        f = full.get(d["_id"]) or {}
-        fields = f.get("fields") or {}
-        label = " ".join(str(fields.get(c) or "") for c in _MATCH_COLS[:3]
-                         ).strip() or f.get("source_name") or "zaapi_kb"
-        sup.append({"kind": "kb_zaapi",
-                    "text": label,
-                    "payload": {"text": f.get("text", ""),
-                                "fields": fields,
-                                "source": f.get("source_name", "")},
-                    "reason": "zaapi_kb_match"})
+    sup: list[dict] = []
+    atts: list[dict] = []
+    seen: set[str] = set()
+    for n in prodish:
+        # typed roles แยกชัด — subject refs → subject-side namespaces;
+        #   target refs → target_ids เท่านั้น (ไม่สลับ role; ไม่ parse
+        #   prose — refs มาจาก TurnNeed typed fields เท่านั้น)
+        srefs = tuple(getattr(n, "subject_refs", ()) or ())
+        trefs = tuple(getattr(n, "target_refs", ()) or ())
+        item_ids = tuple(str(r) for r in srefs if str(r).isdigit())
+        others = tuple(str(r) for r in srefs if not str(r).isdigit())
+        target_ids = tuple(str(r) for r in trefs)
+        asks = tuple(getattr(n, "capability_asks", ()) or ())
+        res = _retr.retrieve(
+            snap, shop=shop, platform=platform,
+            item_ids=item_ids, model_codes=others, aliases=others,
+            subject_ids=others, target_ids=target_ids,
+            semantic_query=" ".join(asks) or None,
+            request_id=request_id)
+        for ev in res.supporting_evidence:
+            rid = (ev.get("meta") or {}).get("record_id")
+            if rid and rid in seen:
+                continue
+            if rid:
+                seen.add(rid)
+            iid = ev.get("item_id")
+            if iid is not None:
+                # resolved item → item-domain attachment (joins ทุก variant
+                # ของ item นั้นใน pool — ไม่สร้าง candidate เอง)
+                # model-bound record (model_id ตั้ง) scope = variant
+                #   เดียว: identity = variant identity เดิมของ record
+                #   (subject_id|model_id projection) + domain model —
+                #   item-level identity จะทำให้ record ของรุ่น A เล็งเป็น
+                #   หลักฐานของรุ่น B ที่แชร์ item
+                # target = typed canonical projection (target_id verbatim
+                #   จาก producer record — compat gate ต้องเห็นมิฉะนั้น
+                #   wrong-device record ผูก item เดียวกันหลุดเข้า need อื่น)
+                mid = ev.get("model_id")
+                vident = (str(ev.get("identity") or "").strip()
+                          or str(mid or "").strip())
+                atts.append({"kind": "kb_zaapi",
+                             "identity": (vident if mid else f"i:{iid}"),
+                             "item_id": iid,
+                             "identity_domain": ("model" if mid
+                                                 else "item"),
+                             "meta": ev.get("meta"),
+                             "target": ev.get("target"),
+                             "model_id": mid,
+                             "payload": ev.get("payload")})
+            else:
+                sup.append(ev)
     return KbEvidenceResult(
         supporting_evidence=tuple(sup),
-        raw_count=len(light),
-        trace=(f"zaapi_match={len(sup)}/{len(scored)}",
-               f"scanned={len(light)}"))
+        attachment_evidence=tuple(atts),
+        raw_count=len(sup) + len(atts),
+        trace=(f"zaapi_artifact={len(sup)}sup+{len(atts)}att",))

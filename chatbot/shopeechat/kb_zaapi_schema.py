@@ -646,7 +646,7 @@ def validate_artifact_manifest(obj: dict) -> dict:
             or set(obj) != {"schema_version", "generation_id", "vectors",
                             "record_map", "structured_index"}
             or not _plain_int(obj["schema_version"])
-            or obj["schema_version"] != 1
+            or obj["schema_version"] not in (1, 2)
             or not isinstance(obj["generation_id"], str)
             or not GEN_ID_RE.match(obj["generation_id"])):
         raise ValueError("invalid artifact manifest")

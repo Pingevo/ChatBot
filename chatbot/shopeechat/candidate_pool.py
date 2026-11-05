@@ -51,6 +51,13 @@ class EvidenceAttachment:
     linked_candidate: str | None      # identity ของ candidate ที่ attach
     identity_domain: str = ""         # "item" | "model" | "name" | "" (self)
     payload: dict | None = None       # bounded evidence (specs/snapshot)
+    meta: dict | None = None          # zaapi typed routing channel (optional)
+    target: str | None = None         # typed projection target (canonical
+                                    #   target_id verbatim — same field as
+                                    #   supporting records; compat gate input)
+    model_id: str | None = None       # typed projection model_id — variant
+                                    #   scope ของ record (model-bound record
+                                    #   ห้ามตัดสิน variant อื่นใน item เดียวกัน)
     trace: tuple[str, ...] = ()
 
 
@@ -127,8 +134,11 @@ def _join_attachment(att: EvidenceAttachment, pooled: list[PooledCandidate]
         targets = [c for c in pooled if c.item_id == iid]
     elif dom in ("model", "variant") and ident:
         targets = [c for c in pooled if c.identity == ident]
-        if not targets and iid:
+        if not targets and iid and not getattr(att, "model_id", None):
             targets = [c for c in pooled if c.identity == f"i:{iid}"]
+        # model-bound attachment (model_id ตั้ง): ไม่มี item fallback —
+        #   variant ที่หา candidate ไม่พบต้อง unlinked ไม่ใช่ผูก listing
+        #   ของ item ทั้งใบ (record ของรุ่น A ห้ามกระจายเข้า sibling)
     elif ident:
         targets = [c for c in pooled if c.identity == ident]
     if targets:
@@ -392,6 +402,9 @@ def build_candidate_pool(
                     linked_candidate=att.get("linked_candidate"),
                     identity_domain=att.get("identity_domain") or "",
                     payload=att.get("payload"),
+                    meta=att.get("meta"),
+                    target=att.get("target"),
+                    model_id=att.get("model_id"),
                     trace=tuple(att.get("trace") or ())))
 
     # ── pass 3: per-request membership + quota — request ตัดเฉพาะ membership

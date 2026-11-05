@@ -67,9 +67,9 @@ def test_producer_records_survive_attribution_and_compile(tmp_path):
                        item_ids=("IT-1",))
     evs = res_kbe.supporting_evidence
     assert len(evs) == 1
-    # producer closed schema — เฉพาะ fields ที่ spec §9 อนุญาต
-    assert all(set(e) <= {"kind", "item_id", "identity", "target", "payload"}
-               for e in evs)
+    # producer closed schema — เฉพาะ fields ที่ spec §9 + v2 meta channel
+    assert all(set(e) <= {"kind", "item_id", "identity", "target",
+                        "payload", "meta"} for e in evs)
 
     # executor result wrapper — request_id ที่ pool ใช้ stamp
     result = RetrievalExecutionResult(
@@ -85,10 +85,11 @@ def test_producer_records_survive_attribution_and_compile(tmp_path):
     trace: list = []
     final = _compile_evidence(
         pool, (), req_needs=req_needs, idx_of=idx_of,
+        need_by_idx={0: need},
         prodish_idx={0}, target_of={}, ref_needs={}, trace=trace)
     assert len(final) == 1, trace
     rec = final[0]
-    assert rec["kind"] == "kb"
+    assert rec["kind"] == "kb_zaapi"
     assert rec["need_indices"] == (0,)          # เติมจาก request_id
     assert rec["item_id"] == "IT-1"             # verbatim
     assert rec["identity"] == "SUB-1"           # subject_id precedence
@@ -99,6 +100,10 @@ def test_producer_records_survive_attribution_and_compile(tmp_path):
     import json
     assert len(json.dumps(rec, ensure_ascii=False).encode("utf-8")
                ) <= _EVIDENCE_RECORD_BYTES
-    # fields นอก closed schema ไม่ข้าม (shop/platform/record_id/digest ฯลฯ)
+    # fields นอก closed schema ไม่ข้าม (shop/platform/digest/meta ฯลฯ —
+    #   routing-only meta keys + meta dict เองถูกทิ้งตอน emit; declared
+    #   emitted fields = record_type/record_id/readiness/score)
     assert set(rec) <= {"kind", "need_indices", "item_id", "identity",
-                        "target", "payload"}
+                        "target", "payload",
+                        "record_type", "record_id", "readiness", "score"}
+    assert rec["record_type"] == "spec" and "meta" not in rec

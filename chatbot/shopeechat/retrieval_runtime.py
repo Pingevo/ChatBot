@@ -79,7 +79,23 @@ def run_grouped_selection(
             channels.append((channel_request("history"),
                              lambda *a, _d=cards, **k: _d))
         if kb_fetcher is not None and _rc.source_enabled("kb"):
-            channels.append((channel_request("kb"), kb_fetcher))
+            if _rc.kb_source() == "zaapi":
+                # per-need typed channels (Task 5) — ch:kb:<i> ต่อ productish
+                #   need หนึ่งตัว: subject/target refs ติด request (identity
+                #   scope) + fetcher ผูก need เดียว — provenance ตรงตัว ไม่
+                #   broadcast ข้อความทั้ง turn; bare ch:kb = legacy เท่านั้น
+                for i, n in enumerate(needs):
+                    if n.kind not in PRODUCTISH_NEED_KINDS:
+                        continue
+                    channels.append((replace(
+                        channel_request("kb"),
+                        request_id=f"ch:kb:{i}",
+                        subject_refs=tuple(n.subject_refs or ()),
+                        target_refs=tuple(n.target_refs or ())),
+                        lambda *a, _n=n, _rid=f"ch:kb:{i}", **k:
+                            kb_fetcher(need=_n, request_id=_rid)))
+            else:
+                channels.append((channel_request("kb"), kb_fetcher))
         if desc_fetcher is not None and any(
                 n.kind in PRODUCTISH_NEED_KINDS for n in needs):
             # description-chunk recall (Phase 10B) — candidate-recall source
