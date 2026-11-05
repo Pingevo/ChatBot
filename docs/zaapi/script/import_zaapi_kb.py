@@ -519,8 +519,8 @@ def main() -> int:
         db = client[ADMIN_DB_NAME] if client else None
         for item in items:
             result = import_source(
-                item, files_dir, db[ZA_KB_RAW_COLL] if db else None,
-                db["zaapi_kb_records"] if db else None,
+                item, files_dir, db[ZA_KB_RAW_COLL] if db is not None else None,
+                db["zaapi_kb_records"] if db is not None else None,
                 canonicalize=args.canonicalize, apply=args.apply,
                 checkpoint=args.resume)
             print(canonical_json(result))
