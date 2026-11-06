@@ -11,11 +11,17 @@ from typing import Any
 import bson
 
 SCHEMA_REVISION = 1
+SCHEMA_REVISION_V2 = 2
 RAW_AUDIT_FIELDS = (
     "source_name", "source_type", "source_file", "import_batch",
     "zaapi_updated_at",
 )
 RAW_CONTENT_FIELDS = ("kind", "sheet", "row_index", "source_row", "fields", "text")
+# v2 semantic row identity: file position (row_index/source_row) is raw audit,
+# never part of the durable content fingerprint
+SEMANTIC_CONTENT_FIELDS = tuple(
+    key for key in RAW_CONTENT_FIELDS
+    if key not in ("row_index", "source_row"))
 RAW_STORAGE_FIELDS = (
     "source_id", "version_id", "accounts", "fingerprint", "scope_fingerprint",
     "raw_row_json", "active", *RAW_CONTENT_FIELDS, *RAW_AUDIT_FIELDS,
@@ -30,6 +36,11 @@ REVISION_FIELDS = (
     "source_id", "source_fingerprint", "source_revision", "scope_fingerprint",
     "model_version", "prompt_version", "record_ids",
 )
+REVISION_FIELDS_V2 = REVISION_FIELDS + ("row_map", "key_map", "quarantined")
+# v2 record identity: hashed subset; these stay first-seen provenance only
+RECORD_PROVENANCE_UNHASHED = frozenset((
+    "source_fingerprint", "source_revision", "source_snapshot_id",
+    "scope_fingerprint", "row"))
 MONGO_BSON_MAX_BYTES = 16 * 1024 * 1024
 EXTRACTION_FIELDS = frozenset((
     "record_type", "topic", "model_codes", "aliases", "item_id", "model_id",
@@ -99,11 +110,14 @@ def canonical_record_id(record: dict) -> str:
     A supplied `_id`/`record_id` must equal that hash (creation passes neither)."""
     payload = {key: value for key, value in record.items()
                if key not in ("_id", "record_id")}
-    if (not isinstance(payload, dict)
-            or set(payload) != _RECORD_PAYLOAD_FIELDS):
+    v2 = payload.get("schema_revision") == SCHEMA_REVISION_V2
+    required = (_RECORD_PAYLOAD_FIELDS | {"row_uid"}) if v2 else (
+        _RECORD_PAYLOAD_FIELDS)
+    if (not isinstance(payload, dict) or set(payload) != required):
         raise ValueError("canonical record schema mismatch")
     if (not _plain_int(payload["schema_revision"])
-            or payload["schema_revision"] != SCHEMA_REVISION
+            or payload["schema_revision"] not in (
+                SCHEMA_REVISION, SCHEMA_REVISION_V2)
             or not _plain_int(payload["row"])
             or any(not _nonempty_str(payload[key]) for key in (
                 "source_id", "source_snapshot_id", "source_fingerprint",
@@ -120,6 +134,11 @@ def canonical_record_id(record: dict) -> str:
                                "subject_id", "target_id"))
             or payload["record_type"] not in {t.value for t in RecordType}
             or payload["readiness"] not in {r.value for r in Readiness}
+            or (v2 and (not _nonempty_str(payload["row_uid"])
+                        or not payload["row_uid"].startswith(
+                            payload["source_id"] + ":r")
+                        or not payload["row_uid"][
+                            len(payload["source_id"]) + 2:].isdigit()))
             or any(not isinstance(payload[key], (list, tuple))
                    or not all(_nonempty_str(value) for value in payload[key])
                    for key in ("model_codes", "aliases", "steps"))
@@ -136,16 +155,21 @@ def canonical_record_id(record: dict) -> str:
                 or isinstance(value, float) and not math.isfinite(value)):
             raise ValueError("canonical record schema mismatch")
         keys.add(fact["key"])
+    semantic_only = {RecordType.FAQ.value, RecordType.POLICY.value,
+                     RecordType.NOTE.value, RecordType.TROUBLESHOOTING.value}
     if payload["readiness"] == Readiness.RESOLVED.value and (
             not payload["shop"].strip() or not payload["platform"].strip()
             or not (payload["item_id"] or payload["model_id"]
-                    or payload["model_codes"])):
+                    or payload["model_codes"]
+                    or v2 and payload["record_type"] in semantic_only)):
         raise ValueError("canonical record schema mismatch")
     if (payload["record_type"] == RecordType.COMPATIBILITY.value
             and payload["readiness"] == Readiness.RESOLVED.value
             and not payload["target_id"]):
         raise ValueError("canonical record schema mismatch")
-    identity = fingerprint(payload)
+    identity = fingerprint(
+        {key: payload[key] for key in required
+         if key not in RECORD_PROVENANCE_UNHASHED} if v2 else payload)
     if any(record.get(key, identity) != identity for key in ("_id", "record_id")):
         raise ValueError("canonical record identity mismatch")
     return identity
@@ -221,10 +245,17 @@ def index_raw_rows(docs) -> dict:
             continue
         row = validate_raw_row(doc)
         safe = sanitize_source_row(row)
-        content = fingerprint({key: safe.get(key) for key in RAW_CONTENT_FIELDS})
-        index.setdefault((row["source_id"], row["fingerprint"],
-                          row["version_id"], row["scope_fingerprint"]),
-                         {}).setdefault(content, []).append((row, safe))
+        bucket = index.setdefault((row["source_id"], row["fingerprint"],
+                                 row["version_id"], row["scope_fingerprint"]),
+                                {})
+        # dual-key: v1 positional fingerprint + v2 semantic fingerprint, so
+        # both record generations resolve their stored content_fingerprint
+        for content in {
+                fingerprint({key: safe.get(key)
+                             for key in RAW_CONTENT_FIELDS}),
+                fingerprint({key: safe.get(key)
+                             for key in SEMANTIC_CONTENT_FIELDS})}:
+            bucket.setdefault(content, []).append((row, safe))
     return index
 
 
@@ -233,6 +264,11 @@ def build_revision(source: dict) -> dict:
 
     `source` supplies REVISION_FIELDS; callers validate a persisted document
     by requiring `build_revision(doc) == doc`."""
+    v2 = (isinstance(source, dict) and (
+        "row_map" in source
+        or source.get("schema_revision") == SCHEMA_REVISION_V2))
+    if v2:
+        return _build_revision_v2(source)
     try:
         fields = {key: source[key] for key in REVISION_FIELDS}
     except (KeyError, TypeError) as error:
@@ -249,6 +285,63 @@ def build_revision(source: dict) -> dict:
     active = fingerprint(tuple(fields.values()))
     revision = {"_id": f"revision:{fields['source_id']}:{active}",
                 "schema_revision": SCHEMA_REVISION, **fields,
+                "active_revision": active, "record_count": len(ids)}
+    if len(bson.encode(revision)) > MONGO_BSON_MAX_BYTES:
+        raise ValueError("revision exceeds BSON document limit")
+    return revision
+
+
+def valid_row_uid(uid: Any, source_id: str) -> bool:
+    """Opaque `{source_id}:r{n}` minted-once identity — never content-derived."""
+    return (isinstance(uid, str) and uid.startswith(source_id + ":r")
+            and uid[len(source_id) + 2:].isdigit())
+
+
+def _build_revision_v2(source: dict) -> dict:
+    """v2 revision: row_map/key_map/quarantined hashed in; expected_rev audit-only."""
+    try:
+        fields = {key: source[key] for key in REVISION_FIELDS_V2}
+    except (KeyError, TypeError) as error:
+        raise ValueError("revision schema mismatch") from error
+    row_map = fields["row_map"]
+    key_map = fields["key_map"]
+    quarantined = fields["quarantined"]
+    uid_ok = lambda uid: valid_row_uid(uid, fields["source_id"])
+    if (not isinstance(row_map, dict)
+            or (not row_map and not quarantined)
+            or not all(uid_ok(uid) and isinstance(members, dict) and members
+                       and all(isinstance(k, str)
+                               and _nonempty_str(rid)
+                               for k, rid in members.items())
+                       for uid, members in row_map.items())
+            or not isinstance(key_map, dict) or not all(
+                _nonempty_str(key) and uid_ok(uid)
+                for key, uid in key_map.items())
+            or set(key_map.values()) - set(row_map) - {
+                q["row_uid"] for q in quarantined
+                if isinstance(q, dict)}
+            or not isinstance(quarantined, list) or not all(
+                isinstance(q, dict) and set(q) == {
+                    "row_uid", "row_content_fp", "reason"}
+                and uid_ok(q["row_uid"])
+                and _nonempty_str(q["row_content_fp"])
+                and _nonempty_str(q["reason"])
+                for q in quarantined)
+            or len({q["row_uid"] for q in quarantined}) != len(quarantined)
+            or {q["row_uid"] for q in quarantined} & set(row_map)):
+        raise ValueError("revision schema mismatch")
+    ids = sorted({rid for members in row_map.values()
+                  for rid in members.values()})
+    fields = {**fields, "record_ids": ids}
+    if (any(not _nonempty_str(value) for key, value in fields.items()
+            if key not in ("source_revision", "record_ids", "row_map",
+                           "key_map", "quarantined"))
+            or not isinstance(fields["source_revision"], str)):
+        raise ValueError("revision schema mismatch")
+    active = fingerprint(tuple(fields[key] for key in REVISION_FIELDS_V2))
+    revision = {"_id": f"revision:{fields['source_id']}:{active}",
+                "schema_revision": SCHEMA_REVISION_V2, **fields,
+                "expected_rev": source.get("expected_rev"),
                 "active_revision": active, "record_count": len(ids)}
     if len(bson.encode(revision)) > MONGO_BSON_MAX_BYTES:
         raise ValueError("revision exceeds BSON document limit")
@@ -327,25 +420,31 @@ class ZaapiKnowledgeRecord:
     model_version: str
     prompt_version: str
     schema_revision: int = SCHEMA_REVISION
+    row_uid: str | None = None
 
     def to_dict(self) -> dict:
         result = asdict(self)
         result["readiness"] = self.readiness.value
+        if result["row_uid"] is None:
+            del result["row_uid"]        # v1 payload: no row_uid key
         return json.loads(canonical_json(result))
 
     @classmethod
     def from_extraction(
-        cls, raw: dict, extracted: Any, *, shop: str, platform: str,
-        model_version: str, prompt_version: str,
+        cls, raw: dict, extracted: Any, *, row_uid: str | None = None,
+        shop: str,
+        platform: str, model_version: str, prompt_version: str,
         failed: bool = False,
     ) -> ZaapiKnowledgeRecord:
         """Validate closed extraction; malformed values become inactive invalid rows."""
         safe = sanitize_source_row(raw)
         scope_fp = account_scope_fingerprint(safe["accounts"])
-        row_data = {k: safe.get(k) for k in RAW_CONTENT_FIELDS}
         snapshot_id = source_snapshot_id(
             raw["source_id"], raw.get("version_id"), raw["fingerprint"], scope_fp)
-        content_fp = fingerprint(row_data)
+        content_fp = fingerprint({
+            k: safe.get(k) for k in (
+                SEMANTIC_CONTENT_FIELDS if row_uid is not None
+                else RAW_CONTENT_FIELDS)})
         valid = isinstance(extracted, dict) and set(extracted) == EXTRACTION_FIELDS
         if valid:
             valid = (
@@ -383,12 +482,17 @@ class ZaapiKnowledgeRecord:
                           or extracted["steps"])
                      and (extracted["record_type"] != "compatibility"
                           or bool(extracted["target_id"])))
+        semantic_only = {RecordType.FAQ.value, RecordType.POLICY.value,
+                         RecordType.NOTE.value,
+                         RecordType.TROUBLESHOOTING.value}
         readiness = (Readiness.UNRESOLVED if failed
                      else Readiness.INVALID if not valid
                      else Readiness.RESOLVED
                      if shop and platform and (
                          extracted["item_id"] or extracted["model_id"]
-                         or extracted["model_codes"]) else Readiness.UNRESOLVED)
+                         or extracted["model_codes"]
+                         or extracted["record_type"] in semantic_only)
+                     else Readiness.UNRESOLVED)
         data = extracted if valid else {}
         payload = {
             "source_id": raw["source_id"],
@@ -414,16 +518,22 @@ class ZaapiKnowledgeRecord:
             "source_revision": raw.get("version_id") or "",
             "model_version": model_version,
             "prompt_version": prompt_version,
-            "schema_revision": SCHEMA_REVISION,
         }
+        if row_uid is not None:
+            payload["row_uid"] = row_uid
+            payload["schema_revision"] = SCHEMA_REVISION_V2
+        else:
+            payload["schema_revision"] = SCHEMA_REVISION
         return cls(record_id=canonical_record_id(payload),
                    **{**payload, "readiness": readiness})
 
 
 CANONICAL_RECORD_FIELDS = tuple(
     field.name for field in _dc_fields(ZaapiKnowledgeRecord))
+# v1 payload set (no row_uid) — v2 adds row_uid to identity
 _RECORD_PAYLOAD_FIELDS = frozenset(
-    name for name in CANONICAL_RECORD_FIELDS if name != "record_id")
+    name for name in CANONICAL_RECORD_FIELDS
+    if name not in ("record_id", "row_uid"))
 
 
 def validate_record_provenance(record: dict, index: dict) -> dict:
@@ -434,6 +544,12 @@ def validate_record_provenance(record: dict, index: dict) -> dict:
         record["source_id"], record["source_fingerprint"],
         record["source_revision"], record["scope_fingerprint"]), {}).get(
         record["content_fingerprint"], [])
+    if record.get("row_uid") is not None:
+        # v2: identical rows share the semantic fingerprint; first-seen
+        # sheet/position picks the actual origin row (raw history immutable)
+        candidates = [(row, safe) for row, safe in candidates
+                      if safe["sheet"] == record["sheet"]
+                      and safe["source_row"] == record["row"]]
     if len(candidates) != 1:
         raise ValueError("canonical provenance mismatch")
     row, safe = candidates[0]
@@ -459,7 +575,8 @@ def validate_manifest(manifest: dict) -> dict:
             or set(manifest) != set(MANIFEST_FIELDS)
             or manifest["_id"] != "active:manifest"
             or not _plain_int(manifest["schema_revision"])
-            or manifest["schema_revision"] != SCHEMA_REVISION
+            or manifest["schema_revision"] not in (
+                SCHEMA_REVISION, SCHEMA_REVISION_V2)
             or not isinstance(manifest["sources"], dict)):
         raise ValueError("active manifest fingerprint mismatch")
     for source_id, pointer in manifest["sources"].items():
@@ -468,9 +585,12 @@ def validate_manifest(manifest: dict) -> dict:
                 or set(pointer) != set(MANIFEST_POINTER_FIELDS)
                 or pointer["source_id"] != source_id
                 or not _plain_int(pointer["schema_revision"])
-                or pointer["schema_revision"] != SCHEMA_REVISION
+                or pointer["schema_revision"] not in (
+                    SCHEMA_REVISION, SCHEMA_REVISION_V2)
                 or not _plain_int(pointer["record_count"])
-                or pointer["record_count"] < 1
+                or pointer["record_count"] < (
+                    0 if pointer["schema_revision"] == SCHEMA_REVISION_V2
+                    else 1)
                 or not isinstance(pointer["source_revision"], str)
                 or any(not _nonempty_str(pointer[key]) for key in (
                     "revision_id", "source_id", "active_revision",
@@ -484,6 +604,67 @@ def validate_manifest(manifest: dict) -> dict:
     return manifest
 
 
+def _validate_manifest_records_v2(pointer: dict, revision: dict,
+                                  by_id: dict, index: dict,
+                                  by_revision: dict) -> None:
+    """v2 coverage: row_map × account delivered-XOR-quarantined + lineage."""
+    source_id = pointer["source_id"]
+    prior = by_revision.get(revision.get("expected_rev"))
+    prior_uids = set((prior or {}).get("row_map") or ())
+    if {q["row_uid"] for q in revision["quarantined"]} & prior_uids:
+        raise ValueError("delivered uid may never enter quarantine")
+    accounts = {}
+    snap_rows = index.get((source_id, pointer["source_fingerprint"],
+                           pointer["source_revision"],
+                           pointer["scope_fingerprint"]), {})
+    # dual-keyed index: each raw row appears under both fingerprint formulas —
+    # count coverage per unique row, per uid, by semantic fingerprint
+    expected_fps: dict[str, int] = {}
+    seen_rows: set[int] = set()
+    for rows in snap_rows.values():
+        for _, safe in rows:
+            if id(safe) in seen_rows:
+                continue
+            seen_rows.add(id(safe))
+            sfp = fingerprint({key: safe.get(key)
+                               for key in SEMANTIC_CONTENT_FIELDS})
+            expected_fps[sfp] = expected_fps.get(sfp, 0) + 1
+            for account in safe["accounts"]:
+                accounts[f"{account['name']}|{account['platform']}"] = (
+                    account["name"], account["platform"])
+    covered: dict[str, int] = {}
+    for uid, members in revision["row_map"].items():
+        if set(members) != set(accounts):
+            raise ValueError("row account coverage mismatch")
+        row_content_fp: str | None = None
+        for account_key, record_id in members.items():
+            doc = by_id.get(record_id)
+            if doc is None:
+                raise ValueError("active manifest record mismatch")
+            canonical_record_id(doc)
+            shop, platform = accounts[account_key]
+            if (doc.get("readiness") != Readiness.RESOLVED.value
+                    or doc.get("row_uid") != uid
+                    or doc.get("shop") != shop
+                    or doc.get("platform") != platform
+                    or any(doc.get(field) != pointer[field] for field in (
+                        "source_id", "model_version", "prompt_version",
+                        "schema_revision"))):
+                raise ValueError("active manifest record mismatch")
+            validate_record_provenance(doc, index)
+            if row_content_fp is None:
+                row_content_fp = doc["content_fingerprint"]
+            elif doc["content_fingerprint"] != row_content_fp:
+                raise ValueError("row content coverage mismatch")
+        if row_content_fp is not None:
+            covered[row_content_fp] = covered.get(row_content_fp, 0) + 1
+    for q in revision["quarantined"]:
+        covered[q["row_content_fp"]] = (
+            covered.get(q["row_content_fp"], 0) + 1)
+    if not expected_fps or covered != expected_fps:
+        raise ValueError("active manifest record mismatch")
+
+
 def validate_manifest_records(sources: dict, revisions: list[dict],
                               docs: list[dict], index: dict) -> None:
     """Fail closed on missing/altered/unprovenanced/incomplete active state."""
@@ -491,6 +672,13 @@ def validate_manifest_records(sources: dict, revisions: list[dict],
     by_revision = {revision.get("_id"): revision for revision in revisions}
     for pointer in sources.values():
         revision = by_revision.get(pointer["revision_id"])
+        if (revision is not None
+                and revision.get("schema_revision") == SCHEMA_REVISION_V2):
+            if build_revision(revision) != revision:
+                raise ValueError("active manifest record mismatch")
+            _validate_manifest_records_v2(pointer, revision, by_id, index,
+                                          by_revision)
+            continue
         if (revision is None or build_revision(revision) != revision
                 or pointer != {
                     **{key: revision[key] for key in MANIFEST_POINTER_FIELDS
@@ -518,7 +706,10 @@ def validate_manifest_records(sources: dict, revisions: list[dict],
                 pointer["source_id"], pointer["source_fingerprint"],
                 pointer["source_revision"], pointer["scope_fingerprint"]),
                 {}).items()
-            for _, safe in rows for account in (safe["accounts"] or [{}])}
+            for _, safe in rows
+            if fingerprint({key: safe.get(key)
+                            for key in RAW_CONTENT_FIELDS}) == content
+            for account in (safe["accounts"] or [{}])}
         if (not expected or expected != delivered
                 or revision["record_count"] != len(expected)):
             raise ValueError("active manifest record mismatch")
@@ -528,8 +719,14 @@ def load_active_state(records_coll, raw_coll, manifest: dict) -> list[dict]:
     """Bounded fetch + owner validation of the persisted global active state."""
     validate_manifest(manifest)
     sources = manifest["sources"]
-    revisions = list(records_coll.find({"_id": {"$in": [
-        pointer["revision_id"] for pointer in sources.values()]}}))
+    rev_ids = {pointer["revision_id"] for pointer in sources.values()}
+    revisions = list(records_coll.find({"_id": {"$in": list(rev_ids)}}))
+    # v2 lineage check needs the diff-base revision docs (expected_rev)
+    prior_ids = {r.get("expected_rev") for r in revisions
+                 if isinstance(r.get("expected_rev"), str)} - rev_ids
+    if prior_ids:
+        revisions += list(records_coll.find(
+            {"_id": {"$in": list(prior_ids)}}))
     docs = [doc for revision in revisions for doc in records_coll.find({
         "_id": {"$in": revision["record_ids"]
                 if isinstance(revision.get("record_ids"), list) else []}})]

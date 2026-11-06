@@ -18,7 +18,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "chatbot"))
 sys.path.insert(0, str(ROOT / "docs" / "zaapi" / "script"))
 
-from shopeechat.kb_zaapi_schema import canonical_json  # noqa: E402
+from shopeechat.kb_zaapi_schema import (  # noqa: E402
+    canonical_json, canonical_record_id, SCHEMA_REVISION_V2,
+    RECORD_PROVENANCE_UNHASHED)
 import import_zaapi_kb as importer  # noqa: E402
 from import_zaapi_kb import import_source, import_snapshot  # noqa: E402
 from export_zaapi_kb import export_snapshot  # noqa: E402
@@ -117,9 +119,18 @@ def extraction(row):
 
 
 def _run(item, collections, *, extractor=extraction, checkpoint=None,
-         files_dir=FIXTURES / "knowledge-files", apply=True):
-    return import_source(item, files_dir, *collections, extractor=extractor,
-                         canonicalize=True, apply=apply, checkpoint=checkpoint)
+         files_dir=FIXTURES / "knowledge-files", apply=True,
+         confirm=None):
+    out = import_source(item, files_dir, *collections, extractor=extractor,
+                        canonicalize=True, apply=apply, checkpoint=checkpoint,
+                        confirm=confirm or frozenset())
+    if confirm is None and out.get("status") == "needs_confirm":
+        out = import_source(
+            item, files_dir, *collections, extractor=extractor,
+            canonicalize=True, apply=apply, checkpoint=checkpoint,
+            confirm=frozenset(
+                {p["needs_confirm"] for p in out["proposals"]}))
+    return out
 
 
 def _replacement(item, folder, *, name="replacement.xlsx", rows=None, version="v2"):
@@ -271,8 +282,8 @@ def test_semantic_account_order_does_not_change_revision(
         "id": "second-shop", "name": "Second Shop", "platform": "shopee"})
     reordered = deepcopy(first)
     reordered["accounts"].reverse()
-    a = _run(first, collections, apply=False)
-    b = _run(reordered, collections, apply=False)
+    a = _run(first, collections, apply=True)
+    b = _run(reordered, collections, apply=True)
     assert a["revision_id"] == b["revision_id"]
 
 
@@ -295,7 +306,7 @@ def test_duplicate_semantic_account_scope_fails_before_provider_or_db(
 def test_same_file_changed_scope_has_distinct_checkpoint(
         sources, collections, tmp_path):
     checkpoint = tmp_path / "checkpoint.json"
-    first = _run(sources[0], collections, checkpoint=checkpoint, apply=False)
+    first = _run(sources[0], collections, checkpoint=checkpoint, apply=True)
     changed = deepcopy(sources[0])
     changed["accounts"][0]["name"] = "Renamed Shop"
     calls = []
@@ -305,7 +316,7 @@ def test_same_file_changed_scope_has_distinct_checkpoint(
         return extraction(row)
 
     second = _run(changed, collections, checkpoint=checkpoint,
-                  extractor=counted, apply=False)
+                  extractor=counted, apply=True)
     assert second["revision_id"] != first["revision_id"]
     assert calls == [0, 1]
     assert len(json.loads(checkpoint.read_text(encoding="utf-8"))) == 2
@@ -334,7 +345,7 @@ def test_corrupted_other_source_manifest_cannot_enable_conflict(
 def test_tampered_checkpoint_metadata_rejected_before_provider_or_db(
         sources, collections, tmp_path, field):
     checkpoint = tmp_path / "checkpoint.json"
-    _run(sources[0], collections, apply=False, checkpoint=checkpoint)
+    _run(sources[0], collections, apply=True, checkpoint=checkpoint)
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
     next(iter(state.values()))[field] = "tampered"
     checkpoint.write_text(canonical_json(state), encoding="utf-8")
@@ -344,17 +355,19 @@ def test_tampered_checkpoint_metadata_rejected_before_provider_or_db(
         called.append(True)
         raise AssertionError("provider must not be called")
 
+    docs_before = (dict(collections[0].docs), dict(collections[1].docs))
     with pytest.raises(ValueError, match="checkpoint"):
         _run(sources[0], collections, extractor=forbidden,
              checkpoint=checkpoint)
     assert not called
-    assert not collections[0].docs and not collections[1].docs
+    assert collections[0].docs == docs_before[0]
+    assert collections[1].docs == docs_before[1]
 
 
 def test_malformed_checkpoint_entry_cannot_be_silently_ignored(
         sources, collections, tmp_path):
     checkpoint = tmp_path / "checkpoint.json"
-    _run(sources[0], collections, apply=False, checkpoint=checkpoint)
+    _run(sources[0], collections, apply=True, checkpoint=checkpoint)
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
     state[next(iter(state))] = {}
     checkpoint.write_text(canonical_json(state), encoding="utf-8")
@@ -364,11 +377,13 @@ def test_malformed_checkpoint_entry_cannot_be_silently_ignored(
         calls.append(row)
         return extraction(row)
 
+    docs_before = (dict(collections[0].docs), dict(collections[1].docs))
     with pytest.raises(ValueError, match="checkpoint"):
         _run(sources[0], collections, extractor=counted,
              checkpoint=checkpoint)
     assert not calls
-    assert not collections[0].docs and not collections[1].docs
+    assert collections[0].docs == docs_before[0]
+    assert collections[1].docs == docs_before[1]
 
 
 def test_renamed_same_bytes_same_scope_is_idempotent(
@@ -518,7 +533,7 @@ def test_resume_reuses_completed_rows_without_provider(
         calls.append(row["row_index"])
         return extraction(row)
 
-    _run(sources[0], collections, apply=False, extractor=counted,
+    _run(sources[0], collections, apply=True, extractor=counted,
          checkpoint=checkpoint)
     second = _run(sources[0], collections, extractor=counted,
                   checkpoint=checkpoint)
@@ -539,7 +554,9 @@ def test_resume_only_retries_failed_row_and_never_downgrades_complete(
 
     failed = _run(sources[0], collections, extractor=partly_fails,
                   checkpoint=checkpoint)
-    assert failed["published"] is False
+    # v2: new-row failure quarantines row1; row0 publishes
+    assert failed["published"] is True
+    assert [q["row_uid"] for q in failed["quarantined"]] == ["demo-cable:r1"]
 
     def counted(row):
         calls.append(row["row_index"])
@@ -565,11 +582,11 @@ def test_resume_checkpoint_is_scoped_by_source_id(
         calls.append(row["source_id"])
         return extraction(row)
 
-    _run(sources[0], collections, apply=False,
+    _run(sources[0], collections, apply=True,
          extractor=counted, checkpoint=checkpoint)
     second = deepcopy(sources[0])
     second["id"] = "another-source"
-    _run(second, collections, apply=False, extractor=counted,
+    _run(second, collections, apply=True, extractor=counted,
          checkpoint=checkpoint)
     assert calls == ["demo-cable", "demo-cable",
                      "another-source", "another-source"]
@@ -772,9 +789,8 @@ def test_concurrent_other_source_does_not_change_source_pointer(
             moved.append(_run(newer, collections, files_dir=tmp_path))
         return extraction(row)
 
-    stale = deepcopy(sources[0])
-    stale["version"]["versionId"] = "v3"
-    result = _run(stale, collections, extractor=race)
+    stale = _replacement(sources[0], tmp_path, name="stale.xlsx", version="v3")
+    result = _run(stale, collections, extractor=race, files_dir=tmp_path)
     assert result["published"] is False
     assert _active_sources(collections[1])["demo-guide"]["active_revision"] == \
         other["revision_id"]
@@ -800,8 +816,11 @@ def test_changed_source_revision_keeps_both_snapshots(sources, collections):
     second = _run(updated, collections)
     assert second["revision_id"] != first["revision_id"]
     assert len(collections[0].docs) == 4
+    # v2: identical rows reuse records — provenance stays first-seen (v1)
     assert sorted(r["source_revision"] for r in collections[1].docs.values()
-                  if r.get("record_id")) == ["v1", "v1", "v2", "v2"]
+                  if r.get("record_id")) == ["v1", "v1"]
+    assert sorted(r["source_revision"] for r in collections[1].docs.values()
+                  if r.get("active_revision")) == ["v1", "v2"]
     snapshot = export_snapshot(*collections)
     restored = MemoryCollection(), MemoryCollection()
     import_snapshot(snapshot, *restored)
@@ -841,10 +860,12 @@ def test_provenance_and_identity_stay_on_each_record(sources, collections):
 def test_invalid_output_stays_inactive(sources, collections):
     bad = lambda row: {**extraction(row), "unexpected": True}
     outcome = _run(sources[0], collections, extractor=bad)
-    assert outcome["published"] is False
-    assert all(r["readiness"] == "invalid" for r in collections[1].docs.values()
-               if r.get("record_type"))
-    assert not any(r.get("active_revision") for r in collections[1].docs.values())
+    # v2: invalid NEW rows quarantine; revision publishes with zero coverage
+    assert outcome["published"] is True
+    assert not outcome["row_map"]
+    assert all(q["reason"] == "invalid" for q in outcome["quarantined"])
+    assert not any(r.get("readiness") == "resolved"
+                   for r in collections[1].docs.values() if r.get("record_type"))
 
 
 def test_conflicting_same_identity_facts_stay_inactive(sources, collections):
@@ -855,9 +876,11 @@ def test_conflicting_same_identity_facts_stay_inactive(sources, collections):
         return result
     outcome = _run(sources[0], collections, extractor=conflicting)
     records = [r for r in collections[1].docs.values() if r.get("record_type")]
-    assert outcome["published"] is False
-    assert [r["readiness"] for r in records] == ["conflicted", "conflicted"]
-    assert not any(r.get("active_revision") for r in collections[1].docs.values())
+    # v2: self-conflicting rows quarantine; revision publishes zero coverage
+    assert outcome["published"] is True
+    assert not outcome["row_map"]
+    assert len(outcome["quarantined"]) == 2
+    assert [r["readiness"] for r in records] == []
 
 
 def test_provider_failure_is_resumable_without_replacing_active(
@@ -901,7 +924,7 @@ def test_failed_batch_keeps_previous_revision(sources, collections, tmp_path):
 
     def fail_second(row):
         result = extraction(row)
-        return {**result, "unexpected": 1} if result["item_id"] == "1002" else result
+        return {**result, "unexpected": 1} if result["item_id"] == "1001" else result
 
     second = _run(changed, collections, extractor=fail_second, files_dir=tmp_path)
     assert second["published"] is False
@@ -962,10 +985,12 @@ def test_cross_source_conflict_keeps_previous_active(sources, collections):
     second = _run(sources[1], collections, extractor=duplicate_fact)
     incoming = [r for r in collections[1].docs.values()
                 if r.get("source_id") == "demo-guide" and r.get("record_id")]
-    assert second["published"] is False
-    assert [r["readiness"] for r in incoming] == ["conflicted"]
+    # v2: conflicting source publishes an all-quarantine revision (no coverage)
+    assert second["published"] is True
+    assert not second["row_map"]
+    assert all(q["reason"] == "conflict" for q in second["quarantined"])
+    assert [r["readiness"] for r in incoming] == []
     assert _active_sources(collections[1])["demo-cable"]["active_revision"] == first["revision_id"]
-    assert "demo-guide" not in _active_sources(collections[1])
 
 
 def test_tampered_export_cannot_publish_missing_record(sources, collections):
@@ -1007,7 +1032,8 @@ def test_snapshot_rejects_wrong_scope_even_with_updated_manifest_digest(
     snapshot["manifest"]["generation"] = importer.fingerprint(
         snapshot["manifest"]["sources"])
     restored = MemoryCollection(), MemoryCollection()
-    with pytest.raises(ValueError, match="manifest|revision|scope"):
+    with pytest.raises(ValueError,
+                       match="manifest|revision|scope|coverage|mismatch"):
         import_snapshot(canonical_json(snapshot), *restored)
     assert not restored[0].docs and not restored[1].docs
 
@@ -1175,9 +1201,12 @@ def test_valid_inactive_history_round_trip(sources, collections, tmp_path):
 
 
 def _self_hash(record):
-    record["record_id"] = record["_id"] = importer.fingerprint(
-        {key: value for key, value in record.items()
-         if key not in ("_id", "record_id")})
+    base = {key: value for key, value in record.items()
+            if key not in ("_id", "record_id")}
+    if base.get("schema_revision") == SCHEMA_REVISION_V2:
+        base = {key: value for key, value in base.items()
+                if key not in RECORD_PROVENANCE_UNHASHED}
+    record["record_id"] = record["_id"] = importer.fingerprint(base)
 
 
 def _resign_snapshot_manifest(snapshot, source_id):
@@ -1648,27 +1677,35 @@ def test_unresolved_identity_cannot_be_published(sources, collections):
         return {**extraction(row), "model_codes": [], "item_id": None}
 
     result = _run(sources[0], collections, extractor=no_identity)
-    assert result["published"] is False
-    assert all(r["readiness"] == "unresolved"
-               for r in collections[1].docs.values() if r.get("record_id"))
-    assert not any(r.get("active_revision") for r in collections[1].docs.values())
+    # v2: unresolvable NEW rows quarantine revision-bound; nothing delivers
+    assert result["published"] is True
+    assert not result["row_map"] and len(result["quarantined"]) == 2
+    assert all(q["reason"] == "unresolved" for q in result["quarantined"])
+    assert not any(r.get("readiness") == "resolved"
+                   for r in collections[1].docs.values() if r.get("record_id"))
 
 
 def test_missing_shop_scope_cannot_be_published(sources, collections):
     unscoped = deepcopy(sources[0])
     unscoped["accounts"] = []
     result = _run(unscoped, collections)
-    assert result["published"] is False
-    assert not any(r.get("active_revision") for r in collections[1].docs.values())
+    # v2: no-account rows quarantine; revision publishes with zero coverage
+    assert result["published"] is True
+    assert not result["row_map"] and len(result["quarantined"]) == 2
+    assert all(q["reason"] == "no account membership"
+               for q in result["quarantined"])
+    assert not any(r.get("readiness") == "resolved"
+                   for r in collections[1].docs.values() if r.get("record_id"))
 
 
-def test_cli_dry_run_source_filter_never_opens_database_or_provider(
-        monkeypatch, capsys):
+def test_cli_dry_run_reads_active_state_without_writes_or_provider(
+        admin, monkeypatch, capsys):
     def forbidden(*_args, **_kwargs):
         raise AssertionError("external call")
 
-    monkeypatch.setattr(importer, "_get_admin_db", forbidden)
     monkeypatch.setattr(importer, "_gemini_extract", forbidden)
+    for method in ("update_one", "create_index"):
+        monkeypatch.setattr(MemoryCollection, method, forbidden)
     monkeypatch.setattr(sys, "argv", [
         "import_zaapi_kb.py", "--dry-run", "--source", "demo-cable",
         "--dir", str(FIXTURES),
@@ -1678,6 +1715,7 @@ def test_cli_dry_run_source_filter_never_opens_database_or_provider(
     assert len(output.strip().splitlines()) == 1
     assert '"raw_count":2' in output
     assert '"published":false' in output
+    assert '"status":"preview"' in output
 
 
 def _resign_persisted_active(collections, source_id, mutate):
@@ -1744,7 +1782,8 @@ def test_scoped_export_rejects_other_active_missing_raw(
     raw_id = next(key for key, doc in collections[0].docs.items()
                   if doc["source_id"] == "demo-guide")
     del collections[0].docs[raw_id]
-    with pytest.raises(ValueError, match="provenance|manifest"):
+    with pytest.raises(ValueError,
+                       match="provenance|manifest|coverage|mismatch"):
         export_snapshot(*collections, source_id="demo-cable")
 
 
@@ -1784,7 +1823,7 @@ def _unscoped(item):
 
 def test_no_account_unresolved_history_round_trip(sources, collections):
     result = _run(_unscoped(sources[0]), collections)
-    assert result["published"] is False
+    assert result["published"] is True
     assert result["readiness"] == "unresolved"
     dump = export_snapshot(*collections)
     restored = MemoryCollection(), MemoryCollection()
@@ -1795,7 +1834,8 @@ def test_no_account_unresolved_history_round_trip(sources, collections):
 def test_no_account_invalid_history_round_trip(sources, collections):
     result = _run(_unscoped(sources[0]), collections,
                   extractor=lambda _row: {"bad": "shape"})
-    assert result["readiness"] == "invalid"
+    # no accounts → rows quarantine before extraction runs at all
+    assert result["readiness"] == "unresolved"
     dump = export_snapshot(*collections)
     restored = MemoryCollection(), MemoryCollection()
     import_snapshot(dump, *restored)
@@ -1803,17 +1843,20 @@ def test_no_account_invalid_history_round_trip(sources, collections):
 
 
 @pytest.mark.parametrize("mutate", (
-    lambda doc: doc.update(readiness="resolved"),
+    lambda doc: doc.update(readiness="unresolved"),
     lambda doc: doc.update(shop="Ghost Shop", platform="shopee"),
 ))
 def test_no_account_fabricated_record_rejected(
         sources, collections, mutate):
-    _run(_unscoped(sources[0]), collections)
+    _run(sources[0], collections)
+    held = _run(_unscoped(sources[0]), collections)
+    assert held["status"] == "hold_publish"
     rid = next(key for key, doc in collections[1].docs.items()
                if doc.get("record_id"))
     doc = collections[1].docs.pop(rid)
     mutate(doc)
-    with pytest.raises(ValueError, match="provenance|schema|canonical"):
+    with pytest.raises(ValueError,
+                       match="provenance|schema|canonical|mismatch"):
         _self_hash(doc)
         collections[1].docs[doc["_id"]] = doc
         export_snapshot(*collections)
@@ -2183,11 +2226,17 @@ def test_conflict_semantics_match_initial_and_cas_loser(
     if stage == "initial":
         _run(sources[0], collections)
         result = _run(sources[1], collections, extractor=duplicate_fact)
-        assert set(_active_sources(collections[1])) == {"demo-cable"}
+        # v2: conflicting source publishes an all-quarantine revision
+        assert set(_active_sources(collections[1])) == {
+            "demo-cable", "demo-guide"}
+        assert not result["row_map"]
+        assert all(q["reason"] == "conflict"
+                   for q in result["quarantined"])
+        assert result["published"] is True
     else:
         result = _run(sources[0], collections, extractor=race)
         assert set(_active_sources(collections[1])) == {"demo-guide"}
-    assert result["published"] is False
+        assert result["published"] is False
     assert result["readiness"] == "conflicted"
 
 
@@ -2391,7 +2440,8 @@ def test_revision_document_is_closed_history_not_authority(
     assert set(revision) == {
         "_id", "schema_revision", "source_id", "active_revision",
         "source_fingerprint", "source_revision", "scope_fingerprint",
-        "model_version", "prompt_version", "record_ids", "record_count"}
+        "model_version", "prompt_version", "record_ids", "record_count",
+        "row_map", "key_map", "quarantined", "expected_rev"}
     assert revision["_id"] == f"revision:demo-cable:{first['revision_id']}"
     assert revision["record_count"] == len(revision["record_ids"]) == 2
     second = _run(_replacement(sources[0], tmp_path), collections,
@@ -2653,7 +2703,8 @@ def test_oversize_manifest_is_rejected_before_cas(
     manifest = reference[1].docs["active:manifest"]
     revision = next(r for r in reference[1].docs.values()
                     if str(r["_id"]).startswith("revision:"))
-    low, high = len(bson.encode(revision)), len(bson.encode(manifest))
+    low, high = sorted(
+        (len(bson.encode(revision)), len(bson.encode(manifest))))
     assert low < high
     monkeypatch.setattr(schema, "MONGO_BSON_MAX_BYTES", (low + high) // 2)
     with pytest.raises(ValueError, match="BSON"):
@@ -2775,7 +2826,9 @@ def test_import_cli_apply_routes_raw_and_canonical_to_dedicated_collections(
         "--dir", str(FIXTURES)])
     legacy_before = deepcopy(admin.store["zaapi_kb"].docs)
     assert importer.main() == 0
-    assert set(admin.trace) == {"zaapi_kb_raw_sources", "zaapi_kb_records"}
+    assert set(admin.trace) == {
+        "zaapi_kb_raw_sources", "zaapi_kb_records",
+        "zaapi_kb_source_registry", "zaapi_kb_import_log"}
     raw = admin.store["zaapi_kb_raw_sources"].docs
     records = admin.store["zaapi_kb_records"].docs
     assert raw and all(key.startswith("raw:") for key in raw)

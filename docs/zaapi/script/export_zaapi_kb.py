@@ -21,8 +21,8 @@ def export_snapshot(raw_coll, records_coll, *, source_id: str | None = None,
     query = {} if source_id is None else {"source_id": source_id}
     index = index_raw_rows(raw_coll.find(query))
     raw_rows = []
-    for row in [row for groups in index.values()
-                for pairs in groups.values() for row, _ in pairs]:
+    for row in {row["_id"]: row for groups in index.values()
+                for pairs in groups.values() for row, _ in pairs}.values():
         sanitized = sanitize_source_row(row)
         raw_row = {k: row.get(k) for k in RAW_CONTENT_FIELDS}
         raw_row["fields"], raw_row["text"] = (

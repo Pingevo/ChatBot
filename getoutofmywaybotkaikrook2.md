@@ -11715,3 +11715,375 @@ Verdict: `TASK_5_LEDGER_ENUM_AND_REPORT_WORDING_CORRECTED_READY_FOR_FINAL_PRECOM
 - mechanism delta vs HEAD~: ตาม approved manifest เท่านั้น — ไม่มี business logic เพิ่มในรอบนี้
 - residual: product↔product pairing feature **deferred** (contract doc only) · Gemini live QA **pending** · dotenv ordering flake = known infra issue · semantic ledger coverage **partial**
 - **ไม่มี push/PR/merge/deploy** — commit อยู่ local เท่านั้น
+
+## กำลังจะทำ — Task 6A read-only activation QA (no code changes, no live calls without approval)
+
+## Task 6A — read-only activation QA closeout (ACTIVATION_QA_BLOCKED)
+
+### PART 1 runtime readiness — blockers พิสูจน์แล้ว (real admin DB `chatbot`, read-only)
+- `zaapi_kb_embedding_generations` collection **ไม่มี** — active pointer + gen docs = 0 (production loader `load_active_generation` → `zaapi_no_active` fail-closed จริง)
+- `exports/zaapi_kb_gen/` 6 dirs **ทั้งหมด schema_v1** — แม้ publish ก็ `zaapi_v1_ineligible` (v2 gate: `kb_zaapi.py:76`)
+- `zaapi_kb` canonical 8600 docs = **raw `xlsx_row`** (Thai headers) — typed v2 fields (record_type/fact_fields/subject_id/target_id/model_code) **0 hits / 5000-doc census** → canonicalization→v2-generation→publish chain ไม่เคยรัน
+- model identity: untestable (ไม่มี published gen; runtime = BAAI/bge-m3 dim 1024)
+
+### Runtime state finding (สำคัญ)
+- `main_config.kb_source` = **"zaapi" อยู่แล้ว** → production ตอนนี้ fail-closed: productish needs ได้ `zaapi_no_active` = **0 KB evidence** (legacy ก็ปิด — `legacy_kb_reads_allowed=False`) — KB สำหรับ productish ปิดเด้นจนกว่า v2 gen จะ publish
+
+### PART 3 source isolation truth table (process-local override, /tmp — ไม่แตะ config จริง)
+| mode | sel | kb_on | legacy_ok | zaapi trace | ev |
+|---|---|---|---|---|---|
+| legacy | legacy | T | T | zaapi_gate_closed | 0 |
+| zaapi | zaapi | T | F | **zaapi_no_active** | 0 |
+| kb_off | zaapi | F | F | zaapi_gate_closed | 0 |
+| invalid/absent | legacy | T | T | zaapi_gate_closed | 0 |
+
+### PART 2 corpus — DATA GAP (ไม่แต่ง fixture)
+- typed Zaapi v2 records = 0 ทุกที่ → actual-data Zaapi canary corpus สร้างไม่ได้
+- มีแต่: catalog/units (ขายได้ตามเดิม) + raw import sheets (ข้อมูลสินค้า 263 · ประกันรายรุ่น 819 · วิธีแก้ปัญหารายรุ่น 287 · ลิงก์สั่งซื้อ 1907 · Stock Balance 1398)
+
+### PART 4 gate
+- credential keys พร้อมผ่าน app load path (GEMINI_API_KEY rotation + OPENROUTER — names only, ไม่พิมพ์ค่า) — blocker ไม่ใช่ provider
+- **หยุดก่อน live calls ตาม spec** (no active generation → ห้ามยิง Gemini)
+
+### PART 3 regression
+- focused: **183 passed, exit 0** · pool admission: **28/0, exit 0**
+- changed files รอบนี้: `/tmp/t6a_source_isolation.py` เท่านั้น (repo: log+ledger bookkeeping)
+
+Verdict: `TASK_6A_ACTIVATION_QA_BLOCKED` — blockers: no published generation, no v2 artifacts, no typed canonical corpus (upstream pipeline never ran). ต้องการแยก: canonicalization run + v2 gen build + publish (อนุมัติแยก) ก่อน QA ทำงานต่อได้
+
+## กำลังจะทำ — Task 6A corrected collection audit (zaapi_kb_records/raw_sources — read-only)
+
+## Task 6A correction — canonical collection audit + selector impact (read-only)
+
+### Corrected collection authority (จาก code)
+| role | collection | writer | reader | runtime-read? |
+|---|---|---|---|---|
+| legacy | `zaapi_kb` (8600, xlsx_row) | old import | `knowledge_base` entry fns | เมื่อ selector=legacy เท่านั้น |
+| raw snapshots | `zaapi_kb_raw_sources` | `import_zaapi_kb.py` | `load_active_state` | ห้ามต่อ request |
+| canonical | `zaapi_kb_records` (+`active:manifest`) | `import_zaapi_kb.py --canonicalize` | `load_active_state` (build/validate เท่านั้น) | ห้ามต่อ request |
+| generations | `zaapi_kb_embedding_generations` (gen: + `active` ptr) | `kb_zaapi_generation` | `load_active_generation` | artifacts only |
+
+### Census (real admin DB `chatbot`, read-only)
+- `zaapi_kb`: exists, 8600 legacy docs — **ไม่ใช่ canonical target** (importer: never read/written)
+- `zaapi_kb_raw_sources`: **ไม่มี**
+- `zaapi_kb_records`: **ไม่มี** (ไม่มี `active:manifest` ด้วย)
+- `zaapi_kb_embedding_generations`: **ไม่มี**
+- source inputs บนดิสก์: `docs/zaapi/kb-export/` มีครบ (knowledge-sources.json + 116 files, 4.8MB)
+- → **State D → importer run ไม่เคย `--apply`** = BLOCKED_SOURCE_IMPORT_REQUIRED (importer เป็นผู้สร้างทั้ง raw+canonical)
+
+### PART 4 selector impact — LIVE_KB_BLACKHOLE_CONFIRMED
+- config: `chatbot.system_configs` `_id=6a840eb0…`, `config_key="main_config"` — **global** (ไม่มี per-shop)
+- `kb_source="zaapi"` + `pool_sources.kb=True` + `grouped_retrieval_selection_enabled=True` — set 2026-10-29 โดย thawatchai.thi (ก่อนงานนี้, ไม่ใช่ leftover)
+- live proof (real config, no monkeypatch): zaapi fetcher attempt → `zaapi_no_active` → 0 ev; `_legacy_allowed()` → False → legacy reads blocked ที่ knowledge_base.py:259/356/878/922 + units.py:405
+- live uvicorn (PID 10118): รัน `shopeechat.app` repo เดียวกัน → `load_dotenv(_REPO_ROOT/.env)` deterministic → DB เดียวกัน → อ่าน config เดียวกัน ผ่าน TTL 5s
+- **net: ทุก productish request บน service จริงได้ 0 KB evidence** (zaapi=no_active, legacy=gated off)
+
+### รายงานเดิมถูกจำกัดความ
+- รอบก่อนนับ legacy `zaapi_kb` เป็น "canonical corpus" — collection ผิดแต่ข้อสรุป BLOCKED ถูกต้อง
+- correction: typed canonical corpus ไม่มีอยู่จริงเพราะ `zaapi_kb_records` ไม่เคยถูกสร้าง (ไม่ใช่แค่ "raw xlsx_row ไม่มี typed fields")
+
+### PART 5 rollback proposal (รอ approval — ไม่ execute)
+- doc: `system_configs` `_id=6a840eb0d6518464123e9d7c` `config_key="main_config"`
+- current `kb_source="zaapi"` → proposed `"legacy"`
+- mechanism: existing owner = `/config` admin write path หรือ `update_one` + precondition `{"config_key":"main_config","kb_source":"zaapi"}` (matched=1) — ไม่มี CAS/revision field ใน doc
+- propagation: ≤5s TTL · post-write verify: `kb_source()=="legacy"` + `legacy_kb_reads_allowed()==True`
+- impact: legacy KB evidence กลับมาทันทีทุก productish request (global)
+
+### PART 6 next path
+source inputs พร้อม → **importer run (approve แยก)** → canonical build → v2 gen build → publish — 3 gates แยกกัน ห้ามรวม
+
+## Selector rollback EXECUTED + importer dry-run evidence (user approved)
+
+### Rollback (approved → executed, verified)
+- `update_one {"config_key":"main_config","kb_source":"zaapi"} → $set kb_source="legacy"` — **matched:1 modified:1**
+- post-write: `kb_source()=="legacy"` · `legacy_kb_reads_allowed()==True` · pool unchanged — propagates ≤5s TTL, ทุก productish request กลับมาใช้ legacy KB ได้แล้ว
+- **LIVE_KB_BLACKHOLE resolved** — live service อ่าน config เดียวกันผ่าน get_runtime_config (TTL 5s)
+
+### Importer dry-run (`--dry-run` only — no DB, no provider)
+- **118 source manifests · 8600 raw rows parse clean** (raw_count>0 ทุก source, no exceptions)
+- per-source `readiness:"invalid"` = expected non-canonicalize semantics (records=[] → not publishable) — **ไม่ใช่ data defect**
+- ⚠️ `--canonicalize --dry-run` จะยิง `_gemini_extract` จริง **ต่อ row (max ~8600 calls)** — ต้องอนุมัติ provider budget แยกก่อนรัน (checkpoint file ช่วย resume)
+
+### ขั้นต่อไป (gates แยก)
+1. canonicalize-apply → `zaapi_kb_raw_sources` + `zaapi_kb_records` + `active:manifest` (ต้อง Gemini budget)
+2. `build_generation` → v2 artifacts + gen doc
+3. publish pointer → zaapi selector ใช้ได้จริง → QA activation ตามแผนเดิม
+
+## กำลังจะทำ Task 6A — two-hour autonomous corrected audit + execution-ready plan
+
+- เวลา: 2026-11-05 16:59 +0700
+- branch: feature-botlogic-kb-workflow · HEAD: a61f9190931abf3e6890fc66b86e6b0303323efd
+- integrity: frozen/active prefix ตรง ledger; active tail = ว่าง (EOF==11810)
+- scope: read-only audit (Mongo read-only, no writes, no provider, no selector change); plan doc 1 ไฟล์ตาม state
+
+## ผ่านแล้ว Task 6A — two-hour corrected audit + execution-ready plan
+
+- เวลา: 2026-11-05 ~17:05–17:50 +0700
+- Census (shared admin DB `chatbot`, read-only — conn identity sha16 525a08a655ac8231):
+  `zaapi_kb`=8,600 legacy (kind xlsx_row 8,595/text 5, typed fields 0) · `zaapi_kb_raw_sources`/`zaapi_kb_records`/`zaapi_kb_embedding_generations` **ทั้งหมดไม่มี collection** → importer --apply ไม่เคยรัน, canonical chain ไม่เคยเริ่ม · on-disk gens 6 ตัว schema_v1 ทั้งหมด (disposable leftovers, ineligible ตาม kb_zaapi.py:76)
+- Source inputs verified: knowledge-sources.json 118 items · files 118/118 sha256 match · rows 8,602 (ตรง A-012 census 8,600) → records est ~112,982 (ตรง 112,974) · GEMINI_API_KEY set (+_1.._9) · google-genai 1.75.0
+- State = **B-variant**: raw+canonical+gen absent, source inputs ready → NEXT = importer rerun (raw → canonicalize → v2 build → publish)
+- Selector: `main_config.kb_source=legacy` persisted (rollback A-071 ทำงาน) → **NO_LIVE_IMPACT** ตอนนี้ · legacy KB serving (knowledge_base 1,040/kb_products 1,011/kb_qa 393) · **latent hazard**: `zaapiKbReady()` นับ legacy zaapi_kb (8,600>0 → always ready) ไม่เช็ค generation pointer → re-flip = blackhole กลับมาได้ (รอ approval แก้ gate — decision D4)
+- Live process: uvicorn :8010 cwd=chatbot checkout เดียวกัน แต่ `bot_worker_enabled=false`+`mock_mode=true` → local ไม่เสิร์ฟลูกค้า; แต่ DB `chatbot` = shared prod (digital.in.th) → selector มีผล production ผ่าน shared config เสมอ
+- Readiness findings เพิ่ม: CLI `zaapi_kb_gen.py` = disposable-only gate (pattern+loopback+port≠27017) → prod build/publish ต้อง `python -c` module calls · artifacts ต้องอยู่ `exports_data` volume ของ container ที่ serve · importer ไม่ load dotenv (ต้องส่ง env เข้า process)
+- งานที่ทำ: authority table ครบ (writer/reader/runtime access ทุก role) · census 4 collections + on-disk + config + traffic probe · state B-variant · plan `docs/plans/task6a-rerun-canonical-import-plan.md` (5 stages, approval gates A1–A5, rollback, self-review ผ่าน)
+- Writes ใน session: plan doc ใหม่ 1 ไฟล์ + waythrough เท่านั้น · Mongo write 0 · selector 0 · provider 0 · Docker 0 · production/test/SRS byte delta 0 (hash-verified) · staging ว่าง
+- งานค้าง: รอ user approval A1–A5 ตามลำดับใน plan · verdict `TASK_6A_LONG_AUDIT_CANONICAL_MISSING_IMPORT_PLAN_READY_FOR_APPROVAL`
+- correction: เวลาจริงของรายงานนี้ = ~16:59–17:08 +0700 (เขียนผิดเป็น ~17:05–17:50 — audit เสร็จเร็วกว่าคาด; เนื้อหาอื่นไม่เปลี่ยน)
+
+## กำลังจะทำ Task 6A continuation — rehearsal + plan sharpening (no approvals)
+
+- เวลา: 2026-11-05 17:09 +0700
+- scope: Stage-0 dry-run, manifest exclusion analysis, offline model-pin check, canary prep, race checks — ยังไม่แตะ shared write/provider/selector
+
+## ผ่านแล้ว Task 6A continuation — rehearsal executed + plan sharpened
+
+- เวลา: ~17:09–17:20 +0700
+- S0.1 executed: `import_zaapi_kb.py --dry-run` → 118 results, exit 0, raw_count sum **8,600** (exact A-012 match — probe count 8,602 ต่าง 2 rows จาก empty-field skip), 0 zero-row, readiness=invalid×118 expected, 0 conflicts · ผลเก็บ /tmp/task6a_dryrun.jsonl
+- Exclusion authority: raw dump 134 items → manifest 118 (15 disabled + 1 ZAAPI_SYSTEM quick-reply, filter `enabled==true AND createdBy !~ ^ZAAPI`) → corpus = all enabled non-system sources; excluded items ทั้งหมด file=None/accounts=0
+- Model pin verified: `HF_HUB_OFFLINE=1` → model_identity 6 fields exact (bge-m3@5617a9f6…/ST5.7.0/1024/fp32/normalize) → `_model_pin` ผ่านที่ Stage 3
+- Race check: `/api/zaapi-kb` CRUD เขียน legacy `zaapi_kb` เท่านั้น — canonical 3 colls มี writer เดียวคือ importer/generation (exclusive)
+- Rehearsal limit พบ: fakes GenColl/GenDb ไม่มี `$setOnInsert` → `import_source` รันบน fake ไม่ได้ (A-032 เคยบันทึก) → disposable real-Mongo หรือ gated prod run เท่านั้น
+- Canary scope concrete: source `6acf5df0ff3520d5c8bb7cbb` (single acct) → shop `Black Shark Thailand` / platform `Shopee`
+- Plan updated: S0.1 marked done + evidence, exclusion semantics, model-pin verified, canary candidate, fake-limitation note, admin-CRUD race note
+- Writes: plan doc edits + waythrough เท่านั้น · Mongo write 0 · provider 0 · selector 0 · Docker 0
+- งานค้าง: เหมือนเดิม — approvals A1–A5 (Stage 1 raw apply → Stage 2 canonicalize+Gemini → Stage 3 build → Stage 4 publish → Stage 5 flip)
+
+## กำลังจะทำ — Task 6A plan execution Stage 1 (raw import --apply)
+- approval: user "เริ่ม" → A1 granted (raw import write only; Stage 2 Gemini ยังต้อง A2 แยก)
+- command: importer --apply via load_dotenv wrapper → writes zaapi_kb_raw_sources เท่านั้น + index; provider calls = 0
+- pre-checks: git clean (docs-only deltas), importer env/path verified, dry-run 118/118 ผ่านแล้ว
+
+## ผ่านแล้ว — Stage 1 raw import (A1)
+- error: pymongo Database truthiness crash (`if db`) — เส้นทาง --apply ไม่เคยถูกรัน (tests inject colls ข้าม main)
+- เกิดเพราะ: pymongo ไม่รองรับ bool(Database); dry-run ผ่านเพราะ db=None
+- แก้: `if db is not None` 2 จุด → commit c289371
+- ผลกระทบเคสอื่น: ไม่มี — behavior เดิมเมื่อ db=None เหมือนเดิม
+- run: --apply 118 sources EXIT=0 → zaapi_kb_raw_sources 8,600 docs (0 invalid ตาม validate_raw_row), distinct source_id 118, index_raw_rows→118, active:false ทั้งหมด, legacy zaapi_kb 8,600 ไม่ถูกแตะ, zaapi_kb_records 0 docs ไม่มี manifest, provider calls 0
+- งานค้าง: A2 (Stage 2 canonicalize — Gemini calls + shared write รอ approval แยก)
+
+## กำลังจะทำ — Stage 0.2 canary probe (user approved "probe ก่อน")
+- canonicalize --dry-run source 6acf5df0ff3520d5c8bb7cbb (2 rows = ~2 Gemini calls), ไม่เขียน DB
+
+## กำลังจะทำ — Structural lock audit: Zaapi KB / pool / workflow (user redirect 2026-11-06)
+- user task: ล็อกโครงสร้างให้ตรงเป้าหมายเดิม ก่อนรัน import เพิ่ม — 8 ขั้น FREEZE→AUDIT→ROOT CAUSE→CONTRACT→PLAN→RED→STOP GATE→REPORT
+- baseline: HEAD c289371; dirty = ledger+active tail (docs only) + untracked task6a plan; frozen/active integrity ผ่าน; tail 11851–11866 → A-074
+- freeze: ไม่แตะ production code; ไม่รัน import/Gemini/Docker/Mongo writes; ไม่อ่าน .env/secret; output = audit+truth table+contract+plan+RED design ถึง STOP GATE เท่านั้น
+
+## ผ่านแล้ว — Structural lock audit: Zaapi KB search-coverage + diff-import design (session ใหม่ 2026-11-06)
+- census [ไฟล์]: Downloads/zaapi 2/data ≡ repo kb-export byte-identical (118 items, 118/118 sha256 OK, 113 xlsx+5 txt); key census รันจริง: 46 ไฟล์มี unique key col / 62 partial / 5 ไม่มี → stable column key ไม่ universal
+- census [Mongo สด]: zaapi_kb 8,600 legacy · zaapi_kb_raw_sources 8,600 (118 src, active:false) · zaapi_kb_records = 0 (canonical ไม่เคยรัน) · zaapi_kb_embedding_generations ไม่มี → "อยู่ Mongo ≠ ค้นได้"
+- root cause (executable, /tmp/zaapi_counterexamples.py รันผ่าน): CE1 แก้ 1 ช่อง → 3/3 raw+record id เปลี่ยน (file fp ใน identity); CE3 checkpoint_key มี file fp+versionId → re-extract ทุกแถว; CE5 blank row skip → row_index renumber; CE6 header หาย → silent; CE7 no-identity row → published=False ทั้ง source; CE8 policy/troubleshoot/claim need → zaapi_no_productish_need
+- contract v2 (proposed): row_uid (column|assigned mode), position-free row_content_fp, record identity ตัด file_fp/version/position ออก, checkpoint_key ตัด file fp, incremental vector reuse by semantic_digest, D1 scope-only resolved สำหรับ faq/policy/note — records coll ว่าง → schema 1→2 ไม่มี migration cost
+- coverage matrix: policy/warranty/FAQ/troubleshooting โครงสร้างค้นไม่ได้วันนี้ (CE7+CE8) — D2 widening ต้องอนุมัติ, ห้าม free-text scan
+- log+preview: zaapi_kb_import_log (counts/field_diffs/redact ผ่าน _credential_column) + preview→apply binding ผ่าน preview_id hash — user เลือก source_id หรือ new-source เท่านั้น ไม่เดาจากชื่อไฟล์
+- RED plan 18 cases + changed-file manifest + decisions D1–D7 → docs/plans/2026-11-06-zaapi-kb-diff-import-design.md
+- STOP GATE: ไม่มี production byte เปลี่ยน · Mongo/provider/config write 0 · ไม่มี stage/commit · รอ approve contract + D1–D7
+- งานค้าง: approval + RED suite implementation + T18 real-answer proof หลังมี generation
+
+## ผ่านแล้ว — Zaapi KB diff-import design rev2: แก้ตาม independent review (session เดิม 2026-11-06)
+- FREEZE recheck ผ่าน: frozen a67b…0341 + active prefix 1..11882 bd25…5f16 ตรง baseline; ไม่แตะงานค้าง
+- finding 2 [โค้ด] พิสูจน์ verbatim: canonical_record_id hash payload ที่ผูก file fp (source_fingerprint/source_snapshot_id/source_revision), account-set fp (scope_fingerprint), position (content_fingerprint/row), readiness → 1-cell edit หรือ ±1 account re-keys ทุก record (rev1 claim scope_update ผิด → v2 แก้)
+- finding 3 [โค้ด] 2 กำแพง: publish wall (CE7: resolved ต้องมี item/model/model_codes) + query wall (adapter _PRODUCTISH gate + semantic_query=capability_asks ที่ docstring stamp เฉพาะ product needs → policy need มี subject_refs แต่ไม่มี query text; retrieve() เองรับ semantic-only ได้ — missing piece คือ producer ไม่ใช่ retrieval)
+- finding 1 แก้ census แล้ว (รันจริง /tmp/zaapi_census2.py → /tmp/census2.json): disqualify positional # → stable declared key 73 ไฟล์ / assigned row_uid 45 ไฟล์ (ไม่ใช่ 46/62+5); caveat ชื่อสินค้า unique วันนี้ → key-edit = deactivate+add
+- finding 4 [โค้ด] zaapiKbReady() นับ legacy zaapi_kb ทั้งที่ canonical ว่าง; app.py ไม่มี endpoint ที่โหลด artifact จริง → design /internal/zaapi-kb/status probe (load_active_generation + spot checks, token auth, timeout, fail-closed)
+- v2 contract: record identity ตัด file fp/version/scope-set/position ออก → provenance (unhashed); revision.row_map = หลักฐาน membership ของ record ในไฟล์ใหม่; checkpoint ตัด file fp; raw_row_id=raw:fp(source_id,row_uid,import_seq); one-time migration = zaapi_kb_row_map จาก v1 docs (ไม่เขียนทับ immutable)
+- executable probe (/tmp/zaapi_diff_probe.py รันผ่าน): T1 1-cell edit → changed=1, extract=1, ids อื่นคง; T2 insert → stable; T3 rename → unchanged; T5 dup → STOP; T6 key-edit → deactivate+add pair; assigned mode: moved rows inherit uid ผ่าน content fp, edited row → positional proposal ต้องคน confirm
+- D5 ตัดสินด้วยข้อมูล: 40/118 ไฟล์มี identity-risk row (198 แถว proxy) → quarantine-with-visibility สำหรับ row-class; STOP-class ยัง all-or-nothing
+- write-class consistency: active-data=0 / audit=1 / provider=0 ใน preview; preview doc รวมเข้า zaapi_kb_import_log (ตัด collection แยก)
+- doc rev2: docs/plans/2026-11-06-zaapi-kb-diff-import-design.md — STOP GATE เหลือ approve D1,D2,D3,D4a,D6 + confirm quarantine
+- งานค้าง: approval → RED suite (tests only) → implementation
+
+## ผ่านแล้ว — Zaapi KB design rev3: แก้ตาม independent review รอบ 2 (session เดิม 2026-11-06)
+- FREEZE recheck ผ่าน: prefix 1..11895 cc82… ตรง; EOF=baseline
+- finding A [โค้ด] production proof: import_zaapi_kb.py:313-330 from_extraction per account → 1 raw row × N accounts = N record_ids (probe บน dataclass จริง: 2 accounts → 2 ids, scope_fp+snapshot_id ร่วม) → rev2 row_map scalar ผิด → v2 = {row_uid:{account_key:record_id}}
+- finding B แก้ census (/tmp/zaapi_keyledger.py → keyledger.json): "73 stable keys" → 66 column-mode candidates (100% complete + normalized-unique ทุก sheet) / 52 assigned — พบ 6 ไฟล์ Products Balance ที่ ชื่อสินค้า dup หลัง normalize; mutable-value keys (name/link/text) → edit = match proposal ไม่ auto deactivate+add
+- finding C: existing row แก้แล้ว extraction fail → keep-prior semantics (record เดิมคงใน revision ใหม่ + stale_reason) — ลูกค้าได้ข้อมูลเวอร์ชันเดิม ไม่หายเงียบ ๆ; new row fail → quarantine; key ambiguous/header หาย → STOP ทั้ง source; atomic unit = manifest CAS
+- finding D [โค้ด] verify บน schema จริง: validate_manifest_records เทียบ doc.source_fingerprint/scope_fingerprint/source_revision == pointer → record จากไฟล์เก่าใช้ซ้ำไม่ได้เลย (structural) → v2: doc เก็บ first-seen provenance, membership proof อยู่ที่ revision.row_map + raw index (row_uid + row_content_fp + scope membership)
+- probe [sim] /tmp/zaapi_diff_probe2.py รันผ่าน: P1 ±account → records account อื่นคง; P2 mutable-key → proposal; P3 fail → keep-prior; P4 tamper/cross-shop/ghost-uid → reject
+- doc rev3 + RED matrix T23–T26 (multi-account/mutable-key/failed-change/provenance) + mechanism delta แก้ — STOP GATE เหลือ D1,D2,D3,D4a,D5b,D6
+- งานค้าง: review รอบ 3 → approval → RED suite → implementation
+
+## ผ่านแล้ว — Zaapi KB design rev4: แก้ตาม independent review รอบ 3 (session เดิม 2026-11-06)
+- FREEZE recheck ผ่าน: prefix 1..11905 66c4… ตรง; EOF=baseline
+- R1 reproduce (รันจริง): keep-prior record มี row_content_fp ของ raw เก่า ≠ snapshot ใหม่ → membership พิสูจน์ไม่ได้ → ตัด keep-prior/stale_*, default = HOLD-PUBLISH (manifest ชี้ revision เดิม, ลูกค้าได้ข้อมูลเดิม, log ระบุแถว+เหตุผล)
+- R2 reproduce (รันจริง): rev3 P4 ยอมรับ rec:WRONG เพราะไม่เช็ค record_id ∈ row_map[uid] → validator เพิ่มขั้น record_id == row_map[uid][account_key]; ทดสอบ wrong-id/cross-shop/ghost-uid/foreign-source → reject ครบ
+- row_uid model ใหม่: opaque {src}:r{n} ทุก mode; declared key = match aid เท่านั้น (key_map ใน registry); rename → proposal → confirm → uid persist; collision → STOP; ไม่มี auto-match จากชื่อ/position
+- combined probe /tmp/zaapi_combined_probe.py [sim] รันออก exit 0 หลังแก้ bug probe 3 จุด (stale-baseline compare, wrong-fp index, poisoned map restore): S1 1:N map · S2 fail→hold-publish · S3 retry→publish ids stable · S4 rename→uid persist · S5 reorder stable · S6 ±account exact delta · S7 membership chain reject ครบ · S8 dup→STOP
+- doc rev4: failure policy เป็น hold-publish; ลบ stale_reason/stale_count/keep-prior; mechanism delta นับใหม่; "66 column-mode candidates" ยังคงเป็น candidates ไม่ใช่ approved keys
+- งานค้าง: independent review รอบ 4 → approve D1,D2,D3,D4a,D6 → RED suite → implementation
+
+## กำลังจะทำ — Zaapi KB design rev5: แก้ตาม review รอบ 4 (finding A quarantine-vs-validator, finding B registry atomicity)
+- ไฟล์ศึกษา: kb_zaapi_schema.py:487-524 (validate_manifest_records expected/delivered), import_zaapi_kb.py:358-392 (apply/CAS order), design doc rev4, probe rev4
+- baseline: active EOF 11914
+
+## ผ่านแล้ว — Zaapi KB design rev5: แก้ตาม independent review รอบ 4 (session เดิม 2026-11-06)
+- FREEZE recheck ผ่าน: prefix 1..11914 a282… ตรง; append "กำลังจะทำ" ก่อนงานแล้ว
+- finding A reproduce (รันจริง): quarantined new row → expected(delivered∪snapshot×accounts) != delivered → validate_manifest_records fail → rev4 quarantine ผ่าน validator ของตัวเองไม่ได้ → fix = revision.quarantined[{row_uid,row_content_fp,reason}] ผูกใน revision doc + validator expected == delivered ∪ quarantined (disjoint, reason ไม่ว่าง)
+- finding B reproduce (รันจริง): key_map บน registry แยก doc → rename-confirm แล้ว extraction fail → hold → registry นำหน้า manifest → retry ไฟล์เก่าหา key เดิมไม่เจอ → uid churn → fix = key_map ย้ายเข้า revision doc (active mapping = active revision's map ตามสร้าง); registry เหลือ uid_next + staged(crash-resume) + lease(concurrency)
+- write order ล็อก: lease → match via active key_map + stage uid allocations (ก่อน extraction) → extract → changed-fail=hold / new-fail=quarantine → rev doc insert-once → manifest CAS fence expected_rev → clear staged → log; CAS conflict loser ไม่แตะ active mapping
+- probe v5 /tmp/zaapi_combined_probe_v5.py [sim] exit 0: Q2 quarantine coverage · Q3 hold · Q4 rename+fail atomicity (active key_map ไม่เปลี่ยน) · Q5 retry uid เดิม · Q6 crash-stage resume · Q7 precas-crash converge · Q8 CAS conflict loser mutates nothing · Q9 membership rejects wrong-id/ghost/foreign; ซ่อม probe bug 2 จุด (paren-trap confirms, rename re-mint clobber)
+- doc rev5: §5.1 rejected-hold rationale, §5.2 atomicity/state table, §6 membership+quarantine coverage, T29–T32, mechanism delta นับใหม่ (revision.key_map+quarantined, registry.uid_next/staged/lease)
+- งานค้าง: independent review รอบ 5 → approve D1,D2,D3,D4a,D6 → RED suite → implementation
+
+## กำลังจะทำ — Zaapi KB design rev6: แก้ตาม independent review รอบ 5 (session เดิม 2026-11-06)
+- FREEZE ผ่าน: HEAD c289371, staging ว่าง, diff --check 0; frozen a67b9152 ✓; active prefix 1..11927 = 7ddd89b2 ✓; tail หลัง prefix ว่าง (EOF)
+- findings รอบ 5: F1 restart ทำ EXISTING กลายเป็น NEW (uid_fp in-process authority) → hold-publish พัง; F2 ghost quarantine UID (validator เทียบแค่ fp set ไม่ผูก UID); F3 Q8 CAS มี pointer rollback + `or True` fake-PASS
+- ศึกษา: /tmp/zaapi_combined_probe_v5.py (แก้ inline เท่านั้น ห้ามเพิ่ม helper/guard/mechanism), design doc rev5
+- งบ mechanism = +0 ทุกตัว; baseline=11927
+
+## ผ่านแล้ว — Zaapi KB design rev6: แก้ตาม independent review รอบ 5 (session เดิม 2026-11-06)
+- F1 reproduce (รันจริง): restart → uid_fp ว่าง → แถว EXISTING ที่แก้แล้ว extract fail ถูกจัด NEW → quarantine → publish แล้ว Alpha หายจาก row_map → ลูกค้าเสียข้อมูลเงียบ ๆ → fix = classification ผูก durable state `uid ∈ active_rev.row_map` (cache ใช้ memoize เท่านั้น)
+- F2 reproduce (รันจริง): แทน quarantined.row_uid ด้วย ghost (fp เดิม) → validator errs=[] ยอมรับ → fix = validator per-UID: uid ต้องอยู่ใน snapshot+fp ตรง, reason ไม่ว่าง, row_map∩quarantined=∅, dup-uid reject, coverage นับต่อ uid×account ไม่ใช่ fp-set
+- F3 reproduce: Q8 เดิมย้อน pointer ด้วยมือ + `or True` → เจอ flaw จริงเพิ่ม: staged slot เดียว ทำให้ importer อื่น wipe pinned diff → CAS conflict ไม่มีทางเกิด → fix = staged per-importer-tag + expected_rev pin ตอน match (persist ใน staged), CAS loser ลบเฉพาะ staged ตัวเองแล้ว re-base, ไม่ย้อน pointer
+- probe v5 (rev6) /tmp/zaapi_combined_probe_v5.py [sim] exit 0 — Q1–Q12: Q10 restart→HOLD, Q11 ghost/wrong-fp/overlap/dup/empty-reason/drop reject ครบ, Q8 true staged-resume race→cas_conflict โดยไม่แก้ state ด้วยมือ, Q12 refail uid เดิม/success→delivered; 43 PASS 0 FAIL; ไม่มี or True
+- doc rev6: §4.1 staged per-tag+expected_rev, §5 durable classification (quarantined=NEW-class: refail uidเดิม/success→row_map), §5.2 write order pin expected_rev + CAS loser contract, §6 validator per-UID, §4.3 revision doc +expected_rev audit field, T29–T35, mechanism delta net +0
+- mechanism delta รอบนี้ +0 ทุกตัว (helpers/guards/functions/regex/keywords/owners/collections); staged เปลี่ยน shape ภายใน field เดิมเท่านั้น
+- งานค้าง: independent review รอบ 6 → approve D1,D2,D3,D4a,D6 → RED suite → implementation; [sim] ไม่ใช่ importer GREEN
+
+## ผ่านแล้ว — Zaapi KB design rev7: แก้ตาม independent review รอบ 6 (session เดิม 2026-11-06)
+- FREEZE ผ่าน: prefix 1..11942 = 27f0b8ea ✓, staging ว่าง, diff --check 0
+- A reproduce (รันจริง): forged candidate ย้าย uid ที่เคย delivered (s1:r0) ไป quarantined → validator errs=[] ยอมรับ → fix = lineage check `quarantined ∩ revisions[expected_rev].row_map = ∅` ใน validator เดิม; importer path เดิม hold อยู่แล้ว (ไม่มีทาง forge ผ่าน import)
+- B reproduce (รันจริง): re-import ไฟล์เดิม → published event ซ้ำ + doc ถูกเขียนทับ (expected_rev เปลี่ยน None→revX = attempt ใหม่เขียนประวัติ) → fix = (1) file_fp==active→noop (ไม่เรียก extractor, pointer คง, log noop_reimport) (2) rev doc insert-only: idซ้ำ+payloadเดิม→reuse, idซ้ำ+payloadต่าง→reject
+- probe [sim] exit 0, 54 PASS 0 FAIL — Q13 forged-lineage reject, Q14 noop byte-identical+zero extractor calls, Q15 collision reject/reuse/precas-retry no-overwrite; Q1–Q12 เดิมไม่ regress; ไม่มี or True; ซ่อม probe bug 3 จุด (P.ACC2 stray, Q15 deactivation-gate ordering, Q12 ต้องใช้ fp ต่างไฟล์เพราะ noop ถูกต้อง)
+- doc rev7: §5 lineage+idempotency invariants, §5.2 write order step0 noop+insert-only, §6 validator lineage clause, §8 noop_reimport event, T1/T36–T38, mechanism delta +0
+- mechanism delta +0: lineage อ่าน revisions[expected_rev].row_map (field เดิม), noop/insert-only = write-order logic, noop_reimport = event บน import_log เดิม
+- งานค้าง: independent review รอบ 7 → approve D1,D2,D3,D4a,D6 → RED suite → implementation; [sim] ไม่ใช่ importer GREEN
+
+## ผ่านแล้ว — Zaapi KB design rev8: noop predicate root cause + decision lock (session เดิม 2026-11-06)
+- FREEZE ผ่าน: prefix 1..11951 = 59832f66 ✓, staging ว่าง, diff --check 0
+- root cause: rev7 noop predicate ตรวจ file_fp ตัวเดียว → (1) ไฟล์เดิม+quarantined ค้าง → noop ไม่ publish (2) ไฟล์เดิม+เพิ่ม account → noop account ไม่มี record
+- fix: noop ⟺ file_fp ∧ scope_fp ∧ model_version ∧ prompt_version ∧ schema_revision ∧ quarantined==[] — อ่านจาก active rev contract ไม่ใช่ไฟล์อย่างเดียว; scope_fp เข้า hashed payload (มีใน schema เดิม ตรง account_scope_fingerprint จริง); retry ที่ converged → noop_reimport{reason:retry_converged} ไม่ปลอม publish
+- audit owners [โค้ด]: MODEL_VERSION/PROMPT_VERSION/SCHEMA_REVISION constants ใน kb_zaapi_schema.py; checkpoint เดิมเทียบ source_revision+scope_fp+model+prompt — ขาด file_fp+quarantine
+- probe [sim] exit 0, 62 PASS 0 FAIL — Q12 same-file quarantine retry (refail→converged noop uidเดิม / success→delivered), Q16 ±account same file (เฉพาะ membership นั้นเปลี่ยน, 0 extractor calls), Q17 new fp same rows → uid/rec ids identical; limitation: model/prompt/schema versions + cold-process reuse ไม่ได้จำลอง (T41 = prod contract)
+- doc rev8: §5.3 state-dimension transition table ครบทุก input, noop predicate final, §10.1 D1–D6 locked defaults+acceptance (D1 scope-only {faq,policy,note,troubleshooting}, D2 excerpts=capability_asks verbatim, D3 exclude+log, D4a bearer+timeout+fail-closed, D6 legacy-only), §10.2 สาม state แยก (import rev ≠ generation ≠ runtime ready), T39–T42
+- mechanism delta +0: scope_fp เติม slot ที่ schema ประกาศไว้แล้ว, predicate=read-compare, retry_converged=reason field บน event เดิม, decisions=เลือก option ที่มีอยู่
+- งานค้าง: independent review รอบ 8 → RED suite → implementation; [sim] ไม่ใช่ importer GREEN
+
+## กำลังจะทำ — ทะเบียนงานคงค้าง Zaapi KB, bot-worker, workflow และ backlog หลัก (session เดิม 2026-11-06)
+- baseline: branch feature-botlogic-kb-workflow @ c289371; staging ว่าง; frozen 8624/892284 SHA a67b9152…0341 และ active prefix 1..11961 SHA 57e29fc3…c656 ตรง ledger; active tail ว่าง
+- ผู้ใช้สั่งสร้าง plan กันลืม: รวบรวมงานจาก master plan, ledger และสถานะ repo; แทรกงานแอดมินอนุมัติ/แก้/ปฏิเสธคำตอบ bot-worker หลัง KB ก่อนงานอื่น
+- รอบนี้แก้เอกสารแผนกับ waythrough เท่านั้น; ไม่แก้ production/test, ไม่แตะ Mongo/provider, ไม่เปิด live send
+
+## ผ่านแล้ว — ทะเบียนงานคงค้างและลำดับใหม่ (session เดิม 2026-11-06)
+- สร้าง docs/plans/2026-11-06-remaining-work-register.md จำนวน 84 บรรทัด / 27 task IDs: K0–K5 KB, H0–H4 แอดมินอนุมัติส่งเร่งด่วน, W0–W5 workflow, R0–R5 backlog เดิม, S0–S3 งาน support/deferred
+- ลำดับล็อก: KB acceptance K5 → human-review pilot H0–H4 ก่อนงานอื่น → workflow → prompt distillation, Phase 4B, Phase 5 เดิม, bot-worker canary, DB maintenance, analytics/logging; ระบุว่า Task 6A runbook ต้อง rebaseline เพราะ census ขัดกับ ledger ใหม่
+- ตรวจแล้ว: link 9/9 มีไฟล์จริง, task IDs 27/27 unique, git diff --check ผ่าน, staging ว่าง; production/test/Mongo/provider/selector/live-send ไม่ถูกแตะ
+- งานค้าง: K0 independent review ของ KB rev8, แล้ว K1–K5; human approval เริ่มหลัง K5; ทะเบียนนี้เป็นแผน ไม่ใช่ implementation หรือ production authorization
+
+## ผ่านแล้ว — Zaapi KB design rev9: K0 review รอบ 9 — scope owner + D2 contract (session เดิม 2026-11-06)
+- FREEZE ผ่าน: prefix 1..11972 = 2641acee ✓, staging ว่าง, diff --check 0
+- finding scope [โค้ด]: probe hash เฉพาะ account id → rename shop (idเดิม,ไฟล์เดิม) → noop ทั้งที่ account_scope_fingerprint() จริง (kb_zaapi_schema.py:74) hash (id, canonical_delivery_scope(name,platform)) → fix = probe เรียก owner function จริง; rename→publish, account ที่เปลี่ยน re-mint, อื่น byte-stable, 0 calls
+- finding D2 [โค้ด]: capability_asks stamp เฉพาะ product needs (turn_decision.py:798-816); policy producer ส่ง refs-only need (:766-781) → asks+facts ว่าง → no_query → contract ล็อก: query_excerpts = producer-stamped normalized question text ที่ fire need นั้น (producer ถือ norm อยู่แล้ว, ไม่มี table ใหม่); empty excerpt → no_query ตรง ๆ; acceptance = decide() จริง (T44)
+- probe [sim] exit 0, 65 PASS 0 FAIL — Q16b rename via owner fp; T43/T44 เพิ่มใน matrix (T44 = prod-owner acceptance)
+- doc rev9: header findings, noop predicate ระบุ scope_fp IS account_scope_fingerprint, §10.1 D2 contract แก้เป็น producer-stamped excerpt, T43–T44, mechanism +0
+- งานค้าง: independent review รอบ 9 → RED suite → implementation; [sim] ไม่ใช่ importer GREEN
+
+## ผ่านแล้ว — Zaapi KB design rev10: K0 review รอบ 10 — retrievable≠answerable + taxonomy (session เดิม 2026-11-06)
+- FREEZE ผ่าน: prefix 1..11980 = 18eca94a ✓, staging ว่าง, diff --check 0
+- finding answer-chain [โค้ด] 4 choke points: kb_zaapi.py:61-63 request loop prodish-only (zaapi_no_productish_need) · answer_context.py:650 idxs&=prodish_idx ตัด binding · :587 rt==troubleshooting return False · :1030-1035 non-productish→UnansweredNeed(deferred) ไม่มี NeedTask → ค้นเจอก็ตอบไม่ได้
+- finding taxonomy [โค้ด]: TurnNeedKind (:98) ไม่มี faq/note — สองค่านั้นเป็น record kinds → D1/§7.3/D2 แก้เป็น need kinds {policy,troubleshoot} → record kinds {policy,faq,note,troubleshooting}; claim/order/human ประกาศ out of Zaapi scope (owner อื่น)
+- §7.3 เขียน need→record→answer contract + owner changes ที่ต้องทำ (adapter allow-set, _attribute widen เฉพาะ kb_zaapi evidence, _kb_zaapi_need_ok admit per-kind, compile_answer_task emit NeedTask เมื่อ evidence bound — ไม่ bound ยัง deferred)
+- T45a/b เพิ่มใน matrix: decide()→retrieval→bound evidence→NeedTask→answer (prod-owner acceptance)
+- probe [sim] ไม่เปลี่ยน 65 PASS exit 0 (turn-side นอกขอบเขต importer probe); mechanism +0
+- งานค้าง: independent review รอบ 10 → RED suite → implementation; [sim] ไม่ใช่ importer GREEN
+
+## ผ่านแล้ว — Zaapi KB design rev11: K0 review รอบ 11 — attribution + compose authority (session เดิม 2026-11-06)
+- FREEZE ผ่าน: prefix 1..11989 = f23b60d8 ✓, staging ว่าง, diff --check 0
+- finding attribution [โค้ด] choke point ที่ 5: needs_for_request (retrieval_selection.py:218-225) ทุก branch กรอง prodish; kb+refs branch match exact ref-set → policy need ที่พก subject_refs ส่ง ch:kb:<i> แล้ว attribute ไม่ติด → req_needs link ขาดก่อนถึง _attribute → fix contract: kb+refs branch ใช้ shared allow-set (prodish∪served)
+- finding compose owner [โค้ด]: policy มี deterministic authority อยู่แล้ว — policy_decision/policy_resolver (:2376, fail-closed ก่อน boundary ตาม locked test test_phase7:599 ซึ่งล็อก policy∉task.tasks) → rev10 "served need→NeedTask" ขัด test ที่ล็อก + ตก domain product → contract แก้เป็น DomainResult(domain=kind, origin=zaapi, text=record body) ที่ compose_answer; policy_decision cover ก่อน, zaapi เติมเฉพาะ need ที่ไม่มี decision; unbound → deferred เหมือนเดิม
+- T45a–c เขียนใหม่: no-refs policy → DomainResult→answer อ้าง record; policy_decision present → ไม่มี zaapi duplicate; with-refs policy → needs_for_request attribute ผ่าน allow-set
+- probe [sim] ไม่เปลี่ยน 65 PASS exit 0; mechanism +0
+- งานค้าง: independent review รอบ 11 → RED suite → implementation
+
+## ผ่านแล้ว — Zaapi KB design rev12: K0 review รอบ 12 — render path + early return (session เดิม 2026-11-06)
+- FREEZE ผ่าน: prefix 1..11997 = 9f1edf6c ✓, staging ว่าง, diff --check 0
+- finding render [โค้ด] choke 6: _render_composition (app.py:760) — domain=="policy" ใช้ policy_outcome_text(r.outcome) ไม่อ่าน r.text; outcome ว่าง → admin-review wording → Zaapi result domain แก้เป็น "zaapi" (non-policy → r.text verbatim, renderer ไม่ต้องแก้)
+- finding early-return [โค้ด] choke 7: app.py:2030-2152 return_policy _pdec → unknown/admin_review→handoff return, eligible/ineligible→deterministic return ก่อน grouped retrieval → Zaapi ไม่ถูกค้นเลย
+- class split ล็อกบน typed context: class-E eligibility (return_policy+subject cards/_pd_mixed/product refs) → _pdec owns ทุก outcome Zaapi ไม่แข่ง; class-I informational (policy need ไม่มี eligibility context) → _pdec unknown handoff เลื่อนไปหลัง compose — bound→ตอบด้วย record, unbound→handoff เหมือนเดิมทุกตัวอักษร
+- T45a-I/E/∅ ที่ app.chat(): informational→final answer มี record body; eligibility→Zaapi หายจากคำตอบ; no-evidence→outcome เดิม
+- probe [sim] ไม่เปลี่ยน 65 PASS exit 0; mechanism +0
+- งานค้าง: independent review รอบ 12 → RED suite → implementation
+
+## กำลังจะทำ — K0 diff-import IMPLEMENTATION (ช่วงแรกเท่านั้น: importer+revision+log) 2026-11-06
+- ขอบเขต: v2 import path ใน owner เดิม — kb_zaapi_schema.py (v2 record row_uid/identity-split, v2 revision row_map+key_map+quarantined, validators dispatch ตาม doc schema_revision) + import_zaapi_kb.py (match→diff→extract-changed-only→quarantine/hold/stop→rev→CAS→log) + registry/log collections ตาม design · ห้าม §7 answer path, ห้าม provider จริง, Mongo เฉพาะ disposable
+- tests: docs/test/ ใหม่สำหรับ v2 RED→GREEN + reuse MemoryCollection/extraction stub เดิม
+
+## ผ่านแล้ว — K0 diff-import IMPLEMENTATION: schema v2 + v2 diff engine (offline GREEN) 2026-11-06
+- scope: importer เท่านั้นตาม authorization; ไม่แตะ §7 answer path, ไม่มี provider call, ไม่มี shared Mongo write
+- kb_zaapi_schema.py: record v2 = row_uid `{source_id}:r{n}` + identity/provenance split (RECORD_PROVENANCE_UNHASHED = source_fingerprint/source_revision/source_snapshot_id/scope_fingerprint/row → first-seen audit ไม่เข้า hash → record reuse byte-stable ข้าม revision/scope); canonical_record_id dispatch ตาม doc schema_revision; v2 semantic-only resolved (faq/policy/note/troubleshooting ด้วย scope เพียงอย่างเดียว); build_revision v2 (row_map/key_map/quarantined hashed, expected_rev audit-only first-seen); _validate_manifest_records_v2 (account coverage ต่อ uid, delivered∪quarantined==expected, delivered→quarantine ห้าม); validate_manifest record_count v2 ≥0
+- import_zaapi_kb.py: v2 diff engine — match declared-key(=match aid)→rename/deactivate proposals→assigned-mode content-fp match→mint uid เฉพาะ unmatched→extract เฉพาะ changed/new accounts→existing-fail=HOLD_PUBLISH, new-fail=quarantine, all-quarantine revision publish ได้→CAS manifest generation fence→CAS loser ไม่ repoint→registry (uid_next/staged/lease) collection แยก (ไม่ปน records_coll)→import log noop/publish/hold/quarantine/stop/cas_conflict
+- bugfixes จริง: registry fallback เขียนลง records_coll (export พัง) → collection แยก+uid_next floor จาก durable prior_rev; checkpoint status="complete" ก่อน CAS → CAS loser resume ชนะผิด → complete เฉพาะ post-CAS; fence expected_generation=None pinned ข้าม manifest → setOnInsert เสมอ (pinned fence = attempt owner); key_of ternary precedence; all-quarantine row_map ว่าง; v2 manifest/record validators dispatch
+- tests: docs/test/test_zaapi_kb_diff_import.py ใหม่ 15 cases (contract 16 แถวจาก PART 2 ครบ: noop/1-cell-edit/add-rows/rename-file/reorder/key-rename-confirm/dup-key-stop/row-removal-confirm/±account/shop-rename/edited-fail-hold/new-fail-quarantine-retry/restart-classify/log); ผล: 279 passed (15 ใหม่ + 264 suite เดิมหลัง v2-semantic updates) + related suites 194 passed (phase4 generation/scope/isolation/retrieval/attribution/phase7/phase10b/task5)
+- legacy locks kept: revision/record immutable insert-once, _persist_immutable exact-readback (provenance/expected_rev = audit exclusion), CAS fence, fact-conflict fail-closed, snapshot export/import validators, raw provenance, closed collections
+- git diff --check 0; SRS section 6.34c อัปเดต rows: canonical_record_id/build_revision/validate_manifest(_records)/from_extraction
+- งานค้าง: Mongo rehearsal ยังไม่ได้ทำ (ไม่มี mongod/docker/brew mongo บนเครื่อง — offline MemoryCollection เท่านั้น); shared Mongo import/generation build/publish/policy-troubleshoot answer path/customer QA = งานถัดไป; verdict: K0_DIFF_IMPORT_OFFLINE_ONLY_MONGO_REHEARSAL_PENDING
+
+## กำลังจะทำ — K0 diff-import ROOT-CAUSE CORRECTION (F1–F5) 2026-11-06
+- findings: F1 CLI ไม่ wire registry/log/confirmation · F2 reorder re-extract+re-key · F3 +account เรียก extractor ซ้ำ · F4 lease ไม่ตรวจ matched_count · F5 confirmation ไม่ผูก preview
+- กฎเหล็ก: ห้ามเพิ่ม helper/guard/regex/table/heuristic/owner/collection — แก้ใน owner เดิมเท่านั้น; ถ้าต้องเพิ่ม → หยุด finding นั้นขออนุมัติ
+- census baseline: จะนับ AST จริงเทียบ HEAD + ก่อน correction แล้ว KEEP/DELETE/MERGE
+
+## กำลังจะแก้ — K0 correction root-cause table (RED ผ่านแล้ว 6/10) 2026-11-06
+| finding | root cause | owner | minimal mutation |
+|---|---|---|---|
+| F1 CLI ไม่ wire | main() ส่งเฉพาะ raw/records | import_zaapi_kb main() | wire zaapi_kb_source_registry + zaapi_kb_import_log + --confirm + importer_tag |
+| F2 reorder re-extract | row_index/source_row อยู่ใน RAW_CONTENT_FIELDS → position เข้า content_fp | kb_zaapi_schema from_extraction/index_raw_rows/_validate_manifest_records_v2 + importer _row_content_fp | semantic fp ไม่รวม position (v2 เท่านั้น; v1 คงสูตร); index dual-key เพื่อ v1 compat; coverage per-uid multiset |
+| F3 +account re-extract | need_extract เรียก extractor เสมอ | _import_v2 classify | reuse extraction จาก prior member record (EXTRACTION_FIELDS reconstruction) |
+| F4 lease ไม่ตรวจ | update_one result ignored | import_source lease block | matched_count==0 → stopped; release filter tag เดิมอยู่แล้ว |
+| F5 confirm ไม่ผูก | needs_confirm = category strings | _import_v2 proposals | token = type + fingerprint(expected_rev, file_fp, proposal fields) — เดิม confirm arg ผ่านได้ทุก proposal |
+- validate_record_provenance: v2 branch — lookup ด้วย stored first-seen provenance (raw history immutable) + filter candidate ด้วย sheet+source_row (identical rows แยกด้วย position); v1 เดิม
+- ไม่เพิ่ม helper/guard/regex/heuristic/collection; เพิ่ม SEMANTIC_CONTENT_FIELDS constant เดียว (field list ตามกติกา PART 2 — ห้าม inline ซ้ำ)
+
+## ผ่านแล้ว — K0 diff-import ROOT-CAUSE CORRECTION F1–F5 (offline GREEN) 2026-11-06
+- RED probes 10 ตัวใน docs/test/test_zaapi_kb_diff_corrections.py — ล้ม 6/10 ก่อนแก้ (F1 CLI, F2 keyed+assigned, F3, F4, F5-base) ผ่านทั้งหมดหลังแก้
+- F1: main() wire zaapi_kb_source_registry + zaapi_kb_import_log + --confirm + importer_tag="cli" — ก่อนแก้ CLI publish โดย uid allocation ไม่ durable เลย
+- F2: SEMANTIC_CONTENT_FIELDS constant เดียว (RAW_CONTENT_FIELDS ลบ row_index/source_row) — position เป็น raw audit; from_extraction v2→semantic fp (v1 คงสูตร); index_raw_rows dual-key (v1 compat); _row_content_fp/_diff_summary→semantic; _validate_manifest_records_v2 coverage→per-uid multiset (dedupe dual-key rows) → reorder = extractor 0 calls + record_ids เดิม; validate_record_provenance v2 filter candidates ด้วย first-seen sheet+source_row (identical rows ไม่ชน)
+- F3: unchanged row + account ใหม่ → reconstruct EXTRACTION_FIELDS output จาก donor member record → extractor 0 calls (account ใหม่มี record ตัวเอง, เก่า byte-stable)
+- F4: lease update_one ตรวจ matched_count==0 → stopped ไม่ write; release filter lease:tag เดิม (ไม่ขโมย)
+- F5: needs_confirm token = type+fingerprint(expected_rev, file_fp, proposal fields) — confirm เดิมใช้ไม่ได้เมื่อ file/base/proposal เปลี่ยน; CLI --confirm รับ token จาก preview
+- knock-on fixes: export_snapshot dedupe dual-key rows; v1 expected filter สูตรตัวเอง; _diff_summary→_row_content_fp (merge)
+- tests: corrections 10 + importer 264 + diff 15 = 289 pass; Zaapi suites 336 pass; py_compile OK; git diff --check 0; ไม่มี provider/secret/product-DB write
+- mechanism delta รอบนี้: functions +0, guards +0, regex +0, tables +0, heuristics +0, owners +0, collections +0 (registry/log = design contract เดิม), constants +1 (SEMANTIC_CONTENT_FIELDS), CLI arg +1 (--confirm)
+- migration note: v2 records ที่ publish ก่อน fix นี้มี content_fp สูตรเดิม — re-import ครั้งแรกจะ re-extract 1 ครั้งต่อ row แล้ว stable (provenance first-seen ผ่าน dual-key index)
+- งานค้าง: Mongo rehearsal ยังไม่ได้ทำ (ไม่มี mongod/docker); shared import/generation/answer integration/QA = งานถัดไป; verdict: K0_DIFF_IMPORT_CORRECTED_OFFLINE_VERIFIED_MONGO_PENDING
+
+## กำลังจะทำ — K0 CLI preview/provider/log CORRECTION (F6–F8) 2026-11-06
+- F6: dry-run db=None → เห็นเป็น first import (ไม่มี prior state); F7: dry-run+canonicalize เรียก extractor; F8: noop log idempotent _id → event ซ้ำไม่ถูกบันทึก
+- owner เดิมเท่านั้น: main()/import_source/_import_v2/_write_log; ห้ามเพิ่ม helper/guard/regex/table/owner/collection/flag
+
+## ผ่านแล้ว — K0 CLI preview/provider/log CORRECTION (F6–F8) 2026-11-06 (offline-verified, MONGO_PENDING)
+- error→cause→fix→impact:
+  - F6 dry-run ไม่เห็น active → `main()` ไม่เปิด DB เมื่อ apply=False → preview = fake first import | `main()` เปิด read connection ให้ preview ด้วย (apply เท่านั้นที่ write); `import_source` อ่าน manifest/registry read-only; อ่านไม่ได้ → `status:"unavailable"` ไม่ปลอม first import | preview = diff จริงเทียบ active state
+  - F7 dry-run เรียก provider → extraction อยู่ `canonicalize` gate ไม่เช็ค apply + `_write_log`/`_write_checkpoint` unconditional | early preview return ใน `_import_v2` หลัง diff/token ก่อน confirmation/extraction/persistence — 0 writes/0 provider/0 checkpoint ทุก flag (canonicalize/resume รวม); extraction+checkpoint อยู่ apply path เท่านั้น | direct tests ที่ใช้ apply=False เพื่อ extraction/checkpoint เปลี่ยนเป็น apply=True (semantic เดิม — ทดสอบพฤติกรรมที่ย้ายไป apply)
+  - F8 noop log หาย → log `_id` derive จาก event payload + `$setOnInsert` → attempt ซ้ำชน _id | `_write_log` เพิ่ม `attempt` field (fingerprint ของ source+event+per-invocation counter) → ทุก apply attempt = event แยก แม้ payload เดิม; noop/held/stopped/conflict ล้วนเขียน | audit trail ครบต่อ attempt
+- test: corrections+import+diff 298 passed; 9 Zaapi suites 336 passed; py_compile OK; git diff --check 0
+- census: correction delta +0 funcs/+0 raises/+0 regex/+0 tables/+0 owners/+0 collections (ทุกแก้ใน owner เดิม)
+- งานค้าง: Mongo rehearsal (no mongod/docker — offline MemoryCollection only), shared import, generation publish, answer integration, customer QA — NOT production-ready
+
+## ผ่านแล้ว — K0 F6–F8 review CORRECTION (F8 log identity + read-error gate) 2026-11-06
+- error→cause→fix→impact:
+  - F8 review: `_write_log` ใช้ timestamp เดียวใน `_id` → two invocations เวลาเดียวกัน = 1 event | `attempt = os.urandom(16).hex()` (module ที่ import อยู่แล้ว ไม่เพิ่ม dependency) เข้า entry+`_id` fingerprint → unique ต่อ invocation แม้ `at` ชน | test: frozen datetime → 2 noop events (at เท่ากัน attempt ต่างกัน)
+  - F6 review: unavailable gate เช็คแค่ `records_coll is None` — `find_one` throw ใน preview propagate | try/except ครอบ read cluster (manifest→load_active_state→prior_rev→registry read) — `apply` re-raise, preview → `status:unavailable` | apply path ยัง fail loudly, preview fail-closed
+  - report wording: ก่อนหน้าอ้าง "per-invocation counter" — implementation จริงคือ random unique attempt id; SRS/log แก้ให้ตรง
+- test: corrections+import+diff 300 passed (+2 ใหม่: same-timestamp, read-error); 9 Zaapi suites 336 passed; py_compile OK; diff --check 0
+- census delta รอบนี้: +0 funcs, +1 raise (`if apply: raise`), +1 except handler — ทั้งหมดใน owner เดิม
+
+## กำลังจะทำ — K0 MONGO REHEARSAL (offline→real Mongo gate) 2026-11-06
+- อนุมัติแล้ว: start Docker daemon + docker pull mongo image + docker run disposable container (พอร์ตทดสอบ)
+- target: ADMIN_MONGO_URI=mongodb://127.0.0.1:<test-port> + ADMIN_MONGO_DB=zaapi_kb_rehearsal — แยกจาก admin/product DB จริงทั้งหมด
+- พิสูจน์ผ่าน owner จริง: noop/log attempt/row identity/hold/quarantine/stale confirm/lease+CAS/restart/unavailable gate → ตรวจ Mongo docs จริง → drop เฉพาะ rehearsal DB + rm เฉพาะ test container
+
+## ผ่านแล้ว — K0 MONGO REHEARSAL + R1 CAS-retry fix (real mongo:7 verified) 2026-11-06
+- env escalation อนุมัติแยกชั้น: start Docker Desktop + mongo:7 image (local อยู่แล้ว ไม่ต้อง pull) + disposable container 127.0.0.1:27019 → ADMIN_MONGO_URI/DB=zaapi_kb_rehearsal (แยกจาก admin/product จริง)
+- rehearsal 40/40 บน Mongo จริง: first+reimport (2 noop events attempt ต่างกัน, extractor 0), edit/±row/reorder/rename (uid+record_id คงเดิม), +account (membership เพิ่มเฉพาะส่วน, 0 calls), hold_publish (uid เก็บ record เดิม), quarantine (new-row fail), stale confirm ถูกปฏิเสธ + token จริง publish, lease race (rival stopped "leased by rh-1"), cross-source CAS race (mid-flight publish → loser retry converge), read error → preview unavailable/apply raise
+- REAL BUG พบและแก้ (R1, อนุมัติแล้ว): CAS loser retry เป็น dead code — `progress["expected_revision"]` (doc-id form) เทียบ `expected_pointer["active_revision"]` (fp form) ไม่เท่ากันเสมอ → cas_conflict ทุก cross-source loss | fix: เทียบ `expected_rev_id` (same-form, stale-checkpoint fence ยัง fail-closed) | ผล: cross-source loss ที่ slot ไม่เปลี่ยน+ไม่ conflict → converge จริง
+- offline tests +3: converge / conflict-no-retry / stale-checkpoint-no-retry; 303 focused + 336 wide pass
+- truth correction ในเทสต์เอง: slot-moved ทำไม่ได้จริง (lease ครอบ publish) — แทนด้วย conflict-at-recheck; dropped row ยัง guard fact key ผ่าน revision record_ids
+- cleanup: drop zaapi_kb_rehearsal + rm container — dbs เหลือ admin/config/local เท่านั้น
+- census R1: +0 funcs/raises/handlers/regex/tables/owners/collections (เปลี่ยน operand เดียว)
+- งานค้าง: shared Mongo import, generation build/publish, §7 answer integration, customer QA — NOT production-ready
+
+## correction — pre-commit review report wording (ไม่แก้โค้ด) 2026-11-06
+- รายงานตาราง "declared-key edit" เดิมเขียน deactivate+mint new — ผิด: code line 496-500 เสนอ `rename` เมื่อ missing/new = 1:1; confirm แล้ว uid เดิม (assign prior uid → new key, key_map อัปเดต); ต่างจำนวนค่อย deactivate ทีละ key — ตรง design line 309
+- M1 wording แก้: fallback `log_coll else registry_coll` อาจเขียน log:* ปน registry สำหรับ caller ที่ส่งเฉพาะ registry_coll (CLI ส่งทั้งคู่เสมอ — edge เฉพาะ direct callers)
