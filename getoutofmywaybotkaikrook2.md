@@ -12326,3 +12326,118 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - focused+related 7-file pytest: 424 passed/13 skipped exit 0; ChatAdminWeb `npx tsc --noEmit` exit 0; Python `py_compile` 6 files exit 0; `git diff --check` exit 0
 - ค้างจริง: live provider E2E, shared Mongo migration/write, selector activation, v2/flag-off serving scope decision, independent review; bot-worker human approval ยังเป็นแผน ไม่มี code หรือ Shopee send
 - PR ต้องเป็น Draft, target main เพื่อ review เท่านั้น; ห้าม merge/deploy; สร้าง branch bot-worker หลัง commit จากหัว PR branch เดียวกัน
+
+## กำลังจะทำ — H0–H3 bot-worker human review mock-send implementation 2026-11-09
+- branch codex/botworker-human-review-mock @ f9f4fd7 (clean); plan = docs/plans/2026-11-09-botworker-human-approval-mock-send-plan.md
+- scope: freeze review_bubbles ใน shadow_replies ตอน insert, review command API (save/approve/save_and_approve/reject), mock sender seam (provider=mock, delivered=false, ไม่มี Shopee call), UI 3 ปุ่ม + inline edit บน /botworker, product_card typed request เมื่อ item identity verified
+- ห้าม: Shopee HTTP/credentials, เปลี่ยน SAFETY.shopeeLiveSend, เขียน mock ลง messages_shp, ปนกับ botworker_messages sandbox, sent_text ต้องว่างเสมอ, semantic keyword/regex ใหม่
+- coverage note: ledger coverage=partial; งานนี้ใช้ targeted coverage (A-107 plan entry, A-108 baseline) ตามกฎ 8B
+
+## ผ่านแล้ว — H0–H3 bot-worker human review mock-send implementation 2026-11-09
+- error ก่อนแก้: shadow_replies ไม่มี per-bubble review state — `|||` แยกเฉพาะ UI; ไม่มี approval path / mock sender / card contract
+- วิธีแก้: `reviewService.ts` owner เดียว — `buildReviewBubbles` freeze ตอน insert (storeBotReply+storeWorkflowDelivered); `applyReviewAction` conditional update ต่อ transition (save/approve/save_and_approve/reject/send_card); op dedupe `reviewop:<id>`; ordering gate earlier=settled; retry mock_failed ด้วย event id เดิม
+- mock sender: `mockSendService.ts` seam เดียว — deterministic `botworker_events` `_id="mocksend:<reply>:<bubble>:<part>"` type `mock_send`; receipt provider=mock delivered=false เสมอ; ไม่มี Shopee URL/cred/HTTP; ไม่แตะ SAFETY
+- review route POST `/api/botworker/conversations/[id]/review` — server derive actor/shop/designated (`bot_review_admin_id`/`bot_review_shop_id` ใน system_config); messages route คืน `review_bubbles`+`can_review`; UI `/botworker` per-bubble 3 ปุ่ม + inline edit (บันทึก/บันทึกและส่ง/ยกเลิก) + card attach selector + label "จำลองส่งเท่านั้น"
+- tests: `scripts/test-botworker-review.ts` 20/20 pass (behavioral Mongo+route); boundary regression 20/20; `npx tsc --noEmit` exit 0; `git diff --check` exit 0
+- ผลกระทบเคสอื่น: legacy draft ไม่มี review_bubbles → แสดงได้แต่ approve=409 (ห้ามแปลงย้อนหลัง); sandbox composer เดิมไม่เปลี่ยน; bot_reply_text immutable
+- งานค้าง: sent_text ว่างเสมอ (provider จริง phase แยก); product card payload ไม่ใช่ Shopee schema จริง; live canary/deploy/merge นอกขอบเขต; commit รอ user approval
+
+## ผ่านแล้ว — H mock closeout corrections (independent review 5 findings) 2026-11-09
+- F1 ordering: mock request เขียนก่อน decision CAS → log อาจเป็น text A แต่ decision เป็น B → แก้เป็น CAS#1 decision(pending→approved/edited_approved+approved_text) ก่อน mock เสมอ (loser ออกก่อน mock, winner log = persisted text), CAS#2 delivery not_requested→mock_sent/mock_failed; card เหมือนกัน (CAS intent ก่อน request)
+- F2 op dedupe ไม่ผูก request → op doc เก็บ request binding {actor,shop,conv,reply,bubble,action,edited_text,card_item_id}; E11000 + binding ต่าง → 409 ไม่แตะ state; binding ตรง + outcome → คืนเดิม
+- F3 test I2 ปลอม → workflow path จริง (trigger wfkw→let_ai_respond→storeWorkflowDelivered) origin=workflow มี review_bubbles 2 อัน approve ผ่าน
+- F4 UI act() กลืน error แล้วปิด editor → act คืน bool, setEditingId(null) เฉพาะ success; merge logic แยก src/lib/reviewUi.ts (tested)
+- F5 Next.js docs อ่านได้จริงผ่าน cat (route handlers = Web Request/Response, POST, dynamic config) — pattern เดิมถูกต้อง
+- crash recovery: decided+not_requested → retry ส่ง persisted approved_text เท่านั้น (forged text ไม่มีผล); event มีอยู่แล้ว → E11000 คืน receipt เดิม ไม่ซ้ำ
+- tests: test-botworker-review.ts 26/26 exit 0 (เพิ่ม J1–J6), boundary 20/20, tsc 0, diff --check 0; ไม่มี sent_text/messages_shp/botworker_messages write ใน mock
+
+## ผ่านแล้ว — H mock closeout round 2 (3 findings) 2026-11-09
+- UI retry ซ่อน: ปุ่มลองส่งใหม่อยู่ใน pending block → decided+mock_failed ไม่เห็นปุ่ม → ย้ายมา block แยก decided&&mock_failed (gateOk+canReview เหมือนเดิม)
+- retry op binding: recovery path รับเฉพาะ approve → save_and_approve ตัดสินแล้ว retry = CAS miss → รับทั้ง approve+save_and_approve (ส่ง persisted approved_text เท่านั้น)
+- rejected bubble send_card: API ไม่ gate decision → เพิ่ม decision==="rejected" → 409 ก่อน intent CAS
+- tests: J7 save_and_approve retry persisted text, J8 rejected send_card=409+0 request; 28/28 + boundary 20/20 + tsc 0 + diff-check 0
+
+## ผ่านแล้ว — H mock closeout round 2b (J7 test gap) 2026-11-09
+- J7 เดิมใช้ op id ใหม่ → พิสูจน์แค่ recovery path ไม่ได้พิสูจน์ same-op crash resume → seed `review_op` in_progress + request binding เดิม + decided bubble → retry ด้วย op เดิม: binding ตรง → ทำต่อ → op done + 1 mock event (persisted text) + replay ได้ outcome เดิม; 28/28 + tsc 0
+
+## ผ่านแล้ว — H mock full-system test + config merge defect fix 2026-11-09
+- env: docker mongo:7 `bwreview-mongo` :27099 db `botreview_admin`, stub bot :8011 (`STUB_ANSWER`), Next dev (turbopack, isolated copy /tmp app + hardlinked node_modules) :3210, JWT minted ด้วย test secret — ไม่แตะ dev server :3000 ของผู้ใช้ ไม่เขียน shared DB
+- defect จริงที่พบ: `getSystemConfig` merge ไม่ carry `bot_review_admin_id`/`bot_review_shop_id` → review route 403 ตลอด → เพิ่ม passthrough 2 บรรทัดที่ merge owner (systemConfigService.ts ~204); UI crash `Avatar` เมื่อ `to_name` ขาด → schema เดิมใช้ `to_name` (seed ผิด field ไม่ใช่ bug prod)
+- worker live path: inbound → poll → callBot(stub) → shadow_replies + review_bubbles 3 อัน ✓; workflow `let_ai_respond → storeWorkflowDelivered` → `:wf0` + review_bubbles ✓
+- HTTP API suite: 13/13 — ordering gate, save/edit/save_and_approve/reject, dup op binding 409, wrong admin 403, card verified/foreign/rejected, concurrent 200+409 (event text = persisted approved_text เท่านั้น), crash windows (decided+not_requested retry persisted, pre-existing event no dup, in_progress op resume→done) — ตรวจจาก Mongo จริงไม่ใช่แค่ status
+- UI playwright (chromium): 5/5 — bubbles+3 ปุ่ม, edit mode 3 ปุ่ม+cancel ปิด, mock label "จำลองส่งเท่านั้น", evil admin ไม่เห็นปุ่ม; screenshots /tmp/bwtest/shots
+- regressions: review 28/28, boundary 20/20, tsc 0, diff --check 0
+- cleanup: docker rm bwreview-mongo, kill test dev/stub, ลบ /tmp app + scripts/bwtest-* — tree เหลือเฉพาะ candidate files
+- ข้อจำกัด: mock-fail mid-flight ทดสอบเฉพาะ fake-mongo suite (prod sender ล้มได้เฉพาะ DB error ยากต่อการยิงจริง — crash windows ที่เหลือพิสูจน์ผ่าน state seeding บน Mongo จริง); provider bot เป็น stub (ไม่มี credential จริงใน scope); ไม่มี DOM harness ใน repo — UI พิสูจน์ผ่าน playwright ad-hoc
+
+## กำลังจะทำ — live provider + mock transport failpoint test 2026-11-09
+- ต่อยอด H mock test: (1) provider จริง bot :8010 (user รันเอง ไม่อ่าน .env, LLM call จำกัด 2-3 inbound) (2) mock transport failure บน Mongo จริงผ่าน failCommand (testCommands only, ไม่มี prod hook)
+
+## ผ่านแล้ว — live provider + real transport-failure test 2026-11-09
+- env rebuild: docker mongo:7 `bwreview-mongo` :27099 `--setParameter enableTestCommands=1`, Next dev :3210 (isolated /tmp copy), stub :8011, JWT minted via jose — seed ต้องมี `config_key:"main_config"`, `shops.bot_worker_enabled:true`, `admins.active:true`, `conversations.to_name` (field จริงทั้งหมด — ไม่ใช่ bug prod)
+- LIVE PROVIDER: CHATBOT_BASE_URL_SHOPEE→bot จริง :8010 (user รันเอง; secret เอาจาก process env ผ่าน python-dotenv โดยไม่แสดงค่า) — inbound 2 msgs → buffer flush → bot ตอบจริง (LLM cost จริง 1 call) → shadow_replies `a8e000f4` + 1 bubble (bot ไม่ใช้ ||| รอบนี้ — รายงานตามจริง) → HTTP approve → mock event `text===approved_text===real answer`, delivery mock_sent, delivered:false, ไม่มี sent_text — chain เต็มพิสูจน์บน Mongo จริง
+- REAL TRANSPORT FAILURE: failCommand กรอง doc ไม่ได้ (extra args match เฉพาะ top-level command fields) → ใช้ schema validator ชั่วคราว reject เฉพาะ `event_id ^mocksend` (code 121 ไม่ใช่ E11000) — approve → CAS#1 ผ่าน, mock insert fail → HTTP 409 "mock send failed", decision=approved persisted + delivery=mock_failed(error), b1 ยัง pending (gate ยัง block), 0 mocksend event ใหม่, op done+outcome — ลบ validator → retry op ใหม่ → recovery path resume ด้วย persisted text → mock_sent + event เดียว "A"
+- prod code ไม่ได้แก้ระหว่างเทส; defect เดียวที่พบรอบนี้คือ config merge (fixed รอบก่อน verify ผ่าน getSystemConfig คืน review fields แล้ว)
+- cleanup: docker rm, kill stub, ลบ /tmp app + secret file — งานค้าง: crash กลาง CAS#1↔mock (process death window) ยังพิสูจน์ผ่าน state seeding เท่านั้น ไม่ใช่ kill จริง
+
+## ผ่านแล้ว — live provider per-shop (3 ร้านจริง) 2026-11-09
+- env: docker mongo:7 :27099, Next dev :3210, bot จริง :8010 (user restart เอง --reload; secret ผ่าน dotenv ไม่แสดงค่า)
+- รอบแรก product_recommend ทั้ง 3 ร้าน timeout: bot Pass1 intent ช้า (~61s จาก log ของ user) + concurrent calls → เกิน worker timeout 90s → claims bot_failed = timeout guard ทำงานถูก; bot ค้างชั่วคราวจาก load → user restart
+- รอบสองด้วย shipping question ต่อร้าน: 3/3 conv `bot_answered` → shadow_replies 3 docs (conv_pingevox/aumpornpoonsiri/wattaka_sana, 1 bubble ต่อ reply — bot ไม่ใช้ |||)
+- review gate per-shop: approve บน pingevox (designated) → 200 mock_sent, event text===persisted===real answer, delivered:false, ไม่มี sent_text; ร้านอื่นด้วย admin เดียวกัน → 403 "shop outside pilot scope" ถูกต้อง; wattaka_sana ยัง pending not_requested
+- ข้อสังเกต bot-side (ไม่ใช่ review feature): product_recommend queries ตอบช้ามาก/อาจเกิน 90s → ใน production จริง claim จะเป็น bot_failed; ถ้าจะใช้กับคำถามสินค้าจริงต้องพิจารณา timeout/queue ฝั่ง bot
+- cleanup: docker rm, /tmp app+secret ลบ — งานค้าง: multi-bubble จาก bot จริงยังไม่เคยเห็น (bot ไม่ตอบ ||| ใน 4 live calls)
+
+## ผ่านแล้ว — full system test ผ่าน flush buffer (real bot, 3 ร้าน) 2026-11-09
+- env rebuild: docker mongo:7 :27099 + Next dev :3210 (isolated /tmp copy) + bot จริง :8010 (`--reload` โดย user) + config `bot_buffer_enabled:true, window 15s, max 5`
+- BUFFER PROOF: 6 inbound (2/conv × 3 ร้าน) → poll → ทุกข้อความ `buffered (2 msgs, text window 15000ms)` → buffer_messages 6 rows + convlock 3 docs ค้าง t+3..18s → t+21s buffer=0 + shadow=3 — flush เด้งจริงผ่าน debounce ไม่ใช่ direct fire
+- real bot ตอบครบ 3 ร้าน (shipping/cod question ~ตอบใน window 90s ปกติเมื่อไม่มี product_recommend spike) → shadow_replies ×3 พร้อม review_bubbles
+- review: pingevox (pilot shop) approve → 200 mock_sent, event text===persisted===real answer, delivered:false, ไม่มี sent_text; wattaka_sana → 403 shop outside pilot scope
+- สาเหตุช้ารอบก่อนสรุปได้: ไม่ใช่ quota pacer (Mongo llm_config.keys=20 enabled → 280 RPM หลวม) — เป็น provider spike ชั่วคราว + concurrency + `--reload` watcher กระทบ _save_quota_day write; ตอนนี้ product question เดิมตอบ 3.8s
+- cleanup: docker rm, /tmp artifacts ลบ — งานค้างเดิม: process-kill crash window = state-seeded proof เท่านั้น, multi-bubble live ยังไม่เคยเห็น (bot ไม่ตอบ |||)
+
+## A-117 — กำลังจะทำ: shadow generate 3 real shopee convs
+- เลือก convs จริงจาก messages_shp: iSuper (24Q), BlackShark (23Q), CukTechThailand (33Q) — ทุกอันยังไม่เคย generate
+- ใช้ generateConversationShadowReplies + callOurBot ไป bot :8010 — write เฉพาะ shadow_replies (safety guards เดิม)
+- เป้า: ผู้ใช้เห็นคำตอบในหน้า /shadow-inbox ของ browser
+
+## A-118 — ผ่านแล้ว: shadow generate 3 real shopee convs (by customer name)
+- ผู้ใช้ชี้แจง: pingevox/aumpornpoonsiri/wattaka_sana = ชื่อลูกค้า (to_name) ไม่ใช่ร้าน — 3 ชื่อไม่มีใน shops/products เลย
+- เลือก conv จริง: shp_203905019987193330 (KingGadgets,5Q,re-gen), shp_714486222525921792 (IMILab,6Q,re-gen), shp_458397959824723675 (ZMI,11Q,fresh)
+- ผล: 22 shadow_replies ใน batch ใหม่, คำตอบจริงครบ ยกเว้น [item] card → bot คืนว่าง → "(ไม่มีคำตอบ)" 1 อัน
+- เวลา: ~85s/5Q, ~53s/6Q, ~112s/11Q (sequential per conv)
+- field จริงของคำตอบใน shadow_replies = bot_reply_text (ไม่ใช่ bot_answer)
+- วิธีดูใน UI: /shadow-inbox บน dev :3000 → เลือก conversation ตาม id/to_name ข้างบน
+- งานค้างเดิม: process-kill crash window ยังพิสูจน์แค่ state-seeding; multi-bubble จาก live bot ยังไม่เห็นจริง (รอบนี้ IMILab มี ||| ในคำตอบจริง 1 อัน — ใน shadow ไม่ผ่าน review_bubbles)
+
+## A-119 — ผ่านแล้ว: ปิดงานค้าง 3 จุด (real-Mongo failpoint + real SIGKILL)
+- Rebuild env: bwreview-mongo :27099 (enableTestCommands), Next copy /tmp/bwtest/app :3210 (hardlink node_modules — Turbopack ไม่รับ symlink), worker dotenv อ่าน .env เท่านั้น (ไม่ใช่ .env.local)
+- แก้ seed gotchas: config auto-doc เปล่าบัง main_config (delete อันเก่า), admins ต้องมี field `active` ไม่ใช่ is_active, system_configs ต้อง config_key="main_config" ไม่ใช่ _id:"system_config"
+- Test B (real-Mongo transport failure) 5/5: $jsonSchema validator บล็อกเฉพาะ event_id /^mocksend:/ → decision ค้าง approved + delivery=mock_failed + 0 event leaked + bubble1 blocked + same opId replay 409 deterministic + NEW opId resume→mock_sent 1 event เดียว
+- Test C (REAL SIGKILL): failpoint-on-insert ใช้ไม่ได้เพราะ op write ใช้ collection เดียวกัน → ใช้ test-hook KILLTEST_DELAY_MS ใน app COPY เท่านั้น (sleep ใน sendMockPart ก่อน insert) → mid-flight เห็น decision=approved+not_requested → SIGKILL → C1 state เป๊ะ crash window จริง → restart+same opId → resume→mock_sent, 1 event, text===persisted, delivered:false, ไม่มี sent_text, op→done
+- ⚠️ ข้อสังเกต (ไม่ใช่ review bug): live bot ไม่ยอม emit ||| ให้ ZMIThailand (4 compound prompts ล้วน 1 bubble) — multi-bubble พิสูจน์ผ่าน stub+unit เท่านั้น, ||| จริงเคยเห็นใน IMILab shadow-gen batch
+- ⚠️ worker gap พบระหว่างเทส: msgs ที่เข้าระหว่าง batch flush pending ถูก "buffered: duplicate — not admitted" และค้าง unread ถาวร (msg_mb3_1, mb3_2, mb4_0 ไม่เคยถูก process) — น่าจะ dedup/lock edge ใน bufferService ไม่เกี่ยว review feature
+
+## A-120 — ไล่ bug: buffer dormant-failed → เป็น design ที่มี gap จริง ไม่ใช่ crash bug
+- Repro สำเร็จ: bot port ตาย → flush 2 msgs → rows=failed(dormant), claims=bot_failed, err "fetch failed"
+- ยิง inbound ใหม่ d_2 → carryDormantRows revive claims (attempt 1→2) + rows→buffered → flush รวม 3 msgs (พิสูจน์ carry ทำงาน)
+- เปลี่ยน bot port กลับ + inbound d_3 → batch 4 msgs รวมของเก่า+ใหม่ → bot_answered, rows ถูกลบครบ, draft สร้าง — recovery end-to-end ผ่าน
+- ข้อเท็จจริงของ "stuck": re-poll ข้อความเดิมเจอ E11000 (unique message_id) → "duplicate — not admitted" → ปลุก batch ตัวเองไม่ได้ (carry ต้อง distinct new inbound เท่านั้น) → ถ้าลูกค้าไม่ทักมาอีก = ข้อความไม่ถูก retry ถาวร (ไม่ใช่หาย — เป็น dormant รอ)
+- พบเพิ่ม: ถ้า unique index ยังไม่ถูก instrumentation สร้าง (worker รันก่อน Next) → re-poll insert ซ้ำได้ → rows ทับซ้อนหลายชุดใน buffer
+- ผลกระทบจริง: (a) ข้อความลูกค้าที่ bot fail แล้วลูกค้าเงียบ = ไม่มี retry ไม่มีแจ้ง admin (b) log spam "duplicate" ทุก cycle (c) index-race ถ้า worker up ก่อน Next
+
+## A-121 — decision: dormant-failed carry-forward คือ intended design (อนุมัติโดยผู้ใช้)
+- ผู้ใช้ยืนยันเก็บพฤติกรรมเดิม: ข้อความที่ bot_failed → dormant รอ distinct inbound ใหม่ปลุก ไม่มี auto-retry/sweep/dead-letter
+- implication ที่รับรู้แล้ว: ลูกค้าที่ fail แล้วเงียบ = ข้อความค้าง dormant; "duplicate — not admitted" spam เป็น expected; index-race (worker ก่อน Next instrumentation) ยังคงอยู่ — รับ risk
+- ไม่มี code change — เหลือแค่นโยบายว่าถ้าอยากให้แน่ใจว่าข้อความไม่ตกหล่น ให้ลูกค้าทักใหม่หรือ admin แทรกข้อความเข้า conv เอง
+
+## A-122 — ผ่านแล้ว: แก้ independent review findings ทั้งหมด (Critical+Important+Minor)
+- #1 CRITICAL send_card dead code: entry.shop (shopname) เทียบ conv.shop_name, fallback shop_id เทียบ doc.shop_id — K1/K2 tests พิสูจน์
+- #5 deleted draft reviewable: loadReply + deleted_at:$exists:false → 404 (K4)
+- #3 finish LWW: outcome CAS บน metadata.status=in_progress — finisher เดียวชนะ (K7)
+- #4 conflict คืน uncommitted bubble: persistedBubble() re-read doc หลัง CAS miss
+- #2 expectedUpdatedAt dead param: wire เข้า check ก่อน transition → stale 409 (K6)
+- #10 send_card empty card_item_id → 422 (K3); #6 reject-after-card-mock_sent → 409 (K5)
+- #11 validate text ก่อน gate เฉพาะ pending bubble; #12 mockSend exists-path เช็ค payload+provider
+- #7 canReview String() normalize; #8 err per-bubble; #9 opId reuse ต่อ intent; #13 bot_review_* เข้า allowedKeys; #14 legacy wording
+- Tests: 35/35 review + 20/20 boundary + tsc clean + diff --check clean
