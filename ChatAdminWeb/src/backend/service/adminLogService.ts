@@ -19,6 +19,7 @@ export type AdminActionType =
   | "kb.delete"
   | "kb.toggle"
   | "kb.import_excel"
+  | "zaapi_kb.mapping_set"
   | "user.create"
   | "user.update"
   | "user.delete"

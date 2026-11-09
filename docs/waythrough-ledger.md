@@ -25,9 +25,9 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12443 |
-| active_integrity_prefix_sha256 | `2eb180d9be8b2eac` (full SHA: 2eb180d9be8b2eac6546ebd8b0e3a1009c5e665e8c4e708b67219535095130d4) |
-| active_line_count_at_baseline | 12443 |
+| active_integrity_prefix_lines | 12456 |
+| active_integrity_prefix_sha256 | `d158d01c137f7225` (full SHA: d158d01c137f7225bac72465ab2f75e0333f3e48063cd2745ffa6c2034b94e72) |
+| active_line_count_at_baseline | 12456 |
 | active_integrity_recorded_at | 2026-11-09T12:15+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
