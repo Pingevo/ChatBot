@@ -12497,3 +12497,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ครอบ hot path: fuzzy_match, item_name/text/relaxed/no_brand search, model/car/code queries — กัน query hang เกิน botCallTimeoutMs → bot_failed dormant
 - verify: py_compile + subset tests 10/10
 - ค้าง S6: ตัดสิน botCallTimeoutMs 90s vs product path latency
+
+## ผ่านแล้ว — S6 decision: คง botCallTimeoutMs=90s (data-driven)
+- bot_elapsed_ms 38,990 samples: p50=1.9s p95=46.5s max=282.8s; >90s เพียง 2.3% (provider spike tail ไม่ใช่ query ช้า)
+- ขยาย 180s ช่วยแค่ 2.3% แต่ทุก fail ช้า 2 เท่า → ไม่คุ้ม; S5 bound query 20s ลดส่วน query-driven อีกต่อ
+- decision: คง 90s + monitor หลัง S5 deploy — revisit ถ้า tail ยังสูง
