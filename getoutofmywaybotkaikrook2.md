@@ -12491,3 +12491,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - flip ผ่าน setKbSource CAS (readiness gate ผ่าน) → kb_source=zaapi
 - verify path จริง: _zaapi_files_allowed=True, legacy_kb_reads_allowed=False (zero reads), zaapi_kb_evidence 20 hits จริง (ZMI specs+balance), file_kb_ready searchable (active_rows 7,130 = 82 ไฟล์ที่เปิด)
 - ค้าง: admin ทบทวน 36 disabled + canary QA จริง; rollback = setKbSource legacy ไม่ต้อง readiness
+
+## ผ่านแล้ว — S5 product query max_time_ms
+- product_store.find() 14 จุด + `_Q_MAX_MS` env-bound (PRODUCT_QUERY_MAX_MS default 20000ms, 0=ปิด)
+- ครอบ hot path: fuzzy_match, item_name/text/relaxed/no_brand search, model/car/code queries — กัน query hang เกิน botCallTimeoutMs → bot_failed dormant
+- verify: py_compile + subset tests 10/10
+- ค้าง S6: ตัดสิน botCallTimeoutMs 90s vs product path latency
