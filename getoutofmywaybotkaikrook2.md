@@ -12564,3 +12564,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - live QA จริง PROMPT_MODULAR=1: "สวัสดี"→8.5k chars ตอบถูก shop-scoped; "ประกันเท่าไหร่"→9.0k chars ตอบถูก
 - prompt tokens ~12k ทั้งคู่ (เดิม CORE_B เต็ม ~+19k chars ≈ +5k tok → ประหยัด ~25-30% เคส non-product)
 - flag OFF = SYSTEM_INSTRUCTION เดิม 100%
+
+## ผ่านแล้ว — R0 modular switch (config `prompt_modular`)
+- prompt_sections.modular_enabled: config bool (admin flip ได้) → env PROMPT_MODULAR=1 override → default ปิด
+- systemConfigService: type+passthrough+allowedKeys — admin update ผ่าน config API ได้
+- verify: Mongo write true→enabled, false→disabled, tsc clean — flag ปิด=prompt เดิม 100%

@@ -57,6 +57,15 @@ def _split(core_b: str) -> dict[str, str]:
 
 
 def modular_enabled() -> bool:
+    """สวิตช์เปิด/ปิด — config `prompt_modular` (bool) ใน system_configs;
+    env PROMPT_MODULAR=1 override เปิด (ใช้ test/dev); ค่าว่าง/อ่านไม่ได้ = ปิด"""
+    try:
+        from . import runtime_config as _rc
+        v = _rc.get_runtime_config().get("prompt_modular")
+        if isinstance(v, bool):
+            return v
+    except Exception:
+        pass
     return os.environ.get("PROMPT_MODULAR", "") == "1"
 
 
