@@ -12087,3 +12087,242 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 ## correction — pre-commit review report wording (ไม่แก้โค้ด) 2026-11-06
 - รายงานตาราง "declared-key edit" เดิมเขียน deactivate+mint new — ผิด: code line 496-500 เสนอ `rename` เมื่อ missing/new = 1:1; confirm แล้ว uid เดิม (assign prior uid → new key, key_map อัปเดต); ต่างจำนวนค่อย deactivate ทีละ key — ตรง design line 309
 - M1 wording แก้: fallback `log_coll else registry_coll` อาจเขียน log:* ปน registry สำหรับ caller ที่ส่งเฉพาะ registry_coll (CLI ส่งทั้งคู่เสมอ — edge เฉพาะ direct callers)
+
+## กำลังจะทำ — Task 6A Shared Mongo Import PREFLIGHT (READ-ONLY) 2026-11-06 (session ใหม่ branch เดิม feature-botlogic-kb-workflow HEAD=e6dffc4)
+- เป้าหมาย: เตรียมนำ Zaapi sources เข้า shared admin Mongo ด้วย K0 diff-import ที่ commit แล้ว — audit ข้อมูลจริง + preview ก่อน ส่ง decision package ให้ user อนุมัติ apply
+- ข้อห้ามรอบนี้: ห้ามเขียน shared Mongo / ห้าม provider call / ห้ามเปลี่ยน kb_source / ห้าม build-publish generation / ห้าม commit-push-PR / ห้ามเพิ่ม helper-guard-regex-table-owner (+0)
+- ขั้นตอน: audit sources+manifest+Mongo census (read-only) → ตรวจ key mode/account mapping → รัน --dry-run preview ผ่าน owner จริง → safety/write-scope/rollback → customer-path gap → tests+diff --check → decision package
+
+## ผ่านแล้ว — Task 6A Shared Mongo Import PREFLIGHT (READ-ONLY, verified) 2026-11-06
+- audit จริง: files 118/118 sha256 OK (113 xlsx + 5 txt) · manifest items 118 unique ids · accounts 899 memberships (0 source ไม่มี accounts) · exclusion 134→118 (15 disabled + 1 system)
+- shared admin Mongo `chatbot` (read-only census ผ่าน `_get_admin_db` owner เดิม): zaapi_kb 8,600 legacy untouched · zaapi_kb_raw_sources 8,600 (118 src, active:false) · zaapi_kb_records exists=0 docs (no manifest/rev/rec) · zaapi_kb_source_registry ABSENT · zaapi_kb_import_log ABSENT · zaapi_kb_embedding_generations ABSENT · server มี DB เดียว chatbot
+- raw_row_id v2 = v1 พิสูจน์บน DB จริง (computed ids match stored docs, fields=RAW_STORAGE_FIELDS) → re-apply raw idempotent
+- preview --dry-run ผ่าน owner จริง EXIT=0: 118/118 status=preview (unavailable 0, stopped 0) · raw_count รวม 8,600 ตรง raw_sources พอดี · diff รวม added 8,600 / unchanged 0 / changed 0 / deactivated 0 / retried 0 · proposals 0 (first v2 import) · 0 writes/0 provider/0 checkpoint (F6–F8 contract ทำงาน — records coll อ่านได้ ว่าง → first import จริง ไม่ใช่ fake)
+- expected canonical = Σ rows×accounts = 112,974 records (ตรง A-012 พอดี) · extractor calls worst-case = 8,600 (1/row, accounts share output) · --resume checkpoint รองรับ resume
+- key mode: registry ABSENT → ทั้ง 118 = assigned default; keyledger (/tmp) 66 column candidates / 52 assigned — ยังไม่มี declaration ใดยืนยัน; column mode ต้อง declare ก่อน apply (switch หลัง import = uid churn เพราะ column ไม่อ่าน prior_row_map) · 21 Products-Balance + 5 txt + 26 อื่น = assigned
+- write scope ถ้า apply: raw re-validate idempotent · rec: ≤112,974 · rev: 118 docs · registry: 118 reg:* · log ≥118 events · manifest bootstrap→CAS ต่อ source · zaapi_kb ไม่แตะ · product DB ไม่แตะ
+- stop conditions: extraction fail new row → quarantine (publish ต่อ); existing row fail → hold_publish; proposals ไม่ confirm → needs_confirm; lease busy → stopped; CAS → conflict+1 retry converge; checkpoint mismatch → raise
+- verify: importer suites 303/303 exit 0 · Zaapi กว้าง 7 suites 143/143 exit 0 · py_compile 2 files OK · git diff --check OK · mechanism delta +0 ทุกชนิด (code untouched — เขียนเฉพาะ waythrough/ledger)
+- งานค้าง: รอ user approval — (1) apply scope (raw-only vs canonicalize) (2) key declarations 66 ไฟล์ถ้าต้องการ column mode (ก่อน apply) (3) provider budget 8,600 calls (4) gen build/publish (5) selector flip — customer path ยังไม่พร้อม: gen+publish+flip+QA ยังไม่ทำ
+
+## กำลังจะทำ — Task 6A แก้ Decision Package + plan doc (docs-only) 2026-11-06 (session ใหม่ branch เดิม HEAD=e6dffc4)
+- อนุมัติ: ตรวจ+แก้เอกสารแผน/รายงานเท่านั้น — ห้าม shared Mongo write / provider / gen build-publish / kb_source / production+test code / commit
+- งาน: canary command full-ID + row/acct facts · key-mode per-source decision table · provider budget จริงจาก _gemini_extract · recovery จาก owner ที่มี · GO/NO-GO 3 ขั้น · แก้ task6a-rerun-canonical-import-plan.md ที่ stale ตาม v2 contract
+- ต้องระบุข้อจำกัดจริง: declare_source ไม่มี CLI, dry-run ไม่ extract (F7), ไม่มี hard call cap
+
+## ผ่านแล้ว — Task 6A แก้ Decision Package + plan doc (docs-only verified) 2026-11-06
+- verify จริง: `--source 6acf5df0` → `error: source not found` exit 2 (exact id match เท่านั้น); `--source 6acf5df0ff3520d5c8bb7cbb --dry-run` → exit 0 preview raw_count=2 added 2/0 proposals · canary apply จะเขียน rec 2 (2 แถว×1 acct) + rev 1 + reg 1 + log + manifest bootstrap · provider calls = 2 พอดี (1/row ไม่มี retry)
+- findings ที่แก้: (1) S0.2 dry-run canonicalize เป็นไปไม่ได้ภายใต้ F7 — preview return ก่อน extraction = 0 calls/0 checkpoint → probe ต้อง --apply จริง (2) v2 publish ไม่ gate all-resolved — new-row fail → quarantine + publish ต่อ; existing fail → hold_publish (3) registry absent → all assigned; declare_source = $setOnInsert no-CLI → ต้อง declare ก่อน first apply ของ source นั้น else lock/churn (4) ถอน "drop zaapi_kb_records" — manual pointer removal หรือ forward re-import เท่านั้น; import_snapshot restore ได้เฉพาะ manifest ว่าง/ตรง (ไม่ใช่ rollback tool) (5) ไม่มี hard call cap flag — budget บังคับด้วย source selection + checkpoint
+- key table 118: 24 modelish→column / 32 name-mutable→column(confirm burden) / 7 text-mutable→column / 2 link-volatile→human / 1 other→column / 52 assigned(ไม่มี key — edit+add batch=deactivate+add churn, multi-edit=positional pairing risk)
+- แก้ docs/plans/task6a-rerun-canonical-import-plan.md (370→452): audit basis ปัจจุบัน, S0.2/S1 status, Stage2 v2 contract, owners +registry/log, key-mode section, rollback per-phase, approvals แบบ G0–G5+D4
+- verify: dry-run full-id exit 0 / short-id exit 2 · git diff --check OK · mechanism delta +0 ทุกชนิด (แก้เฉพาะ plan doc + waythrough) · ไม่มี Mongo rehearsal ใหม่ · ไม่มี shared write/provider
+- งานค้าง: รอ user ตัดสิน G1 canary approval (assigned vs pre-declare column), G2 per-source declarations, G3 budget+quota evidence
+
+## กำลังจะทำ — Task 6A budget wording correction (docs-only) 2026-11-06
+- user review พบ overclaim: `_gemini_extract` สร้าง genai.Client() ต่อ invocation (ไม่ใช่ client เดียว/process) + ไม่มี hard cap + checkpoint cache เฉพาะ resolved → ใช้นับ request จริงไม่ได้
+- แก้เฉพาะถ้อยคำใน plan doc — ห้ามเพิ่ม helper/guard
+
+## ผ่านแล้ว — Task 6A budget wording correction (docs-only verified) 2026-11-06
+- error→cause→fix→impact:
+  - report/plan อ้าง "exactly 2 provider calls" + "8,600 calls exactly bounded" | _gemini_extract:183 = `client = genai.Client()` per invocation; SDK-internal transport retry unverified → extractor invocations ≠ HTTP requests; importer loop ไม่มี retry จริงแต่ rerun บน failed rows re-invoke → cumulative > row count; checkpoint = resume cache ไม่ใช่ call counter | แก้ 5 จุดใน plan doc: Stage2 header (expected invocations + no hard cap + SDK unverified), quota line (user-provided unverified + canary วัดจริง), 429 note (per-run bound เท่านั้น), cost table, G1/G3 rows (expected 2 invocations / ~8,598 invocations) | ไม่มีคำอ้างเกินหลักฐานเหลือ
+  - client claim ผิด: เดิมเขียน "1 client per process" | จริง = fresh client ต่อ invocation | wording แก้พร้อมกัน | accurate
+- verify: grep ยืนยันเหลือเฉพาะ honest phrasing · git diff --check OK · mechanism delta +0 · docs เท่านั้น ไม่แตะ production/test/Mongo
+- งานค้าง: canary รอ user approval — รู้แล้วว่าไม่มี hard cap, expected 2 extractor invocations (ไม่ใช่ guaranteed calls)
+
+## กำลังจะทำ — Task 6A Gemini trial 50 rows บน disposable test Mongo 2026-11-06 (session เดิม HEAD=e6dffc4)
+- อนุมัติ: provider calls + writes เฉพาะ test Mongo (loopback 27019, DB zaapi_kb_trial_50, container zaapi-trial-50) — ห้าม shared admin Mongo/Product DB
+- 5 sources = 50 แถว: 6acf5df0(2)+6aba3ff8(18)+6a069124(12)+68747411(11)+68c8f859(7) — นับซ้ำด้วย importer owner ก่อนยิง
+- เป้าหมาย: เทียบ 3 ชั้น source→raw doc→canonical record + audit log รายแถว + truth table จำแนก correctness
+
+## ผ่านแล้ว — Task 6A Gemini trial 50 rows บน disposable test Mongo (27019/zaapi_kb_trial_50) 2026-11-06
+- ข้อมูลจริง: 5 sources = 50 แถวตรงตามนับ (2+18+12+11+7) · expected recs 1,502 · extractor ~50 invocations (resolved 44: cache 2+18+12+10+2, unresolved 6)
+- published: 3/5 sources (6acf5df0 2recs, 68747411 10rows/110recs+1quar, 68c8f859 2rows/10recs+5quar) — chain 122/122 bindings ok, 0 missing raw, 3/3 revs logged
+- BUG พบ (real): _import_v2:731-742 conflict-exclusion append quarantine ต่อ "record" ไม่ใช่ต่อ uid → multi-account row conflict = duplicate row_uids → build_revision "schema mismatch" → whole-source crash (6aba3ff8 r13/r16 ×68accts, 6a069124 7uids ×10accts) — abort สะอาด (0 recs/rev/raw; reg created+lease released)
+- semantic ของ conflict: แถวต่าง policy แต่ fact key เดียวกัน ("required_information"/"วิธีตรวจสอบ") + identity/target ว่าง → false cross-row contradiction (extraction ใช้ชื่อ key ไม่คงที่ TH/EN สลับ)
+- nondeterminism: spec rows โครงเหมือนกัน 7/13 unresolved (68c8f859 5/7, 68747411 1/11) — extraction output ไม่ผ่าน readiness โดยไม่ deterministic
+- truth table: 44 extracted ทุกตัวเทียบต้นฉบับ — facts/answer ตรงมีหลักฐานทั้งหมด (ตัวเลข/วันที่/รหัส/spec เช็คครบ: BLAC10RUN, 16.00 cutoff, 20% batt, BF01, CTL301, NotePin/Pro 500mAh) · ตกหล่น 2 (HIFi-1 model scope หายจาก facts r3/r4) · fabricate 0 · wrong-binding 0/122
+- artifact: /tmp/zaapi_trial50_audit.json + /tmp/zaapi_trial50_cmp.txt + /tmp/task6a_trial50_ckpt.json
+- cleanup: container+db ลบแล้ว · shared Mongo verify unchanged (8600/8600/0/0/0) · mechanism +0 · diff --check OK
+- งานค้าง: bug conflict-quarantine dedup (production fix ต้องอนุมัติแยก); unresolved spec rows ต้อง retry เพื่อแยก nondeterminism vs systematic; import ≠ KB usable — gen/publish/selector/QA gates เหมือนเดิม
+
+## กำลังจะทำ — Zaapi KB file-based import/export audit + spec (session ใหม่, branch feature-botlogic-kb-workflow HEAD=e6dffc4) 2026-11-06
+- เป้าหมาย user: Zaapi KB = ไฟล์ข้อมูล — นำเข้าเก็บแถว/คอลัมน์ตามต้นฉบับใน Mongo ตรง ไม่ผ่าน Gemini; identity = ชื่อไฟล์ตรงตัว (ชื่อเดิม replace ทั้งชุด / ชื่อใหม่ add / ไม่ match ข้ามชื่อ); Import/Export บนหน้า Zaapi KB; ค้น fields/text ต้นฉบับส่ง evidence พร้อม filename/sheet/row
+- ข้อจำกัด: ห้าม helper/guard/regex/keyword table/heuristic/decision owner เพิ่มเพื่อแก้เฉพาะหน้า; แก้ owner เดิมให้น้อยที่สุด; ไม่เรียก Gemini ตอน import; ไม่เขียน Product DB; ไม่เปลี่ยน kb_source; ไม่แตะ workflow Zaapi; รอบนี้ = audit+spec+plan เท่านั้น ห้าม shared Mongo write/provider/commit/push/PR/deploy
+- ขั้นตอน: freeze protocol (ผ่าน — frozen+prefix sha ตรง, tail ว่าง, coverage partial ตามเดิม) → PART1 audit เส้นทางจริง (Mongo read-only + โค้ด UI/API/importer/search/pool) → PART2 data contract → PART3 search design → PART4 UI spec → PART5 RED→GREEN test plan → PART6 KEEP/DELETE/MOVE census → PART7 stop-gate report รอ independent review/อนุมัติ
+
+## ผ่านแล้ว — Zaapi KB file-based audit+spec (design round, ไม่แตะ production) 2026-11-06
+- freeze ผ่าน: frozen+prefix sha ตรง, tail ว่าง, coverage partial เดิม; dirty 3 ไฟล์ = งาน docs session ก่อน index แล้วไม่ commit — ไม่ทับ
+- audit จริง (code+Mongo read-only): zaapi_kb 8,600 (fields/text/accounts/sheet/row_index/source_name — ไม่มี filename; $text index ไทย 0 hit) · raw_sources 8,600 superset (source_file ×118 + source_row + scope_fp, active:false) · records=0 · registry/log/gens absent · 4 manual_input · Mongo standalone ไม่มี txn · system_configs kb_source=legacy, grouped flag ON
+- root cause: (1) adapter อ่านเฉพาะ active gen artifacts → zaapi_no_active (canonicalize ไม่เคยรัน) (2) channel+_attribute productish-only 2 ชั้น (3) $text ใช้ไทยไม่ได้ (4) ขาด filename บน serving coll
+- spec ส่ง: zaapi_kb เสิร์ฟต่อ + source_file/file_rev + registry zaapi_kb_files (identity=filename exact, same=replace rev+1, new=add, no cross-name) · atomic swap parse→insert→registry CAS→ลบเก่า · scope: ไฟล์ใหม่เลือก accounts ใน UI / ชื่อเดิมสืบทอด registry · manual (no source_file) ไม่โดน · logAdminEvent owner เดิม
+- search: fetcher internals ใหม่ใน kb_zaapi (signature/gate เดิม) — ค้น zaapi_kb scoped (accounts.name==shop) + BGE-M3 embed text ต้นฉบับ (shared singleton, in-mem cache pattern _qa_docs) → kind "kb" + record_id=file::sheet::row + request_id bound → productish path ไม่แตะ boundary; non-prodish = Option B แยก approval
+- UI: gate legacy actions ด้วย corpus==legacy; panel group ตาม source_file + Import preview→confirm + Export/file; endpoints ทาง A=FastAPI owner+thin Next binary passthrough (แนะนำ — openpyxl byte-identical, dep+0) / ทาง B=pure-Node+xlsx dep; ⚠️ /api/chatbot proxy เดิม req.text() ทำ binary เสีย → route ใหม่ ไม่แตะ proxy
+- migration: join source_id เติม source_file/source_row/file_rev:1 in-place + registry 118 rev1; raw_sources คง donor; K0 canonical path DEFER (records=0, bug A-097 ค้างแยก)
+- census: KEEP zaapi_kb/parse shape/evidence contract/needs_for_request · DEFER canonicalize leg+records · mechanism +1 coll +2 endpoints +1 fetcher internals +0 guards/regex/tables/heuristics · deps +0 (ทาง A)
+- งานค้าง: รอ user ตัดสิน 7 ข้อ (endpoint host / scope picker / non-prodish / evidence kind / K0 fate / NNN prefix / flip timing) → independent review spec ก่อน implementation
+
+## กำลังจะทำ — Zaapi KB design correction ตาม independent review (design-only ไม่แตะ production) 2026-11-06
+- ตรวจ 4 flaws: (1) _id hash(file,sheet,row) ชนข้าม revision (2) reader อ่าน pointer เก่า vs ลบแถวเก่าหลัง flip (3) zaapiKbReady นับ docs ผ่านทั้งที่ retrieval ไม่พร้อม (4) productish-only + kind="kb" → FAQ/policy/troubleshoot หายหรือผิด need — แยก code-proven จาก inference
+- แก้ contract: _id ไม่ชนข้าม rev, single-point visibility swap, reader เก่าอ่านจบได้, failure recovery, cleanup owner เดียว (Mongo standalone ไม่มี txn)
+- แก้ readiness: ตรวจ active dataset + ทางค้นจริง ไม่ใช่นับ legacy docs; migration verify source_id→filename read-only ก่อนเขียน; ห้าม flip kb_source กลาง migration
+- แก้ search: ครบ product/FAQ/policy/troubleshoot — ไม่เลื่อน non-prodish ออก; ตรวจ kind="kb" ข้าม gate/ผิดหัวข้อไหม; BGE-M3 ต้องมี benchmark+invalidation proof ก่อนเลือก
+- UI: legacy buttons เฉพาะ legacy tab; Zaapi preview→confirm + export/file + log; export round-trip ค่าปัจจุบัน; endpoint owner ตัดสินจาก repo evidence
+- ลด decisions เหลือเฉพาะ usage; แก้ ledger A-098 `||` bug; อัปเดต log/ledger/integrity ตาม protocol
+
+## ผ่านแล้ว — Zaapi KB design correction ตาม independent review (design-only) 2026-11-06
+- 4 flaws verified: (1) _id=hash(file,sheet,row) ชนข้าม rev — proven design (2) reader+old pointer vs delete เก่า — proven (3) zaapiKbReady นับ docs≥1 ไม่เกี่ยวกับ retrieval — proven code (ts:461, comment ยอม P2 smoke ไม่ทำ) (4) productish-only = 3 ชั้น proven: ch:kb สร้างเฉพาะ prodish (:87-89, zaapi ไม่มี bare ch:kb) + adapter prodish filter (:61-64) + _attribute ∩prodish_idx (:650 ทุก kind)
+- kind="kb" proven correct contract: raw rows ผ่าน _META_REQUIRED ไม่ได้โดยนิยาม; kind="kb" อยู่ใน _SUPPORTING_KINDS + record_id ใน _EVIDENCE_OUT_FIELDS แล้ว (+0 closed-set edit); attribution ผูก request_id channel — ไม่เพิ่ม misattribution
+- non-prodish owner map proven: FAQ→qa_context(app.py:4982)→search_qa/kb_qa · tips→qa_troubleshoot_tips(warranty_flow:1760) · policy→policy_resolver (active_policy_rules คืน () = seam ว่างใน prod) · claim/order=warranty_flow/order_store — ทั้งหมด gated _legacy_allowed → zaapi mode = blackhole สมบูรณ์
+- corrected contract: _id=sha256(file|rev|sheet|row) · registry zaapi_kb_files CAS = visibility จุดเดียว · parse→staged bulk_write(มี emb)→CAS→mark old expire_at+GRACE10m(TTL)→sweep owner=importer · reader-finish = in-memory snapshot isolation + grace · crash pre/post-flip = invisible waste เท่านั้น ไม่ผิด
+- readiness ใหม่: registry≥1 AND active-rev rows>0 · migration gate: sid→file 1:1 + join parity (fields/text/accounts) + manual_input check — queries พร้อม, Mongo credential ไม่มีใน shell → รอรันตอนมี creds · kb_source คง legacy จน smoke+คำตอบจริงผ่าน
+- search ครบ 4 ชนิด: product→pool kind="kb"+record_id=file::sheet::row · FAQ/policy→search_qa zaapi branch→qa_context · troubleshoot→tips zaapi branch(sim+len ไม่แตะ level taxonomy) · claim/order owners ไม่แตะ · corpus=snapshot keyed signature(max imported_at + manual watermark) — invalidation-proof ไม่ใช่ TTL · emb 4KB/row ฝังตอน import (BGE-M3 local ไม่ใช่ provider) flip พร้อม row · benchmark 5 ตัวเป็น gate ไม่สมมติ
+- endpoint owner=FastAPI ตัดสินจาก repo evidence (openpyxl+_admin_db+embedding local+secret pattern; Node+xlsx=dep+parser ซ้ำ ปฏิเสธ) · ⚠️/api/chatbot proxy req.text() ทำ binary เสีย→route ใหม่ arrayBuffer · UI: gate legacy buttons corpus==legacy + panel file-grouped + preview→confirm + scope picker union accounts + export xlsx per-sheet round-trip ค่า (ไม่ใช่ byte)
+- census: MOVE parser→zaapi_kb_files.py · ADAPT fetcher internals/search_qa/zaapiKbReady/panel/page · RETIRE-candidate K0 canonical chain (dormant ไม่ลบ) · +1 coll +1 module +3+2 endpoints +0 guards/regex/tables/heuristics/owners/deps
+- คำถาม usage เหลือ 2: scope universe (corpus accounts เท่านั้น v1?) + NNN-prefix keep/strip · งานค้าง: independent review ก่อน implementation
+
+## กำลังจะทำ — Zaapi KB correction round 2: reproduce 4 findings + แก้สเปก (design-only) 2026-11-06
+- (append หลัง verify — ลำดับคลาดรอบนี้ บันทึกตามจริง)
+- reproduce: (1) row_index vs source_row join ผิด (2) signature updated_at ไม่มีจริง (3) BSON emb size จริง (4) kind="kb" ผ่าน attribution จริง
+
+## ผ่านแล้ว — correction round 2 verified (design-only) 2026-11-06
+- F1 PROVEN owner `_xlsx_docs` (:92-104): source_row=excel row เริ่ม 2 ข้ามแถวว่าง (fields ว่าง→continue) · row_index=len(docs) 0-based dense → `row_index==source_row` ไม่เคยตรง + `row_index+2≠source_row` เมื่อมีแถวว่าง — join ที่ spec เดิมผิดสมบูรณ์ · ทั้งสอง coll มี row_index (raw มาจากฟังก์ชันเดียวกัน) → join verify ใช้ (source_id,row_index) ได้ แต่ migration ไม่ต้อง join เลย: rebuild zaapi_kb จาก raw_sources (donor ครบทุก field) — join ใช้เฉพาะ parity CHECK; ไม่ครบ→STOP ห้าม auto-manual
+- F2 PROVEN routes: PATCH เขียน edited_at+manual_edit (ไม่มี updated_at เลย) POST เขียน imported_at → signature 'max manual updated_at' = null ตลอด → manual edits/deletes ไม่ invalidate — ตัด cache ออกจาก v1 (per-request query แทน)
+- F3 PROVEN ทดลอง bson: ndarray→InvalidDocument, list(np.f32)→InvalidDocument, list(f64)=13,241B/doc(70.5MB corpus), **f32.tobytes()=4,096B field/4,111B doc=35.2MB corpus roundtrip exact**, f16=2,063B(17.6MB) cos 0.99999 — "4KB" ผลดันเคยถูกแต่ตอนนี้ measured แล้ว; emb ยัง defer เป็น gate 2
+- F4 PROVEN probe real fns: ch:kb:<i> refs→exact (E1/E2=[i] ผิดหัวข้อ=fetch-quality ไม่ใช่ attribution) · no-refs→broadcast all-prodish (E3/E4/E5=[0,1,2] need_index+mapped rid ไม่ช่วย) · **need_index+unmapped rid→exact {i} (E10/E11)** · unmapped rid เดี่ยว→DROP · kb_zaapi meta={}→DROP meta_invalid (compile order) + spec fact_fields ว่าง→DROP unattributed (content gate เข้ม) · need_index=nonprodish→DROP (E13 prodish boundary แข็ง) · pool stamp rid เฉพาะ absent (:268) → contract: kind="kb"+need_index=i+rid="ch:kb:i:row"+record_id+payload verbatim
+- scope=canonical_delivery_scope (name+platform exact/ว่าง=unscoped) enforced ที่ fetch+registry ไม่ใช่ attribution (wrong-shop ผ่านได้แค่เมื่อ fetch หลุด)
+- census callers จริง: kb_zaapi←app.py:1219 เท่านั้น · schema←answer_context(Readiness/RecordType)+gen+retr · retr←gen+adapter · 59 test imports → RETIRE=dormant ไม่ลบ (tests ที่ล็อก artifact contract ต้อง ADAPT พร้อมกัน)
+- spec ใหม่ v1: ไม่มี cache/emb — query/req = registry resolve→scoped $or(file,rev)+manual+scope → Python score (refs-substring exact + trigram ไทย) → embedding เป็น gate 2 (format+model+visibility ตอบครบแล้ว) · non-prodish=QA owners (search_qa/tips +shop param +zaapi branch — signature owner เดิม) · readiness=serving-predicate+rows-match · migration=rebuild from raw+gate STOP · คำถามเหลือ 2 (scope universe / manual_edit บน file-backed แพ้ import ไหม)
+
+## กำลังจะทำ — Zaapi KB correction round 3: แก้ 3 blockers จาก independent review (design-only) 2026-11-06
+- B1 migration: ลบก่อนเขียนมีหน้าต่างข้อมูลหาย + parity "sample/เต็ม" ไม่พอ → full verify ทุกแถว + insert staged→verify→flip→grace-delete (order เดียวกับ import contract)
+- B2 need-binding ≠ คำตอบถูก: acceptance row→evidence→final answer + near-model/conflicting cases ก่อนเปิดใช้
+- B3 QA path vs raw rows: ระบุ mapping ชัดโดยไม่เดา type จากชื่อไฟล์/ไม่ hardcode — ตรวจ _QA_TRIGGER_KWS, mongo_doubles, admin docs query
+
+## ผ่านแล้ว — Zaapi KB correction round 3 (design-only): spec v3 แก้ 3 blockers จาก review 2026-11-06
+
+### ผลจริง (probe บน owner จริง)
+
+**B1 migration — executable proof** (`/tmp/zaapi_migration_probe.py`, FakeColl):
+- ลำดับใหม่: G1 FULL verify ทุกแถว → stage(staged:true, file_rev:1, _id ใหม่ไม่ชน) → verify-staged → flip(registry) → unstage → retire โดย explicit `_id` list เท่านั้น — เก่าอยู่ครบจนชุดใหม่ serve ได้
+- crash ทุกจุด → legacy 6/6 คงอยู่ + staged invisible เสมอ (PASS x5)
+- concurrent read: pre-flip → 0 file docs (legacy era), post-flip → new set ครบ 6
+- re-run บนสภาพ migrated → STOP:staged_verify (gate จับ legacy docs ไม่เจอแล้ว — ไม่ซ้ำเขียน)
+- **LIMIT จริง**: `FakeColl.delete_many` เป็น stub `deleted_count=0` — พิสูจน์ได้เฉพาะ serving-predicate safety + ordering; delete semantics ต้อง verify บน disposable Mongo จริง (acceptance)
+- gate predicate edge (probe เจอ): gate ต้องกรองเฉพาะ legacy docs `{source_file:{$exists:false}, kind:{$ne:"manual"}}` ไม่งั้นอ่าน doc ที่ migrate แล้ว (ไม่มี source_id) → KeyError
+- serving predicate สำคัญ: legacy doc ไม่มี source_file + kind≠manual → invisible หลัง flip — ไม่มีหน้าต่าง duplicate-serve เลย (kind="manual" check บังคับ)
+
+**B3 QA contract — อ่าน owner จริง**:
+- `_QA_TRIGGER_KWS` (kb:900) recall gate: "วิธี/ชาร์จไม่/ไม่ทำงาน/..." — zaapi QA hits ใช้ gate เดิม (fire เมื่อ claim หรือ kw เดียวกัน)
+- `search_qa` scoring (kb:~1010): `_qa_score` = raw_sim + substring bonus(q⊂msg +0.4) + level bonus — zaapi hit **ไม่มี q field → bonus ไม่ fire (honest ไม่สร้าง q ปลอม)**
+- dcodes fallback (kb:~1024): `model_codes` ว่าง → `re.findall` บน `topic` — zaapi topic=source_file → **mechanism เดิม extract รหัสรุ่นจากชื่อไฟล์** (ไม่ใช่ heuristic ใหม่ — reuse owner เดิม) → level=model/brand ผ่านได้ตามกฎเดิม
+- cross-model guard (kb:1030): `dcodes & known` ไม่ตรง → continue — ใช้กับ zaapi เหมือน kb_qa
+- `qa_troubleshoot_tips` (kb:1122): 3 gates {level∈model,item,brand} ∧ `_qa_sim≥min_sim` ∧ `len(a)≥30` — zaapi hits ผ่านได้เฉพาะเมื่อ level ผ่าน (filename-code fallback) — generic zaapi rows ถูก drop เหมือน generic kb_qa docs (consistent, บันทึกเป็น limitation ไม่ใช่ bug)
+- `_QA_MIN_SCORE=0.45` cosine — zaapi v1 ใช้ trigram scale → floor ต้อง calibrate จากข้อมูลจริง (acceptance, ไม่ใช่ magic const)
+- **ไม่มี type classification** — ทุก serving row ค้นด้วย text เดียวกัน; "แถวไหนเป็น FAQ/policy/troubleshoot" ไม่ใช่คำถามที่ต้องตอบ — retrieval signal คือเนื้อแถวเอง (ตอบ reviewer ตรง ๆ: ไม่เดาชื่อไฟล์/ไม่ hardcode field/ไม่ keyword table ใหม่)
+
+### Spec v3 changes
+- Migration: ลบ→insert เปลี่ยนเป็น stage→verify→flip→grace-retire(explicit _id list) + rollback ภายใน GRACE + full-verify ทุกแถว (ไม่ sample)
+- Evidence acceptance ขยาย: row→evidence→final-answer E2E + near-model(AC65B vs AC65B2 ต้อง boundary-aware ref match — `_code_match` convention เดิม) + conflicting rows(ทั้งคู่ emit แยก citation ไม่ merge) + off-topic→floor→"ไม่มีข้อมูลยืนยัน"
+- QA: zaapi hit `{a=text verbatim, topic=source_file, _qa_score=_qa_sim=zaapi score, _qa_level=logic เดิม, _qa_source="zaapi", provenance fields}` + qa_context render `[จากไฟล์ f › s › แถว r]` (owner edit เล็ก)
+- คำถามเหลือ 2 ข้อเดิม; unproven เพิ่ม: trigram floor calibration + real-Mongo delete semantics
+
+## ผ่านแล้ว — Zaapi KB correction round 4 (design-only): spec v4 แก้ 3 blockers รอบที่ 2 2026-11-06
+
+### F1 — serving window หลัง flip (reviewer จับถูก, probe v4 พิสูจน์แก้แล้ว)
+- สาเหตุ: serving predicate v3 มี `¬staged` → flip→unstage ช่วงนั้นแถวใหม่ทั้งชุดถูกซ่อน (claim "ไม่มีหน้าต่าง" ผิด)
+- แก้: **ทิ้ง field `staged` ทั้งหมด** — visibility = registry `file_rev==active_rev` เท่านั้น
+  - staged docs ที่ยังไม่ flip: `file_rev=R+1 ≠ active_rev=R` → invisible โดย rev check (ไม่ต้องมี flag)
+  - sweep ใช้ `{file_rev≠active_rev}` + expire_at TTL — flag ไม่มีหน้าที่เหลือ → mechanism −1
+- probe `/tmp/zaapi_migration_probe2.py` PASS x6: mid-stage reader=legacy era เท่านั้น, post-flip reader=ชุดใหม่ครบ 6/6 ทันที, crash@stage/pre-flip=0 file docs, crash@post-flip=ชุดใหม่ครบ — ไม่มีจุดที่ reader เห็น partial
+
+### F2 — `_qa_sim` semantics (แก้โดยไม่เพิ่ม mechanism)
+- v3 จะใส่ trigram score ลง `_qa_sim` → threshold 0.5 หมดความหมาย — reviewer จับถูก
+- แก้: `_qa_sim` = **cosine จริง** คำนวณตอน query — lazy-embed top-K candidates ด้วย `embed_texts`/`embed_query` (embedding.py owner เดิม, local BGE-M3, precedent `_qa_embed_missing` kb:964)
+  - retrieval (trigram+refs) หน้าที่เดียว = pre-filter เป็น K candidates; `_qa_score`/`_qa_sim` = real cosine → `min_sim=0.5`, `_QA_MIN_SCORE=0.45` semantics เดิมครบ
+  - ไม่มี persistent vector store → **ไม่มี invalidation problem เลย** (embed จาก serving rows ปัจจุบันเสมอ)
+  - cost = K embeds/QA-eligible request (K≤10, local) → วัดใน benchmark gate
+- F3 chain: `model_codes` ของ zaapi hit = codes จาก **row content (fields+text)** ด้วย regex เดิมของ owner (kb:1024) — content-proven binding; `topic=""` (ไม่ป้อนชื่อไฟล์เข้า field semantic) → `dcodes` fallback ดึงจาก filename ไม่ได้อีก → level=model เฉพาะเมื่อแถวพูดถึงรุ่นจริง — **แก้ทั้งคะแนนและขอบเขตรุ่นใน mechanism เดิม**
+
+### F4 — conflicting answer lock (acceptance)
+- A3 เข้ม: แถวขัดกัน → final answer ต้องแสดงทั้งสองค่าพร้อม citation หรือบอกชัดว่าข้อมูลขัดกัน — **ห้ามยืนยันค่าเดียวเอง**; test assert บน answer text (LLM-eval gate — วัดบน run จริง, evidence side การันตีทั้งสองแถวถึง pool)
+
+### Spec v4 delta จาก v3
+- staged field: ถูกลบออกจาก contract (visibility=registry only, sweep=rev mismatch)
+- migration order: stage→verify→flip→retire(explicit _id + expire_at GRACE) — ไม่มี unstage step อีก
+- QA zaapi hit: {a=text, topic:"", q:"", model_codes=content-extracted, _qa_score/_qa_sim=real cosine(lazy embed), _qa_level=owner logic, _qa_source:"zaapi", _zaapi_file/_sheet/_row}
+- unproven เพิ่ม: lazy-embed latency K rows/query, trigram pre-filter recall (ต้องครอบ candidate ที่ cosine จะให้ผ่าน)
+
+## กำลังจะทำ — Implement Zaapi KB file-based import/export/search (ตาม spec v4 A-098..A-102, session ใหม่ branch feature-botlogic-kb-workflow HEAD=e6dffc4) 2026-11-06
+- authorization: audit + แก้โค้ดใน scope + offline/disposable tests อนุมัติแล้ว; stop gates = shared Mongo write / provider / activation / commit แรก
+- freeze protocol ผ่าน: frozen sha a67b91… ตรง, active prefix sha d07afb… ตรง, prefix@EOF tail ว่าง, coverage partial ตามเดิม
+- scope: PART A preview → B apply/rev/rollback/log → C export → D UI Zaapi tab → E search+provenance → F QA/policy owners → G readiness → executable E2E tests → SRS/ledger
+- ห้าม: Gemini ตอน import, เขียน Product DB, แตะ workflow Zaapi, keyword/regex/owner ใหม่เพื่อเดาชนิดเนื้อหา, ลบ K0 importer/artifacts
+
+## ผ่านแล้ว — Implement Zaapi KB file-backed import/export/search (spec v4, offline+disposable Mongo verify) 2026-11-06
+- ใหม่ `chatbot/shopeechat/kb_zaapi_files.py` (owner เดียว): parse_upload verbatim (xlsx rows/txt), preview_import read-only, apply_import full-replace (staged rev+1 → CAS active_rev จุดเดียว → old rev expire_at GRACE 7d; ชื่อไฟล์=identity ตรงทุกตัวอักษร), rollback_import CAS กลับ, export_xlsx active rev, zaapi_search (registry→scope pairs→zaapi_kb find→refs*0.5+trigram prefilter→lazy-embed top-K cosine; embed fail→prefilter trace), file_kb_ready; audit zaapi_kb_import_log; manual docs ไม่โดน
+- `kb_zaapi.zaapi_kb_evidence` rewired → zaapi_search (signature/productish gate/_zaapi_allowed เดิม; evidence kind="kb" + record_id file::sheet::row + meta{file,sheet,row}); canonical path (`kb_zaapi_retrieval`/`zaapi_kb_records`) dormant ไม่ลบ
+- `knowledge_base.py`: search_qa zaapi branch (refs→zaapi_search, contract _qa_sim/_qa_score/_qa_level/cross-model guard เดิม) + get_general_faq zaapi branch — legacy reads ทุกเส้นทางผ่าน `_legacy_allowed` เดิม (zaapi=0 reads)
+- `app.py`: 5 endpoints (internal-secret middleware เดิม) POST /zaapi-kb/import/preview|apply, /import/rollback, GET /zaapi-kb/export, GET /zaapi-kb/files
+- ChatAdminWeb: ZaapiKbPanel +file-import section (registry list/preview modal/apply/rollback/export), 3 routes ใหม่ api/zaapi-kb/{import,files,export} binary-safe (proxy req.text() ทำ binary เสีย→route แยกตาม A-099), route.ts mode=docs รับ source_file, systemConfigService.zaapiKbReady→file_kb_ready (registry+searchable rows ไม่ใช่ doc count)
+- tests: test_zaapi_kb_files.py 22 tests (memory double + disposable mongo:7 parametrized) — parse verbatim/same-name replace/coexist/rollback/export round-trip/scope/provenance/no-provider/no-cross-file/gate/no-evidence → 22/22 ผ่านทั้งสอง backend; test_task5_final_answer.py +file-backed app.chat() e2e (row→Mongo→search→evidence→answer_typed) ผ่าน; 13 canonical-contract tests → skip("dormant canonical path") ไม่ปล่อย fail เงียบ
+- verify: offline 40 passed/13 skipped exit 0; real Mongo (mongo:7 :27019) 22 passed exit 0; regression 303 passed exit 0; py_compile+tsc 0; git diff --check 0; container ลบแล้ว
+- งานค้าง (ต้องอนุมัติแยก): shared Mongo write/migration จาก raw_sources, live provider (Gemini) E2E คำตอบภาษาไทย, activation kb_source=zaapi, commit แรก; sweep_expired caller ยังไม่มี (grace ยังไม่ถูกลบจนกว่าจะมี task); conflicting-rows answer gate ทดสอบระดับ evidence เท่านั้น (LLM-eval ยังไม่ได้รัน)
+
+## กำลังจะทำ — Zaapi KB file-backed correction ตาม independent review 5 findings (session เดิม, branch เดิม HEAD=e6dffc4) 2026-11-06
+- freeze protocol ผ่าน: frozen sha a67b91… ตรง, active prefix sha b0c074… ตรง @EOF 12269, tail ว่าง
+- findings: (1) apply_import ลบ active rev ได้ถ้า post-CAS fail / CAS loser ลบแถวผู้ชนะ (2) ไม่มี content_type ที่ admin เลือก (3) zaapi_search .limit(500) ก่อน rank + docs ไม่มี source_file รวมโดยไม่กรอง scope (4) Zaapi tab แสดงปุ่ม Legacy (5) e2e assert ถึง answer_typed ไม่ถึง ChatResponse.answer
+- scope: reproduce ด้วย executable tests ก่อนแก้ → แก้ที่ owner เดิมให้เล็กสุด → disposable Mongo จริงสำหรับ CAS/crash/rollback → UI แยก tab → app.chat answer-level asserts
+- stop gates เดิม: shared Mongo write / provider / activation / commit แรก ต้องอนุมัติแยก
+
+## ผ่านแล้ว — Zaapi KB correction 5 findings จาก independent review (RED→GREEN, disposable Mongo จริง) 2026-11-06
+- F1 data-loss แก้แล้วที่ apply_import: attempt=random ต่อ call → rows มี `apply_id`+`expire_at`(staged self-expire 7d) → insert→verify count(apply_id)→CAS→post-commit (ปลด expire ตัวเอง+retire old+log) ห่อ try/except แยก → post-commit fail คืน `{ok:True,warning}` ไม่ลบแถวที่ publish; pre-CAS crash ลบเฉพาะ apply_id (ล้มเหลว→expire ไว้ให้ sweep); CAS loser ลบเฉพาะ apply_id ตัวเอง ไม่แตะ winner; `_row_id` มี attempt → retry ไฟล์ต่างกันไม่ชน _id
+- rollback_import แก้: prev_row_count บันทึกตอน flip → rollback verify count==prev_row_count (partial sweep→`prev_rows_incomplete` fail-closed); ปลด expire_at ของ prev **ก่อน** CAS (กัน sweep แย่ง) CAS แพ้→คืน expire; sweep_expired เพิ่ม `$nor` registry-active pairs — active rev มี expire รั่วก็ไม่ถูกลบ; `_RETIRE_S` 3600→604800 แก้ตามสัญญา 7d ที่รายงาน
+- F2 content_type ที่ admin ประกาศจริง: `content_type` file-level/`sheet_types` per-sheet param (product|troubleshooting|faq|warranty; ไม่รู้จัก→ValueError ห้าม infer); registry เก็บไว้ inherit ตอน reimport ชื่อเดิม; row เก็บ `content_type` per-sheet resolved; preview แจ้ง type ต่อ sheet + untyped_rows; แถวไม่จัดชนิดค้นไม่เจอผ่าน typed path (fail-closed)
+- F3 search: ลบ `.limit(500)` ก่อน rank (ค้นทั้ง corpus 8,600 ระดับ); `_ref_hit` ASCII-alnum boundary แทน substring (ac65b≠ac65b2 ทั้งสองทิศทาง); query แยก manual `kind:"manual"`+active≠false+`_manual_scope_ok`(scope/ว่าง) เปิดเฉพาะ `include_manual=True` (QA paths) — legacy-unmigrated xlsx_row/text ไม่มี source_file ไม่เข้า search; file_kb_ready `searchable`=active file rows เท่านั้น (manual/legacy ไม่ทำให้พร้อม รายงานแยกเพื่อ migration)
+- F4 UI: page.tsx legacy actions (Upload Excel/Template/เพิ่ม) render เฉพาะ corpus==="legacy" — Zaapi tab เหลือ ZaapiKbPanel อย่างเดียว; ZaapiKbPanel import modal +content_type select (5 ตัวเลือกรวม "ไม่ระบุ") +per-sheet pickers sync preview
+- F5 e2e answer-level: test_zaapi_files_chat_e2e ใช้ spec need (product_recommend) assert resp.answer มีเนื้อหาคำตอบจริง; เพิ่ม compat-need case พิสูจน์ file evidence=supporting ไม่ใช่ typed verdict→cannot-confirm ถูกต้อง; payload ที่ typed boundary=string → `_ev_text` helper อ่านถูก shape; replace/near-model/conflict tests ปรับให้ assert row identity ไม่ใช่เพียง "มี evidence"
+- typed callers: zaapi_kb_evidence types=("product",); search_qa types=("faq","troubleshooting")+include_manual; get_general_faq types=("faq","warranty")+include_manual — typed path ไม่ปนกัน, manual เข้า QA เท่านั้น
+- verify: offline 60 passed/13 dormant-skipped exit 0 · Mongo จริง mongo:7 :27019 37 passed (99.8s — มี >500-row corpus test) exit 0 · regression 96 passed exit 0 · py_compile+tsc+git diff --check exit 0 · 14 RED tests ล้มก่อนแก้จริง
+- งานค้างเดิม (ต้องอนุมัติแยก): shared Mongo write/migration, live provider E2E, activation, commit แรก; +ใหม่: untyped rows ในไฟล์จริงต้อง admin ระบุ type ก่อนใช้ตอบ; sweep_expired ยังไม่มี caller; manual-scope substring เป็น interim จน registry/store มี manual scope owner
+
+## กำลังจะทำ — Zaapi KB correction รอบ 2 ตาม independent review r2 (adfe40e8): UI contract/readiness/search-cap/staged-visibility (session เดิม, branch เดิม HEAD=e6dffc4, uncommitted) 2026-11-07
+- r2 findings ที่ verify แล้ว: (R1) ZaapiKbPanel EmptyState gate `sources.length===0` ก่อน Import → bootstrap dead-end (R2) `mode=sources` group `$source_id` → file rows เป็น null group → sort/filter crash (R3) TS `zaapiKbReady` นับ manual → ready ทั้งที่ spec=active file rows (R4) `cands = scored[:_EMBED_TOPK]` ตัด semantic rerank (R5) staged rows ใช้ `(file,file_rev)` identity — post-CAS stamp fail → published rev อ่านไม่ได้ + orphan attempt ชน rev
+- scope: fix ที่ owner เดิม; RED ที่ executable ได้; UI ไม่มี test suite → tsc+source verify; ห้าม shared Mongo/provider/activation/commit
+
+## ผ่านแล้ว — Zaapi KB correction รอบ 2 (RED→GREEN + real Mongo จริง) 2026-11-07
+- **Triple-visibility design (R5 root-cause fix):** rows stamp `(file_rev, apply_id)` ตั้งแต่ insert + `expire_at` → CAS publish `(active_rev, active_apply)` — **visibility ไม่ต้องการ mutation หลัง CAS**: staged rows apply_id ไม่เคยถูก publish → invisible เสมอ; CAS loser/orphan ชน file_rev ก็ invisible (triple ไม่ตรง); post-commit (ปลด expire ตัวเอง/retire old/log) = cleanup ล้วน ล้ม → `{ok,warning}` ไม่ทำ rev อ่านไม่ได้ — readers ทั้งหมด (`zaapi_search`/`file_kb_ready`/`list_files`/`export_file`/`sweep $nor`/rollback `prev_filt`) ใช้ triple เดียวกัน; registry เก็บ `prev_apply` สำหรับ rollback verify; `mode=docs` route filter apply_id ด้วย
+- **R4 semantic rank cap ลบออก**: `cands = scored` (ทุกแถวที่ prefilter ผ่าน) — prefilter (ref boundary+trigram≥0.08) คือขอบเขตงานเดียว; `_EMBED_TOPK` env ลบ (dead knob); RED พิสูจน์: 46-row corpus, semantic-best row rank 45 ถูกตัดตอน cap=40 (`cands=40` ใน trace) → GREEN embed ทุก candidate ชนะ cosine
+- **R1/R2 UI contract:** EmptyState เฉพาะ `sources∅ && files∅ && !imp` + Import button ใช้ได้ตอน bootstrap; importModal hoist เป็น const ใช้ร่วมทั้ง empty/main view; `mode=sources` filter `source_id:{$nin:[null]}`; `mode=list` filter `file_rev:{$exists:false}` (file rows ไม่ปน manual/legacy view); sort/filter null-safe source_name
+- **R3 readiness:** TS `zaapiKbReady` ตัด manual fallback — ready = registry file มี active rows เท่านั้น (ตรง Python `file_kb_ready`)
+- **เพิ่มที่ reviewer flag + verify เอง:** export ชื่อไฟล์ตรง (`filename*=UTF-8''<file>` + `a.download=f.file`) — `.txt` export คืน text/plain verbatim (เดิม xlsx bytes ใต้ชื่อ .txt = round-trip พัง) ฟังก์ชัน rename `export_xlsx`→`export_file`; `app.py` preview/apply ValueError→400; `GET /zaapi-kb/import-log` endpoint + Next proxy + panel "ประวัติ Import/Rollback" block (audit ตาม req 6); rollback UI ใช้ `prev_rev` จริง + warning toast; preview แสดง resolved type ต่อ sheet (`sheet_type_map`)
+- **verify:** offline `test_zaapi_kb_files.py`+`test_task5_final_answer.py` **69 passed/13 dormant-skipped** exit 0 · real Mongo (mongo:7 :27019) **46 passed 101.1s** exit 0 (ทดสอบ triple/CAS/crash/rollback/sweep บนจริง) · regression 17 files **458 passed** exit 0 · `py_compile`+`tsc --noEmit`+`git diff --check` exit 0 · RED พิสูจน์ embed-cap ก่อนแก้จริง (temp-restore cap → target row หายจาก hits)
+- **งานค้าง:** shared Mongo write/migration, live provider E2E, activation kb_source=zaapi, commit แรก — ทั้งหมดต้องอนุมัติแยก; sweep_expired ยังไม่มี caller; post-commit expire-fail → old rev rows ค้าง invisible-forever (leak ไม่ใช่ loss — warning รายงาน); UI ไม่มี test suite (tsc+code verify); rollback double-swap semantics = prev_apply swap ทดสอบแล้ว memory+mongo
+
+## ผ่านแล้ว — Zaapi KB correction รอบ 3 ตาม post-fix independent review (3e9e1491: BLOCKED) 2026-11-06
+- รอบนี้ fix findings ที่ verify ในโค้ดจริง: **M1 platform case mismatch** — UI ส่ง `platforms:["Shopee"]` แต่ req.platform="shopee" → `_scope_ok` exact-match ไม่เจอตลอด = file scoped ตายเงียบทุก platform; แก้ `_norm_platforms` (canonical lowercase ตอน write + inherit) + case-fold compare ใน `_scope_ok`/`_manual_scope_ok` (ข้อมูล display-case เดิม/manual entry ยัง match)
+- **M2 readiness สอง owner ไม่ตรง:** Python `file_kb_ready` เดิมกรอง scope → scoped-only deployment รายงาน searchable=False ทั้งที่ข้อมูลพร้อม; แก้นับ rows ด้วย registry triple ทั้งหมดแบบ `$or` (ไม่กรอง scope, ไม่มี cap 200) — TS `zaapiKbReady` เพิ่ม `apply_id` ใน row filter (orphan/loser rows ไม่นับ) ตอนนี้ predicate ตรงกันทั้งสองฝั่ง
+- **M3 = scope decision ไม่ใช่ patch:** `format_kb_context` ต้องการ structured product docs (brand/model/specs) — map raw rows เข้า formatter = สร้าง canonical transform ที่งานนี้ตั้งใจหลีกเลี่ยง; `chat_v2` (ใช้ได้จริงผ่าน use_v2/USE_LEGACY_CHAT) + v1 flag-off productish path ยังไม่มี file evidence → ค้างเป็น decision: rollout รองรับ v1 grouped-retrieval เท่านั้น หรือต้อง wire v2 (feature work ใหม่ ไม่ใช่ correction)
+- minors ที่แก้: refusal-path `_log` → `_log_safely` ทั้งหมด (audit write fail ไม่กลบ structured result เป็น 500) · `preview.old_rows` นับด้วย triple · `.txt` sheet label "None"→`"-"` (`_sheet_key` shared) · `sweep_expired` มี caller แล้ว (`POST /zaapi-kb/import/sweep` + ปุ่มในไฟล์ header) · stale same-rev attempt re-expire ใน post-commit cleanup (re-apply หลัง rollback) · index ตาม reader predicate (source_file,file_rev,apply_id) · file docs แยก `fileDocs` state จาก source docs + Pagination · import modal +free-text accounts input (scoped import บน fresh deploy)
+- minors ที่เอกสารไว้ไม่แก้: `.txt` strip edges (round-trip 2+ ครั้งเสถียร), comma ในชื่อร้าน (CSV param จำกัด), mode=list ไม่มี caller (dead surface แต่ guard ถูก)
+- **verify:** offline focused **73 passed/13 dormant-skipped** exit 0 · real Mongo (mongo:7 :27019) **50 passed 100.5s** exit 0 · regression 17 files **458 passed** exit 0 · py_compile+tsc --noEmit+git diff --check exit 0 · tests เพิ่ม: platform case-insensitive, readiness ignores scope, manual platform case-fold, re-apply stale attempt, semantic-below-lexical-rank (RED พิสูจน์แล้ว)
+- **ค้างสำหรับ verdict:** v2/flag-off serving coverage (decision), live provider eval (อนุมัติแยก), shared Mongo migration, activation, commit แรก
+
+## กำลังจะทำ — H0–H3 bot-worker human review mock-send plan 2026-11-09
+- ผู้ใช้เลื่อนงาน human approval ขึ้นก่อน KB completion: ร่างคำตอบลง Admin Mongo, ตัดสินรายบับเบิ้ล, แก้ข้อความบนหน้า bot-worker ด้วยปุ่ม บันทึก/บันทึกและส่ง/ยกเลิก, และ mock Shopee API call ตามจำนวนบับเบิ้ล; ห้ามส่งจริงในรอบนี้
+- รอบนี้ทำแผนและปรับลำดับงานเท่านั้น; ตรวจ owner ปัจจุบันก่อนกำหนด contract, ไม่แตะ production/API จริง/ข้อมูล Mongo
+
+## ผ่านแล้ว — H0–H3 bot-worker human review mock-send plan 2026-11-09
+- ตรวจโค้ดจริง: `botWorkerService` เขียน `shadow_replies`; `/botworker` แยก `|||` ตอน render; `/botworker/.../send` เขียน sandbox `botworker_messages` และ `safety.ts` ยังปิด live Shopee; `botworker_events` ใช้ random event ID จึงไม่ใช่ idempotency key
+- เพิ่ม `docs/plans/2026-11-09-botworker-human-approval-mock-send-plan.md`: per-bubble draft/decision/edit UI (บันทึก/บันทึกและส่ง/ยกเลิก), ordered mock request, typed product-card intent, mock receipt แยก `sent_text` (ว่าง), unique mock event key, acceptance matrix และ later live gate
+- ปรับ remaining-work register: H0–H3 mock pilot มาก่อน KB; H4/live delivery ค่อยทำภายหลังด้วยอนุมัติแยก; KB/workflow/Phase 4B/Phase 5/prompt/log backlog ไม่ถูกลบ
+- ตรวจ `git diff --check` ผ่านก่อน closeout; รอบนี้ไม่มี production/test/API/Mongo/ผู้รับจริงเปลี่ยน; งานค้าง = independent review แผน → implementation ใน session/branch แยก พร้อม fake-provider tests
+
+## กำลังจะทำ — เก็บ Zaapi KB candidate เป็น WIP commit และเปิด Draft PR 2026-11-09
+- ผู้ใช้สั่ง commit งานล่าสุดที่ยังค้าง, เปิด PR บน GitHub โดยห้าม merge main, แล้วแยก branch bot-worker จากหัว PR branch; งาน Zaapi KB ยังไม่ activation
+- baseline feature-botlogic-kb-workflow @ e6dffc4; staging ว่าง; frozen/active SHA ตรง ledger A-107; stash เดิมคงอยู่
+
+## ผ่านแล้ว — precommit WIP verification 2026-11-09
+- candidate มี Zaapi file-backed KB implementation/UI/tests และ H mock pilot plan/register; `python3` system ไม่มี pytest จึงใช้ `.venv/bin/python`
+- focused+related 7-file pytest: 424 passed/13 skipped exit 0; ChatAdminWeb `npx tsc --noEmit` exit 0; Python `py_compile` 6 files exit 0; `git diff --check` exit 0
+- ค้างจริง: live provider E2E, shared Mongo migration/write, selector activation, v2/flag-off serving scope decision, independent review; bot-worker human approval ยังเป็นแผน ไม่มี code หรือ Shopee send
+- PR ต้องเป็น Draft, target main เพื่อ review เท่านั้น; ห้าม merge/deploy; สร้าง branch bot-worker หลัง commit จากหัว PR branch เดียวกัน

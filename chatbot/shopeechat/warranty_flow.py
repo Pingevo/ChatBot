@@ -1760,7 +1760,8 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             _tips = _kbmod.qa_troubleshoot_tips(
                 req.message, conversation_id=req.conversation_id,
                 item_id=req.item_id,
-                snap=ctx.get("snap", _gen.SNAP_UNSET))
+                snap=ctx.get("snap", _gen.SNAP_UNSET),
+                shop=req.shop, platform=req.platform)
             if _tips:
                 _ts_lines = "\n".join(f"• {t}" for t in _tips)
                 _ts_answer = (

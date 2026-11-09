@@ -22,7 +22,9 @@ export async function GET(req: NextRequest) {
 
   if (mode === "sources") {
     const q = url.searchParams.get("q")?.trim() || "";
-    const match: Record<string, unknown> = {};
+    // file-backed rows (source_file, ไม่มี source_id) ไม่ใช่ legacy source —
+    // $nin:[null] กันกลุ่ม null ที่ทำให้ client crash
+    const match: Record<string, unknown> = { source_id: { $nin: [null] } };
     if (q) match.source_name = { $regex: safeRegexSearch(q), $options: "i" };
     const sources = await coll
       .aggregate([
@@ -56,12 +58,24 @@ export async function GET(req: NextRequest) {
 
   if (mode === "docs") {
     const sourceId = url.searchParams.get("source_id") || "";
-    if (!sourceId) return error("source_id required", 400);
+    const sourceFile = url.searchParams.get("source_file") || "";
+    if (!sourceId && !sourceFile) return error("source_id or source_file required", 400);
     const skip = Math.max(0, parseInt(url.searchParams.get("skip") || "0", 10));
     const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "30", 10)));
     const q = url.searchParams.get("q")?.trim() || "";
     const active = url.searchParams.get("active") || "";
-    const filter: Record<string, unknown> = { source_id: sourceId };
+    let filter: Record<string, unknown>;
+    if (sourceFile) {
+      // file-backed rows — visibility = registry (active_rev, active_apply)
+      const filesColl = await getCollection("zaapi_kb_files");
+      const reg = await filesColl.findOne({ _id: sourceFile as never }) as
+        { active_rev?: number; active_apply?: string } | null;
+      if (!reg?.active_rev) return json({ docs: [], total: 0 });
+      filter = { source_file: sourceFile, file_rev: reg.active_rev };
+      if (reg.active_apply) filter.apply_id = reg.active_apply;
+    } else {
+      filter = { source_id: sourceId };
+    }
     if (q) filter.text = { $regex: safeRegexSearch(q), $options: "i" };
     if (active === "active") filter.active = { $ne: false };
     else if (active === "inactive") filter.active = false;
@@ -70,7 +84,7 @@ export async function GET(req: NextRequest) {
         .find(filter, {
           projection: {
             row_index: 1, sheet: 1, kind: 1, fields: 1, text: 1,
-            source_name: 1, active: 1,
+            source_name: 1, source_file: 1, active: 1,
           },
         })
         .sort({ row_index: 1 })
@@ -90,7 +104,8 @@ export async function GET(req: NextRequest) {
     const skip = Math.max(0, parseInt(url.searchParams.get("skip") || "0", 10));
     const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get("limit") || "24", 10)));
 
-    const filter: Record<string, unknown> = {};
+    // manual/legacy view — file-backed rows (file_rev) ดูผ่าน mode=docs แยก
+    const filter: Record<string, unknown> = { file_rev: { $exists: false } };
     if (q) {
       const rx = { $regex: safeRegexSearch(q), $options: "i" };
       filter.$or = [{ text: rx }, { source_name: rx }];
@@ -144,6 +159,7 @@ function _docRow(d: Record<string, unknown>) {
     fields: d.fields || {},
     text: d.text || "",
     source_name: d.source_name,
+    source_file: d.source_file,
     active: d.active !== false,
   };
 }

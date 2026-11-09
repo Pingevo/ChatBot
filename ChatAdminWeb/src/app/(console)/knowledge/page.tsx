@@ -442,7 +442,9 @@ export default function KnowledgePage() {
         </>
       }
       actions={
-        editable && (
+        // Upload/Template/เพิ่ม = Legacy corpus เท่านั้น — Zaapi tab ใช้
+        // Import preview→confirm / Export / Rollback ของ ZaapiKbPanel เอง
+        editable && corpus === "legacy" && (
           <>
             <Button size="sm" variant="outline" onClick={handleDownloadTemplate}>
               <Download size={14} /> ดาวน์โหลด Template

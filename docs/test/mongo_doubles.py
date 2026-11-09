@@ -145,6 +145,12 @@ class FakeColl:
         self._docs.append(dict(doc))
         return SimpleNamespace(inserted_id=len(self._docs))
 
+    def insert_many(self, docs, *a, **k):
+        for d in docs:
+            self.insert_one(d)
+        return SimpleNamespace(
+            inserted_ids=[d.get("_id") for d in docs])
+
     def delete_many(self, *a, **k):
         return SimpleNamespace(deleted_count=0)
 

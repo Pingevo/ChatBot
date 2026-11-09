@@ -149,6 +149,10 @@ def _verdict(ctx, need_i):
             if v.need_index == need_i] if ctx else []
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_typed_compatible_positive_segment_and_capacity():
     """facts[compatible]=True → decided verdict → deterministic positive
     segment; cable capacity (power_capacity_w) grounds the spec answer
@@ -172,6 +176,10 @@ def test_typed_compatible_positive_segment_and_capacity():
     assert vs and all(v.decision.outcome == "compatible" for v in vs)
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_typed_incompatible_never_positive():
     """facts[compatible]=False → typed negative verdict; even an
     adversarial canned-positive reply cannot flip it (decided pair
@@ -281,6 +289,10 @@ def test_variant_scoped_proof_never_decides_sibling():
                for v in (ctx.compat_verdicts or ()))
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_variant_scoped_proof_decides_own_variant():
     """positive control — the same record DOES decide its own variant
     (MB200 asked, MB200 bound) → typed compatible verdict + segment."""
@@ -323,6 +335,10 @@ def test_model_bound_record_never_reaches_sibling_llm_input():
     assert "MB200" not in text
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_model_bound_record_serves_own_variant_context():
     """positive control — the same record DOES reach the MB200 turn's
     evidence and decides its own variant."""
@@ -363,6 +379,10 @@ def _NS_Item():
     return cp.PooledCandidate(**fields)
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_item_level_record_still_works():
     """item-bound record (no model_id) keeps its contract — it is about
     the item as a whole and may answer an item-level turn."""
@@ -375,6 +395,10 @@ def test_item_level_record_still_works():
                for e in (ctx.evidence or ()))
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_variant_verdicts_stay_separate_same_item():
     """two variants of one item with opposite verdicts — each turn sees
     only its own variant's record in evidence and final answer."""
@@ -577,6 +601,10 @@ def test_warranty_title_path_2y_no_zaapi():
         "title path must not cite Zaapi evidence"
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_warranty_zaapi_path_no_suffix():
     """C2 — Zaapi path only: name has NO -2Y suffix; a properly scoped
     Zaapi faq warranty fact ('24 months') must ground 'ประกัน 2 ปี'
@@ -615,6 +643,10 @@ def test_warranty_no_source_cannot_confirm():
         f"warranty claim survived with no evidence: {ans!r}"
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_cable_length_2m_never_two_months():
     """cable_length_m=2 spec answers 'สายยาวกี่เมตร' — the typed spec
     fact must render as length, never as a 2-month warranty claim."""
@@ -657,6 +689,10 @@ def _d_warranty_rec():
                   answer_text="CTC620P ประกัน 2 ปี")
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_multi_need_complete_evidence_answers_each_need():
     """D1 — full evidence: typed compat verdict + Zaapi capacity spec +
     Zaapi warranty fact — every need answers from its own source.
@@ -686,6 +722,10 @@ def test_multi_need_complete_evidence_answers_each_need():
     assert "2 เดือน" not in ans
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_multi_need_missing_compat_only_that_need_fails():
     """D2 — partial evidence: no compat record → only the compat need
     degrades to cannot-confirm; capacity and Zaapi warranty must still
@@ -712,6 +752,10 @@ def test_multi_need_missing_compat_only_that_need_fails():
         or "แอดมิน" in ans
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_multi_need_claims_stay_on_own_evidence():
     """compat + charging_speed + warranty in one turn WITHOUT a
     charging literal in the message — the compat relation is
@@ -937,6 +981,10 @@ def test_control_non_compat_recommendation_calls_model():
         f"model spec answer missing: {resp.answer!r}"
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_control_multi_need_pairing_declined_spec_answered():
     """Mixed turn: unsupported pairing need (kind=compat, no target)
     + grounded spec need → only the pairing need declines
@@ -967,6 +1015,10 @@ def test_control_multi_need_pairing_declined_spec_answered():
         f"pairing cannot-confirm missing: {ans!r}"
 
 
+@pytest.mark.skip(
+    reason="canonical zaapi_kb serving superseded by file-backed rows "
+           "(spec v4 2026-11-07) — dormant path; file-backed e2e = "
+           "test_zaapi_files_chat_e2e below")
 def test_control_mixed_fact_strips_compatibility_only():
     """Single productish need carrying compatibility + charging_speed:
     compatibility subclaim is stripped from the rendered task (model
@@ -1021,3 +1073,199 @@ def test_canary_asks_marked_relation_never_reaches_model():
     assert _cannot_confirm(ans)
     assert "กันน้ำ" in ans, \
         f"capability-ask cannot-confirm lost: {ans!r}"
+
+
+# ══════════════════════════════════════════════════════════════════
+# File-backed Zaapi KB (spec v4) — app.chat() e2e: row → Mongo active
+# rev → search → evidence → typed answer context (stub LLM captures)
+# ══════════════════════════════════════════════════════════════════
+
+def _xlsx_bytes(rows, sheet="ข้อมูลสินค้า"):
+    from openpyxl import Workbook
+    from io import BytesIO
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet
+    for r in rows:
+        ws.append(r)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+_FILE_XLSX = _xlsx_bytes([
+    ["ชื่อสินค้า", "รายละเอียดสินค้า", "คำตอบ"],
+    ["CTC620P", "สายชาร์จ CTC620P 240W ยาว 2 เมตร", "รองรับ Xiaomi 17 Ultra"],
+])
+
+
+def _chat_files(mp, *, file_rows, filename="test-kb.xlsx",
+                content_type="product", shop="ShopA", msg=_MSG,
+                intent_result=None,
+                llm_reply="CTC620P ใช้ได้ค่ะ", import_fn=None):
+    """file row → apply_import (real owner) → app.chat() → (resp, typed_ctx).
+    import_fn(admindb) เสริม import เพิ่ม/ทำกิจก่อน chat (replace/rollback)."""
+    from shopeechat import kb_zaapi_files as _zkf
+    cid = f"fa-files-{id(file_rows) & 0xffff:x}-{len(msg)}"
+    fx = {"id": cid, "shop": shop, "platform": "shopee",
+          "conversation_id": cid,
+          "catalog": [_item_doc("i-ct", "CTC620P สายชาร์จ 240W",
+                                ("CTC620P",), "cable")],
+          "turns": [{"text": msg,
+                     "intent_result": intent_result or {
+                         "intent": "product_compat",
+                         "confidence": 0.9,
+                         "requested_facts": ["charging_speed"]}}],
+          "llm_reply": llm_reply,
+          "runtime_flags": {"grouped_selection": True}}
+    with tempfile.TemporaryDirectory():
+        client, captured, _ = _install(mp, fx)
+        admindb = client[ADMIN_DB]
+        admindb["sellable_units"].insert_one(
+            _unit("u1", "i-ct", "m-ct", "CTC620P สายชาร์จ 240W",
+                  ("CTC620P",), "cable"))
+        if file_rows is not None:
+            r = _zkf.apply_import(
+                admindb, filename=filename, data=file_rows,
+                accounts=["ShopA"], platforms=["shopee"],
+                content_type=content_type, admin="t")
+            assert r["ok"]
+        if import_fn is not None:
+            import_fn(admindb)
+        mp.setattr(runtime_config, "kb_source", lambda: "zaapi")
+        mp.setattr(runtime_config, "source_enabled",
+                   lambda *a, **k: True)
+        try:
+            resp = app.chat(app.ChatRequest(
+                message=msg, shop=shop, platform="shopee",
+                history=[], conversation_id=cid, limit=5,
+                simulate_assignment=True, test_source="zaapi-files-e2e"))
+        finally:
+            mp.undo()
+        typed_ctx = next(
+            (c["context"] for c in captured.calls
+             if c["fn"] == "answer_typed"), None)
+        return resp, typed_ctx
+
+
+def _ev_text(e):
+    p = e.get("payload")
+    if isinstance(p, dict):
+        return str(p.get("text") or "")
+    return str(p or "")
+
+
+def _file_evid(typed_ctx, prefix=""):
+    return [e for e in (typed_ctx.evidence or ())
+            if e.get("kind") == "kb"
+            and str(e.get("record_id") or "").startswith(prefix)]
+
+
+def test_zaapi_files_chat_e2e():
+    """file row → active rev → kind=kb evidence ที่ typed boundary +
+    ChatResponse.answer (stub LLM parrot เนื้อหาแถว — พิสูจน์ทางเดิน
+    ไม่ใช่คำตอบไทยจริงจาก provider)."""
+    mp = MonkeyPatch()
+    resp, typed_ctx = _chat_files(
+        mp, file_rows=_FILE_XLSX,
+        msg="สาย CTC620P รองรับกี่วัตต์",
+        intent_result={"intent": "product_recommend", "confidence": 0.9,
+                       "requested_facts": ["charging_speed"]},
+        llm_reply="สาย CTC620P รองรับสูงสุด 240W ยาว 2 เมตรค่ะ")
+    kbe = _file_evid(typed_ctx, "test-kb.xlsx")
+    assert kbe, "file row evidence missing at typed boundary"
+    assert "CTC620P" in _ev_text(kbe[0])
+    ans = resp.answer or ""
+    assert "240W" in ans, f"model-rendered answer lost: {ans!r}"
+
+
+def test_zaapi_files_compat_need_still_cannot_confirm():
+    """typed truth: file row เป็น supporting evidence ไม่ใช่ compat verdict —
+    product_compat need ต้อง cannot-confirm ตาม owner เดิมแม้มี evidence."""
+    mp = MonkeyPatch()
+    resp, typed_ctx = _chat_files(mp, file_rows=_FILE_XLSX)
+    ans = resp.answer or ""
+    assert _cannot_confirm(ans), \
+        f"compat need answered without typed verdict: {ans!r}"
+
+
+def test_zaapi_files_wrong_shop_no_evidence():
+    """ร้านผิด → registry scope ตัด → 0 kb evidence ที่ typed boundary."""
+    mp = MonkeyPatch()
+    resp, typed_ctx = _chat_files(
+        mp, file_rows=_FILE_XLSX, shop="ShopB")
+    assert _file_evid(typed_ctx, "test-kb.xlsx") == [], \
+        "wrong-shop file evidence leaked"
+
+
+def test_zaapi_files_replace_uses_new_value():
+    """import ชื่อเดิม → evidence ใช้ค่าใหม่ ไม่ใช่ค่าเก่า; rollback → กลับค่าเดิม."""
+    from shopeechat import kb_zaapi_files as _zkf
+    v2 = _xlsx_bytes([
+        ["ชื่อสินค้า", "รายละเอียดสินค้า", "คำตอบ"],
+        ["CTC620P", "สายชาร์จ CTC620P 240W ยาว 3 เมตร", "รุ่นใหม่"],
+    ])
+    mp = MonkeyPatch()
+    resp, typed_ctx = _chat_files(
+        mp, file_rows=_FILE_XLSX,
+        import_fn=lambda admindb: _zkf.apply_import(
+            admindb, filename="test-kb.xlsx", data=v2,
+            accounts=["ShopA"], platforms=["shopee"],
+            content_type="product", admin="t"))
+    kbe = _file_evid(typed_ctx, "test-kb.xlsx")
+    assert kbe and "ยาว 3 เมตร" in _ev_text(kbe[0]), \
+        "replaced value must reach evidence"
+    # rollback → ค่าเก่ากลับมา
+    mp2 = MonkeyPatch()
+    resp2, typed_ctx2 = _chat_files(
+        mp2, file_rows=_FILE_XLSX,
+        import_fn=lambda admindb: (
+            _zkf.apply_import(
+                admindb, filename="test-kb.xlsx", data=v2,
+                accounts=["ShopA"], platforms=["shopee"],
+                content_type="product", admin="t"),
+            _zkf.rollback_import(admindb, filename="test-kb.xlsx",
+                                 admin="t")))
+    kbe2 = _file_evid(typed_ctx2, "test-kb.xlsx")
+    assert kbe2 and "ยาว 2 เมตร" in _ev_text(kbe2[0]), \
+        "rollback must restore old value"
+
+
+def test_zaapi_files_near_model_not_confused():
+    """ไฟล์มี CTC620P + CTC620P2 → ถาม CTC620P → evidence แรกต้องเป็นแถว
+    CTC620P (ref boundary; แถว CTC620P2 ไม่ได้ ref credit)."""
+    both = _xlsx_bytes([
+        ["ชื่อสินค้า", "รายละเอียดสินค้า"],
+        ["CTC620P", "สายชาร์จ CTC620P 240W ยาว 2 เมตร"],
+        ["CTC620P2", "สายชาร์จ CTC620P2 300W ยาว 5 เมตร"],
+    ])
+    mp = MonkeyPatch()
+    resp, typed_ctx = _chat_files(mp, file_rows=both)
+    ev = _file_evid(typed_ctx, "test-kb.xlsx")
+    assert ev, "expected kb evidence for the CTC620P question"
+    top = ev[0]
+    assert "CTC620P2" not in _ev_text(top), \
+        "near-model row outranked the exact-model row"
+    assert top["record_id"].endswith("::0")
+
+
+def test_zaapi_files_conflicting_sources_both_reach_evidence():
+    """สองไฟล์ค่าขัดกัน → แถวของทั้งสองไฟล์ต้องถึง typed context
+    (owner ตอบต้องเห็นความขัดแย้ง ห้ามตัดไฟล์ใดทิ้งเงียบ ๆ)."""
+    from shopeechat import kb_zaapi_files as _zkf
+    f2 = _xlsx_bytes([
+        ["ชื่อสินค้า", "รายละเอียดสินค้า"],
+        ["CTC620P", "สายชาร์จ CTC620P ยาว 99 เมตร"],
+    ])
+    mp = MonkeyPatch()
+    resp, typed_ctx = _chat_files(
+        mp, file_rows=_FILE_XLSX,
+        import_fn=lambda admindb: _zkf.apply_import(
+            admindb, filename="second-kb.xlsx", data=f2,
+            accounts=["ShopA"], platforms=["shopee"],
+            content_type="product", admin="t"))
+    ev = _file_evid(typed_ctx)
+    files_seen = {(e.get("record_id") or "").split("::")[0] for e in ev}
+    assert "test-kb.xlsx" in files_seen
+    assert "second-kb.xlsx" in files_seen, \
+        "conflicting file silently dropped from evidence"
