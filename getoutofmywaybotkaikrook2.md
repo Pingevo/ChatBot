@@ -12579,3 +12579,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 ## ผ่านแล้ว — R0 modular toggle UI on /config
 - safeSwitches + SystemConfig interface เพิ่ม prompt_modular — toggle จริงบน config page (ส่งผ่าน updateSystemConfig allowedKeys)
 - R4 root cause: 3,206 dup = เก่า (Sep–Oct) post-fix เหลือ 26 — proposal archive ไม่ใช่ลบ
+
+## ผ่านแล้ว — R5 audit findings (real, code-verified)
+- GAP1: stats live/admin-activity/performance ใช้ new Date(customStart) = UTC midnight → +7 ผิด 1 วัน (dashboard แก้แล้ว 3 routes ยังเหลือ)
+- GAP2: audit vocab 15+ strings กระจาย ไม่มี canonical
+- GAP3: ai_usage ขาด path/conv_id/attempt/outcome
+- GAP4: workflow/import events ไม่เข้า unified log
