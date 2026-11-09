@@ -12534,3 +12534,14 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 ## ผ่านแล้ว — S7 quota-file churn fix
 - `_QUOTA_FILE` รองรับ env `GEMINI_QUOTA_FILE` → ย้าย quota file ออก watch dir ได้โดยไม่แก้ deploy
 - S8/R0 instrumentation/S2 = pending batch ต่อไป
+
+## ผ่านแล้ว — S8 closed as false-positive (verify ก่อนลบตามกฎ)
+- `inbound_message_ids` = ใช้จริง (เขียนใน botWorkerService.ts:511,586 — provenance ของ shadow reply)
+- `review_admin_id` = ใช้จริง (ส่งจาก messages route → UI ปุ่ม review)
+- `batch_id` = ใช้ใน admin-chat-result/live-assignment — ไม่ใช่ของ review system
+- ไม่มี field ที่ลบได้ — S8 ไม่ต้องทำอะไร ปิดด้วยเหตุผลพิสูจน์ได้
+
+## ผ่านแล้ว — S2 dotenv flake = แก้ไปแล้วก่อนหน้า (closed, verified)
+- repro: run docs/test/test_zaapi_kb_files.py ↔ test_phase4b_refresh.py ทั้งสอง order — ผ่านทั้งคู่ (203 tests ต่อรอบ)
+- สาเหตุที่เคย flake: module-level load_dotenv side effect — มี conftest stub ก่อน import อยู่แล้ว (line 61) → flake หายไปแล้วก่อนที่จะถูกบันทึกเป็น S2
+- ไม่ต้องแก้อะไรเพิ่ม
