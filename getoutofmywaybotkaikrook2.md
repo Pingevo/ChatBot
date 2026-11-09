@@ -12506,3 +12506,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 ## ผ่านแล้ว — R1 runbook Phase 4B refresh (docs/plans/2026-11-09-r1-phase4b-refresh-runbook.md)
 - pipeline มีครบ: build_sellable_units/build_image_texts/build_embeddings → exports/gen/<gid> → publish_generation CAS pointer + 24h cleanup + rollback
 - เหลือ: first manual run (วัดเวลา/cost), r1_refresh.sh wrapper, cron 09:00 (รอ host approval)
+
+## ผ่านแล้ว — S4 index-race fix
+- bot-worker.ts เรียก ensureIndexes() ตอน start ก่อน Mongo work เสมอ (warn+continue ถ้า fail)
+- ปิด gap: worker up ก่อน Next instrumentation → unique index buffer_messages ขาด → re-poll insert ซ้ำ
+- verify: tsc clean
