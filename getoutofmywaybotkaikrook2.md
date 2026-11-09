@@ -12454,3 +12454,40 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - mapping page /zaapi-kb-mapping + API GET/POST → zaapi_kb_mappings coll + audit zaapi_kb.mapping_set; manifest 118 ไฟล์; theme tokens + nav entries
 - k2_bulk_apply.py: --dry-run preview / apply จาก Mongo mapping; 5 txt ครบ 118/8,600
 - ค้าง: staff map → bulk apply → K3 verify → K5 flip (gate แยก)
+
+## ผ่านแล้ว — K2 rehearsal บน disposable Mongo (k2-rehearse :27098)
+- apply 118/118 files เข้า mongo:7 disposable ผ่าน k2_bulk_apply + guess-mapping → zaapi_kb 8,600 rows, registry 118 active, file_kb_ready searchable
+- zaapi_search จริง (BGE embed local): hits ทำงาน; **shop isolation พิสูจน์ — scoped files (41) ไม่รั่วข้ามร้าน** (query @ZMIThailand เจอเฉพาะ unscoped)
+- สังเกต: shopname มี 2 ตัวแปร "BlackShark" vs "BlacksharkThailand" — staff ต้อง map ให้ถูกตัว
+- ค้าง: staff map จริง → apply เข้า shared Mongo → K5 flip
+
+## กำลังจะทำ — K2 apply เฉพาะ confident files เข้า shared Mongo
+- user: map เองเฉพาะที่มั่นใจ admin ปรับทีหลังได้ (re-import rev+1) + ทำขั้นตอนต่อให้จบ
+- rule: shopname ปรากฏชัดใน filename (maximal substring match) + ไม่กำกวม; ตัด BlackShark/BlacksharkThailand ออก (2 entities คล้ายกัน) → 30 files
+
+## ผ่านแล้ว — K2 confident-batch apply เข้า shared Mongo จริง
+- กฎ confident: shopname maximal-substring match ใน filename เดี่ยว + ไม่กำกวม → 41 files; ตัด BlackShark/BlacksharkThailand (2 entities คล้าย) → **30 files**
+- 30 mappings upsert เข้า `zaapi_kb_mappings` (mapped_by=devin-automap — admin ปรับได้ ปุ่มบันทึก upsert อยู่แล้ว)
+- k2_bulk_apply → 30/30 apply เข้า Mongo จริง: **3,353 stamped rows + 30 registry active**
+- verify จริง: `file_kb_ready` searchable; Kieslect promo hit @KieslectThailand / 0 hits @ZMIThailand (isolation ผ่าน)
+- ค้าง: 88 files เหลือรอ staff map (รวม 11 blackshark-ambiguous) → apply ต่อ; K5 flip gate
+
+## ผ่านแล้ว — K2 apply ครบ 118/118 เข้า shared Mongo + fix mapping bug
+- mapping v2 (maximal shopname + brand alias + platform ตามชื่อไฟล์): 118 upsert zaapi_kb_mappings; scoped 75 / unscoped 43
+- apply 118/118 → zaapi_kb stamped rows, registry 118 active, visible triple rows = 8,600 ตรง census, file_kb_ready searchable, import_log 148
+- **bug จับได้เอง**: file 018 "ทุกแบรนด์-ยกเว้น-imilab-cuktech-zmi-ztec" automap scope ผิดทิศ (scoped ให้ร้านที่ถูกยกเว้น) → unscoped + re-apply rev2 + registry accounts=[] (apply inherit-empty → ต้องแก้ registry ตรง) → visible pairs พิสูจน์ทุก shop
+- isolation: 003 Kieslect promo @Kieslect=True @ZMI=False ผ่าน
+- ค้าง: admin ทบทวน mapping บนเวป / K5 flip gate (ยังไม่ flip — kb_source=legacy คงเดิม)
+
+## ผ่านแล้ว — K3 retrieval verify บน data จริง (11 cases)
+- mechanics ผ่าน: platform scope แยกถูก (shopee→040 / tiktok→037 balance), scoped promo @ร้านตัวเองเจอ, generic troubleshoot/warranty เจอ, wrong-shop scoped ไม่รั่ว
+- คำเตือนจริง: **unscoped promo files รั่วเข้าทุกร้าน** — 005 "Mi by IT Showroom" / 021 "Ztec Thailand" / 002 promo กลาง ไม่มี shop ในระบบจึงถูก unscope → query โปรโมชันร้านอื่นเจอโปรโมชันร้านเหล่านี้ (ต้องให้ admin ตัดสิน scope/disable ก่อน flip)
+- ranking: บางเคส top hit ไม่ใช่ไฟล์ที่ตรงสุด (TSP_LINK โผล่ใน Yaber query, 028 มอก แทน 025 ติดตั้ง) — semantic rank กับคำถามเปล่า; refs จริงน่าจะดีกว่า
+- ค้าง: admin review unscoped promo + K5 gate
+
+## ผ่านแล้ว — K5 flip kb_source=zaapi + disable risky files + verify
+- disable mechanism: ไม่มี enabled flag → ย้าย active_rev/active_apply → disabled_rev/disabled_apply (restore ได้ทันที) — 36 ไฟล์เสี่ยง (unscoped promo/brand) ปิด, 82 เปิด
+- retest: promo leaks หาย (Kieslect/ZMI top-hit ถูกไฟล์), TSP/Yaber miss = search quality ไม่ใช่ leak
+- flip ผ่าน setKbSource CAS (readiness gate ผ่าน) → kb_source=zaapi
+- verify path จริง: _zaapi_files_allowed=True, legacy_kb_reads_allowed=False (zero reads), zaapi_kb_evidence 20 hits จริง (ZMI specs+balance), file_kb_ready searchable (active_rows 7,130 = 82 ไฟล์ที่เปิด)
+- ค้าง: admin ทบทวน 36 disabled + canary QA จริง; rollback = setKbSource legacy ไม่ต้อง readiness
