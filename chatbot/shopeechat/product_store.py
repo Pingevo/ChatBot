@@ -7,6 +7,9 @@
 from __future__ import annotations
 
 import os
+
+# S5 — bound ทุก product query (default 20s; 0 = ปิด)
+_Q_MAX_MS = int(os.environ.get("PRODUCT_QUERY_MAX_MS", "20000"))
 import sys
 import re
 from pathlib import Path
@@ -879,7 +882,7 @@ def fuzzy_match_products(
         q = {"item_name": {"$regex": re.escape(prefix), "$options": "i"}}
         if shop:
             q["shopname"] = {"$regex": f"^{re.escape(shop)}$", "$options": "i"}
-        docs = list(coll.find(q, PRODUCT_PROJECTION).limit(30))
+        docs = list(coll.find(q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(30))
         for d in docs:
             if d.get("item_id") and not any(c.get("item_id") == d.get("item_id") for c in candidates):
                 candidates.append(d)
@@ -917,7 +920,7 @@ def fuzzy_match_products(
     # ponytail: cap 2000 — ร้านใหญ่สุดตอนนี้ ~2100 docs; ร้านใหญ่กว่านั้นในอนาคตค่อยทำ index จริง
     if not scored and shop:
         q = {"shopname": {"$regex": f"^{re.escape(shop)}$", "$options": "i"}}
-        candidates = list(coll.find(q, PRODUCT_PROJECTION).limit(2000))
+        candidates = list(coll.find(q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(2000))
         scored = _score(candidates)
 
     if not scored:
@@ -3354,7 +3357,7 @@ def fetch_products(
                             if shop_filter:
                                 model_filter["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
                             model_docs = list(
-                                collection.find(model_filter, PRODUCT_PROJECTION).limit(5)
+                                collection.find(model_filter, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(5)
                             )
                             for d in model_docs:
                                 iid = str(d.get("item_id"))
@@ -3446,7 +3449,7 @@ def fetch_products(
                 car_query = dict(query)
                 car_query["cat_name"] = {"$in": car_only_cats}
                 _car_limit = max(limit * 5, 50)
-                _car_docs = list(collection.find(car_query, PRODUCT_PROJECTION).limit(_car_limit))
+                _car_docs = list(collection.find(car_query, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(_car_limit))
                 if _car_docs:
                     docs = _car_docs
                     _car_charger_only = True
@@ -3473,7 +3476,7 @@ def fetch_products(
                     # ⚠️ ถ้ามี shop_filter ต้องกรองเฉพาะร้านนั้น — ห้ามค้นข้ามร้าน
                     if shop_filter:
                         text_q["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
-                    cursor = collection.find(text_q, PRODUCT_PROJECTION).limit(limit * 2)
+                    cursor = collection.find(text_q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(limit * 2)
                 else:
                     cursor = cursor.limit(limit)
 
@@ -3493,7 +3496,7 @@ def fetch_products(
             text_q = {"item_name": {"$regex": type_regex, "$options": "i"}}
             if shop_filter:
                 text_q["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
-            extra_docs = list(collection.find(text_q, PRODUCT_PROJECTION).limit(max(limit * 10, 200)))
+            extra_docs = list(collection.find(text_q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(max(limit * 10, 200)))
             # merge กับ docs เดิม (dedup by item_id)
             _docs_before = len(docs)
             existing_ids = {str(d.get("item_id")) for d in docs}
@@ -3528,7 +3531,7 @@ def fetch_products(
             target = pM if pM is not None else pm
             if target is not None:
                 # ดึงเยอะแล้ว sort ใน Python (เพราะ model.price_info.current_price อาจเป็น array)
-                docs = list(collection.find(relaxed_q, PRODUCT_PROJECTION).limit(max(limit * 5, 100)))
+                docs = list(collection.find(relaxed_q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(max(limit * 5, 100)))
                 docs = _filter_false_positives(docs, product_types)
                 # sort ตามระยะห่างจากราคาเป้าหมาย (ใกล้สุดก่อน)
                 def _price_dist(d):
@@ -3539,10 +3542,10 @@ def fetch_products(
                 docs.sort(key=_price_dist)
                 docs = docs[:max(limit * 2, 20)]
             else:
-                docs = list(collection.find(relaxed_q, PRODUCT_PROJECTION).limit(max(limit * 5, 50)))
+                docs = list(collection.find(relaxed_q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(max(limit * 5, 50)))
                 docs = _filter_false_positives(docs, product_types)
         else:
-            docs = list(collection.find(relaxed_q, PRODUCT_PROJECTION).limit(max(limit * 5, 50)))
+            docs = list(collection.find(relaxed_q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(max(limit * 5, 50)))
             docs = _filter_false_positives(docs, product_types)
 
         # ขั้นที่ 2: ถ้ายังไม่มี ถอด item_name ด้วย
@@ -3554,7 +3557,7 @@ def fetch_products(
                 related_cats = _product_type_categories(product_types)
                 if related_cats:
                     relaxed_q2["cat_name"] = {"$in": related_cats}
-            docs = list(collection.find(relaxed_q2, PRODUCT_PROJECTION).limit(max(limit * 2, 30)))
+            docs = list(collection.find(relaxed_q2, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(max(limit * 2, 30)))
             # กรอง false positive ใน fallback ด้วย (กันสายนาฬิกา/อุปกรณ์เสริม)
             if product_types:
                 docs = _filter_false_positives(docs, product_types)
@@ -3623,7 +3626,7 @@ def fetch_products(
     if (not used_vector_search
             and brand_key in base_filter and "item_name" in base_filter):
         no_brand_q = {k: v for k, v in base_filter.items() if k != brand_key}
-        extra_docs = list(collection.find(no_brand_q, PRODUCT_PROJECTION).limit(max(limit * 10, 200)))
+        extra_docs = list(collection.find(no_brand_q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(max(limit * 10, 200)))
         extra_docs = _filter_false_positives(extra_docs, product_types)
         # รวมกับ docs เดิม (ถอดซ้ำ)
         existing_ids = {str(d.get("item_id")) for d in docs}
@@ -3720,7 +3723,7 @@ def fetch_products(
             if shop_filter:
                 _code_filter["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$",
                                             "$options": "i"}
-            for _d in collection.find(_code_filter, PRODUCT_PROJECTION).limit(5):
+            for _d in collection.find(_code_filter, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(5):
                 _iid = str(_d.get("item_id"))
                 if _iid and _iid not in _existing_iids:
                     docs.append(_d)
@@ -3864,7 +3867,7 @@ def fetch_product_docs_by_ids(
         q = {"item_id": {"$in": id_values},
              "shopname": {"$regex": f"^{re.escape(shop_filter)}$",
                           "$options": "i"}}
-        for doc in collection.find(q, PRODUCT_PROJECTION).limit(limit):
+        for doc in collection.find(q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(limit):
             out[_norm(doc.get("item_id"))] = doc
         return out
     for doc in collection.find(
@@ -3896,7 +3899,7 @@ def fetch_products_by_models(
            for t in tokens]}
     if shop:
         q["shopname"] = {"$regex": f"^{re.escape(shop)}$", "$options": "i"}
-    return list(collection.find(q, PRODUCT_PROJECTION).limit(limit))
+    return list(collection.find(q, PRODUCT_PROJECTION).max_time_ms(_Q_MAX_MS).limit(limit))
 
 
 def list_shops(db) -> list[str]:
