@@ -12478,3 +12478,16 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - **bug จับได้เอง**: file 018 "ทุกแบรนด์-ยกเว้น-imilab-cuktech-zmi-ztec" automap scope ผิดทิศ (scoped ให้ร้านที่ถูกยกเว้น) → unscoped + re-apply rev2 + registry accounts=[] (apply inherit-empty → ต้องแก้ registry ตรง) → visible pairs พิสูจน์ทุก shop
 - isolation: 003 Kieslect promo @Kieslect=True @ZMI=False ผ่าน
 - ค้าง: admin ทบทวน mapping บนเวป / K5 flip gate (ยังไม่ flip — kb_source=legacy คงเดิม)
+
+## ผ่านแล้ว — K3 retrieval verify บน data จริง (11 cases)
+- mechanics ผ่าน: platform scope แยกถูก (shopee→040 / tiktok→037 balance), scoped promo @ร้านตัวเองเจอ, generic troubleshoot/warranty เจอ, wrong-shop scoped ไม่รั่ว
+- คำเตือนจริง: **unscoped promo files รั่วเข้าทุกร้าน** — 005 "Mi by IT Showroom" / 021 "Ztec Thailand" / 002 promo กลาง ไม่มี shop ในระบบจึงถูก unscope → query โปรโมชันร้านอื่นเจอโปรโมชันร้านเหล่านี้ (ต้องให้ admin ตัดสิน scope/disable ก่อน flip)
+- ranking: บางเคส top hit ไม่ใช่ไฟล์ที่ตรงสุด (TSP_LINK โผล่ใน Yaber query, 028 มอก แทน 025 ติดตั้ง) — semantic rank กับคำถามเปล่า; refs จริงน่าจะดีกว่า
+- ค้าง: admin review unscoped promo + K5 gate
+
+## ผ่านแล้ว — K5 flip kb_source=zaapi + disable risky files + verify
+- disable mechanism: ไม่มี enabled flag → ย้าย active_rev/active_apply → disabled_rev/disabled_apply (restore ได้ทันที) — 36 ไฟล์เสี่ยง (unscoped promo/brand) ปิด, 82 เปิด
+- retest: promo leaks หาย (Kieslect/ZMI top-hit ถูกไฟล์), TSP/Yaber miss = search quality ไม่ใช่ leak
+- flip ผ่าน setKbSource CAS (readiness gate ผ่าน) → kb_source=zaapi
+- verify path จริง: _zaapi_files_allowed=True, legacy_kb_reads_allowed=False (zero reads), zaapi_kb_evidence 20 hits จริง (ZMI specs+balance), file_kb_ready searchable (active_rows 7,130 = 82 ไฟล์ที่เปิด)
+- ค้าง: admin ทบทวน 36 disabled + canary QA จริง; rollback = setKbSource legacy ไม่ต้อง readiness
