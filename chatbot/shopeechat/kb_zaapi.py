@@ -22,6 +22,10 @@ _COLL = os.environ.get(
 
 _PRODUCTISH = frozenset({"product", "compare", "compat"})
 
+# ⚡ evidence ขอทุกชนิดที่ประกาศได้ (ชุดปิดเดียวกับ _CONTENT_TYPES ใน
+#   kb_zaapi_files) — แถวที่ admin จัดชนิดไว้ต้องค้นเจอครบ ไม่ใช่เฉพาะ product
+_CONTENT_TYPES_ALL = ("product", "troubleshooting", "faq", "warranty")
+
 
 def _zaapi_allowed() -> bool:
     """อ่าน zaapi_kb ได้ก็ต่อเมื่อ kb source เปิด และ selector เลือก zaapi —
@@ -74,7 +78,7 @@ def zaapi_kb_evidence(
     hits, trace = _zkf.zaapi_search(
         db if db is not None else _kb._admin_db(),
         shop=shop, platform=platform, query=query, refs=refs,
-        limit=limit, types=("product",))
+        limit=limit, types=_CONTENT_TYPES_ALL)
     sup = [{"kind": "kb", "record_id": h["record_id"],
             "request_id": request_id,
             "payload": {"text": h["a"], "fields": h.get("fields") or {}},

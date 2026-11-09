@@ -453,6 +453,30 @@ def test_zaapi_kb_evidence_shape(db, monkeypatch):
     assert "แบต" in ev["payload"]["text"]
 
 
+def test_zaapi_kb_evidence_nonproduct_type_visible(db, monkeypatch):
+    """evidence path ต้องค้นเจอแถวที่ประกาศชนิดอื่นที่ไม่ใช่ product
+    (troubleshooting/faq/warranty) — types widen ครอบชุดปิดทั้งหมด"""
+    from shopeechat import kb_zaapi
+    from shopeechat import knowledge_base as kb
+    _no_embed(monkeypatch)
+    monkeypatch.setattr(kb, "_admin_db", lambda: db)
+    monkeypatch.setattr(kb_zaapi, "_COLL", zkf._COLL)
+    zkf.apply_import(db, filename=TS_FILE, data=TS_DATA,
+                     content_type="troubleshooting", admin="t")
+
+    class N:  # TurnNeed-shaped double
+        kind = "product"
+        subject_refs = ("AC65B",)
+        target_refs = ()
+        capability_asks = ()
+
+    res = kb_zaapi.zaapi_kb_evidence(
+        shop=None, platform="shopee", message="AC65B เชื่อมต่อไม่ได้",
+        needs=(N(),), request_id="ch:kb:1", db=db)
+    assert res.supporting_evidence
+    assert "รีเซ็ตหูฟัง" in res.supporting_evidence[0]["payload"]["text"]
+
+
 def test_readiness_searchable(db):
     zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
     r = zkf.file_kb_ready(db)
