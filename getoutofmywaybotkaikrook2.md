@@ -12511,3 +12511,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - bot-worker.ts เรียก ensureIndexes() ตอน start ก่อน Mongo work เสมอ (warn+continue ถ้า fail)
 - ปิด gap: worker up ก่อน Next instrumentation → unique index buffer_messages ขาด → re-poll insert ซ้ำ
 - verify: tsc clean
+
+## ผ่านแล้ว — H4 output-path audit (no bypass evidence)
+- outbound paths ทั้งหมดผ่าน `assertPlatformApiDisabled` guard: botworker /send (sandbox), admin /send, botWorkerService process path, shadowReplyService — platform API ถูกปิดระดับ guard ไม่มีทางส่งจริง
+- workflow delivered → storeWorkflowDelivered เขียน shadow_replies เท่านั้น + review_bubbles — ผ่าน review gate เดียวกัน
+- mock send = mockSendService deterministic events เท่านั้น delivered:false เสมอ
+- verdict: ไม่พบ path ที่ส่งจริงโดยไม่ผ่าน review/mock — H4 PASS (สำหรับ pilot scope ปัจจุบัน)
