@@ -34,10 +34,10 @@ Phase 4 retrieval code and Task 5 pool integration were committed earlier; K0–
 
 | ID | Status | Work and dependency | Done when |
 | --- | --- | --- | --- |
-| H0 | Design review | Start now: use the [per-bubble mock-send plan](2026-11-09-botworker-human-approval-mock-send-plan.md) to review `shadow_replies`, bot-worker UI/API, assignment ownership and outbound paths for one designated admin and one Shopee shop. | Server-owned draft/recipient/product identity, approval authority and no-bypass paths are explicit. Existing `/botworker` send remains sandbox-only. |
-| H1 | Open | Store original and per-bubble drafts on generation; show approve, edit and reject per bubble. Inline editor has **บันทึก / บันทึกและส่ง / ยกเลิก**. | Original is immutable; saved edit remains pending; rejected bubble has no send request; state and actor/time survive refresh. |
-| H2 | Open | Add conditional review decisions and a **mock-only** Shopee send seam: one request per approved text bubble, plus a separate typed card request when item identity is verified. | No network send, no live flag change, no `sent_text` from mock; duplicate clicks/retries do not create duplicate mock requests; existing sandbox composer remains distinct. |
-| H3 | Open | Test approvals, edits, reject, `|||` ordering, product-card identity, failure/retry and unauthorized decisions against the persisted mock request log. | Mongo review state, UI and mock receipts agree; zero actual Shopee delivery. Live canary is a later, separately authorized gate. |
+| H0 | **Done** | Plan + 2 รอบ independent review ผ่าน (A-109→A-111); เสร็จใน PR #37 merged 2026-11-09. | Server-owned draft/recipient/product identity, approval authority and no-bypass paths verified — `reviewService.ts` owner เดียว |
+| H1 | **Done** | `review_bubbles` freeze ตอน insert (storeBotReply+storeWorkflowDelivered); inline edit pending→approve แยก `edited_text`/`edited_approved`; reject ไม่มี send request; actor/time persist — tests C/E ผ่าน | Original immutable; saved edit remains pending; rejected bubble has no send request — verified A-109..A-122 |
+| H2 | **Done** | `mockSendService.ts` seam: deterministic `mocksend:` events 1 per text bubble + typed `product_card` เมื่อ shop identity verify ผ่าน (entry.shop↔conv.shop_name); delivered:false เสมอ | No network send, no `sent_text`, dup clicks/op ids → single receipt; verified incl. real-Mongo validator failpoint 5/5 |
+| H3 | **Done** | 35/35 review suite (incl. K1–K7 review fixes) + 20/20 boundary + live bot :8010 3 ร้าน + real SIGKILL crash recovery + Playwright UI 5/5 | Mongo/UI/receipts agree; zero actual Shopee delivery — PR #37 merged into main |
 | H4 | Open | Recheck bot-worker and workflow output paths against the approval boundary before enabling additional traffic. | No enabled path can bypass the pilot approval rule; expansion beyond the pilot is separately reviewed. |
 
 The existing [bot-worker script](../../ChatAdminWeb/scripts/bot-worker.ts) and [bot-worker send route](../../ChatAdminWeb/src/app/api/botworker/conversations/%5BconversationId%5D/send/route.ts) explicitly do **not** deliver to Shopee today. H2 therefore includes a genuine platform-delivery capability, not a relabeling of a Mongo write.
@@ -74,6 +74,11 @@ Workflow import, executable runtime, and live activation are separate milestones
 | S1 | Open | Gemini live QA for KB/answer quality, under an authorized provider budget. | Real prompts and answers are judged against source facts; stub/fixture results are labeled separately. |
 | S2 | Open | Diagnose the dotenv test-order isolation flake when it blocks a required regression gate. | Cause reproduced and fixed without weakening the test; forward/reverse batch exits zero. |
 | S3 | Open | Waythrough semantic-coverage migration remains partial; use targeted reads for current work. | Ledger coverage becomes complete only under AGENTS.md §8G, including independent review. |
+| S4 | Open | **Buffer index-race:** worker up ก่อน Next instrumentation → unique indexes ยังไม่ถูกสร้าง → re-poll insert rows ซ้ำใน buffer_messages. เจอใน A-121 repro | Worker ensure indexes เองตอน start หรือใช้ upsert/findOneAndUpdate แทน insert-then-catch; หรือกำหนด startup order ชัดเจน |
+| S5 | Open | **`product_store.find()` ไม่มี `max_time_ms`** (~4 จุด) — slow product query ทำให้ bot >90s → claim `bot_failed` → dormant (user-approved design: รอ inbound ปลุก ไม่ auto-retry) | Query timeout bound; re-measure คำถามสินค้า end-to-end |
+| S6 | Open | **`botCallTimeoutMs` 90s < คำถามสินค้าบางข้อ (>200s observed A-115)** → bot_failed claims แม้ bot จะตอบได้ถ้ารอนานขึ้น | ตัดสิน: ขยาย timeout / เร่ง product path (S5) / ยอมรับ dormant |
+| S7 | Open | **Dev-only `--reload` churn:** `.gemini_quota.json` write ทุก call → watcher reload ระหว่าง traffic | รัน prod ไม่ใส่ `--reload` หรือย้าย quota file ออก watch dir |
+| S8 | Open | **Review leftovers (post-merge minor):** unused fields (`review_admin_id`/`batch_id`/`inbound_message_ids`) cleanup; workflow replies ไม่ persist `bot_products` → send_card บน workflow draft = 422 fail-closed (ปลอดภัย — จดไว้ให้รู้); `|||` จาก live bot ยังไม่เคยเห็นผ่าน review path (mechanics proven stub+unit) | Cleanup commit แยกเมื่อพร้อม; persist bot_products เฉพาะถ้า verify identity ได้ fail-closed |
 
 ## Maintenance rules for this register
 
