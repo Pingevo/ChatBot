@@ -40,10 +40,10 @@ export async function GET(req: NextRequest) {
   let weekStart: Date | null;
   let weekEnd: Date | null;
   if (customStart) {
-    weekStart = new Date(customStart);
-    weekStart.setHours(0, 0, 0, 0);
-    weekEnd = customEnd ? new Date(customEnd) : new Date(weekStart);
-    weekEnd.setHours(23, 59, 59, 999);
+    const [_sy,_sm,_sd]=customStart.split('-').map(Number);
+    weekStart = new Date(_sy,_sm-1,_sd,0,0,0,0);
+    const [_ey,_em,_ed]=customEnd?customEnd.split('-').map(Number):[_sy,_sm,_sd];
+    weekEnd = new Date(_ey,_em-1,_ed,23,59,59,999);
   } else {
     const bounds = getBounds(range);
     weekStart = bounds.start;

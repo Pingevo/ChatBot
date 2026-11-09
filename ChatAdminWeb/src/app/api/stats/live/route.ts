@@ -35,10 +35,10 @@ export async function GET(req: NextRequest) {
   let start: Date | null;
   let end: Date | null;
   if (customStart) {
-    start = new Date(customStart);
-    start.setHours(0, 0, 0, 0);
-    end = customEnd ? new Date(customEnd) : new Date(start);
-    end.setHours(23, 59, 59, 999);
+    const [_sy,_sm,_sd]=customStart.split('-').map(Number);
+    start = new Date(_sy,_sm-1,_sd,0,0,0,0);
+    const [_ey,_em,_ed]=customEnd?customEnd.split('-').map(Number):[_sy,_sm,_sd];
+    end = new Date(_ey,_em-1,_ed,23,59,59,999);
   } else {
     const bounds = getBounds(range);
     start = bounds.start;
