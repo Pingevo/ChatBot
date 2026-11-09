@@ -12524,3 +12524,13 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - R0 baseline done: bot_elapsed_ms p95=46.5s; GAP = ไม่มี ai_usage log persist → ขั้นต่อไป = ai_usage collection instrumentation (ตาม R0 spec วัดก่อนลด)
 - คิวที่เหลือตาม user: R0(ทำอยู่) → R2 → R3 → R4 → R5 → W0–W5
 - 36 disabled zaapi files รอ admin บน /zaapi-kb-mapping
+
+## กำลังทำ — R1 resume build ส่วนขาด (session นี้)
+- units JSONL เสร็จแล้ว: 28,044 units (93.8% classified) → exports/gen/g20261109-091914-c06ea7fd/sellable_units.jsonl
+- unit_embeddings.npz build อยู่ (BGE-M3 local, ~28k rows ETA ~40min) — shell 2adc1b
+- ขาดต่อ: product_embeddings.npz (description path) → publish CAS (อนุมัติแยก)
+- R0 gap noted: ไม่มี ai_usage persist → instrumentation at llm.py usage boundary (_openrouter_generate + gemini path)
+
+## ผ่านแล้ว — S7 quota-file churn fix
+- `_QUOTA_FILE` รองรับ env `GEMINI_QUOTA_FILE` → ย้าย quota file ออก watch dir ได้โดยไม่แก้ deploy
+- S8/R0 instrumentation/S2 = pending batch ต่อไป

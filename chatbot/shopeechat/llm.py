@@ -843,7 +843,9 @@ _MODEL_FALLBACK = {
     "gemini-3.5-flash-lite": "gemini-3.1-flash-lite",
     "gemini-3.1-flash-lite": "gemini-3.5-flash-lite",
 }
-_QUOTA_FILE = Path(__file__).resolve().parent.parent.parent / "exports" / ".gemini_quota.json"
+_QUOTA_FILE = Path(os.environ.get("GEMINI_QUOTA_FILE")
+                     or (Path(__file__).resolve().parent.parent.parent
+                         / "exports" / ".gemini_quota.json"))
 
 import threading as _threading
 import time as _time
