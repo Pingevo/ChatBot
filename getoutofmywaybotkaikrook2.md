@@ -12441,3 +12441,16 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - #11 validate text ก่อน gate เฉพาะ pending bubble; #12 mockSend exists-path เช็ค payload+provider
 - #7 canReview String() normalize; #8 err per-bubble; #9 opId reuse ต่อ intent; #13 bot_review_* เข้า allowedKeys; #14 legacy wording
 - Tests: 35/35 review + 20/20 boundary + tsc clean + diff --check clean
+
+## กำลังจะทำ — K2–K5 Zaapi KB closeout (branch codex/zaapi-kb-closeout)
+- ตาม register 2026-11-06 + user สั่ง "ปิดจบงาน kb": เปิด branch ใหม่จาก main หลัง merge PR36+37
+- K2 = shared Mongo write/migration + re-census 118 sources → canonical typed records (ต้องอนุมัติ write)
+- K3–K5 = retrieval coverage verify, v2 gen build+publish, live QA + selector canary
+
+## ผ่านแล้ว — K2 prep: mapping page + evidence widen (branch codex/zaapi-kb-closeout)
+- verified state: zaapi_kb_raw_sources 8,600/118 เก่า (invisible), zaapi_kb 8,600 old-format, zaapi_kb_records 0, zaapi_kb_files 0, kb_source=legacy
+- serving path จริง = file-backed (zaapi_kb+zaapi_kb_files registry triple), canonical/gen dormant → K2 = bulk apply_import ไม่ใช่ canonical
+- fix: zaapi_kb_evidence types ("product")→ชุดปิดทั้ง 4 (TDD RED→GREEN 51/51 file + 303/303 suite)
+- mapping page /zaapi-kb-mapping + API GET/POST → zaapi_kb_mappings coll + audit zaapi_kb.mapping_set; manifest 118 ไฟล์; theme tokens + nav entries
+- k2_bulk_apply.py: --dry-run preview / apply จาก Mongo mapping; 5 txt ครบ 118/8,600
+- ค้าง: staff map → bulk apply → K3 verify → K5 flip (gate แยก)
