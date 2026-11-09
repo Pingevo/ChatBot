@@ -12454,3 +12454,20 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - mapping page /zaapi-kb-mapping + API GET/POST → zaapi_kb_mappings coll + audit zaapi_kb.mapping_set; manifest 118 ไฟล์; theme tokens + nav entries
 - k2_bulk_apply.py: --dry-run preview / apply จาก Mongo mapping; 5 txt ครบ 118/8,600
 - ค้าง: staff map → bulk apply → K3 verify → K5 flip (gate แยก)
+
+## ผ่านแล้ว — K2 rehearsal บน disposable Mongo (k2-rehearse :27098)
+- apply 118/118 files เข้า mongo:7 disposable ผ่าน k2_bulk_apply + guess-mapping → zaapi_kb 8,600 rows, registry 118 active, file_kb_ready searchable
+- zaapi_search จริง (BGE embed local): hits ทำงาน; **shop isolation พิสูจน์ — scoped files (41) ไม่รั่วข้ามร้าน** (query @ZMIThailand เจอเฉพาะ unscoped)
+- สังเกต: shopname มี 2 ตัวแปร "BlackShark" vs "BlacksharkThailand" — staff ต้อง map ให้ถูกตัว
+- ค้าง: staff map จริง → apply เข้า shared Mongo → K5 flip
+
+## กำลังจะทำ — K2 apply เฉพาะ confident files เข้า shared Mongo
+- user: map เองเฉพาะที่มั่นใจ admin ปรับทีหลังได้ (re-import rev+1) + ทำขั้นตอนต่อให้จบ
+- rule: shopname ปรากฏชัดใน filename (maximal substring match) + ไม่กำกวม; ตัด BlackShark/BlacksharkThailand ออก (2 entities คล้ายกัน) → 30 files
+
+## ผ่านแล้ว — K2 confident-batch apply เข้า shared Mongo จริง
+- กฎ confident: shopname maximal-substring match ใน filename เดี่ยว + ไม่กำกวม → 41 files; ตัด BlackShark/BlacksharkThailand (2 entities คล้าย) → **30 files**
+- 30 mappings upsert เข้า `zaapi_kb_mappings` (mapped_by=devin-automap — admin ปรับได้ ปุ่มบันทึก upsert อยู่แล้ว)
+- k2_bulk_apply → 30/30 apply เข้า Mongo จริง: **3,353 stamped rows + 30 registry active**
+- verify จริง: `file_kb_ready` searchable; Kieslect promo hit @KieslectThailand / 0 hits @ZMIThailand (isolation ผ่าน)
+- ค้าง: 88 files เหลือรอ staff map (รวม 11 blackshark-ambiguous) → apply ต่อ; K5 flip gate
