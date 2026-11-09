@@ -39,13 +39,38 @@ def _db():
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--mapping", required=True)
+    ap.add_argument("--mapping", default=None,
+                    help="mapping JSON file — ละเว้น = อ่านจาก Mongo zaapi_kb_mappings")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--only", default=None,
                     help="จำนวนไฟล์แรก หรือชื่อไฟล์เดียว")
     args = ap.parse_args()
 
-    mapping = json.loads(Path(args.mapping).read_text(encoding="utf-8"))
+    db = _db()
+    if args.mapping:
+        mapping = json.loads(Path(args.mapping).read_text(encoding="utf-8"))
+    else:
+        saved = {d["_id"]: d for d in db["zaapi_kb_mappings"].find({})}
+        manifest = json.loads(
+            (ROOT / "ChatAdminWeb/data/zaapi-kb-files-manifest.json")
+            .read_text(encoding="utf-8"))
+        mapping = []
+        skipped = []
+        for f in manifest["files"]:
+            m = saved.get(f["file"])
+            if not m:
+                skipped.append(f["file"]); continue
+            mapping.append({
+                "file": f["file"],
+                "accounts": m.get("accounts") or [],
+                "platforms": m.get("platforms") or ["shopee"],
+                "content_type": m.get("content_type"),
+                "sheet_types": m.get("sheet_types") or {},
+            })
+        if skipped:
+            print(f"{len(skipped)} files unmapped — skipped:")
+            for s in skipped:
+                print(f"  - {s}")
     if args.only and args.only.isdigit():
         mapping = mapping[: int(args.only)]
     elif args.only:
@@ -53,7 +78,6 @@ def main() -> int:
         if not mapping:
             raise SystemExit(f"not in mapping: {args.only}")
 
-    db = _db()
     results = []
     for m in mapping:
         fn = m["file"]
