@@ -46,6 +46,7 @@ import {
   HelpCircle,
   UserCog,
   Inbox,
+  Map,
   type LucideIcon,
 } from "lucide-react";
 
@@ -96,6 +97,7 @@ const navGroups: NavGroup[] = [
       { href: "/workflows", label: "เวิร์กโฟลว์", icon: GitBranch, page: "workflow" },
       { href: "/quick-replies", label: "คำตอบเร็ว", icon: Reply, page: "quickreply" },
       { href: "/knowledge", label: "ฐานความรู้", icon: BookOpen, page: "kb" },
+      { href: "/zaapi-kb-mapping", label: "แมป Zaapi KB", icon: Map, page: "kb" },
       { href: "/persona", label: "ตัวแทนร้าน", icon: Sparkles, page: "persona" },
       { href: "/shop-settings", label: "ตั้งค่าร้าน", icon: Settings2, page: "shop-setting" },
     ],

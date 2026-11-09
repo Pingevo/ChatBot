@@ -20,6 +20,7 @@ type SavedMap = {
 };
 const TYPES = ["product", "troubleshooting", "faq", "warranty"];
 const ALL = "ทุกร้าน";
+const SEL = "w-full bg-surface text-text border border-border rounded-md px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
 
 export default function ZaapiKbMappingPage() {
   const { user } = useAuth();
@@ -100,12 +101,12 @@ export default function ZaapiKbMappingPage() {
           onClick={() => setFilter("unmapped")}>ยังไม่ map ({files.length - mappedCount})</Button>
         <Button size="sm" variant={filter === "all" ? "primary" : "secondary"}
           onClick={() => setFilter("all")}>ทั้งหมด ({files.length})</Button>
-        {!editable && <span className="text-xs text-zinc-400 ml-2">read-only — ต้องมีสิทธิ์แก้ KB</span>}
+        {!editable && <span className="text-xs text-text-muted ml-2">read-only — ต้องมีสิทธิ์แก้ KB</span>}
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-xs border-collapse">
           <thead>
-            <tr className="text-left text-zinc-400 border-b border-zinc-700">
+            <tr className="text-left text-text-muted border-b border-border">
               <th className="py-2 pr-3 w-8">#</th>
               <th className="pr-3">ไฟล์</th>
               <th className="pr-3 w-56">shop</th>
@@ -119,15 +120,15 @@ export default function ZaapiKbMappingPage() {
               const d = draft[f.file] || {};
               const mapped = isMapped(f);
               return (
-                <tr key={f.file} className="border-b border-zinc-800 align-top">
-                  <td className="py-2 pr-3 text-zinc-500">{i + 1}</td>
+                <tr key={f.file} className="border-b border-border align-top">
+                  <td className="py-2 pr-3 text-text-muted">{i + 1}</td>
                   <td className="pr-3 py-2">
                     <div className="font-medium">{f.file}</div>
-                    <div className="text-zinc-500">{f.name} · {f.rows} rows</div>
+                    <div className="text-text-muted">{f.name} · {f.rows} rows</div>
                     {mapped && <div className="text-emerald-500 text-[10px]">mapped by {saved[f.file].mapped_by}</div>}
                   </td>
                   <td className="pr-3 py-2">
-                    <select className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1"
+                    <select className={SEL}
                       disabled={!editable}
                       value={(d.accounts && d.accounts[0]) || ALL}
                       onChange={(e) => setField(f.file, {
@@ -141,7 +142,7 @@ export default function ZaapiKbMappingPage() {
                     )}
                   </td>
                   <td className="pr-3 py-2">
-                    <select className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1"
+                    <select className={SEL}
                       disabled={!editable}
                       value={d.content_type || "product"}
                       onChange={(e) => setField(f.file, { content_type: e.target.value })}>
@@ -151,8 +152,8 @@ export default function ZaapiKbMappingPage() {
                   <td className="pr-3 py-2">
                     {Object.entries(f.sheets).map(([s, n]) => (
                       <div key={s} className="flex items-center gap-1 mb-1">
-                        <span className="text-zinc-500 truncate max-w-[140px]" title={s}>{s} ({n})</span>
-                        <select className="bg-zinc-900 border border-zinc-700 rounded px-1 py-0.5"
+                        <span className="text-text-muted truncate max-w-[140px]" title={s}>{s} ({n})</span>
+                        <select className={SEL}
                           disabled={!editable}
                           value={(d.sheet_types || {})[s] || d.content_type || "product"}
                           onChange={(e) => {
