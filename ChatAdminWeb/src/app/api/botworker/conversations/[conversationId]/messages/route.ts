@@ -43,6 +43,8 @@ interface UnifiedMessage {
   image_desc?: string;
   images?: string[];
   bubble_color?: string;  // ⚡ สี bubble ของแอดมินใน sandbox (botworker_messages)
+  bot_products?: unknown[];   // ⚡ review — product entries ที่ bot แนะนำ (card attach)
+  review_bubbles?: unknown[]; // ⚡ review — frozen per-bubble state (absent = legacy draft)
   // ⚡ rich media (parsed from raw_payload) — เหมือน /admin/conversations/:id/messages
   message_type?: MessageType;
   media?: MessageMedia;
@@ -109,6 +111,8 @@ export async function GET(
     trigger_id?: string;
     mode?: string;
     origin?: string;
+    bot_products?: unknown[];
+    review_bubbles?: unknown[];
     created_at: Date;
     deleted_at?: Date;
   }>(COLLECTIONS.shadowReplies);
@@ -342,6 +346,8 @@ export async function GET(
       trigger_id: d.trigger_id,
       mode: d.mode,
       origin: d.origin,
+      bot_products: d.bot_products,
+      review_bubbles: d.review_bubbles,
     });
   }
 
@@ -362,5 +368,15 @@ export async function GET(
   // 7. เรียงเก่า → ใหม่
   unified.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-  return json({ messages: unified, total: unified.length });
+  // ⚡ review permission — designated admin + shop เท่านั้น (server-derived)
+  const me = r.ctx.admin.admin_id;
+  let canReview = false;
+  try {
+    const { getSystemConfig } = await import("@/backend/service/systemConfigService");
+    const config = await getSystemConfig();
+    canReview = !!config.bot_review_admin_id && !!config.bot_review_shop_id
+      && me === config.bot_review_admin_id && String(conv?.shop_id) === String(config.bot_review_shop_id);
+  } catch { /* config read fail → review off */ }
+
+  return json({ messages: unified, total: unified.length, can_review: canReview, review_admin_id: canReview ? me : undefined });
 }

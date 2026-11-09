@@ -48,6 +48,7 @@ import { callBot } from "./botCallService";
 import { workflowEngine, type EngineResult, type DeliveredMessage } from "./workflowEngine";
 // ⚡ botworker parallel sandbox — event log แยกจาก admin_logs + test status store
 import { logBotworkerEvent } from "./botworkerEventService";
+import { buildReviewBubbles } from "./reviewService";
 import { logAdminEvent } from "./adminLogService";
 import { testStatusConversationService } from "./testStatusConversationService";
 
@@ -518,6 +519,7 @@ async function storeBotReply(opts: {
     bot_cost_usd: opts.botResp.cost,
     bot_cost_thb: opts.botResp.cost ? opts.botResp.cost * 36 : undefined,
     bot_products: opts.botResp.products,
+    review_bubbles: buildReviewBubbles(shadowReplyId, opts.botResp.answer),
     zaapi_reply_text: zaapiReply?.text,
     zaapi_reply_message_id: zaapiReply?.message_id,
     ...(opts.outcomeEnvelope ? { outcome_envelope: opts.outcomeEnvelope } : {}),
@@ -585,6 +587,7 @@ async function storeWorkflowDelivered(opts: {
       batch_id: opts.batchId,
       inbound_text: opts.messageText,
       bot_reply_text: d.text,
+      review_bubbles: buildReviewBubbles(shadowReplyId, d.text),
       ...(d.image_url ? { bot_reply_image_url: d.image_url } : {}),
       bot_source: d.source,
       ...(opts.outcomeEnvelope ? { outcome_envelope: opts.outcomeEnvelope } : {}),

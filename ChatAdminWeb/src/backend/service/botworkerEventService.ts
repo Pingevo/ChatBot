@@ -17,7 +17,9 @@ export type BotworkerEventType =
   | "bot_cancelled"   // kill-switch/ownership abort — ไม่ใช่ provider error (claim คง processing)
   | "workflow"        // workflow node side-effects (assign/label/close)
   | "backlog_assign"  // distributor จ่ายงานค้าง (per-ticket)
-  | "backlog_commit"; // distributor commit batch (aggregate — ไม่ผูก conversation เดียว)
+  | "backlog_commit"  // distributor commit batch (aggregate — ไม่ผูก conversation เดียว)
+  | "mock_send"       // mock Shopee send request/receipt (per review bubble — delivered=false เสมอ)
+  | "review_op";      // review action operation record (dedupe ด้วย deterministic _id)
 
 export interface BotworkerEventDoc {
   event_id: string;
@@ -70,6 +72,19 @@ export async function listBotworkerEvents(
     .limit(limit)
     .toArray()
     .then((docs) => docs.reverse());
+}
+
+// ⚡ deterministic event insert — unique _id = idempotency key
+//   ใช้กับ review_op / mock_send — retry ด้วย key เดิมไม่สร้าง record ที่สอง
+export async function insertDeterministicEvent(doc: BotworkerEventDoc & { _id: string }): Promise<"inserted" | "exists"> {
+  const coll = await getCollection<BotworkerEventDoc>(COLLECTIONS.botworkerEvents);
+  try {
+    await coll.insertOne(doc as never);
+    return "inserted";
+  } catch (e) {
+    if ((e as { code?: number }).code === 11000) return "exists";
+    throw e;
+  }
 }
 
 export const botworkerEventService = {
