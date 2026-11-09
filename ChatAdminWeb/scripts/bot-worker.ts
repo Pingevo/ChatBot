@@ -46,6 +46,14 @@ async function main() {
   //   ปิด→เปิด = boundary ใหม่; backlog ช่วงปิดไม่ถูก admit เข้า poll
   let enabledSince: Date | null = null;
   console.log("[bot-worker] starting...");
+  // ⚡ S4 — ensure indexes ก่อน Mongo-dependent work เสมอ (worker อาจขึ้นก่อน
+  //   Next instrumentation → unique index buffer_messages ยังไม่มี → re-poll insert ซ้ำ)
+  try {
+    const { ensureIndexes } = await import("../src/backend/db/mongoClient");
+    await ensureIndexes();
+  } catch (e) {
+    console.warn("[bot-worker] ensureIndexes failed (continuing):", (e as Error).message);
+  }
   console.log("[bot-worker] ⚡ FIRE-AND-FORGET: แต่ละข้อความยิงไปบอทแยกอิสระ ไม่รอคิว ไม่รอ batch");
   console.log("[bot-worker] ⚠️ READ-ONLY messages_shp → writes to shadow_replies + chat_processing");
   console.log("[bot-worker] ⚠️ No Shopee API calls. No real message delivery.");
