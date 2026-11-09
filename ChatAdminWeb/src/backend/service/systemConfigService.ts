@@ -460,11 +460,27 @@ export async function setBotWorkerPlatformEnabled(
  */
 export async function zaapiKbReady(): Promise<{ ready: boolean; reason: string }> {
   try {
-    const coll = await getCollection<Document>('zaapi_kb');
-    const count = await coll.countDocuments({ active: { $ne: false } }, { limit: 1 });
-    return count > 0
-      ? { ready: true, reason: `zaapi_kb active docs >= 1` }
-      : { ready: false, reason: 'zaapi_kb has no active documents' };
+    // readiness = registry file มี active rows ของ triple ที่ publish จริง
+    //   (source_file+file_rev+apply_id — orphan/loser rows ไม่นับ;
+    //    manual/legacy-unmigrated docs ไม่ใช้ flip readiness;
+    //    ไม่กรอง scope — ตรง Python file_kb_ready owner เดียวกัน)
+    const za = await getCollection<Document>('zaapi_kb');
+    const files = await getCollection<Document>('zaapi_kb_files');
+    const regs = await files
+      .find(
+        { active_rev: { $gt: 0 } },
+        { projection: { active_rev: 1, active_apply: 1 } })
+      .limit(200).toArray();
+    for (const r of regs.slice(0, 50)) {
+      const filt: Record<string, unknown> =
+        { source_file: r._id, file_rev: r.active_rev };
+      if (r.active_apply) filt.apply_id = r.active_apply;
+      const n = await za.countDocuments(filt, { limit: 1 });
+      if (n > 0) {
+        return { ready: true, reason: `file rows active (${r._id} rev ${r.active_rev})` };
+      }
+    }
+    return { ready: false, reason: 'no active file rows (registry)' };
   } catch (e) {
     return { ready: false, reason: `zaapi_kb unreadable: ${(e as Error).message}` };
   }

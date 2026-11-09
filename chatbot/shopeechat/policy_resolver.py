@@ -40,7 +40,8 @@ POLICY_ORDER_STATES = frozenset({"unshipped", "shipped", "delivered",
                                  "unknown"})
 # device-side connector evidence grades — structured sources เท่านั้นที่
 # prove compatible/incompatible ได้; intent hint/web prose parse = unknown
-_DEVICE_STRUCTURED_SOURCES = frozenset({"spec-db", "web-structured"})
+_DEVICE_STRUCTURED_SOURCES = frozenset(
+    {"spec-db", "web-structured"})
 # canonical_specs ที่ยืมมาผ่าน attach_kb_specs — provenance ต้องบอกตรง
 _KB_INHERIT_SOURCE = "kb_inherit"
 
@@ -443,6 +444,18 @@ def extract_field_facts(card: dict, *, subject_id: str = "",
     facts: list[FieldEvidence] = []
 
     def add(key, val, source, prov):
+        # typed charging facts: invalid shape -> no row (unknown)
+        if key == "product_type":
+            if source != "card" or not isinstance(val, str) or not val.strip():
+                return
+        elif key in ("power_capacity_w", "max_current_a"):
+            val = (val if isinstance(val, (int, float))
+                   and not isinstance(val, bool)
+                   and math.isfinite(val) and val > 0 else None)
+        elif key == "charging_protocols":
+            val = (tuple(x.strip() for x in val if x.strip())
+                   if isinstance(val, (list, tuple))
+                   and all(isinstance(x, str) for x in val) else None)
         if val in (None, "", (), [], {}):
             return
         facts.append(FieldEvidence(
@@ -493,6 +506,7 @@ def extract_field_facts(card: dict, *, subject_id: str = "",
     add("output_w_structured",
         device_compat._structured_watts(card) or None,
         "card", "output_power_w|variants (structured only)")
+    add("product_type", card.get("product_type"), "card", "product_type")
     # canonical numeric/feature facts (extractor owner เดียวกัน — ไม่มี
     #   evidence → ไม่ emit row = unknown ไม่ใช่ negative)
     add("data_transfer_mbps",
@@ -616,6 +630,8 @@ _FIELD_UNITS = {
     "data_transfer_mbps": (("gbps", 1000.0), ("mbps", 1.0)),
     "output_w": (("kw", 1000.0), ("w", 1.0)),
     "output_power_w": (("kw", 1000.0), ("w", 1.0)),
+    "power_capacity_w": (("kw", 1000.0), ("w", 1.0)),
+    "max_current_a": (("a", 1.0),),
     "capacity_mah": (("ah", 1000.0), ("mah", 1.0)),
     "cable_length_m": (("mm", 0.001), ("cm", 0.01), ("m", 1.0)),
 }
@@ -652,7 +668,7 @@ def claim_supported(facts, subject_id: str, token: str) -> bool:
         if f.source == _KB_INHERIT_SOURCE:
             continue  # borrowed spec = hint grade — ไม่ ground claim
         vals = f.value if isinstance(f.value, tuple) else (f.value,)
-        if f.fact_key in ("spec_tokens", "certifications") \
+        if f.fact_key in ("spec_tokens", "certifications", "connector") \
                 and t in {_norm_tok(str(v)) for v in vals}:
             return True
         if f.fact_key == t:
@@ -713,7 +729,7 @@ def compat_relation_for_mode(mode: str | None) -> str | None:
 # resolver downgrade เป็น admin_review เสมอ (unverified); นอก set = unknown
 # → reject (fail closed, ไม่ coerce เป็น trusted)
 COMPAT_PROOF_SOURCES = frozenset(
-    {"spec-db", "web-structured", "customer"})
+    {"spec-db", "web-structured", "customer", "kb_zaapi"})
 
 
 def compat_proof_from_dict(d: dict) -> CompatProof:
@@ -760,6 +776,54 @@ def _unk(*codes: str) -> CompatDecision:
     return CompatDecision("unknown", (), tuple(codes))
 
 
+def _wattage_rc(subject_facts, target_facts, subject_id: str,
+                target: str) -> list:
+    """wattage truth reason codes (owner เดียว — ใช้ร่วม declared/derived
+    charges path): เปรียบ target min_watt (structured เท่านั้น) กับ
+    subject watt — cable ใช้ `power_capacity_w` (capacity ≠ output) ส่วน
+    power source ใช้ `output_w_structured`; ไม่มี req_w → [] (ไม่เติม
+    caveat); req>0 แต่ไม่มี subject watt → missing_wattage_evidence;
+    ทุกค่า < req → insufficient_wattage; mixed → variant_unconfirmed;
+    ครบและเป็น cable → cable_capacity_covers_target"""
+    _sid = (subject_id or "").lower()
+    _req_w = 0.0
+    for _v in _fact_vals(target_facts, target, "min_watt"):
+        try:
+            _fv = float(_v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(_fv):
+            _req_w = max(_req_w, _fv)
+    if _req_w <= 0:
+        return []
+    # cable: capacity is not power-source output
+    _cable = any(
+        f.subject_id.lower() == _sid
+        and f.fact_key == "product_type" and f.source == "card"
+        and isinstance(f.value, str)
+        and _norm_tok(f.value) == "cable"
+        for f in subject_facts or ())
+    _ws = []
+    for _v in _fact_vals(subject_facts, subject_id,
+                         "power_capacity_w" if _cable
+                         else "output_w_structured"):
+        try:
+            _fw = float(_v)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(_fw):
+            _ws.append(_fw)
+    if not _ws:
+        return ["missing_wattage_evidence"]
+    if all(_w < _req_w for _w in _ws):
+        return ["insufficient_wattage"]
+    if any(_w < _req_w for _w in _ws):
+        return ["wattage_variant_unconfirmed"]
+    if _cable:
+        return ["cable_capacity_covers_target"]
+    return []
+
+
 def resolve_compat(*, subject_id: str, target: str, relation: str,
                    subject_facts=(), target_facts=(), declared=()
                    ) -> CompatDecision:
@@ -792,8 +856,16 @@ def resolve_compat(*, subject_id: str, target: str, relation: str,
             if len(verdicts) > 1:
                 return CompatDecision("admin_review", tuple(rest),
                                       ("proof_conflict",))
-            return CompatDecision(verdicts.pop(), tuple(rest),
-                                  ("declared_proof",))
+            _v = verdicts.pop()
+            _rc = ["declared_proof"]
+            # declared compatible + charges — wattage eval owner เดียวกับ
+            #   connector-match path: declared proof พิสูจน์การเชื่อมต่อ
+            #   เท่านั้น กำลังชาร์จจริงประเมินจาก structured facts (cable
+            #   capacity ≠ output/full-speed) — ไม่มี req_w → ไม่เติม code
+            if _v == "compatible" and relation == "charges":
+                _rc += _wattage_rc(subject_facts, target_facts,
+                                   subject_id, target)
+            return CompatDecision(_v, tuple(rest), tuple(_rc))
         return CompatDecision("admin_review", tuple(cust),
                               ("customer_evidence_unverified",))
 
@@ -829,34 +901,8 @@ def resolve_compat(*, subject_id: str, target: str, relation: str,
             #   เป็นหลักฐาน — ยังไม่รู้ selected variant)
             _rc = ["connector_match"]
             if relation == "charges":
-                _req_w = 0.0
-                for _v in _fact_vals(target_facts, target, "min_watt"):
-                    try:
-                        _fv = float(_v)
-                    except (TypeError, ValueError):
-                        continue
-                    # NaN/Inf/negative ไม่ใช่ requirement ที่ valid —
-                    #   watt ไม่ควรกลายเป็น adequacy claim จาก target ที่
-                    #   malformed
-                    if math.isfinite(_fv):
-                        _req_w = max(_req_w, _fv)
-                _ws = []
-                for _v in _fact_vals(
-                        subject_facts, subject_id,
-                        "output_w_structured"):
-                    try:
-                        _fw = float(_v)
-                    except (TypeError, ValueError):
-                        continue
-                    if math.isfinite(_fw):
-                        _ws.append(_fw)
-                if _req_w > 0:
-                    if not _ws:
-                        _rc.append("missing_wattage_evidence")
-                    elif all(_w < _req_w for _w in _ws):
-                        _rc.append("insufficient_wattage")
-                    elif any(_w < _req_w for _w in _ws):
-                        _rc.append("wattage_variant_unconfirmed")
+                _rc += _wattage_rc(subject_facts, target_facts,
+                                   subject_id, target)
             return CompatDecision("compatible", (proof,), tuple(_rc))
         if "usb-a" in sub and "usb-c" in dev:
             return _unk("adapter_bridge_possible")

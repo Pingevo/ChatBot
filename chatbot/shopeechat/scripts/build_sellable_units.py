@@ -250,6 +250,9 @@ def _build_unit(doc: dict, m: dict | None, sections: dict, image_ids: list[str],
         "cable_subtype": c["cable_subtype"],
         "camera_subtype": c["camera_subtype"],
         "model_codes": c["model_codes"],
+        "canonical_specs": (doc.get("canonical_specs")
+                            if isinstance(doc.get("canonical_specs"), dict)
+                            else {}),
         "confidence": c["confidence"],
         "price": _price_of(m, doc),
         "stock": stock,

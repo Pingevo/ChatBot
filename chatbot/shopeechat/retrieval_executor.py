@@ -113,10 +113,14 @@ def _bucket(card: dict, req: RetrievalRequest) -> tuple[str, str]:
     # hidden (ยังไม่ publish — UNLIST/unknown) ห้ามใช้เป็น evidence ตอบลูกค้า
     if card.get("customer_visibility") == "hidden":
         return "rejected", "customer_hidden"
-    from .units import _SUBTYPE_TO_TYPES
+    from .units import _SUBTYPE_TO_TYPES, _CHARGER_MEMBER_TYPES
     eff_types = set(req.product_types)
     for s in req.subtypes:
         eff_types |= _SUBTYPE_TO_TYPES.get(s, set())
+    if "charger" in req.product_types:
+        # 'charger' declared = family head — cover member types ทั้ง domain
+        #   (semantic เดียวกับ needs_for_request scope expansion)
+        eff_types |= _CHARGER_MEMBER_TYPES
     canon = ((card.get("_evidence") or {}).get("facts") or {}).get("canonical") or {}
     ctypes = set(canon.get("type_candidates") or ())
     if card.get("canonical_type"):

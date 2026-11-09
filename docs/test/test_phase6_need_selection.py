@@ -28,9 +28,10 @@ from shopeechat.retrieval_executor import (  # noqa: E402
     execute_grouped_retrieval_requests)
 from shopeechat.candidate_pool import build_candidate_pool  # noqa: E402
 from shopeechat.retrieval_selection import (  # noqa: E402
-    select_for_llm_context)
+    needs_for_request, select_for_llm_context)
 from shopeechat.retrieval_policy import make_evidence_card  # noqa: E402
 from shopeechat import retrieval_runtime  # noqa: E402
+from shopeechat import runtime_config  # noqa: E402
 
 AD1404T_MSG = ("อยากได้สายที่ใช้กับ AD1404T แบบมีจอ ยาว 2 เมตร เต็มสปีด")
 AD1404T_INTENT = {"intent": "recommendation", "confidence": 0.85,
@@ -152,6 +153,41 @@ def test_intent_subtype_domain_maps_to_need_subtypes():
         f"subtype บน need — got {[(n.kind, n.subtypes) for n in prodish]}")
     assert all("cable" not in n.product_types for n in prodish), (
         "subtype-domain value ห้ามปนเป็น product_type บน need")
+
+
+def test_pseudo_intent_product_type_never_scopes_need():
+    # q184-shaped live defect: intent product_recommend conf 0.95 +
+    # product_type="other" (classifier catch-all — ไม่ใช่ canonical sellable
+    # type ใน PRODUCT_TYPES) — pseudo-type ห้าม stamp เป็น need scope;
+    # empty scope = unscoped → need attribute กับ typed request ได้ตามเดิม
+    plan = _decide(
+        "[ลดเหลือ 1649] iSUPER Dash Cam Lite กับ "
+        "[ลดเหลือ 1649] iSUPER Dash Cam Lite เลือกตัวไหนดี",
+        intent={"intent": "product_recommend", "confidence": 0.95,
+                "product_type": "other"})
+    prodish = [n for n in plan.needs if n.kind in ("product", "compare")]
+    assert prodish, plan.needs
+    assert all("other" not in n.product_types for n in prodish), (
+        f"pseudo-type 'other' ห้ามเป็น need scope — "
+        f"{[(n.kind, n.operation, n.product_types) for n in prodish]}")
+    req = RetrievalRequest(
+        request_id="req-0", slot_id="slot-dashcam", source="slot",
+        product_types=frozenset({"dashcam"}), subtypes=frozenset(),
+        model_codes=(), target_device=None,
+        availability_mode="sellable_first", compat_mode="none")
+    for n in prodish:
+        assert n in needs_for_request(req, plan.needs), (
+            f"unscoped need ต้อง attribute เข้า dashcam request — {n}")
+    # control: canonical type ยัง stamp + scope เหมือนเดิม
+    plan2 = _decide(
+        "[ลดเหลือ 1649] iSUPER Dash Cam Lite กับ "
+        "[ลดเหลือ 1649] iSUPER Dash Cam Lite เลือกตัวไหนดี",
+        intent={"intent": "product_recommend", "confidence": 0.95,
+                "product_type": "dashcam"})
+    prodish2 = [n for n in plan2.needs if n.kind in ("product", "compare")]
+    assert any("dashcam" in n.product_types for n in prodish2), (
+        f"canonical type ต้อง stamp scope เหมือนเดิม — "
+        f"{[(n.kind, n.product_types) for n in prodish2]}")
 
 
 def test_multi_need_product_and_policy():
@@ -630,6 +666,15 @@ def test_run_grouped_selection_forwards_needs():
 
 
 def test_grouped_selection_calls_selector_once(monkeypatch):
+    # offline boundary: central pool-source policy (runtime_config→Mongo)
+    #   ไม่ใช่ส่วนของ test นี้ — all sources ON = absent-field default เดิม
+    monkeypatch.setattr(runtime_config, "source_enabled",
+                        lambda _name: True)
+
+    def _no_fetch(*a, **k):
+        raise AssertionError("Mongo/config read reached — offline leak")
+
+    monkeypatch.setattr(runtime_config, "_fetch", _no_fetch)
     prof = route_context.build_retrieval_profile(
         AD1404T_MSG, history=[], intent_result=AD1404T_INTENT,
         shop="KingGadgets")

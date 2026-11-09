@@ -3163,7 +3163,7 @@ def fetch_products(
     if _uif == "charger":
         try:
             from . import route_context as _rc, units as _units
-            _chg_types = set().union(*_units._SUBTYPE_TO_TYPES.values())
+            _chg_types = _units._CHARGER_MEMBER_TYPES
             if retrieval_profile is not None:
                 # profile เป็น canonical facts — ไม่ต้อง resolve_route ซ้ำ
                 _is_chg = bool(_prof_sub or (_prof_types or set()) & _chg_types)

@@ -34,6 +34,11 @@ _SUBTYPE_TO_TYPES = {
     "desktop": {"desktop_charger"}, "socket": {"socket"},
 }
 
+# member unit types ทั้งหมดของ charger domain — scope 'charger' (family
+# head) cover ทุก member (derived จาก _SUBTYPE_TO_TYPES เท่านั้น —
+# ห้ามเขียนรายชื่อซ้ำ)
+_CHARGER_MEMBER_TYPES = frozenset().union(*_SUBTYPE_TO_TYPES.values())
+
 # npz cache keyed by immutable generation path — ไม่ใช่ mtime (gen dir เป็น
 # immutable; path ใหม่ = generation ใหม่); cap กัน pointer flip-flop สะสม
 _VEC_CACHE: dict[str, dict] = {}

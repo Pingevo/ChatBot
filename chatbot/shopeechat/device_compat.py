@@ -176,9 +176,9 @@ def _wattage_asc_key(p: dict, min_watt: float | None = None) -> tuple:
     ถ้ารู้ min_watt ที่ valid (numeric/finite/>0): สินค้าที่ structured
     watt ทุกค่า ≥ min_watt = adequate tier ก่อน (เรียงตัวพอ spec ที่
     เล็กสุดก่อน — baseline ของ dual-tier) — tier adequacy ต้องพิสูจน์
-    จาก structured set เท่านั้น ไม่ใช่ max หรือชื่อสินค้า (name-derived
-    watt ใช้ relevance ได้ ไม่ใช่ adequacy proof); below/mixed/unknown
-    อยู่ tier ถัดไป เรียงตาม structured watt สูงสุดที่ยืนยันได้
+    จาก structured set เท่านั้น ไม่ใช่ max หรือชื่อสินค้า; below/mixed
+    อยู่ tier ถัดไปและเรียงตาม structured watt สูงสุดที่ยืนยันได้;
+    unknown คงลำดับ relevance เดิมโดยไม่ parse title เป็นอำนาจ
 
     ถ้าไม่รู้ min_watt ที่ valid → asc ล้วนด้วย watt ที่ดึงได้
     (พฤติกรรมเดิม — sort hint ไม่ใช่ proof)
@@ -189,7 +189,9 @@ def _wattage_asc_key(p: dict, min_watt: float | None = None) -> tuple:
         sw = _structured_watts(p)
         if sw and all(v >= min_watt for v in sw):
             return (0, min(sw))
-        return (1, max(sw) if sw else 0.0)
+        if sw:
+            return (1, -max(sw))
+        return (2, 0.0)
     return (0, _extract_max_wattage(p))
 
 
@@ -593,7 +595,6 @@ _CONN_QUERY_KW = {
     "lightning": ["lightning"],
     "micro-usb": ["micro usb", "micro-usb"],
 }
-
 
 def _device_mentioned(device_name: str, products: list[dict]) -> bool:
     """catalog evidence — สินค้าระบุชื่อ target_device ตรงใน name/description

@@ -163,20 +163,29 @@ def _select_one(c: PooledCandidate, req: RetrievalRequest,
 
 
 def _need_scope(need) -> set:
-    """scope ของ need — types ∪ subtypes ∪ subject_refs ∪ target_refs
-    (union semantics เหมือน _bucket eff_types — ไม่ expand subtype→unit
-    type ตรงนี้)"""
-    return (set(getattr(need, "product_types", ()) or ())
-            | set(getattr(need, "subtypes", ()) or ())
-            | set(getattr(need, "subject_refs", ()) or ())
-            | set(getattr(need, "target_refs", ()) or ()))
+    """scope ของ need — types ∪ subtypes ∪ subject_refs ∪ target_refs —
+    declared 'charger' (family head) cover member types ทั้ง domain
+    ผ่าน units._CHARGER_MEMBER_TYPES; subtype entry ไม่ expand —
+    explicit subtype แคบกว่า family"""
+    ptypes = set(getattr(need, "product_types", ()) or ())
+    s = (ptypes | set(getattr(need, "subtypes", ()) or ())
+         | set(getattr(need, "subject_refs", ()) or ())
+         | set(getattr(need, "target_refs", ()) or ()))
+    if "charger" in ptypes:
+        from .units import _CHARGER_MEMBER_TYPES
+        s |= _CHARGER_MEMBER_TYPES
+    return s
 
 
 def _req_scope(req: RetrievalRequest) -> set:
-    return (set(req.product_types or ()) | set(req.subtypes or ())
-            | set(req.model_codes or ()) | set(req.subject_refs or ())
-            | set(req.target_refs or ())
-            | ({req.target_device} if req.target_device else set()))
+    s = (set(req.product_types or ()) | set(req.subtypes or ())
+         | set(req.model_codes or ()) | set(req.subject_refs or ())
+         | set(req.target_refs or ())
+         | ({req.target_device} if req.target_device else set()))
+    if "charger" in (req.product_types or ()):
+        from .units import _CHARGER_MEMBER_TYPES
+        s |= _CHARGER_MEMBER_TYPES
+    return s
 
 
 def needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
@@ -206,8 +215,17 @@ def needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
     elif req.source in ("slot", "relation_target"):
         out = [n for n in prodish
                if not _need_scope(n) or _need_scope(n) & _req_scope(req)]
+    elif req.source == "kb" and (req.subject_refs or req.target_refs):
+        # per-need zaapi channel (ch:kb:<i> ติด refs ของ need มา) —
+        #   identity-scoped coverage: เฉพาะ need ที่ refs ตรงกันเป๊ะ;
+        #   typed topic gate ที่ compiler คัดหัวข้อขั้นสุดท้าย
+        srefs = (frozenset(req.subject_refs or ())
+                 | frozenset(req.target_refs or ()))
+        out = [n for n in prodish
+               if (frozenset(n.subject_refs or ())
+                   | frozenset(n.target_refs or ())) == srefs]
     else:
-        out = list(needs)  # kb/อื่นๆ = context channel ทุก need
+        out = list(needs)  # bare kb/อื่นๆ = context channel ทุก need
     return tuple(out)
 
 

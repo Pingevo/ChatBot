@@ -116,14 +116,6 @@ TurnSubjectScope = Literal[
 _TURN_SUBJECT_SCOPES = frozenset(
     {"none", "explicit", "current_single", "current_set"})
 
-# ref_kind (semantic owner: intent_classifier) → subject_scope —
-#   mechanical typed→typed map; "unknown"/absent/invalid → คง verbatim
-_REF_KIND_SCOPE = {
-    "current_subject": "current_single",
-    "explicit_subject": "explicit",
-    "new_discovery": "none",
-}
-
 # kinds ที่ selector ต้องเลือก evidence ให้ — แบก product scope/ranking
 # productish kind domain (typed TurnNeedKind contract owner — consumer:
 # selector attribution, reversed-relation eligibility ฯลฯ)
@@ -302,9 +294,6 @@ def decide_turn(
     _subj_scope = intent.get("subject_scope")
     if _subj_scope not in _TURN_SUBJECT_SCOPES:
         _subj_scope = "none"
-    # ref_kind คือ semantic classification ของการอ้างอิง — semantic owner
-    #   (classifier) ตัดสิน; ที่นี่ map typed→typed เท่านั้น ห้าม infer
-    _subj_scope = _REF_KIND_SCOPE.get(intent.get("ref_kind"), _subj_scope)
     try:
         _subj_count = intent.get("subject_count")
         _subj_count = None if _subj_count is None else int(_subj_count)
@@ -729,7 +718,13 @@ def decide_turn(
                     _add_need("product", _op_f, refs=_prod_subject,
                               trefs=_prod_target, conf=0.8, facts=(_f,),
                               prov=("intent.requested_facts",))
-            _df = tuple(f for f in _req_facts if f in _FACT_DESCRIBE)
+            # targeted compatibility is owned by the compat need below;
+            # emitting it again as product/describe duplicates the outcome.
+            _df = tuple(
+                f for f in _req_facts
+                if f in _FACT_DESCRIBE
+                and not (f == "compatibility"
+                         and intent_name == "compatibility_check"))
             if _df:
                 _add_need("product", "describe", refs=_prod_subject,
                           trefs=_prod_target, conf=0.8, facts=_df,
@@ -790,7 +785,9 @@ def decide_turn(
     _has_product_or_compare_need = any(
         n.kind in ("product", "compare") for n in needs
     )
-    if _has_explicit_product and not _has_product_or_compare_need:
+    if (_has_explicit_product and not _has_product_or_compare_need
+            and not (intent_name == "compatibility_check"
+                     and "compatibility" in _req_facts)):
         _op: TurnNeedOp = (
             "recommend" if intent_name == "product_recommend" else "describe"
         )

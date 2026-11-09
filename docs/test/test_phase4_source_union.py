@@ -43,8 +43,9 @@ os.environ.update({k: v for k, v in _env_before_replay_import.items()
 del _env_before_replay_import
 
 from shopeechat import (  # noqa: E402
-    app, candidate_pool, conversation_products, knowledge_base,
-    product_store, retrieval_executor, retrieval_runtime, units)
+    app, candidate_pool, conversation_products, kb_zaapi, knowledge_base,
+    product_store, retrieval_executor, retrieval_runtime, runtime_config,
+    units)
 from shopeechat.candidate_pool import (  # noqa: E402
     CandidatePool, EvidenceAttachment, PooledCandidate, build_candidate_pool)
 from shopeechat.retrieval_executor import (  # noqa: E402
@@ -76,6 +77,13 @@ def _offline_guard(monkeypatch):
         pytest.fail("OFFLINE LEAK: pymongo.MongoClient() constructed",
                     pytrace=False)
     monkeypatch.setattr(pymongo.MongoClient, "__init__", _client_init_guard)
+    monkeypatch.setattr(runtime_config, "source_enabled", lambda _name: True)
+    monkeypatch.setattr(runtime_config, "kb_source", lambda: "legacy")
+
+    def _config_read_guard(*_args, **_kwargs):
+        pytest.fail("OFFLINE LEAK: runtime config read", pytrace=False)
+
+    monkeypatch.setattr(runtime_config, "_fetch", _config_read_guard)
 
 
 # ── card/request/pipeline helpers ────────────────────────────────────────────
@@ -620,6 +628,52 @@ def test_main_branch_executes_union_once_with_branch_evidence(monkeypatch):
     assert "subject_cards" in kw, f"missing channel kwargs: {sorted(kw)}"
     assert "compat_cards" in kw
     assert "supporting" in kw
+
+
+def test_main_grouped_zaapi_wires_selected_kb_fetcher(monkeypatch):
+    """Zaapi must be reachable from the main grouped path without a legacy hit."""
+    calls = _spy_run(monkeypatch,
+                     result={"selected_cards": [], "summary": {}})
+    seen = []
+    sentinel = object()
+    monkeypatch.setattr(runtime_config, "kb_source", lambda: "zaapi")
+    monkeypatch.setattr(runtime_config, "source_enabled", lambda _name: True)
+    monkeypatch.setattr(
+        kb_zaapi, "zaapi_kb_evidence",
+        lambda **kw: seen.append(kw) or sentinel)
+
+    resp, _ = _chat(monkeypatch, _fx("main-zaapi", grouped=True),
+                    "มี WPB100L ไหม")
+
+    assert resp.source == "product_store", resp.source
+    assert calls["n"] == 1
+    fetcher = calls["kwargs"][0].get("kb_fetcher")
+    assert callable(fetcher)
+    assert fetcher() is sentinel
+    assert len(seen) == 1
+    kw = seen[0]
+    assert (kw["shop"], kw["platform"], kw["message"]) \
+        == (SHOP, "shopee", "มี WPB100L ไหม")
+    # per-need contract (Task 5): adapter retrieves by turn needs
+    assert isinstance(kw.get("needs"), tuple) and kw["needs"]
+
+
+def test_main_grouped_legacy_without_hit_never_falls_through_to_zaapi(
+        monkeypatch):
+    """The KB selector is authoritative even when legacy returns no hit."""
+    calls = _spy_run(monkeypatch,
+                     result={"selected_cards": [], "summary": {}})
+    monkeypatch.setattr(runtime_config, "kb_source", lambda: "legacy")
+    monkeypatch.setattr(
+        kb_zaapi, "zaapi_kb_evidence",
+        lambda **_kw: pytest.fail("legacy selection reached Zaapi"))
+
+    resp, _ = _chat(monkeypatch, _fx("main-legacy-empty", grouped=True),
+                    "มี WPB100L ไหม")
+
+    assert resp.source == "product_store", resp.source
+    assert calls["n"] == 1
+    assert calls["kwargs"][0].get("kb_fetcher") is None
 
 
 def test_flag_off_skips_union_and_preserves_legacy_payload(monkeypatch):

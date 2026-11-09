@@ -311,7 +311,11 @@ class TestComposeAnswer:
 
     def test_three_productish_needs_one_product_result(self):
         """compare+compat+describe = productish → ONE product result ที่
-        attribute ทุก covered need (answer model ≤1)."""
+        attribute ทุก covered need (answer model ≤1).
+        Task5-simp: compat need ที่ subject_refs เป็น product (ไม่ใช่
+        device target) = deferred product↔product pairing ask —
+        unsupported relation decline → task dropped + UnansweredNeed
+        (no_evidence); product result covers compare+describe only."""
         needs = (_need_compare(refs=("AC65B",)), _need_compat(),
                  _need_product())
         req = _req(rid="req-0", types=("earphone", "cable"),
@@ -321,14 +325,16 @@ class TestComposeAnswer:
         ctx = _compile(needs, sel,
                        _pool((_pooled("i:1", "1", name="Earphone"),)),
                        (req,), _profile())
-        assert len(ctx.task.tasks) == 3
+        assert [t.need_index for t in ctx.task.tasks] == [0, 2]
         comp = acx.compose_answer(
             needs=needs, context=ctx, product_text="p", answer_calls=1)
         assert len(comp.results) == 1
         r = comp.results[0]
         assert r.domain == "product"
-        assert set(r.need_indices) == {0, 1, 2}
-        assert comp.unanswered_needs == ()
+        assert set(r.need_indices) == {0, 2}
+        assert [(u.need_index, u.kind, u.reason)
+                for u in comp.unanswered_needs] == [
+            (1, "compat", "no_evidence")]
 
     def test_unanswered_alongside_answered(self):
         """productish need ไร้ coverage → unanswered คงอยู่ข้าง policy result."""
@@ -530,6 +536,9 @@ class TestBoundaryComposition:
 class TestFinalizeAnswer:
 
     def test_finalize_joins_in_canonical_order(self, monkeypatch):
+        """canonical order = comp.results order (need-major จาก
+        compose owner — renderer ไม่ re-sort); ตัวอย่างนี้ need
+        order [0,1,2] → product ก่อน claim ก่อน policy."""
         _import_app(monkeypatch)
         comp = acx.AnswerComposition(
             results=(
@@ -539,7 +548,7 @@ class TestFinalizeAnswer:
             ))
         resp = _finalize(comp)
         a = resp.answer
-        assert a.index("claim text") < a.index("prod text") < a.index(
+        assert a.index("prod text") < a.index("claim text") < a.index(
             "เปลี่ยน/คืนได้ตามเงื่อนไข")
 
     def test_finalize_dedupes_identical_segments(self, monkeypatch):
@@ -778,6 +787,22 @@ class TestEnforceComposition:
 # ────────────────────────────────────────────────────────────────────────────
 
 class TestE2EMixedComposition:
+
+    @pytest.fixture(autouse=True)
+    def _runtime_config_contract(self, monkeypatch):
+        """pin runtime-config doc = {} → contract defaults เดิมทุกตัว
+        (pool_sources absent→ON, kb_source→"legacy") — E2E เหล่านี้ต้อง
+        deterministic จาก cold process ไม่ depend on warm _cache หรือ
+        local Mongo doc; `_fetch` = trap พิสูจน์ว่า DB path เข้าไม่ถึง
+        (auto-restore ผ่าน monkeypatch — ไม่แตะ production runtime_config)"""
+        from shopeechat import runtime_config as _rc
+        monkeypatch.setattr(
+            _rc, "get_runtime_config", lambda *a, **k: {})
+        monkeypatch.setattr(
+            _rc, "_fetch",
+            lambda *a, **k: pytest.fail(
+                "OFFLINE LEAK: runtime_config._fetch → MongoClient",
+                pytrace=False))
 
     def test_flag_on_ineligible_composes_structural_segments(
             self, monkeypatch):

@@ -77,8 +77,9 @@
 - `AGENTS.md` (root) — กฎหลักของ repo นี้ (บังคับอ่าน)
 - `ChatAdminWeb/AGENTS.md` — กฎเฉพาะ Next.js 16
 
-### Waythrough log (บังคับอ่านทุกครั้ง — กฎข้อ 8)
+### Waythrough log (ledger + active tail — กฎข้อ 8)
 
+- `docs/waythrough-ledger.md` — **canonical ledger** (ดัชนี/สรุป อ่านครบทุกครั้ง) + แผน `docs/plans/waythrough-ledger-migration.md`
 - `getoutofmywaybotkaikrook.md` — **history (freeze)** — เคสเก่าที่ผ่าน/ปัญหาเก่า อ่านอย่างเดียว ห้ามเขียนเพิ่ม
 - `getoutofmywaybotkaikrook2.md` — **active log** — กำลังจะทำ/กำลังทำ/ผ่านแล้วใหม่/งานค้าง เขียนที่นี่เท่านั้น
 - `มาแล้วจ้า.md` — ไฟล์ secret deploy (ห้ามอ่านซ้ำ — อนุญาตตอนสร้างครั้งเดียว)
@@ -147,18 +148,46 @@
 - `search_and_answer` ใน `web_search.py` deprecated — ใช้ `search_and_extract` แทน
 - `lazadachat/` และ `tiktokchat/` เป็น placeholder — อย่าเพิ่มโค้ดจริงโดยไม่ได้รับอนุญาต
 
-### 8. ห้ามลืม — อ่าน waythrough log ทุกครั้ง (อ่าน file 1+2, เขียนเฉพาะ file 2)
+### 8. ห้ามลืม — waythrough log (canonical ledger + incremental tail, เขียนเฉพาะ file 2)
 
-**ไฟล์บังคับ**: `getoutofmywaybotkaikrook.md` + `getoutofmywaybotkaikrook2.md` (ที่ root ของ repo)
+(แก้ 2026-11-03 ด้วยการอนุมัติของผู้ใช้: การอ่าน raw logs ~19k บรรทัด / ~3 MB ทุก session ไม่ scale)
 
-- ต้องอ่าน**ทั้ง 2 ไฟล์**ทุกครั้งก่อนทำงานใหม่ใน repo นี้
-- `getoutofmywaybotkaikrook.md` = **history (freeze)** — อ่านอย่างเดียว ห้ามเขียนเพิ่ม
-- `getoutofmywaybotkaikrook2.md` = **active** — กำลังจะทำ/กำลังทำ/ผ่านแล้วใหม่/งานค้าง เขียนที่นี่เท่านั้น
-- เป็น waythrough log — บันทึกทำอะไร แก้อะไร เคสไหนผ่านแล้ว แก้ยังไง
-- **ห้ามทำลายเคสที่เคยผ่าน** — ดูใน "เคสที่ผ่านแล้ว" ทั้ง 2 ไฟล์ก่อนแก้
-- ก่อนทำอะไรใหม่ → เขียนใน "กำลังจะทำ" ของ file 2 ก่อน
-- แก้เสร็จ → เขียน "วิธีแก้" + ย้ายไป "ผ่านแล้ว" ของ file 2 + อัปเดต "กำลังจะทำ"+"วันเวลาทีแก้"
-- มีกฎเหล็ก: ห้ามบอก "แก้เสร็จ" ถ้ายังไม่ verify, บันทึก baseline ก่อนแก้, ฯลฯ
+**A. Source of truth**
+- `getoutofmywaybotkaikrook.md` = frozen source of truth (อ่านอย่างเดียว ห้ามแก้)
+- `getoutofmywaybotkaikrook2.md` = append-only active source of truth — เขียนที่นี่เท่านั้น
+- `docs/waythrough-ledger.md` = ดัชนี/สรุป ไม่แทน raw logs; ห้ามแก้ย้อนหลัง/ลบ/rewrite raw logs
+
+**B. ก่อนงานใหม่ (ไม่ต้องอ่าน raw logs ตั้งแต่บรรทัด 1 และไม่ต้องอ่าน active 1..EOF)**
+1. อ่าน ledger ให้ครบ
+2. ตรวจ frozen integrity (C) — ไม่ตรง → หยุด
+3. คำนวณ SHA-256 ของ active บรรทัด `1..active_integrity_prefix_lines` (D) — ไม่ตรง → หยุด
+4. อ่านเฉพาะ active tail `active_integrity_prefix_lines + 1 .. EOF`
+5. สรุป tail เข้า ledger เป็น entry (exact range) ก่อนเริ่มงานใหม่
+6. งานที่ต้องใช้ historical context ซึ่ง semantic coverage ยังขาด: targeted search (`grep -n` heading/คำค้น) → อ่าน exact source range → เพิ่ม coverage entry
+7. รายงาน coverage limitation ตามตรง
+- ห้ามบังคับอ่าน active 1..EOF เพียงเพราะ semantic migration ยัง partial
+
+**C. Frozen integrity** — ledger เก็บ line count, byte size, full SHA-256 ของ frozen file; ถ้าไม่ตรง → **หยุดทันที** ห้าม regenerate ledger กลบการเปลี่ยนโดยไม่มี user approval
+
+**D. Active integrity (append-only) แยกจาก semantic coverage — ห้ามใช้แทนกัน**
+- integrity: ledger เก็บ `active_integrity_prefix_lines`, `active_integrity_prefix_sha256`, `active_line_count_at_baseline`, `active_integrity_recorded_at` — ยืนยันแค่ว่าบรรทัด 1..N ไม่ถูกแก้ย้อนหลัง (`head -n N file | shasum -a 256`) ตั้ง N = EOF ได้หลังตรวจทั้งไฟล์; **ไม่ได้แปลว่า 1..N ถูกอ่านหรือ index**
+- semantic coverage: ledger เก็บ `active_coverage_ranges` (และ frozen coverage ranges) = exact ranges ที่อ่านและสรุปเข้า ledger จริง; partial/ว่างได้แม้ integrity prefix อยู่ที่ EOF; ห้ามอ้าง full coverage จนครบ 1..EOF; migration ขยับเฉพาะ coverage
+- integrity prefix ขยับเฉพาะเมื่อ append tail ใหม่ถูกตรวจและสรุปเข้า ledger แล้ว
+
+**E. Ledger entry** ต้องมี: source file, exact inclusive line range (ห้าม `N+`), phase/task/date (ถ้ามี), category (invariant | passed behavior | failed/rejected approach | regression lock | pending/deferred work | decision/approval), concise summary, status (verified | historical-unverified | superseded), superseded-by (ถ้ามี)
+
+**F. Migration state** — `coverage: partial` | `coverage: complete`. ขณะ partial: อ่าน ledger + active tail ตาม B, รายงาน coverage gap, ผู้ใช้อนุมัติให้ทำต่อภายใต้ targeted coverage ได้, ห้ามกล่าวว่า full historical audit ผ่าน
+
+**G. Completion rule** — `coverage: complete` ได้เมื่อ: union ของ coverage ranges ครอบทุกบรรทัดของ raw logs ทั้งสองไฟล์ ไม่มี gap/overlap ที่อธิบายไม่ได้, frozen SHA ตรง, active integrity prefix SHA ตรง, ledger ผ่าน independent review — ถ้า checksum ตัวใดไม่ตรง ห้ามถือว่า complete
+
+**H. Writing rule (บังคับ ไม่ optional)**
+- ก่อนเริ่มงาน → append "กำลังจะทำ" ลง file 2
+- หลัง verify → append "ผ่านแล้ว/วิธีแก้/งานค้าง" ลง file 2 (append สุดท้ายของ task)
+- จากนั้นต้อง: (1) อ่านและสรุป tail ที่เพิ่มใน task เข้า ledger เป็น entry, (2) เลื่อน active integrity prefix ไป EOF ใหม่, (3) คำนวณ prefix SHA ใหม่, (4) อัปเดต metadata — ใน commit เดียวกัน; ห้ามเขียน active เพิ่มหลังวัด baseline
+- ถ้างานหยุดก่อนอัปเดต ledger: session ถัดไปจะเห็น tail หลัง prefix เดิม และต้องสรุปก่อนเริ่มงานใหม่
+- ห้ามให้ ledger อ้างงานว่า verified ถ้า test/evidence ยังไม่ผ่าน
+- **ห้ามทำลายเคสที่เคยผ่าน** — เช็ก ledger entries (invariant / regression lock / passed behavior) ที่เกี่ยวก่อนแก้
+- กฎเหล็ก: ห้ามบอก "แก้เสร็จ" ถ้ายังไม่ verify, บันทึก baseline ก่อนแก้
 
 ### 9. แก้ที่ root cause + ขออนุญาตก่อนแก้
 

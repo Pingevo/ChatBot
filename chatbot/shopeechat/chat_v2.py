@@ -576,10 +576,12 @@ def _check_general_question(req, ctx, history, db) -> dict | None:
                         if general_qtype in ("categories", "brands")
                         else None)
     _gen_res = knowledge_base.build_general_context(
-        general_qtype, mongo_db=db, shop_filter=_gen_shop_filter)
+        general_qtype, mongo_db=db, shop_filter=_gen_shop_filter,
+        shop=req.shop, platform=req.platform)
     if _gen_shop_filter and not _gen_res:
         _gen_res = knowledge_base.build_general_context(
-            general_qtype, mongo_db=db)
+            general_qtype, mongo_db=db,
+            shop=req.shop, platform=req.platform)
     if not _gen_res or not _gen_res.get("context"):
         return None
     _kb_ctx = _gen_res["context"]
@@ -1026,7 +1028,9 @@ def _retrieve_products(req, ctx: dict, history: list[dict], intent: dict,
             print(f"[MODEL-REGEX-V2] error: {_e}", file=sys.stderr)
 
     # 5.3 KB lookup
-    _kb_result = knowledge_base.lookup_kb(_retrieval_msg, snap=snap)
+    _kb_result = knowledge_base.lookup_kb(_retrieval_msg, snap=snap,
+                                          shop=req.shop,
+                                          platform=req.platform)
     _kb_context = ""
     _products: list[dict] = []
     # เพิ่ม follow-up products ก่อน (ถ้ามี)
@@ -1343,7 +1347,8 @@ def _build_answer(req, ctx: dict, history: list[dict], intent: dict,
     _llm_elapsed = _time.time() - _t_llm
     ctx["timing"]["llm"] = round(_llm_elapsed, 3)
     # append base warranty ถ้าเป็นคำถามรับประกัน
-    _answer = _app_module._append_base_warranty(_answer, req.message)
+    _answer = _app_module._append_base_warranty(
+        _answer, req.message, shop=req.shop, platform=req.platform)
     # record LLM2 step
     _model = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
     _prompt_t = _usage.get("prompt", 0) + ctx["vision_usage"].get("prompt", 0)

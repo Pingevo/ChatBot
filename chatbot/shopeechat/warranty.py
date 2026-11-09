@@ -9,8 +9,8 @@ r"""ดึงระยะเวลารับประกันจากชื�
   - "Xiaomi Mijia ... -12M"
 
 Pattern ที่รองรับ:
-  - ท้ายชื่อ: `[-\s]?(\d+)([yYmM])$` (เช่น -2Y, -15M, -12M, - 1Y, 1Y)
-  - ใกล้คำ "ประกัน"/"warranty": `ประกัน.{0,15}?(\\d+)\\s*([yYmM])` หรือ `warranty.{0,15}?(\\d+)\\s*([yYmM])`
+  - ท้ายชื่อ: Y/y = ปี, uppercase M = เดือน (เช่น -2Y, -15M, -12M, - 1Y, 1y)
+  - ใกล้คำ "ประกัน"/"warranty": Y/y = ปี, M/m = เดือน (เช่น ประกัน 24m, warranty 6m)
 
 แปลงเป็นเดือน:
   - 1Y = 12 เดือน, 2Y = 24 เดือน, 3Y = 36 เดือน
@@ -18,7 +18,7 @@ Pattern ที่รองรับ:
 
 หลีกเลี่ยง false positive:
   - ตัวเลขที่ไม่ใช่ warranty เช่น "5260mAh", "4/64GB", "3.5 นิ้ว", "65W"
-  - ใช้ heuristic: ตัวเลขต้องตามด้วย Y/M ที่ท้ายชื่อ หรือใกล้คำว่า "ประกัน"
+  - lowercase m ท้ายชื่อโดยไม่มีบริบทประกันไม่ใช่ warranty (เช่น สายชาร์จยาว 2m)
 """
 from __future__ import annotations
 
@@ -28,7 +28,8 @@ from typing import Optional, Any
 
 
 # Pattern หลัก: ท้ายชื่อ เช่น "-2Y", "-15M", "- 1Y", " 1Y"
-# รองรับ: optional space/dash ก่อนตัวเลข, ตัวเลข 1-3 หลัก, Y/y หรือ M/m ตัวเดียว
+# Regex จับ unit ได้ทั้ง Y/y/M/m; tail parser รับเฉพาะ Y/y/M
+# lowercase m ต้องผ่าน pattern ใกล้คำ "ประกัน"/"warranty"
 _TAIL_PATTERN = re.compile(
     r"[\-\s]+(\d{1,3})\s*([yYmM])\s*$"
 )
@@ -56,11 +57,27 @@ _FALSE_POSITIVE_PATTERN = re.compile(
 def _unit_to_months(value: int, unit: str) -> int:
     """แปลง unit Y/M หรือ ปี/เดือน เป็นจำนวนเดือน."""
     u = unit.lower()
-    if u in ("y", "year", "ปี"):
+    if u in ("y", "year", "years", "ปี"):
         return value * 12
-    if u in ("m", "month", "เดือน"):
+    if u in ("m", "month", "months", "เดือน"):
         return value
     return 0
+
+
+def warranty_value_months(value) -> int | None:
+    """normalize typed warranty fact value → เดือน (owner เดียวของ
+    months semantics): int/float ผ่านตรง, str "24"/"24 months"/
+    "2 years" → months; รูปแบบอื่น → None (unknown ไม่ใช่ negative)"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+    m = re.match(r"^\s*(\d{1,3})\s*([a-zA-Z]+|ปี|เดือน)\s*$",
+                 str(value or ""))
+    if not m:
+        return None
+    months = _unit_to_months(int(m.group(1)), m.group(2))
+    return months or None
 
 
 def extract_warranty_from_name(item_name: str) -> Optional[dict]:
@@ -96,7 +113,7 @@ def extract_warranty_from_name(item_name: str) -> Optional[dict]:
                 "text": f"{value} ปี" if value > 1 else "1 ปี",
                 "source": "tail",
             }
-        if 1 <= value <= 60 and unit.lower() == "m":
+        if 1 <= value <= 60 and unit == "M":
             months = _unit_to_months(value, unit)
             years = months // 12
             rem = months % 12

@@ -25,6 +25,9 @@ _model: Any = None
 _model_load_time: float = 0.0
 
 MODEL_NAME = "BAAI/bge-m3"
+# immutable HF commit — audited + offline-load proven 2026-11-04 (Phase 4 §13
+# single identity source; ห้ามใส่ refs/main/tag — ต้อง 40-hex commit เท่านั้น)
+MODEL_REVISION = "5617a9f61b028005a4858fdac845db406aefb181"
 EMBEDDING_DIM = 1024  # bge-m3 ให้ vector 1024 มิติ
 # device อ่านจาก env — "mps" (Apple Silicon), "cuda" (NVIDIA GPU), "cpu" (server ทั่วไป)
 DEVICE = os.environ.get("EMBEDDING_DEVICE", "mps").strip() or "mps"
@@ -40,10 +43,26 @@ def _get_model() -> Any:
 
     t0 = time.time()
     logger.info("Loading embedding model %s on %s...", MODEL_NAME, DEVICE)
-    _model = SentenceTransformer(MODEL_NAME, device=DEVICE)
+    _model = SentenceTransformer(
+        MODEL_NAME, revision=MODEL_REVISION, device=DEVICE)
     _model_load_time = time.time() - t0
     logger.info("Embedding model loaded in %.1fs", _model_load_time)
     return _model
+
+
+def model_identity() -> dict:
+    """Single source of loaded-model identity (6 fields — Phase 4 §13 gen-doc
+    pin contract). ST version resolves via importlib.metadata — no model load;
+    PackageNotFoundError propagates if unresolvable."""
+    from importlib.metadata import version
+    return {
+        "name": MODEL_NAME,
+        "revision": MODEL_REVISION,
+        "sentence_transformers_version": version("sentence-transformers"),
+        "dim": EMBEDDING_DIM,
+        "normalize_embeddings": True,
+        "output_dtype": "float32",
+    }
 
 
 def embed_texts(texts: list[str], batch_size: int = 32) -> np.ndarray:

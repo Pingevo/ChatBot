@@ -54,7 +54,8 @@ _load_env()
 _BASE_WARRANTY_CACHE: str | None = None
 
 
-def get_base_warranty_text() -> str:
+def get_base_warranty_text(shop: str | None = None,
+                           platform: str | None = None) -> str:
     """ดึงเงื่อนไขการรับประกันสินค้าเบื้องต้น.
 
     ลำดับความสำคัญ:
@@ -64,13 +65,22 @@ def get_base_warranty_text() -> str:
     คืนข้อความเงื่อนไขการรับประกันสินค้าเบื้องต้น.
     """
     global _BASE_WARRANTY_CACHE
-    if _BASE_WARRANTY_CACHE is not None:
+    _zaapi = False
+    try:
+        from . import runtime_config as _rc
+        _zaapi = _rc.kb_source() == "zaapi"
+    except Exception:
+        pass
+    # zaapi: cache global ห้ามใช้ — scoped warranty file จะรั่วข้ามร้าน
+    if not _zaapi and _BASE_WARRANTY_CACHE is not None:
         return _BASE_WARRANTY_CACHE
 
     # 1. ลองดึงจาก KB general_faq ก่อน
     try:
-        faq = get_general_faq("รับประกัน")
+        faq = get_general_faq("รับประกัน", shop=shop, platform=platform)
         if faq and faq.get("answer"):
+            if _zaapi:
+                return faq["answer"].strip()
             _BASE_WARRANTY_CACHE = faq["answer"].strip()
             return _BASE_WARRANTY_CACHE
     except Exception:
@@ -349,10 +359,30 @@ def _search_kb_single(message: str, limit: int = 5) -> list[dict[str, Any]]:
     return results
 
 
-def get_general_faq(topic: str = "รับประกัน") -> dict[str, Any] | None:
+def get_general_faq(topic: str = "รับประกัน", *,
+                    shop: str | None = None,
+                    platform: str | None = None) -> dict[str, Any] | None:
     """ดึง general_faq ตาม topic — kb_qa ก่อน, legacy knowledge_base fallback.
 
-    kb_qa เก็บคำตอบใน field `a` — normalize เป็น `answer` ให้ caller เดิม."""
+    kb_qa เก็บคำตอบใน field `a` — normalize เป็น `answer` ให้ caller เดิม.
+    zaapi mode → ค้น file-backed rows ด้วย topic (owner kb_zaapi_files —
+    legacy collections ไม่ถูกอ่าน)."""
+    try:
+        from . import runtime_config as _rc
+        if _rc.kb_source() == "zaapi":
+            from . import kb_zaapi_files as _zkf
+            hits, _tr = _zkf.zaapi_search(
+                _admin_db(), shop=shop, platform=platform,
+                query=topic, limit=3,
+                types=("faq", "warranty"), include_manual=True)
+            if not hits:
+                return None
+            return {"answer": "\n\n".join(h["a"] for h in hits),
+                    "topic": topic, "type": "general_faq",
+                    "_qa_source": "zaapi",
+                    "meta": [h.get("meta") or {} for h in hits]}
+    except Exception:
+        pass
     if not _legacy_allowed():
         return None
     q = {"type": "general_faq", "topic": topic, "active": {"$ne": False}}
@@ -410,6 +440,8 @@ def build_general_context(
     qtype: str,
     mongo_db=None,
     shop_filter: str | None = None,
+    shop: str | None = None,
+    platform: str | None = None,
 ) -> dict[str, Any] | None:
     """สร้าง context สำหรับคำถามทั่วไป (policy/brands/categories/shops).
 
@@ -444,7 +476,8 @@ def build_general_context(
             "shipping_policy": "จัดส่ง",
         }
         kb_topic = topic_map.get(qtype, "")
-        faq = get_general_faq(kb_topic) if kb_topic else None
+        faq = (get_general_faq(kb_topic, shop=shop, platform=platform)
+               if kb_topic else None)
         faq_answer = (faq or {}).get("answer", "") or ""
 
         # 2. ดึงจาก Mongo description — เฉพาะ shipping เท่านั้น
@@ -682,7 +715,9 @@ def format_kb_context(
 
 def lookup_kb(message: str, *,
               snap=_gen.SNAP_UNSET,
-              retrieval_profile: RetrievalProfile | None = None) -> dict[str, Any] | None:
+              retrieval_profile: RetrievalProfile | None = None,
+              shop: str | None = None,
+              platform: str | None = None) -> dict[str, Any] | None:
     """ค้น KB ตามข้อความลูกค้า.
 
     คืน dict:
@@ -705,7 +740,8 @@ def lookup_kb(message: str, *,
     # ถ้าถามรับประกัน → ดึง general FAQ ด้วย
     general_faq = None
     if topic == "warranty":
-        general_faq = get_general_faq("รับประกัน")
+        general_faq = get_general_faq("รับประกัน", shop=shop,
+                                      platform=platform)
 
     # ถ้าถามรับประกัน แต่สินค้าไม่มี warranty เลย → ไม่ต้องส่ง general FAQ
     if topic == "warranty" and general_faq:
@@ -986,7 +1022,10 @@ def _qa_embed_missing(docs: list[dict]) -> None:
 
 def search_qa(message: str, *, model_codes: set[str] | None = None,
               anchor_item_id: str | None = None, known_brand: str | None = None,
-              snap=_gen.SNAP_UNSET, limit: int = 3) -> list[dict]:
+              snap=_gen.SNAP_UNSET, limit: int = 3,
+              shop: str | None = None,
+              platform: str | None = None,
+              types: tuple | None = None) -> list[dict]:
     """ค้น kb_qa — hybrid: embedding sim + substring + model/item anchor boost.
 
     Model rules (กันคำแนะนำข้ามรุ่น):
@@ -995,6 +1034,39 @@ def search_qa(message: str, *, model_codes: set[str] | None = None,
 
     คืน docs + _qa_score + _qa_level ('model'|'item'|'generic').
     """
+    # ⚡ zaapi file-backed KB — ค้น active raw rows ผ่าน kb_zaapi_files
+    #   (owner เดียว); contract เดิม: _qa_sim=cosine, _qa_level,
+    #   cross-model guard — model_codes สกัดจาก row text ด้วย owner regex เดิม
+    try:
+        from . import runtime_config as _rc
+        _za_mode = _rc.kb_source() == "zaapi"
+    except Exception:
+        _za_mode = False
+    if _za_mode:
+        from . import kb_zaapi_files as _zkf
+        _refs = tuple(model_codes or ()) + tuple(
+            extract_model_keywords(message))
+        hits, _tr = _zkf.zaapi_search(
+            _admin_db(), shop=shop, platform=platform,
+            query=message, refs=_refs,
+            limit=max(limit, 1) * 3,
+            types=types or ("faq", "troubleshooting", "warranty"),
+            include_manual=True)
+        known = {str(c).upper() for c in (model_codes or set())}
+        za_hits: list[dict] = []
+        for h in hits:
+            dcodes = {t.upper() for t in extract_model_keywords(h.get("a") or "")}
+            if known and dcodes and not (dcodes & known):
+                continue  # คำแนะนำผูกรุ่นอื่น — guard เดิม ห้ามข้ามรุ่น
+            h["model_codes"] = sorted(dcodes)
+            h["q"] = h.get("q") or h.get("record_id") or ""
+            h["_qa_level"] = "model" if (known and dcodes) else "generic"
+            if h["_qa_level"] == "model":
+                h["_qa_score"] = h.get("_qa_sim", 0.0) + 0.5
+            if h.get("_qa_score", 0.0) >= _QA_MIN_SCORE:
+                za_hits.append(h)
+        za_hits.sort(key=lambda x: -x["_qa_score"])
+        return za_hits[:limit]
     docs = _qa_docs()
     if not docs:
         return []
@@ -1061,6 +1133,7 @@ def search_qa(message: str, *, model_codes: set[str] | None = None,
 
 
 def qa_context(message: str, *, conversation_id=None, claim: bool = False,
+               shop: str | None = None, platform: str | None = None,
                snap=_gen.SNAP_UNSET,
                retrieval_profile: RetrievalProfile | None = None) -> str:
     """context block '=== คำแนะนำจากฐานความรู้ (QA) ===' หรือ '' — entry ที่ app.py เรียก.
@@ -1103,7 +1176,8 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
     if not known_brand:
         known_brand = next((b for b in _known_brands(snap) if b in low), None)
     hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
-                     known_brand=known_brand, snap=snap)
+                     known_brand=known_brand, snap=snap,
+                     shop=shop, platform=platform)
     if not hits:
         return ""
     print(f"[QA] hits={len(hits)} levels={[h['_qa_level'] for h in hits]} "
@@ -1121,7 +1195,9 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
 
 def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
                          min_sim: float = 0.5, min_answer_len: int = 30,
-                         limit: int = 2, snap=_gen.SNAP_UNSET) -> list[str]:
+                         limit: int = 2, snap=_gen.SNAP_UNSET,
+                         shop: str | None = None,
+                         platform: str | None = None) -> list[str]:
     """คืน list คำแนะนำแก้ปัญหาเบื้องต้น (field `a`) สำหรับ troubleshoot-first claim flow.
 
     Gate 3 ชั้น (กัน tips ไม่เกี่ยว):
@@ -1163,7 +1239,9 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
         low = message.lower()
         known_brand = next((b for b in _known_brands(snap) if b in low), None)
     hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
-                     known_brand=known_brand, snap=snap)
+                     known_brand=known_brand, snap=snap,
+                     shop=shop, platform=platform,
+                     types=("faq", "troubleshooting"))
     return [(h.get("a") or "").strip() for h in hits
             if h.get("_qa_level") in ("model", "item", "brand")
             and h.get("_qa_sim", 0.0) >= min_sim
@@ -1200,16 +1278,7 @@ def _kb_model_row_match(doc: dict, token: str) -> dict | None:
     return None
 
 
-@dataclass(frozen=True)
-class KbEvidenceResult:
-    """ผล KB product evidence resolution — cards (live listing ที่ model
-    match) + attachments (item-domain joins) + supporting (name-only/
-    unmatched — ห้ามกลายเป็น candidate)"""
-    cards: tuple[dict, ...] = ()
-    supporting_evidence: tuple[dict, ...] = ()
-    attachment_evidence: tuple = ()
-    raw_count: int = 0
-    trace: tuple[str, ...] = ()
+from .kb_evidence_result import KbEvidenceResult  # noqa: F401 — contract owner; re-export เพื่อ callsites เดิม
 
 
 def kb_product_evidence(

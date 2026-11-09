@@ -592,6 +592,38 @@ def test_multi_need_compare_plus_compat():
     assert set(cmp_need.subject_refs) >= {"AC65B", "AC65B2"}
 
 
+def test_compatibility_fact_is_owned_only_by_compat_need():
+    """A targeted relation ask must not also emit a generic product answer."""
+    p = _decide(
+        "แล้วเชื่อมเข้ากับแอป Strava ไหม",
+        intent_result={
+            "intent": "compatibility_check", "confidence": 0.95,
+            "product_type": "smartwatch", "relation_target": "Strava",
+            "requested_facts": ["compatibility"],
+        },
+        active_anchor={"item_id": "18408364022", "name": "IMILAB W01"},
+    )
+
+    assert _pairs(p) == {("compat", "compat")}
+    assert p.needs[0].target_refs == ("Strava",)
+
+
+def test_targeted_compatibility_keeps_other_product_facts():
+    p = _decide(
+        "W01 มีรายละเอียดอะไรและเชื่อม Strava ไหม",
+        intent_result={
+            "intent": "compatibility_check", "confidence": 0.95,
+            "product_type": "smartwatch", "relation_target": "Strava",
+            "requested_facts": ["description", "compatibility"],
+        },
+        active_anchor={"item_id": "19308362993", "name": "IMILAB W01"},
+    )
+
+    assert _pairs(p) == {("product", "describe"), ("compat", "compat")}
+    prod = next(n for n in p.needs if n.kind == "product")
+    assert prod.requested_facts == ("description",)
+
+
 def test_multi_need_human_request_plus_product_info():
     """Explicit human request while bot owns ticket sets primary_action='handoff'
     AND preserves the independent product information need."""
@@ -908,3 +940,23 @@ def test_invalid_scope_in_intent_normalizes_none():
     for n in p.needs:
         assert n.subject_scope == "none"
         assert n.subject_count is None
+
+
+def test_subject_scope_is_not_overridden_by_redundant_ref_kind():
+    """The canonical subject_scope must survive conflicting legacy metadata."""
+    p = _decide(
+        "หัวชาร์จละ",
+        history=_PROD_HISTORY,
+        intent_result={
+            "intent": "product_recommend",
+            "product_type": "charger",
+            "charger_subtype": "adapter",
+            "target_device": "xiaomi 17 ultra",
+            "subject_scope": "none",
+            "ref_kind": "current_subject",
+            "confidence": 0.98,
+        },
+    )
+    prod = [n for n in p.needs if n.kind == "product"]
+    assert prod
+    assert all(n.subject_scope == "none" for n in prod)

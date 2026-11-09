@@ -728,8 +728,8 @@ def _typed_answer_boundary(sel: dict, *, needs: tuple, profile,
     except Exception:
         return _done(adm=adm, web=web_used)
     # model ถูกเรียกเฉพาะเมื่อมี task ที่ต้องตอบจริง — ctx ว่าง หรือ turn
-    # มีแต่ typed deterministic results (compat verdict / deferred) →
-    # composition อย่างเดียว, 0 answer-model call
+    # มีแต่ typed deterministic results (compat verdict / deferred)
+    #   → composition อย่างเดียว, 0 answer call
     if ctx.is_empty or not ctx.task.tasks:
         return _done(ctx=ctx, adm=adm, web=web_used)
     answer, usage = llm.answer_typed(
@@ -750,8 +750,10 @@ def _render_composition(comp) -> str:
         return llm.LLM_ERROR_REPLY
     parts: list[str] = []
     seen: set[str] = set()
-    for r in sorted(comp.results,
-                    key=lambda r: _acx._DOMAIN_ORDER.get(r.domain, 9)):
+    # comp.results = canonical order จาก compose_answer (ordering owner
+    #   เดียว — need_index แล้วตามด้วย _DOMAIN_ORDER ภายใน need) —
+    #   renderer consume ตรงๆ ไม่ re-derive order ที่นี่
+    for r in comp.results:
         text = (r.text if r.domain != "policy"
                 else _guards.policy_outcome_text(r.outcome))
         if text and text not in seen:
@@ -803,7 +805,7 @@ def _finalize_answer(comp, *, message: str, limit: int, products,
     from . import answer_context as _acx
     from . import guards as _guards
     answer = _render_composition(comp) or _acx.EMPTY_CONTEXT_REPLY
-    answer = _append_base_warranty(answer, message)
+    answer = _append_base_warranty(answer, message, shop=shop)
     rd = dict(routing_decision or {})
     rd["composition"] = {
         "domains": [r.domain for r in comp.results],
@@ -918,6 +920,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
     _subject_view_loaded = False
     _sv = None
     _turn_plan = None
+    _grouped_kb_fetcher = None
 
     # ⚡ Phase 8 — resolve effective LLM context limit (per-request from admin config)
     #   ถ้า req.llm_context_limit ส่งมา → ใช้ค่านั้น (range 10-50)
@@ -1212,6 +1215,14 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             _sel_flag = _rcfg.grouped_retrieval_selection_enabled()
         except Exception:
             _sel_flag = False
+        if _sel_flag and _rcfg.kb_source() == "zaapi":
+            from . import kb_zaapi as _kbz
+            _grouped_kb_fetcher = lambda *a, need=None, request_id="ch:kb", \
+                **k: _kbz.zaapi_kb_evidence(
+                shop=req.shop, platform=req.platform or "shopee",
+                message=req.message, request_id=request_id,
+                needs=((need,) if need is not None
+                       else (_turn_plan.needs if _turn_plan else ())))
         _tagged_item_id = req.item_id or _extract_item_id_tag(req.message)
         _is_from_history_anchor = False
         _hybrid_anchor_card = None  # ⚡ 2026-09-12 — anchor สำหรับ hybrid merge (compat+target_device)
@@ -1752,7 +1763,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         #   explicit evidence (item card / image anchor / model kw / claim flow)
         #   → resolver ไม่ consult (explicit ชนะ precedence เสมอ)
         _subject_ev = {"explicit_ids": (), "pair_ids": (), "ops": (),
-                       "stored": _subject_stored}
+                       "stored": _subject_stored, "resolved": None}
         # ⚡ Phase 2C.3 — resolver อ่าน subject signal ทั้งหมดจาก TurnPlan
         #   เดียวที่คำนวณ post-classify (ไม่ใช่ _intent_result ตรง):
         #   scope/count จาก product need + signal conf จาก plan
@@ -1764,11 +1775,13 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 _plan_scope = _n.subject_scope
                 _plan_count = _n.subject_count
                 break
-        # explicit ids ที่ persist ไปแล้วใน turn นี้ (item-tag block เขียนไว้
-        #   แล้ว) → ไม่ส่งเป็น explicit evidence ซ้ำให้ recorder ตัดสินใหม่
-        #   (same set churn write) — ส่งเฉพาะ explicit ที่ยังไม่ถูก commit
+        # explicit ids ที่ item-tag block commit แล้ว → carry เป็น committed
+        #   evidence เพื่อกัน display batch ทับ โดยไม่เขียน set เดิมซ้ำ
         _persisted_ids = set(
             _subject_stored.subject_ids) if _subject_stored else set()
+        if (_tagged_item_id and _subject_stored is not None
+                and str(_tagged_item_id) in _persisted_ids):
+            _subject_ev["resolved"] = _subject_stored
         _subj_explicit = tuple(
             str(i) for i in (
                 _tagged_item_id,
@@ -1776,6 +1789,9 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             ) if i and str(i) not in _persisted_ids)
         if _subj_explicit:
             _subject_ev["explicit_ids"] = _subj_explicit
+        # gated paths (tagged/anchor/hybrid/claim) own subject ผ่าน channel
+        #   ของตัวเอง → default True; turn ปกติ recompute ใน gate ข้างล่าง
+        _has_explicit_subject = True
         if not (_tagged_item_id or anchor_card or _hybrid_anchor_card
                 or _is_claim_request):
             # explicit-subject gate: typed TurnPlan surface เท่านั้น —
@@ -2160,10 +2176,12 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 _gen_shop_filter = req.shop if general_qtype in ("categories", "brands") else None
                 _gen_res = knowledge_base.build_general_context(
                     general_qtype, mongo_db=db, shop_filter=_gen_shop_filter,
+                    shop=req.shop, platform=req.platform,
                 )
                 if _gen_shop_filter and not _gen_res:
                     _gen_res = knowledge_base.build_general_context(
-                        general_qtype, mongo_db=db)
+                        general_qtype, mongo_db=db,
+                        shop=req.shop, platform=req.platform)
                 # R3 — return_policy eligibility มี typed owner แล้ว:
                 #   FAQ/decision prose ห้าม delegate ให้ product LLM —
                 #   carry เฉพาะ qtype อื่น (context ที่ไม่เกี่ยว eligibility)
@@ -2179,10 +2197,13 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             _gen_shop_filter = req.shop if general_qtype in ("categories", "brands") else None
             gen_result = knowledge_base.build_general_context(
                 general_qtype, mongo_db=db, shop_filter=_gen_shop_filter,
+                shop=req.shop, platform=req.platform,
             )
             if _gen_shop_filter and not gen_result:
                 # ร้านนี้ไม่มีสินค้า NORMAL เลย → fallback เป็นคำตอบทั้งเครือแทน 0 ผลลัพธ์
-                gen_result = knowledge_base.build_general_context(general_qtype, mongo_db=db)
+                gen_result = knowledge_base.build_general_context(
+                    general_qtype, mongo_db=db,
+                    shop=req.shop, platform=req.platform)
                 _gen_shop_filter = None  # ไม่ใช่คำตอบเฉพาะร้านแล้ว ไม่ต้องบอก LLM ว่าจำกัดร้าน
             if gen_result and gen_result.get("context"):
                 gen_context = gen_result["context"]
@@ -2202,7 +2223,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 prompt_t = usage_info.get("prompt", 0)
                 output_t = usage_info.get("output", 0)
                 cost = llm._gemini_cost(prompt_t, output_t)
-                answer = _append_base_warranty(answer, req.message, source=f"general:{general_qtype}", claim_guidance=_mixed_claim_carry)
+                answer = _append_base_warranty(answer, req.message, source=f"general:{general_qtype}", claim_guidance=_mixed_claim_carry, shop=req.shop, platform=req.platform)
                 return ChatResponse(
                     answer=answer,
                     answer_segments=llm.split_segments(answer),
@@ -2248,7 +2269,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 prompt_t = usage_info.get("prompt", 0)
                 output_t = usage_info.get("output", 0)
                 cost = llm._gemini_cost(prompt_t, output_t)
-                answer = _append_base_warranty(answer, req.message, source="general:brand_info", claim_guidance=_mixed_claim_carry)
+                answer = _append_base_warranty(answer, req.message, source="general:brand_info", claim_guidance=_mixed_claim_carry, shop=req.shop, platform=req.platform)
                 return ChatResponse(
                     answer=answer,
                     answer_segments=llm.split_segments(answer),
@@ -2432,11 +2453,17 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                             else "compat" if _compat_followup_skip_kb else "ref_indicator")
             print(f"[TIMING] KB lookup SKIPPED ({_skip_reason} follow-up)", file=sys.stderr)
         else:
-            kb_result = knowledge_base.lookup_kb(kb_query, retrieval_profile=_retrieval_profile, snap=_snap)
+            kb_result = knowledge_base.lookup_kb(kb_query, retrieval_profile=_retrieval_profile, snap=_snap,
+                                                 shop=req.shop, platform=req.platform)
             print(f"[TIMING] KB lookup: {_time.time()-_t0:.2f}s  query={kb_query[:60]!r}", file=sys.stderr)
         if kb_result and kb_result.get("found"):
             kb_context = kb_result.get("context", "")
             kb_docs = kb_result.get("kb_docs", [])
+            if _sel_flag:
+                _grouped_kb_fetcher = lambda: (
+                    knowledge_base.kb_product_evidence(
+                        db, kb_docs, shop=req.shop,
+                        message=req.message))
             if kb_context:
                 # ดึง Mongo มาผสม — เอาราคา/ร้าน/ลิงก์/image/status จาก Mongo
                 # ใช้ model keywords จาก KB docs แทน req.message เพื่อค้นให้ตรง
@@ -2784,17 +2811,6 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     if _sel_flag and _retrieval_profile is not None:
                         try:
                             from . import retrieval_runtime as _rr
-                            from . import runtime_config as _rc
-                            from . import kb_zaapi as _kbz
-                            _kb_fetcher = (
-                                (lambda: _kbz.zaapi_kb_evidence(
-                                        shop=req.shop,
-                                        platform=req.platform or "shopee",
-                                        message=req.message))
-                                if _rc.kb_source() == "zaapi"
-                                else (lambda: knowledge_base.kb_product_evidence(
-                                        db, kb_docs, shop=req.shop,
-                                        message=req.message)))
                             _grouped_sel = _rr.run_grouped_selection(
                                 _retrieval_profile, message=req.message,
                                 shop=req.shop,
@@ -2805,7 +2821,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                 needs=(_turn_plan.needs
                                        if _turn_plan else ()),
                                 snap=_snap,
-                                kb_fetcher=_kb_fetcher,
+                                kb_fetcher=_grouped_kb_fetcher,
                                 desc_fetcher=product_store
                                     .fetch_description_evidence,
                                 supporting=([{"kind": "kb",
@@ -2935,7 +2951,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                         # flag ON: claim guidance + warranty append เป็น
                         #   composition segment/finalizer job — ห้ามแตะ
                         #   answer ที่ callsite
-                        answer = _append_base_warranty(answer, req.message, claim_guidance=_mixed_claim_carry)
+                        answer = _append_base_warranty(answer, req.message, claim_guidance=_mixed_claim_carry, shop=req.shop, platform=req.platform)
                     _timing_breakdown["total"] = round(_time.time() - _total_start, 3)
 
                     # ── Web search fallback (ด่านสุดท้าย) ──
@@ -4243,7 +4259,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     "เช่น หัวชาร์จ สายชาร์จ พาวเวอร์แบงค์ เครื่องฟอกอากาศ "
                     "หรือสินค้าประเภทใดที่ต้องการแบบไวสุด/แรงสุดคะ "
                     "เพื่อให้เราแนะนำรุ่นที่ตรงกับความต้องการได้แม่นยำขึ้น",
-                    req.message, claim_guidance=_mixed_claim_carry),
+                    req.message, claim_guidance=_mixed_claim_carry,
+                    shop=req.shop, platform=req.platform),
                 products=[],
                 source="superlative_no_match_clarify",
                 shop=req.shop,
@@ -4570,7 +4587,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     "ขออภัยค่ะ ตอนนี้ระบบไม่พบข้อมูลสินค้าตามที่สอบถามไว้ "
                     "ระหว่างนี้หากสนใจสินค้าอื่นสอบถามได้เลยค่ะ")
                 return ChatResponse(
-                    answer=_append_base_warranty(_npf_text, req.message, claim_guidance=_mixed_claim_carry),
+                    answer=_append_base_warranty(_npf_text, req.message, claim_guidance=_mixed_claim_carry, shop=req.shop, platform=req.platform),
                     products=[],
                     source="no_product_found_handoff",
                     shop=req.shop,
@@ -4649,6 +4666,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     if missing_tokens:
                         _t_kb = _time.time()
                         kb_comp = knowledge_base.lookup_kb(" ".join(missing_tokens), snap=_snap,
+                                                           shop=req.shop, platform=req.platform,
                                                            retrieval_profile=_retrieval_profile)
                         if kb_comp and kb_comp.get("found"):
                             for kd in kb_comp.get("kb_docs", []):
@@ -4971,7 +4989,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         # ⚡ QA-KB — คำแนะนำจาก kb_qa (trigger kw เท่านั้น; model/brand scoped ใน search_qa)
         _qa_ctx = knowledge_base.qa_context(
             req.message, conversation_id=req.conversation_id,
-            retrieval_profile=_retrieval_profile, snap=_snap)
+            retrieval_profile=_retrieval_profile, snap=_snap,
+            shop=req.shop, platform=req.platform)
         if _qa_ctx:
             _combined_extra = (_combined_extra + "\n\n" + _qa_ctx).strip()
         # ⚡ Phase 3 — Tier merge ก่อนส่งเข้า LLM
@@ -5069,6 +5088,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                                                   "source") or "web-structured"}}]
                                    if _device_spec_data else []),
                     desc_fetcher=product_store.fetch_description_evidence,
+                    kb_fetcher=_grouped_kb_fetcher,
                     snap=_snap)
             except Exception as _e:
                 print(f"[SELECTION] grouped-retrieval error: {_e}",
@@ -5175,7 +5195,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         if not _sel_flag:
             # flag ON: claim guidance + warranty append เป็น composition
             #   segment/finalizer job — ห้ามแตะ answer ที่ callsite
-            answer = _append_base_warranty(answer, desc_message, claim_guidance=_mixed_claim_carry)
+            answer = _append_base_warranty(answer, desc_message, claim_guidance=_mixed_claim_carry, shop=req.shop, platform=req.platform)
         # ส่ง product cards ทั้งหมดที่เป็น context ให้ frontend (เหมือนเดิม)
         # frontend จะโชว์ว่าคำตอบนี้ใช้สินค้าอะไรตัดสินใจบ้าง
         # LLM จะเลือกแนะนำไม่เกิน 3 รายการจาก context เอง (ตาม prompt)
@@ -5251,7 +5271,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     _ws_cost = _ws_r["cost_usd"]
                     _ws_elapsed = _ws_r["search_elapsed"]
                     _ws_usage = {"prompt": 0, "output": 0, "total": 0}  # search usage อยู่ใน steps แล้ว
-                    _ws_answer = _append_base_warranty(_ws_answer, desc_message, claim_guidance=_mixed_claim_carry)
+                    _ws_answer = _append_base_warranty(_ws_answer, desc_message, claim_guidance=_mixed_claim_carry, shop=req.shop, platform=req.platform)
                     _total_ws = round(_time.time() - _total_start, 2)
                     _timing_breakdown["web_search"] = _ws_elapsed
                     _timing_breakdown["total"] = _total_ws
@@ -5437,7 +5457,9 @@ def _record_suggestion_products(req, products: list[dict],
 
 
 def _append_base_warranty(answer: str, message: str, source: str = "",
-                          *, claim_guidance: str = "") -> str:
+                          *, claim_guidance: str = "",
+                          shop: str | None = None,
+                          platform: str | None = None) -> str:
     """finalizer เดียวของ bot answer: compose claim_guidance หนึ่งครั้ง
     (presentation data — ไม่ใช่ routing signal; ว่าง → no-op) แล้วแนบ
     เงื่อนไขการรับประกันเบื้องต้นท้ายคำตอบถ้าคำถามเกี่ยวประกัน/เคลม —
@@ -5471,7 +5493,8 @@ def _append_base_warranty(answer: str, message: str, source: str = "",
     if not _asks_terms:
         # ไม่ใช่คำถามเงื่อนไข → เป็น duration หรือ statement → ไม่แนบเงื่อนไขเต็ม
         return answer
-    base_text = knowledge_base.get_base_warranty_text()
+    base_text = knowledge_base.get_base_warranty_text(
+        shop=shop, platform=platform)
     # ตรวจว่าคำตอบมีเงื่อนไขเบื้องต้นอยู่แล้วไหม (กันซ้ำ)
     # ตรวจเฉพาะข้อความจำเพาะของ base warranty ไม่ใช่คำทั่วไป เช่น "เงื่อนไขการรับประกัน"
     # เพราะคำตอบสินค้าเฉพาะมักมีคำว่า "เงื่อนไขการรับประกัน" อยู่แล้ว แต่ไม่ใช่ base warranty
@@ -5606,3 +5629,133 @@ def feedback(req: FeedbackRequest) -> dict[str, str]:
     if rating != "clear":
         print(f"[FEEDBACK] rating={rating}  answer='{req.answer[:80]}...'")
     return {"status": "ok", "rating": rating}
+
+
+# ══════════════════════════════════════════════════════════════════
+# Zaapi KB — file-backed import/export (spec v4 — ไม่แปลงผ่าน LLM)
+#   owner: kb_zaapi_files; access = internal-secret middleware เดิม +
+#   X-Admin-* headers จาก Next.js route (binary-safe, octet-stream body)
+# ══════════════════════════════════════════════════════════════════
+
+def _csv_param(v: str | None) -> list[str]:
+    return [s.strip() for s in (v or "").split(",") if s.strip()]
+
+
+def _admin_name(request: Request) -> str:
+    from urllib.parse import unquote
+    return unquote(request.headers.get("x-admin-name", "") or "").strip()
+
+
+def _json_param(s: str):
+    """query param JSON object → dict; ว่าง/parse ไม่ได้ → None."""
+    import json
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        v = json.loads(s)
+        return v if isinstance(v, dict) else None
+    except Exception:
+        return None
+
+
+@app.post("/zaapi-kb/import/preview")
+async def zaapi_kb_import_preview(
+    request: Request, filename: str,
+    accounts: str = "", platforms: str = "",
+    content_type: str = "", sheet_types: str = "") -> dict:
+    """read-only: parse → diff vs registry — 0 writes, 0 provider calls.
+    sheet_types = JSON {"ชื่อ sheet": "product|troubleshooting|faq|warranty"}."""
+    from . import kb_zaapi_files as _zkf
+    try:
+        _st = _json_param(sheet_types)
+        if sheet_types.strip() and _st is None:
+            raise ValueError("invalid sheet_types JSON")
+        return JSONResponse(_zkf.preview_import(
+            knowledge_base._admin_db(), filename=filename,
+            data=await request.body(),
+            accounts=_csv_param(accounts), platforms=_csv_param(platforms),
+            content_type=content_type or None,
+            sheet_types=_st))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/zaapi-kb/import/apply")
+async def zaapi_kb_import_apply(
+    request: Request, filename: str,
+    accounts: str = "", platforms: str = "",
+    content_type: str = "", sheet_types: str = "") -> dict:
+    from . import kb_zaapi_files as _zkf
+    try:
+        _st = _json_param(sheet_types)
+        if sheet_types.strip() and _st is None:
+            raise ValueError("invalid sheet_types JSON")
+        return JSONResponse(_zkf.apply_import(
+            knowledge_base._admin_db(), filename=filename,
+            data=await request.body(),
+            accounts=_csv_param(accounts), platforms=_csv_param(platforms),
+            admin=_admin_name(request),
+            content_type=content_type or None,
+            sheet_types=_st))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/zaapi-kb/import/rollback")
+def zaapi_kb_import_rollback(request: Request, file: str) -> dict:
+    from . import kb_zaapi_files as _zkf
+    return JSONResponse(_zkf.rollback_import(
+        knowledge_base._admin_db(), filename=file,
+        admin=_admin_name(request)))
+
+
+@app.post("/zaapi-kb/import/sweep")
+def zaapi_kb_import_sweep(request: Request) -> dict:
+    """manual sweep trigger — ลบแถว expired (staged/retired) ยกเว้น active."""
+    from . import kb_zaapi_files as _zkf
+    res = _zkf.sweep_expired(knowledge_base._admin_db())
+    res["admin"] = _admin_name(request)
+    return JSONResponse(res)
+
+
+@app.get("/zaapi-kb/export")
+def zaapi_kb_export(file: str):
+    """active revision → xlsx bytes (round-trip re-import ชื่อเดิมได้)."""
+    from . import kb_zaapi_files as _zkf
+    from fastapi.responses import Response
+    data = _zkf.export_file(knowledge_base._admin_db(), filename=file)
+    if data is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    from urllib.parse import quote
+    mt = ("text/plain; charset=utf-8" if file.lower().endswith(".txt")
+          else "application/vnd.openxmlformats-officedocument"
+               ".spreadsheetml.sheet")
+    return Response(
+        content=data, media_type=mt,
+        headers={"Content-Disposition":
+                 f"attachment; filename*=UTF-8''{quote(file)}"})
+
+
+@app.get("/zaapi-kb/files")
+def zaapi_kb_files_list() -> dict:
+    """registry + live counts — readiness/visibility สำหรับ Zaapi KB tab."""
+    from . import kb_zaapi_files as _zkf
+    adb = knowledge_base._admin_db()
+    return JSONResponse({
+        "files": _zkf.list_files(adb),
+        "readiness": _zkf.file_kb_ready(adb)})
+
+
+@app.get("/zaapi-kb/import-log")
+def zaapi_kb_import_log(file: str = "", limit: int = 30) -> dict:
+    """audit log ของ apply/rollback/sweep — admin ตรวจ pointer truth ได้."""
+    from . import kb_zaapi_files as _zkf
+    filt = {"file": file} if file else {}
+    rows = list(knowledge_base._admin_db()[_zkf._LOG_COLL]
+                .find(filt).sort("at", -1).limit(min(limit, 100)))
+    for r in rows:
+        r["_id"] = str(r["_id"])
+        if r.get("at"):
+            r["at"] = r["at"].isoformat()
+    return JSONResponse({"log": rows})

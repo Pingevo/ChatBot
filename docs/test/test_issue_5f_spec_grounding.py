@@ -115,6 +115,37 @@ def test_grounded_spec_from_card_passes():
     assert not r.routing_decision.get("guard_rewritten")
 
 
+def test_item_subject_accepts_fact_from_its_variant_card():
+    r = _resp(
+        "รุ่นนี้รับส่งข้อมูล 480Mbps ค่ะ",
+        products=[{"item_id": "27639651334", "model_id": "m1",
+                   "name": "CMC615P variant",
+                   "description_excerpt": "รับส่งข้อมูล 480Mbps"}])
+    r.routing_decision["subject_ids"] = ["i:27639651334"]
+
+    guards.enforce(r, _req("Speed data เท่าไหร่"))
+
+    assert "480Mbps" in r.answer
+    assert not r.routing_decision.get("guard_rewritten")
+
+
+def test_item_subject_rejects_fact_from_other_item_variant():
+    r = _resp(
+        "รุ่นนี้รับส่งข้อมูล 480Mbps ค่ะ",
+        products=[
+            {"item_id": "27639651334", "model_id": "m1",
+             "name": "CMC615P variant"},
+            {"item_id": "999", "model_id": "m9", "name": "Other",
+             "description_excerpt": "รับส่งข้อมูล 480Mbps"},
+        ])
+    r.routing_decision["subject_ids"] = ["i:27639651334"]
+
+    guards.enforce(r, _req("Speed data เท่าไหร่"))
+
+    assert "480Mbps" not in r.answer
+    assert r.routing_decision.get("guard_rewritten") == "spec_claim"
+
+
 def test_grounded_spec_comma_format_passes():
     # "20,000mAh" ใน context vs "20000mAh" ใน answer = spec เดียวกัน
     # — normalize ต้องตัดทั้ง space และ comma ไม่งั้น rewrite ผิด (FP)

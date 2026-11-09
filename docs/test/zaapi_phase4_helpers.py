@@ -1,0 +1,226 @@
+"""Neutral Phase 4 Zaapi test helpers — factories for fixtures/data only.
+
+Shared by Phase 4 test files. Imports ONLY `mongo_doubles` at module level —
+never donor test modules (those have import-time side effects). Schema-owner
+imports (shopeechat.kb_zaapi_schema) are lazy inside functions; fingerprint /
+revision / canonical-id logic is NOT re-implemented here — the schema owner is
+the single implementation.
+
+Functions: `record()` stored-record dict, `manifest_for()` manifest+revision
+docs, `stub_embed()` deterministic embedding stub, `block_network()` offline
+tripwires. GenDb/GenColl/_match re-exported for Phase 4 test files (no test-
+module import needed to reach the doubles).
+"""
+from __future__ import annotations
+
+from mongo_doubles import GenColl, GenDb, _match  # noqa: F401
+
+
+def record(*, record_type="spec", topic="t", model_codes=("CB-100",),
+           aliases=(), item_id=None, model_id=None, subject_id=None,
+           target_id=None, facts=(), answer_text="", steps=(),
+           shop="ShopA", platform="shopee", content_fingerprint=None,
+           readiness="resolved", **over):
+    """Return a stored-record dict shaped like the Mongo record collection
+    (`{"_id", "record_id", **payload}`; `_id == canonical_record_id(payload)`).
+    Provenance defaults are deterministic; `**over` overrides payload keys —
+    `source_snapshot_id` is recomputed from the final provenance values."""
+    from shopeechat.kb_zaapi_schema import (
+        SCHEMA_REVISION, canonical_record_id, fingerprint,
+        source_snapshot_id)
+    payload = {
+        "source_id": "src-1",
+        "source_snapshot_id": "",          # recomputed below
+        "sheet": None,
+        "row": 0,
+        "source_fingerprint": "sfp-1",
+        "scope_fingerprint": "scope-fp-1",
+        "content_fingerprint": content_fingerprint or fingerprint(topic),
+        "shop": shop,
+        "platform": platform,
+        "record_type": record_type,
+        "topic": topic,
+        "model_codes": tuple(model_codes),
+        "aliases": tuple(aliases),
+        "item_id": item_id,
+        "model_id": model_id,
+        "subject_id": subject_id,
+        "target_id": target_id,
+        "facts": tuple(facts),
+        "answer_text": answer_text,
+        "steps": tuple(steps),
+        "readiness": readiness,
+        "source_revision": "rev-1",
+        "model_version": "model-v1",
+        "prompt_version": "prompt-v1",
+        "schema_revision": SCHEMA_REVISION,
+    }
+    payload.update(over)
+    payload["source_snapshot_id"] = source_snapshot_id(
+        payload["source_id"], payload["source_revision"],
+        payload["source_fingerprint"], payload["scope_fingerprint"])
+    rid = canonical_record_id(payload)
+    return {"_id": rid, "record_id": rid, **payload}
+
+
+def manifest_for(record_dicts_by_source: dict) -> dict:
+    """Build manifest + revision docs for test records.
+
+    Input: `{source_id: [record_dicts]}`. Each source's records must share the
+    same provenance fields (validators reject mismatches downstream).
+    Output: `{"manifest": manifest_doc, "revisions": {source_id: rev_doc}}`.
+    Revision is built via `build_revision` (schema owner); `generation` is
+    `fingerprint(manifest["sources"])`."""
+    from shopeechat.kb_zaapi_schema import (
+        MANIFEST_POINTER_FIELDS, SCHEMA_REVISION, build_revision,
+        fingerprint)
+    sources, revisions = {}, {}
+    for source_id, records in record_dicts_by_source.items():
+        first = records[0]
+        rev = build_revision({
+            "source_id": source_id,
+            "source_fingerprint": first["source_fingerprint"],
+            "source_revision": first["source_revision"],
+            "scope_fingerprint": first["scope_fingerprint"],
+            "model_version": first["model_version"],
+            "prompt_version": first["prompt_version"],
+            "record_ids": [r["record_id"] for r in records]})
+        revisions[source_id] = rev
+        sources[source_id] = {
+            **{k: rev[k] for k in MANIFEST_POINTER_FIELDS
+               if k != "revision_id"},
+            "revision_id": rev["_id"]}
+    manifest = {"_id": "active:manifest", "schema_revision": SCHEMA_REVISION,
+                "sources": sources, "generation": fingerprint(sources)}
+    return {"manifest": manifest, "revisions": revisions}
+
+
+def stub_embed(texts, batch_size=32):
+    """Deterministic L2-normalized (n,1024) float32 stub of `embed_texts` —
+    each vector seeded by sha256(text), so semantic-fixture tests get stable
+    nearest-neighbor behavior without provider calls."""
+    import hashlib
+    import numpy as np
+    out = np.empty((len(texts), 1024), dtype=np.float32)
+    for i, text in enumerate(texts):
+        seed = int.from_bytes(
+            hashlib.sha256(text.encode("utf-8")).digest()[:8], "big")
+        vec = np.random.default_rng(seed).standard_normal(1024)
+        out[i] = vec / np.linalg.norm(vec)
+    return out
+
+
+def block_network(monkeypatch):
+    """Install offline tripwires — socket.connect / urlopen /
+    pymongo.MongoClient raise AssertionError if called. Returns None."""
+    import socket
+    import urllib.request
+    import pymongo
+
+    def _leak(what):
+        raise AssertionError(f"OFFLINE LEAK: {what}")
+    monkeypatch.setattr(socket.socket, "connect",
+                        lambda self, addr: _leak(f"socket.connect({addr!r})"))
+    monkeypatch.setattr(pymongo.MongoClient, "__init__",
+                        lambda self, *a, **k: _leak("pymongo.MongoClient()"))
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda *a, **k: _leak("urllib.request.urlopen"))
+
+
+def write_gen_dir(exports_root, gid: str, records: list, embed=None):
+    """Write a full generation artifact dir `exports_root/zaapi_kb_gen/<gid>/`
+    via `kb_zaapi_generation` builders (no logic copied here):
+    semantic_text/digests → sorted-digest vectors.npz (keys
+    digests/embeddings/generation_id) + record_map.json + structured_index.json
+    + manifest.json (validated). Returns the gen dir Path."""
+    import json
+    from pathlib import Path
+    from shopeechat.kb_zaapi_generation import (
+        _write_artifact, build_manifest_payload, build_record_map,
+        build_structured_index, semantic_digest, semantic_text)
+    from shopeechat.kb_zaapi_schema import (canonical_json,
+                                            validate_artifact_manifest)
+    import numpy as np
+
+    embed = embed or stub_embed
+    gen_dir = Path(exports_root) / "zaapi_kb_gen" / gid
+    gen_dir.mkdir(parents=True, exist_ok=True)
+
+    texts = {}
+    for rec in records:
+        texts.setdefault(semantic_digest(rec), semantic_text(rec))
+    digests = sorted(texts)
+    vectors = embed([texts[d] for d in digests])
+
+    roles = {}
+    meta = _write_artifact(gen_dir, "vectors.npz", {
+        "digests": np.array(digests), "embeddings": vectors,
+        "generation_id": np.array(gid)})
+    roles["vectors"] = {**meta, "format": "npz", "row_count": len(digests),
+                        "dim": 1024, "dtype": "float32"}
+
+    record_map = build_record_map(records, texts)
+    meta = _write_artifact(gen_dir, "record_map.json",
+                           canonical_json(record_map).encode("utf-8"))
+    roles["record_map"] = {**meta, "format": "json",
+                           "digest_count": len(record_map),
+                           "record_count": len(records)}
+
+    structured_index = build_structured_index(records)
+    meta = _write_artifact(gen_dir, "structured_index.json",
+                           canonical_json(structured_index).encode("utf-8"))
+    roles["structured_index"] = {
+        **meta, "format": "json", "field_count": len(structured_index),
+        "key_count": sum(len(v) for v in structured_index.values()),
+        "posting_count": sum(len(ids) for entries in structured_index.values()
+                             for ids in entries.values())}
+
+    manifest = build_manifest_payload(gid, roles)
+    validate_artifact_manifest(manifest)
+    _write_artifact(gen_dir, "manifest.json",
+                    canonical_json(manifest).encode("utf-8"))
+    return gen_dir
+
+
+def seed_canonical_state(db, record_specs=(), *, source_id="src-1"):
+    """Seed a coherent canonical state on GenDb for Phase 4 build tests —
+    one raw row + one record per spec; all provenance via schema owner fns.
+    `record_specs`: iterable of record() kwargs (one record per spec, unique
+    row_index per spec → unique content fingerprint).
+    Inserts into `zaapi_kb_raw_sources` + `zaapi_kb_records` (records,
+    revision doc, `active:manifest`). Returns (records, manifest)."""
+    from shopeechat.kb_zaapi_schema import (
+        RAW_CONTENT_FIELDS, account_scope_fingerprint, canonical_json,
+        fingerprint, raw_row_id, sanitize_source_row)
+    raw_coll = db["zaapi_kb_raw_sources"]
+    rec_coll = db["zaapi_kb_records"]
+    accounts = [{"id": "a1", "name": "ShopA", "platform": "shopee"}]
+    scope_fp = account_scope_fingerprint(accounts)
+    records = []
+    for i, spec in enumerate(record_specs):
+        row_data = {"kind": "xlsx_row", "sheet": "S1", "row_index": i,
+                    "source_row": 0, "fields": {"model_code": f"CB-{i}"},
+                    "text": f"model_code: CB-{i}"}
+        raw = {"source_id": source_id, "version_id": "rev-1",
+               "accounts": accounts, "fingerprint": "sfp-1",
+               "scope_fingerprint": scope_fp,
+               "raw_row_json": canonical_json(row_data), "active": True,
+               **row_data, "source_name": "src", "source_type": "file",
+               "source_file": "c.xlsx", "import_batch": "b1",
+               "zaapi_updated_at": "2026-01-01"}
+        raw["_id"] = raw_row_id(raw)
+        raw_coll.insert_one(raw)
+        safe = sanitize_source_row(raw)
+        content_fp = fingerprint({k: safe.get(k) for k in RAW_CONTENT_FIELDS})
+        rec = record(
+            shop="ShopA", platform="shopee",
+            **{"source_id": source_id, "source_fingerprint": "sfp-1",
+               "source_revision": "rev-1", "scope_fingerprint": scope_fp,
+               "content_fingerprint": content_fp, "sheet": "S1", "row": 0,
+               **spec})
+        rec_coll.insert_one(rec)
+        records.append(rec)
+    built = manifest_for({source_id: records})
+    rec_coll.insert_one(built["revisions"][source_id])
+    rec_coll.insert_one(built["manifest"])
+    return records, built["manifest"]

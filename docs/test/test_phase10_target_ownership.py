@@ -145,8 +145,13 @@ def test_mixed_turn_keeps_unrelated_product_need():
 def test_shared_tainted_request_products_drop_everywhere():
     """W01 shape — describe need share request เดียวกับ uncovered compat:
     products ที่เลือกผ่าน tainted request = relation context ของ claim
-    ที่พิสูจน์ไม่ได้ → drop จาก describe need ด้วย; describe task คงอยู่
-    (ไม่มี claim surface) แต่ไม่มี products → ctx empty → model 0 calls"""
+    ที่พิสูจน์ไม่ได้ → drop จาก describe need ด้วย; describe ไม่มี
+    serialized evidence อิสระ (taint ตัด card เดียวที่มี) → task ต้องถูก
+    ตัดตาม evidence-authority contract (task เปล่าไร้ evidence = coverage
+    ปลอม ห้ามส่งให้ model แต่ง — baseline เดิมที่เก็บ dead-shell task
+    ควบ UnansweredNeed ซ้อนกันคือ double-outcome shape ที่ invariant
+    one-outcome-per-need ห้าม) → UnansweredNeed ครั้งเดียว, ctx empty
+    → model 0 calls"""
     need_c = _compat()
     need_d = _describe()
     req = _req(rid="req-0", types=("smartwatch",), codes=("W01",),
@@ -155,12 +160,13 @@ def test_shared_tainted_request_products_drop_everywhere():
                      model_codes=["W01"])
     ctx = _compile((need_c, need_d), _selection((card, "req-0")),
                    _pool(), (req,), _profile())
-    assert [t.need_index for t in ctx.task.tasks] == [1], (
-        "describe task ต้องไม่ถูก drop (ไม่มี target claim) — "
-        "แต่ products ต้องหายเพราะเป็น relation context")
+    assert ctx.task.tasks == (), (
+        "describe task ไม่มี serialized evidence → ต้องถูกตัด "
+        "(one-outcome invariant — ห้าม task∧unanswered ซ้อน)")
     assert ctx.products == ()
     assert _unans(ctx, 0) is not None and _unans(ctx, 0).reason == "no_evidence"
-    assert _unans(ctx, 1) is not None
+    assert [u.need_index for u in ctx.unanswered_needs] == [0, 1]
+    assert _unans(ctx, 1).reason == "no_evidence"
     assert ctx.is_empty
 
 

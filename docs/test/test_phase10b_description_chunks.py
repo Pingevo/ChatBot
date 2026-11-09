@@ -31,11 +31,20 @@ from chatbot.shopeechat import retrieval_policy as _rp
 from chatbot.shopeechat import retrieval_planner as _rpl
 from chatbot.shopeechat import retrieval_executor as _rx
 from chatbot.shopeechat.route_context import RetrievalProfile
+from chatbot.shopeechat import runtime_config as _rcfg
 
 ITEM_A = "27639651334"   # CMC615P-like (desc-only 480Mbps fact)
 ITEM_B = "49267582152"   # CTL301-like
 DESC_480 = ("CUKTECH CMC615P สายชาร์จแม่เหล็ก 240W PD3.1 "
             "รองรับการถ่ายโอนข้อมูล 480Mbps สายถัก")
+
+
+@pytest.fixture(autouse=True)
+def _offline_runtime_config(monkeypatch):
+    monkeypatch.setattr(_rcfg, "source_enabled", lambda _name: True)
+    monkeypatch.setattr(
+        _rcfg, "_fetch",
+        lambda *_a, **_k: pytest.fail("OFFLINE LEAK: runtime config read"))
 
 
 def _profile(**kw):
@@ -76,6 +85,8 @@ def _doc(iid, desc="desc", name="Item", status="NORMAL"):
 
 def _wire(monkeypatch, npz, docs_by_item, qvec=None):
     """patch _desc_vectors/_desc_item_docs/embed_query → isolated fetcher."""
+    from chatbot.shopeechat import units as _units
+    monkeypatch.setattr(_units, "_resolve_snap", lambda _snap: None)
     monkeypatch.setattr(_ps, "_desc_vectors", lambda snap=None: npz)
     monkeypatch.setattr(_ps, "_desc_item_docs",
                         lambda ids: {i: docs_by_item[i]
@@ -275,6 +286,49 @@ def test_desc_cards_merge_into_shared_item_identity():
         {"item_id": int(ITEM_A), "name": "n", "catalog_status": "active"},
         source="units")
     assert c_desc["_evidence"]["item_ids"] == c_unit["_evidence"]["item_ids"]
+
+
+def test_listing_description_survives_variant_identity_merge():
+    """Exact-item facts survive richer same-item + selected unit merging."""
+    listing = _rp.make_evidence_card(
+        {"item_id": int(ITEM_A), "name": "CMC615P listing",
+         "description_excerpt": DESC_480, "catalog_status": "active",
+         "_available_for_sale": True},
+        source="description")
+    richer_listing = _rp.make_evidence_card(
+        {"item_id": int(ITEM_A), "name": "CMC615P listing",
+         "short_link": "https://example.test/item",
+         "image_url": "https://example.test/image.jpg",
+         "tier_variation": [{"name": "สี"}],
+         "catalog_status": "active", "_available_for_sale": True},
+        source="legacy")
+    unit = _rp.make_evidence_card(
+        {"item_id": int(ITEM_A), "model_id": "m1", "unit_id": "u1",
+         "name": "CMC615P variant", "catalog_status": "active",
+         "_available_for_sale": True},
+        source="units")
+    desc_res = _rx.RetrievalExecutionResult(
+        request_id="ch:description", source="description",
+        eligible_candidates=(listing,))
+    legacy_res = _rx.RetrievalExecutionResult(
+        request_id="ch:legacy", source="legacy",
+        eligible_candidates=(richer_listing,))
+    unit_res = _rx.RetrievalExecutionResult(
+        request_id="req-0", source="slot",
+        eligible_candidates=(unit,))
+
+    from chatbot.shopeechat import candidate_pool as _cp
+    pool = _cp.build_candidate_pool(
+        (unit_res, desc_res, legacy_res),
+        profile=_profile(anchor_item_ids=(ITEM_A,)))
+
+    assert len(pool.eligible) == 1
+    assert pool.eligible[0].card["description_excerpt"] == DESC_480
+    from chatbot.shopeechat import policy_resolver as _pr
+    facts = _pr.extract_field_facts(
+        pool.eligible[0].card, subject_id=ITEM_A)
+    assert any(f.fact_key == "data_transfer_mbps" and f.value == 480
+               for f in facts)
 
 
 def test_float_item_ids_canonicalized(monkeypatch):

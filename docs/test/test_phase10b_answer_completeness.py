@@ -744,6 +744,28 @@ def test_adequacy_ranking_before_truncation_from_typed_spec(monkeypatch):
         f"adequate-first เรียงก่อน truncate: 90W ก่อน 120W — got {picked}")
 
 
+def test_unknown_watt_candidates_keep_existing_relevance_order(monkeypatch):
+    """Unknown evidence must not let title watt override relevance order."""
+    from shopeechat import device_compat as dc
+    monkeypatch.setattr(
+        dc, "_lookup_spec_db",
+        lambda name: {"device": "dev-x", "min_watt": 90.0}
+        if name == "dev-x" else None)
+    pool = _pool((
+        _watt_cand("p20", "BasicCell AD 20W charger", None, score=9.0),
+        _watt_cand("p140", "BoostCell AD 140W charger", None, score=1.0),
+    ))
+    req = _req("req-0", types=("charger",), subs=("adapter",),
+               target="dev-x")
+
+    sel = rsel.select_for_llm_context(
+        pool, (req,), _profile(), needs=(), per_request_limit=1)
+
+    picked = sel.by_request[0][1]
+    assert [s.identity for s in picked] == ["i:p20"]
+    assert "ยืนยันไม่ได้" in (picked[0].card.get("_context_note") or "")
+
+
 def test_below_target_pick_gets_slower_label(monkeypatch):
     """C: below-target อาจอยู่เป็นตัวเลือก — แต่ต้องติด label ช้ากว่าปกติ
     ห้ามเสนอเป็น primary full-speed."""
@@ -810,22 +832,16 @@ def test_need_ranking_applies_before_truncation():
 
 
 def test_ungrounded_explicit_fact_need_normalizes_scope():
-    """D: classifier emit ref_kind=current_subject → current_single —
-    resolver consume persisted single ผ่าน machinery เดิม
-    (migrated: carrier heuristic ถูกลบ — ref classification อยู่ที่
-    semantic owner)."""
+    """D: canonical current_single scope reaches the persisted resolver."""
     plan = td.decide_turn(
         "Speed data เท่าไหร่?ครับ",
         intent_result={"intent": "product_spec",
                        "requested_facts": ["data_transfer_speed"],
-                       "subject_scope": "explicit",
-                       "ref_kind": "current_subject",
+                       "subject_scope": "current_single",
                        "confidence": 0.9})
     prod = [n for n in plan.needs if n.kind == "product"]
     assert prod, "ต้องมี product need"
-    assert prod[0].subject_scope == "current_single", (
-        f"ref_kind=current_subject → current_single — "
-        f"got {prod[0].subject_scope}")
+    assert prod[0].subject_scope == "current_single"
 
 
 def test_explicit_scope_preserved_when_refs_exist():
@@ -1024,89 +1040,70 @@ def test_context_absent_answer_names_capability_asks():
         f"context-absent outcome ต้อง name ask — answer:\n{answer}")
 
 
-# ── LOW-2: subject-ref intent contract — classifier emit typed ref_kind ─────
-#   semantic owner (classifier) บอกเหตุผลของ scope ตรงๆ — consumer
-#   (decide_turn) map typed→typed เท่านั้น: ห้าม infer scope จาก carrier
-#   presence (heuristic repair เดิมของ facts ถูกลบ)
+# ── LOW-2: subject-ref intent contract — subject_scope is sole owner ─────────
+#   consumer validates the typed scope only; it never repairs scope from the
+#   presence of facts/specs/features/asks or a second semantic field.
 
-def test_spec_only_current_subject_ref_kind_normalizes_scope():
-    """LOW-2a: classifier emit ref_kind="current_subject" → decide_turn
-    map เป็น current_single — spec carrier ก็ได้ผลเหมือน facts."""
+def test_spec_only_current_subject_scope_is_preserved():
+    """LOW-2a: spec carrier does not alter current_single scope."""
     plan = td.decide_turn(
         "10Gbps + แม่เหล็ก",
         intent_result={"intent": "product_spec",
                        "spec_constraints": [{"field": "data_transfer_mbps",
                                              "op": "gte", "value": 10000}],
-                       "subject_scope": "explicit",
-                       "ref_kind": "current_subject",
+                       "subject_scope": "current_single",
                        "confidence": 0.9})
     prod = [n for n in plan.needs if n.kind == "product"]
     assert prod and prod[0].spec_constraints, (
         f"premise: product need ต้องแบก spec_constraints — {plan.needs}")
-    assert prod[0].subject_scope == "current_single", (
-        f"ref_kind=current_subject → current_single — "
-        f"got {prod[0].subject_scope}")
+    assert prod[0].subject_scope == "current_single"
 
 
-def test_feature_only_current_subject_ref_kind_normalizes_scope():
+def test_feature_only_current_subject_scope_is_preserved():
     """LOW-2b: required_features carrier — contract เดียวกัน."""
     plan = td.decide_turn(
         "แม่เหล็กมีไหม",
         intent_result={"intent": "product_spec",
                        "required_features": ["magnetic"],
-                       "subject_scope": "explicit",
-                       "ref_kind": "current_subject",
+                       "subject_scope": "current_single",
                        "confidence": 0.9})
     prod = [n for n in plan.needs if n.kind == "product"]
     assert prod and prod[0].required_features, (
         f"premise: product need ต้องแบก required_features — {plan.needs}")
-    assert prod[0].subject_scope == "current_single", (
-        f"ref_kind=current_subject → current_single — "
-        f"got {prod[0].subject_scope}")
+    assert prod[0].subject_scope == "current_single"
 
 
-def test_ask_only_current_subject_ref_kind_normalizes_scope():
+def test_ask_only_current_subject_scope_is_preserved():
     """LOW-2c: capability_asks carrier — contract เดียวกัน."""
     plan = td.decide_turn(
         "ใช้โหมดวิ่งบนหน้าจอได้ไหม",
         intent_result={"intent": "product_spec",
                        "capability_asks": ["ใช้โหมดวิ่งบนหน้าจอได้ไหม"],
-                       "subject_scope": "explicit",
-                       "ref_kind": "current_subject",
+                       "subject_scope": "current_single",
                        "confidence": 0.9})
     prod = [n for n in plan.needs if n.kind == "product"]
     assert prod and prod[0].capability_asks, (
         f"premise: product need ต้องแบก capability_asks — {plan.needs}")
-    assert prod[0].subject_scope == "current_single", (
-        f"ref_kind=current_subject → current_single — "
-        f"got {prod[0].subject_scope}")
+    assert prod[0].subject_scope == "current_single"
 
 
-def test_ref_kind_explicit_and_unknown_pass_verbatim():
-    """ref_kind != current_subject → decide_turn ไม่ override —
-    explicit_subject→explicit · new_discovery→none · unknown→pass
-    scope verbatim (classifier เจ้าของ semantic — consumer ไม่เดา)."""
-    for rk, want in (("explicit_subject", "explicit"),
-                     ("new_discovery", "none"),
-                     ("unknown", "explicit")):
+def test_valid_subject_scopes_pass_verbatim():
+    """The canonical scope is consumed verbatim without secondary inference."""
+    for scope in ("explicit", "current_single", "current_set", "none"):
         plan = td.decide_turn(
             "10Gbps + แม่เหล็ก",
             intent_result={"intent": "product_spec",
                            "spec_constraints": [
                                {"field": "data_transfer_mbps",
                                 "op": "gte", "value": 10000}],
-                           "subject_scope": "explicit",
-                           "ref_kind": rk, "confidence": 0.9})
+                           "subject_scope": scope, "confidence": 0.9})
         prod = [n for n in plan.needs if n.kind == "product"]
         assert prod, f"premise — {plan.needs}"
-        assert prod[0].subject_scope == want, (
-            f"ref_kind={rk} → scope={want} — got "
-            f"{prod[0].subject_scope}")
+        assert prod[0].subject_scope == scope
 
 
-def test_no_ref_kind_no_repair():
-    """intent_result เก่าไม่มี ref_kind → decide_turn ไม่ repair เลย —
-    heuristic carrier-check ถูกลบ (explicit+facts ไร้ refs คง explicit)."""
+def test_explicit_scope_needs_no_secondary_metadata():
+    """Explicit scope remains explicit without a second reference field."""
     plan = td.decide_turn(
         "ราคาเท่าไหร่",
         intent_result={"intent": "product_question",
@@ -1114,9 +1111,7 @@ def test_no_ref_kind_no_repair():
                        "subject_scope": "explicit", "confidence": 0.9})
     prod = [n for n in plan.needs if n.kind == "product"]
     assert prod, f"premise — {plan.needs}"
-    assert prod[0].subject_scope == "explicit", (
-        f"ไม่มี ref_kind → ไม่ repair (heuristic deleted) — "
-        f"got {prod[0].subject_scope}")
+    assert prod[0].subject_scope == "explicit"
 
 
 # ── LOW-3: unknown wattage ≠ below-target — ต้องมี uncertainty channel ──────
@@ -1793,12 +1788,17 @@ def test_code_ref_resolution_union_stamps_needs():
         f"{st[1].subject_refs}")
 
 
-def test_code_ref_resolution_end_to_end_subjects_channel():
+def test_code_ref_resolution_end_to_end_subjects_channel(monkeypatch):
     """FIX A e2e (W01 Q2): persisted {18408364022} + code-ref plan →
     resolved → union-stamped → ch:subjects เลือก exact card → ctx ผูก
     item → asks ทุกตัวถึง explicit outcome channel; sibling ไม่รั่ว."""
     from shopeechat import conversation_products as cp
     from shopeechat import retrieval_runtime as rrt
+    from shopeechat import runtime_config as rcfg
+    monkeypatch.setattr(rcfg, "source_enabled", lambda _name: True)
+    monkeypatch.setattr(
+        rcfg, "_fetch",
+        lambda *_a, **_k: pytest.fail("OFFLINE LEAK: runtime config read"))
     plan = td.decide_turn(_W01_MSG, intent_result=dict(_W01_INTENT))
     all_refs = tuple(dict.fromkeys(
         r for n in plan.needs for r in n.subject_refs))
@@ -1824,7 +1824,7 @@ def test_code_ref_resolution_end_to_end_subjects_channel():
     out = rrt.run_grouped_selection(
         profile, message=_W01_MSG, shop="t", platform="shopee",
         fetcher=dead, legacy_fetcher=None, subject_cards=[w01],
-        needs=stamped)
+        needs=stamped, snap=None)
     assert out is not None
     sel_ids = [str(s.card.get("item_id"))
                for s in out["selection"].selected]
@@ -1851,3 +1851,59 @@ def test_code_ref_resolution_end_to_end_subjects_channel():
     txt = ctx.context_text()
     for sib in ("W02", "20069873881"):
         assert sib not in txt, f"sibling {sib} รั่วเข้า context"
+
+
+def _cable_verdict(specs, target_protocols=None):
+    need = td.TurnNeed(kind="compat", operation="compat",
+                       subject_refs=("CTC620P",),
+                       product_types=frozenset({"cable"}))
+    req = _req("req-0", types=("cable",), codes=("CTC620P",),
+               target="xiaomi 17 ultra", cm="connector_required")
+    card = _sel_card("i:1", "subject", "req-0",
+                     "CTC620P สายชาร์จ USB-C to USB-C",
+                     model_codes=["CTC620P"], product_type="cable",
+                     canonical_specs=specs)
+    pool = _pool(supporting=({
+        "kind": "device_spec", "target": "xiaomi 17 ultra",
+        "data": {"connector": "usb-c", "min_watt": 90,
+                 "source": "spec-db",
+                 **({"protocols": target_protocols}
+                    if target_protocols is not None else {})},
+        "subject_refs": ("i:1",)},))
+    ctx = _compile((need,), _selection((card, "req-0")), pool, (req,),
+                   _profile())
+    return ctx, [v for v in ctx.compat_verdicts if v.need_index == 0]
+
+
+@pytest.mark.parametrize(("specs", "target_protocols"), [
+    ({"power_capacity_w": 240}, None),
+    ({"power_capacity_w": 240, "charging_protocols": ["pd3.1"]}, ["qc3.0"]),
+    ({"power_capacity_w": 240, "charging_protocols": ["pd3.1"]}, ["pd3.1"]),
+    ({"power_capacity_w": 240, "charging_protocols": ["pd3.1"]}, None),
+    ({"power_capacity_w": 240, "max_current_a": 6,
+      "charging_protocols": ["pd3.1"]}, ["pd3.1"]),
+])
+def test_cable_capacity_only_verdict_has_honest_customer_caveat(
+        specs, target_protocols):
+    ctx, v = _cable_verdict(specs, target_protocols)
+    assert v and v[0].decision.outcome == "compatible"
+    assert "cable_capacity_covers_target" in v[0].decision.reason_codes
+    assert "missing_wattage_evidence" not in v[0].decision.reason_codes
+    assert not any("protocol" in code for code in v[0].decision.reason_codes)
+    assert v[0].decision.proofs[0].facts == ("connector:usb-c",)
+    seg = acx._compat_segment(v[0])
+    caveat = ("สายรองรับกำลังไฟตามที่อุปกรณ์ต้องการ แต่กำลังชาร์จจริงยังขึ้น"
+              "กับหัวชาร์จ อุปกรณ์ และโปรโตคอลที่รองรับค่ะ")
+    assert seg.count(caveat) == 1
+    assert "จ่ายไฟ 240W" not in seg and "PD3.1" not in seg
+    comp = _compose((td.TurnNeed(
+        kind="compat", operation="compat",
+        subject_refs=("CTC620P",),
+        product_types=frozenset({"cable"})),), ctx)
+    assert [r.text for r in comp.results if r.domain == "compat"] == [seg]
+
+
+def test_cable_without_typed_capacity_keeps_cannot_confirm_caveat():
+    _ctx, v = _cable_verdict({})
+    assert v and "missing_wattage_evidence" in v[0].decision.reason_codes
+    assert "ยืนยันไม่ได้" in acx._compat_segment(v[0])
