@@ -153,27 +153,46 @@ export default function ZaapiKbMappingPage() {
                     </select>
                   </td>
                   <td className="pr-3 py-2">
-                    {Object.entries(f.sheets).map(([s, n]) => (
-                      <div key={s} className="flex items-center gap-1 mb-1">
-                        <button type="button"
-                          className="text-accent hover:underline truncate max-w-[140px] text-left"
-                          title={`ดูเนื้อหา ${s}`}
-                          onClick={() => setPreview({ file: f.file, sheet: s, rows: f.preview?.[s] || [] })}>
-                          {s} ({n})
-                        </button>
-                        <select className={SEL}
-                          disabled={!editable}
-                          value={(d.sheet_types || {})[s] || d.content_type || "product"}
-                          onChange={(e) => {
-                            const st = { ...(d.sheet_types || {}) };
-                            if (e.target.value === d.content_type) delete st[s];
-                            else st[s] = e.target.value;
-                            setField(f.file, { sheet_types: st });
-                          }}>
-                          {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                        </select>
-                      </div>
-                    ))}
+                    <div className="flex flex-col gap-1.5">
+                      {Object.entries(f.sheets).map(([s, n]) => {
+                        const st = (d.sheet_types || {})[s];
+                        const overridden = !!st && st !== d.content_type;
+                        return (
+                          <div key={s}
+                            className={`rounded-lg border px-2 py-1.5 ${overridden ? "border-accent/50 bg-accent/5" : "border-border bg-surface-2"}`}>
+                            <div className="flex items-center justify-between gap-2">
+                              <button type="button"
+                                className="text-accent hover:underline truncate text-left font-medium"
+                                title={`ดูข้อมูล ${s}`}
+                                onClick={() => setPreview({ file: f.file, sheet: s, rows: f.preview?.[s] || [] })}>
+                                {s}
+                              </button>
+                              <span className="text-[10px] text-text-muted whitespace-nowrap">{n} rows</span>
+                            </div>
+                            <div className="flex items-center gap-1.5 mt-1">
+                              <Button size="sm" variant="ghost"
+                                onClick={() => setPreview({ file: f.file, sheet: s, rows: f.preview?.[s] || [] })}>
+                                ดูข้อมูล
+                              </Button>
+                              <select className={SEL}
+                                disabled={!editable}
+                                value={st || d.content_type || "product"}
+                                onChange={(e) => {
+                                  const next = { ...(d.sheet_types || {}) };
+                                  if (e.target.value === d.content_type) delete next[s];
+                                  else next[s] = e.target.value;
+                                  setField(f.file, { sheet_types: next });
+                                }}>
+                                {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                              </select>
+                            </div>
+                            {overridden && (
+                              <div className="text-[10px] text-accent mt-0.5">ต่างจาก type ไฟล์ ({d.content_type})</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
                   </td>
                   <td className="py-2">
                     {editable && (
