@@ -8,9 +8,11 @@ import { toast, useToastError } from "@/components/ui/Toast";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
 
+type PreviewRow = { row: number; fields: Record<string, string>; text?: string };
 type FileMeta = {
   file: string; name?: string; rows: number;
   sheets: Record<string, number>;
+  preview?: Record<string, PreviewRow[]>;
   shop_guess?: string; type_guess?: string;
 };
 type SavedMap = {
@@ -32,6 +34,7 @@ export default function ZaapiKbMappingPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
   const [filter, setFilter] = useState<"all" | "unmapped">("unmapped");
+  const [preview, setPreview] = useState<{ file: string; sheet: string; rows: PreviewRow[] } | null>(null);
   const { catchError } = useToastError();
 
   const load = useCallback(async () => {
@@ -111,7 +114,7 @@ export default function ZaapiKbMappingPage() {
               <th className="pr-3">ไฟล์</th>
               <th className="pr-3 w-56">shop</th>
               <th className="pr-3 w-40">type ไฟล์</th>
-              <th className="pr-3">sheets</th>
+              <th className="pr-3">type ต่อ sheet</th>
               <th className="w-20"></th>
             </tr>
           </thead>
@@ -151,7 +154,25 @@ export default function ZaapiKbMappingPage() {
                   </td>
                   <td className="pr-3 py-2">
                     {Object.entries(f.sheets).map(([s, n]) => (
-                      <div key={s} className="text-text-muted truncate max-w-[200px] mb-1" title={s}>{s} ({n})</div>
+                      <div key={s} className="flex items-center gap-1 mb-1">
+                        <button type="button"
+                          className="text-accent hover:underline truncate max-w-[140px] text-left"
+                          title={`ดูเนื้อหา ${s}`}
+                          onClick={() => setPreview({ file: f.file, sheet: s, rows: f.preview?.[s] || [] })}>
+                          {s} ({n})
+                        </button>
+                        <select className={SEL}
+                          disabled={!editable}
+                          value={(d.sheet_types || {})[s] || d.content_type || "product"}
+                          onChange={(e) => {
+                            const st = { ...(d.sheet_types || {}) };
+                            if (e.target.value === d.content_type) delete st[s];
+                            else st[s] = e.target.value;
+                            setField(f.file, { sheet_types: st });
+                          }}>
+                          {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+                        </select>
+                      </div>
                     ))}
                   </td>
                   <td className="py-2">
@@ -168,6 +189,38 @@ export default function ZaapiKbMappingPage() {
           </tbody>
         </table>
       </div>
+      {preview && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onClick={() => setPreview(null)}>
+          <div className="bg-surface border border-border rounded-xl max-w-4xl w-full max-h-[80vh] overflow-auto p-4"
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-sm font-semibold">{preview.sheet}</div>
+                <div className="text-xs text-text-muted">{preview.file}</div>
+              </div>
+              <Button size="sm" variant="secondary" onClick={() => setPreview(null)}>ปิด</Button>
+            </div>
+            {preview.rows.length === 0 && <div className="text-text-muted text-sm">ไม่มีข้อมูล preview</div>}
+            {preview.rows.map((r, i) => (
+              <div key={i} className="border border-border rounded-lg p-3 mb-2 text-xs">
+                <div className="text-text-muted mb-1">row {r.row}</div>
+                <table className="w-full">
+                  <tbody>
+                    {Object.entries(r.fields).map(([k, v]) => (
+                      <tr key={k} className="align-top">
+                        <td className="pr-3 py-0.5 text-text-muted whitespace-nowrap font-medium w-40">{k}</td>
+                        <td className="py-0.5 whitespace-pre-wrap break-words">{v}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {r.text && <div className="mt-2 pt-2 border-t border-border text-text-muted whitespace-pre-wrap">{r.text}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </PageShell>
   );
 }
