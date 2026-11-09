@@ -12569,3 +12569,13 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - prompt_sections.modular_enabled: config bool (admin flip ได้) → env PROMPT_MODULAR=1 override → default ปิด
 - systemConfigService: type+passthrough+allowedKeys — admin update ผ่าน config API ได้
 - verify: Mongo write true→enabled, false→disabled, tsc clean — flag ปิด=prompt เดิม 100%
+
+## ผ่านแล้ว — R0 flag เปิด + R3 plan + R4 census + R5 audit doc
+- prompt_modular=true set (mock-safe, flip ได้ทันที)
+- R3 plan docs/plans/2026-11-09-r3-botworker-canary-plan.md — รอ canary shop+approval
+- R4 census: **shadow_replies 3,206 dup groups** (conv+text) — cleanup target; chat_processing 380k docs; buffer index ok
+- R5 scope เต็มจด audit doc
+
+## ผ่านแล้ว — R0 modular toggle UI on /config
+- safeSwitches + SystemConfig interface เพิ่ม prompt_modular — toggle จริงบน config page (ส่งผ่าน updateSystemConfig allowedKeys)
+- R4 root cause: 3,206 dup = เก่า (Sep–Oct) post-fix เหลือ 26 — proposal archive ไม่ใช่ลบ
