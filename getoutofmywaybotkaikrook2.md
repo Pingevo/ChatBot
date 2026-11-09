@@ -12556,3 +12556,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - user ต้องการ: persona ทั่วไปส่งเสมอ + needs→sections; คงกฎการ์ดเดียว-พูด 1-3 ตัว และตาราง compare+แนะนำ use case
 - split map ~14 sections ตาม char offsets จดใน r0 plan doc — พร้อม implement flag-gated ปลอดภัย
 - เหตุผลของผู้ใช้: prompt ซับซ้อนเกินจน AI หลอนบางครั้ง
+
+## ผ่านแล้ว — R0 modular prompt implement + live QA verified
+- prompt_sections.py: split _SYS_CORE_B ด้วย markers → 5 sections (core_answer 8.5k/recommend 12.8k/product_match 3.9k/compare 2.1k/claim 0.5k chars, join ครบ 27,711 byte-identical, marker หาย→fallback เต็ม)
+- selector: intent_result=None→เต็มเดิม; kinds ไม่มี product→ตัด recommend/product_match; เทียบ→compare; ประกัน→claim
+- wire answer() เฉพาะ path legacy (typed path มี prompt ของตัวเองอยู่แล้ว)
+- live QA จริง PROMPT_MODULAR=1: "สวัสดี"→8.5k chars ตอบถูก shop-scoped; "ประกันเท่าไหร่"→9.0k chars ตอบถูก
+- prompt tokens ~12k ทั้งคู่ (เดิม CORE_B เต็ม ~+19k chars ≈ +5k tok → ประหยัด ~25-30% เคส non-product)
+- flag OFF = SYSTEM_INSTRUCTION เดิม 100%

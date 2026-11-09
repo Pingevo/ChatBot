@@ -1481,7 +1481,9 @@ def answer(
     model_name = (model or get_model("chat")).strip()
     # Language policy — default ตอบไทยเสมอ; ขอภาษาอื่น → ตอบอังกฤษ
     _lang_inst = _lang_instruction(_msg_for_llm)
-    system_instruction = (SYSTEM_INSTRUCTION + persona_extra + _lang_inst) if persona_extra else (SYSTEM_INSTRUCTION + _lang_inst)
+    from . import prompt_sections as _ps
+    _sys_base = SYSTEM_INSTRUCTION[:len(_SYS_CORE_A)] + _SYS_LEGACY_CLAIM_NOTE + _ps.build_core_b(_SYS_CORE_B, intent_result, _msg_for_llm)
+    system_instruction = (_sys_base + persona_extra + _lang_inst) if persona_extra else (_sys_base + _lang_inst)
 
     # ตรวจว่าคำถามเกี่ยวกับรับประกัน/เคลม/สเปก/รายละเอียดไหม
     # ถ้าใช่ส่ง description ให้ LLM ด้วย
