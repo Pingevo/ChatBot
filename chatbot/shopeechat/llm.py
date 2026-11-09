@@ -920,9 +920,31 @@ def _record_tokens(model: str, resp) -> None:
     usage = getattr(resp, "usage_metadata", None)
     if not usage:
         return
-    n = (getattr(usage, "prompt_token_count", 0) or 0) + (getattr(usage, "candidates_token_count", 0) or 0)
+    pt = getattr(usage, "prompt_token_count", 0) or 0
+    ct = getattr(usage, "candidates_token_count", 0) or 0
+    n = pt + ct
     with _q_lock:
         _q_tok.setdefault(model, _deque()).append((_time.time(), n))
+    _persist_usage(model, pt, ct)
+
+
+def _persist_usage(model: str, prompt_t: int, output_t: int) -> None:
+    """ai_usage log — fire-and-forget persist ของ token usage ทุก LLM call (R0).
+    kill-switch: AI_USAGE_LOG=0. ห้าม throw — measurement ห้ามทำ request พัง"""
+    if os.environ.get("AI_USAGE_LOG", "1") == "0":
+        return
+    try:
+        from . import knowledge_base as _kb
+        _kb._admin_db()["ai_usage"].insert_one({
+            "ts": _dt.datetime.now(_dt.UTC),
+            "model": model,
+            "prompt_tokens": prompt_t,
+            "output_tokens": output_t,
+            "total_tokens": prompt_t + output_t,
+            "est_cost_usd": _gemini_cost(prompt_t, output_t),
+        })
+    except Exception:
+        pass
 
 
 def _or_messages(contents, config: dict) -> list[dict]:

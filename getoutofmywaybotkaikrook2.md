@@ -12545,3 +12545,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - repro: run docs/test/test_zaapi_kb_files.py ↔ test_phase4b_refresh.py ทั้งสอง order — ผ่านทั้งคู่ (203 tests ต่อรอบ)
 - สาเหตุที่เคย flake: module-level load_dotenv side effect — มี conftest stub ก่อน import อยู่แล้ว (line 61) → flake หายไปแล้วก่อนที่จะถูกบันทึกเป็น S2
 - ไม่ต้องแก้อะไรเพิ่ม
+
+## ผ่านแล้ว — R0 step 1: ai_usage instrumentation live
+- llm.py: `_persist_usage()` ใน `_record_tokens` (single point ครอบทุก generate+fallback) → ai_usage coll {ts,model,prompt,output,total,est_cost_usd}
+- kill-switch AI_USAGE_LOG=0; fire-and-forget ไม่ throw
+- verify: fake resp → doc persisted จริง (1234/56/1290 tok $0.00051)
+- จำกัด: ยังไม่มี path/shop/conv_id ใน doc (ต้อง thread ctx เพิ่ม — phase ถัดไป)
