@@ -843,7 +843,9 @@ _MODEL_FALLBACK = {
     "gemini-3.5-flash-lite": "gemini-3.1-flash-lite",
     "gemini-3.1-flash-lite": "gemini-3.5-flash-lite",
 }
-_QUOTA_FILE = Path(__file__).resolve().parent.parent.parent / "exports" / ".gemini_quota.json"
+_QUOTA_FILE = Path(os.environ.get("GEMINI_QUOTA_FILE")
+                     or (Path(__file__).resolve().parent.parent.parent
+                         / "exports" / ".gemini_quota.json"))
 
 import threading as _threading
 import time as _time
@@ -918,9 +920,31 @@ def _record_tokens(model: str, resp) -> None:
     usage = getattr(resp, "usage_metadata", None)
     if not usage:
         return
-    n = (getattr(usage, "prompt_token_count", 0) or 0) + (getattr(usage, "candidates_token_count", 0) or 0)
+    pt = getattr(usage, "prompt_token_count", 0) or 0
+    ct = getattr(usage, "candidates_token_count", 0) or 0
+    n = pt + ct
     with _q_lock:
         _q_tok.setdefault(model, _deque()).append((_time.time(), n))
+    _persist_usage(model, pt, ct)
+
+
+def _persist_usage(model: str, prompt_t: int, output_t: int) -> None:
+    """ai_usage log — fire-and-forget persist ของ token usage ทุก LLM call (R0).
+    kill-switch: AI_USAGE_LOG=0. ห้าม throw — measurement ห้ามทำ request พัง"""
+    if os.environ.get("AI_USAGE_LOG", "1") == "0":
+        return
+    try:
+        from . import knowledge_base as _kb
+        _kb._admin_db()["ai_usage"].insert_one({
+            "ts": _dt.datetime.now(_dt.UTC),
+            "model": model,
+            "prompt_tokens": prompt_t,
+            "output_tokens": output_t,
+            "total_tokens": prompt_t + output_t,
+            "est_cost_usd": _gemini_cost(prompt_t, output_t),
+        })
+    except Exception:
+        pass
 
 
 def _or_messages(contents, config: dict) -> list[dict]:
@@ -1457,7 +1481,9 @@ def answer(
     model_name = (model or get_model("chat")).strip()
     # Language policy — default ตอบไทยเสมอ; ขอภาษาอื่น → ตอบอังกฤษ
     _lang_inst = _lang_instruction(_msg_for_llm)
-    system_instruction = (SYSTEM_INSTRUCTION + persona_extra + _lang_inst) if persona_extra else (SYSTEM_INSTRUCTION + _lang_inst)
+    from . import prompt_sections as _ps
+    _sys_base = SYSTEM_INSTRUCTION[:len(_SYS_CORE_A)] + _SYS_LEGACY_CLAIM_NOTE + _ps.build_core_b(_SYS_CORE_B, intent_result, _msg_for_llm)
+    system_instruction = (_sys_base + persona_extra + _lang_inst) if persona_extra else (_sys_base + _lang_inst)
 
     # ตรวจว่าคำถามเกี่ยวกับรับประกัน/เคลม/สเปก/รายละเอียดไหม
     # ถ้าใช่ส่ง description ให้ LLM ด้วย

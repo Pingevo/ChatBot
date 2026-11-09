@@ -12511,3 +12511,61 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - bot-worker.ts เรียก ensureIndexes() ตอน start ก่อน Mongo work เสมอ (warn+continue ถ้า fail)
 - ปิด gap: worker up ก่อน Next instrumentation → unique index buffer_messages ขาด → re-poll insert ซ้ำ
 - verify: tsc clean
+
+## ผ่านแล้ว — H4 output-path audit (no bypass evidence)
+- outbound paths ทั้งหมดผ่าน `assertPlatformApiDisabled` guard: botworker /send (sandbox), admin /send, botWorkerService process path, shadowReplyService — platform API ถูกปิดระดับ guard ไม่มีทางส่งจริง
+- workflow delivered → storeWorkflowDelivered เขียน shadow_replies เท่านั้น + review_bubbles — ผ่าน review gate เดียวกัน
+- mock send = mockSendService deterministic events เท่านั้น delivered:false เสมอ
+- verdict: ไม่พบ path ที่ส่งจริงโดยไม่ผ่าน review/mock — H4 PASS (สำหรับ pilot scope ปัจจุบัน)
+
+## HANDOFF — session ต่อไปอ่านอันนี้ก่อน
+- เสร็จแล้ว: K0–K5 zaapi KB (kb_source=zaapi live, 118 files, 36 disabled รอ admin), H0–H4 review mock merged, S4 index-race, S5 max_time_ms, S6=keep 90s
+- กำลังทำ: R1 build gid g20261109-091914-c06ea7fd — เช็ค /tmp/r1_run.log + exports/gen/<gid>; ถ้า artifacts ไม่ครบ = rerun /tmp/r1_run.sh
+- R0 baseline done: bot_elapsed_ms p95=46.5s; GAP = ไม่มี ai_usage log persist → ขั้นต่อไป = ai_usage collection instrumentation (ตาม R0 spec วัดก่อนลด)
+- คิวที่เหลือตาม user: R0(ทำอยู่) → R2 → R3 → R4 → R5 → W0–W5
+- 36 disabled zaapi files รอ admin บน /zaapi-kb-mapping
+
+## กำลังทำ — R1 resume build ส่วนขาด (session นี้)
+- units JSONL เสร็จแล้ว: 28,044 units (93.8% classified) → exports/gen/g20261109-091914-c06ea7fd/sellable_units.jsonl
+- unit_embeddings.npz build อยู่ (BGE-M3 local, ~28k rows ETA ~40min) — shell 2adc1b
+- ขาดต่อ: product_embeddings.npz (description path) → publish CAS (อนุมัติแยก)
+- R0 gap noted: ไม่มี ai_usage persist → instrumentation at llm.py usage boundary (_openrouter_generate + gemini path)
+
+## ผ่านแล้ว — S7 quota-file churn fix
+- `_QUOTA_FILE` รองรับ env `GEMINI_QUOTA_FILE` → ย้าย quota file ออก watch dir ได้โดยไม่แก้ deploy
+- S8/R0 instrumentation/S2 = pending batch ต่อไป
+
+## ผ่านแล้ว — S8 closed as false-positive (verify ก่อนลบตามกฎ)
+- `inbound_message_ids` = ใช้จริง (เขียนใน botWorkerService.ts:511,586 — provenance ของ shadow reply)
+- `review_admin_id` = ใช้จริง (ส่งจาก messages route → UI ปุ่ม review)
+- `batch_id` = ใช้ใน admin-chat-result/live-assignment — ไม่ใช่ของ review system
+- ไม่มี field ที่ลบได้ — S8 ไม่ต้องทำอะไร ปิดด้วยเหตุผลพิสูจน์ได้
+
+## ผ่านแล้ว — S2 dotenv flake = แก้ไปแล้วก่อนหน้า (closed, verified)
+- repro: run docs/test/test_zaapi_kb_files.py ↔ test_phase4b_refresh.py ทั้งสอง order — ผ่านทั้งคู่ (203 tests ต่อรอบ)
+- สาเหตุที่เคย flake: module-level load_dotenv side effect — มี conftest stub ก่อน import อยู่แล้ว (line 61) → flake หายไปแล้วก่อนที่จะถูกบันทึกเป็น S2
+- ไม่ต้องแก้อะไรเพิ่ม
+
+## ผ่านแล้ว — R0 step 1: ai_usage instrumentation live
+- llm.py: `_persist_usage()` ใน `_record_tokens` (single point ครอบทุก generate+fallback) → ai_usage coll {ts,model,prompt,output,total,est_cost_usd}
+- kill-switch AI_USAGE_LOG=0; fire-and-forget ไม่ throw
+- verify: fake resp → doc persisted จริง (1234/56/1290 tok $0.00051)
+- จำกัด: ยังไม่มี path/shop/conv_id ใน doc (ต้อง thread ctx เพิ่ม — phase ถัดไป)
+
+## ผ่านแล้ว — R0 design อนุมัติ: CORE_B modular split (ผู้ใช้กำหนด)
+- user ต้องการ: persona ทั่วไปส่งเสมอ + needs→sections; คงกฎการ์ดเดียว-พูด 1-3 ตัว และตาราง compare+แนะนำ use case
+- split map ~14 sections ตาม char offsets จดใน r0 plan doc — พร้อม implement flag-gated ปลอดภัย
+- เหตุผลของผู้ใช้: prompt ซับซ้อนเกินจน AI หลอนบางครั้ง
+
+## ผ่านแล้ว — R0 modular prompt implement + live QA verified
+- prompt_sections.py: split _SYS_CORE_B ด้วย markers → 5 sections (core_answer 8.5k/recommend 12.8k/product_match 3.9k/compare 2.1k/claim 0.5k chars, join ครบ 27,711 byte-identical, marker หาย→fallback เต็ม)
+- selector: intent_result=None→เต็มเดิม; kinds ไม่มี product→ตัด recommend/product_match; เทียบ→compare; ประกัน→claim
+- wire answer() เฉพาะ path legacy (typed path มี prompt ของตัวเองอยู่แล้ว)
+- live QA จริง PROMPT_MODULAR=1: "สวัสดี"→8.5k chars ตอบถูก shop-scoped; "ประกันเท่าไหร่"→9.0k chars ตอบถูก
+- prompt tokens ~12k ทั้งคู่ (เดิม CORE_B เต็ม ~+19k chars ≈ +5k tok → ประหยัด ~25-30% เคส non-product)
+- flag OFF = SYSTEM_INSTRUCTION เดิม 100%
+
+## ผ่านแล้ว — R0 modular switch (config `prompt_modular`)
+- prompt_sections.modular_enabled: config bool (admin flip ได้) → env PROMPT_MODULAR=1 override → default ปิด
+- systemConfigService: type+passthrough+allowedKeys — admin update ผ่าน config API ได้
+- verify: Mongo write true→enabled, false→disabled, tsc clean — flag ปิด=prompt เดิม 100%

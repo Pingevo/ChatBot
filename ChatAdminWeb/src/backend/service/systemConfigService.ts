@@ -106,6 +106,8 @@ export interface SystemConfigDoc extends Document {
   // kb_source: strict "legacy"|"zaapi" — flip ผ่าน setKbSource (CAS+readiness) เท่านั้น
   pool_sources?: { kb?: boolean; mongo_catalog?: boolean; units?: boolean; image_text?: boolean };
   kb_source?: 'legacy' | 'zaapi';
+  // R0 — modular prompt sections switch (OFF = SYSTEM_INSTRUCTION เดิม byte-identical)
+  prompt_modular?: boolean;
 
   updated_by: string;
   updated_at: Date;
@@ -249,6 +251,7 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
       image_text: dbConfig.pool_sources?.image_text !== false,
     },
     kb_source: dbConfig.kb_source === 'zaapi' ? 'zaapi' : 'legacy',
+    prompt_modular: dbConfig.prompt_modular === true,
 
     updated_by: dbConfig.updated_by || 'system',
     updated_at: dbConfig.updated_at || new Date(),
@@ -365,6 +368,7 @@ export async function updateSystemConfig(
     'tiktok_bot_url',
     'lazada_bot_url',
     'chat_engine',
+    'prompt_modular',
     // ⚡ Phase 8 — LLM context limit (admin-configurable)
     'llm_context_limit',
     // ⚡ Task 5B3-D — grouped retrieval (dev-only)
