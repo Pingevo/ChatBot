@@ -12502,3 +12502,7 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - bot_elapsed_ms 38,990 samples: p50=1.9s p95=46.5s max=282.8s; >90s เพียง 2.3% (provider spike tail ไม่ใช่ query ช้า)
 - ขยาย 180s ช่วยแค่ 2.3% แต่ทุก fail ช้า 2 เท่า → ไม่คุ้ม; S5 bound query 20s ลดส่วน query-driven อีกต่อ
 - decision: คง 90s + monitor หลัง S5 deploy — revisit ถ้า tail ยังสูง
+
+## ผ่านแล้ว — R1 runbook Phase 4B refresh (docs/plans/2026-11-09-r1-phase4b-refresh-runbook.md)
+- pipeline มีครบ: build_sellable_units/build_image_texts/build_embeddings → exports/gen/<gid> → publish_generation CAS pointer + 24h cleanup + rollback
+- เหลือ: first manual run (วัดเวลา/cost), r1_refresh.sh wrapper, cron 09:00 (รอ host approval)
