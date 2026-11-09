@@ -111,7 +111,7 @@ export default function ZaapiKbMappingPage() {
               <th className="pr-3">ไฟล์</th>
               <th className="pr-3 w-56">shop</th>
               <th className="pr-3 w-40">type ไฟล์</th>
-              <th className="pr-3">type ต่อ sheet</th>
+              <th className="pr-3">sheets</th>
               <th className="w-20"></th>
             </tr>
           </thead>
@@ -151,20 +151,7 @@ export default function ZaapiKbMappingPage() {
                   </td>
                   <td className="pr-3 py-2">
                     {Object.entries(f.sheets).map(([s, n]) => (
-                      <div key={s} className="flex items-center gap-1 mb-1">
-                        <span className="text-text-muted truncate max-w-[140px]" title={s}>{s} ({n})</span>
-                        <select className={SEL}
-                          disabled={!editable}
-                          value={(d.sheet_types || {})[s] || d.content_type || "product"}
-                          onChange={(e) => {
-                            const st = { ...(d.sheet_types || {}) };
-                            if (e.target.value === d.content_type) delete st[s];
-                            else st[s] = e.target.value;
-                            setField(f.file, { sheet_types: st });
-                          }}>
-                          {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                        </select>
-                      </div>
+                      <div key={s} className="text-text-muted truncate max-w-[200px] mb-1" title={s}>{s} ({n})</div>
                     ))}
                   </td>
                   <td className="py-2">
