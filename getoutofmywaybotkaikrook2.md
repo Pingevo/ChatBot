@@ -12585,3 +12585,7 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - GAP2: audit vocab 15+ strings กระจาย ไม่มี canonical
 - GAP3: ai_usage ขาด path/conv_id/attempt/outcome
 - GAP4: workflow/import events ไม่เข้า unified log
+
+## ผ่านแล้ว — R5 GAP1 fix: timezone parse 3 stats routes
+- live/admin-activity/performance: new Date(customStart) UTC-bug → manual YYYY-MM-DD parse local (แบบ dashboard owner เดียวกัน)
+- verify tsc clean — ตัวเลข analytics ตรงเวลาไทยแล้ว
