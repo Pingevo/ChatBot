@@ -51,6 +51,7 @@ interface SystemConfig {
   // ⚡ Task 5B3-D — grouped retrieval flags (bot อ่านจาก DB, env fallback)
   grouped_retrieval_shadow_enabled: boolean;
   grouped_retrieval_selection_enabled: boolean;
+  prompt_modular: boolean;
   // ⚡ Phase 10A — global web-search operator gate (bot อ่านจาก DB ≤5s, no env fallback)
   web_search_enabled: boolean;
   // ⚡ Workstream E — evidence pool switches (absent key → ON) + strict KB selector
@@ -125,6 +126,7 @@ const safeSwitches: { key: keyof SystemConfig; label: string; description: strin
   { key: "shadow_bot_enabled", label: "Shadow Bot", description: "bot generate reply แต่เก็บใน shadow_replies ไม่ส่งจริง" },
   { key: "bot_worker_enabled", label: "Bot Worker (Auto)", description: "ประมวลผลแชทใหม่อัตโนมัติ: trigger → bot → handoff (ต้องรัน scripts/bot-worker.ts)" },
   { key: "web_search_enabled", label: "Web Search", description: "อนุญาต bot ค้นเว็บภายนอก (OpenRouter) เมื่อข้อมูลในระบบไม่พอ — ปิด = zero external calls ทุก path" },
+  { key: "prompt_modular", label: "Modular Prompt", description: "ส่งเฉพาะ prompt section ที่ตรง intent (ประหยัด token ~25-30%) — ปิด = prompt เดิมเต็ม" },
   // ⚡ workflow_enabled ย้ายไป /admin-config แล้ว — admin เปิด/ปิดเองได้
 ];
 
