@@ -12517,3 +12517,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - workflow delivered → storeWorkflowDelivered เขียน shadow_replies เท่านั้น + review_bubbles — ผ่าน review gate เดียวกัน
 - mock send = mockSendService deterministic events เท่านั้น delivered:false เสมอ
 - verdict: ไม่พบ path ที่ส่งจริงโดยไม่ผ่าน review/mock — H4 PASS (สำหรับ pilot scope ปัจจุบัน)
+
+## HANDOFF — session ต่อไปอ่านอันนี้ก่อน
+- เสร็จแล้ว: K0–K5 zaapi KB (kb_source=zaapi live, 118 files, 36 disabled รอ admin), H0–H4 review mock merged, S4 index-race, S5 max_time_ms, S6=keep 90s
+- กำลังทำ: R1 build gid g20261109-091914-c06ea7fd — เช็ค /tmp/r1_run.log + exports/gen/<gid>; ถ้า artifacts ไม่ครบ = rerun /tmp/r1_run.sh
+- R0 baseline done: bot_elapsed_ms p95=46.5s; GAP = ไม่มี ai_usage log persist → ขั้นต่อไป = ai_usage collection instrumentation (ตาม R0 spec วัดก่อนลด)
+- คิวที่เหลือตาม user: R0(ทำอยู่) → R2 → R3 → R4 → R5 → W0–W5
+- 36 disabled zaapi files รอ admin บน /zaapi-kb-mapping
