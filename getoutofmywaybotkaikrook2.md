@@ -12551,3 +12551,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - kill-switch AI_USAGE_LOG=0; fire-and-forget ไม่ throw
 - verify: fake resp → doc persisted จริง (1234/56/1290 tok $0.00051)
 - จำกัด: ยังไม่มี path/shop/conv_id ใน doc (ต้อง thread ctx เพิ่ม — phase ถัดไป)
+
+## ผ่านแล้ว — R0 design อนุมัติ: CORE_B modular split (ผู้ใช้กำหนด)
+- user ต้องการ: persona ทั่วไปส่งเสมอ + needs→sections; คงกฎการ์ดเดียว-พูด 1-3 ตัว และตาราง compare+แนะนำ use case
+- split map ~14 sections ตาม char offsets จดใน r0 plan doc — พร้อม implement flag-gated ปลอดภัย
+- เหตุผลของผู้ใช้: prompt ซับซ้อนเกินจน AI หลอนบางครั้ง
