@@ -12471,3 +12471,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - k2_bulk_apply → 30/30 apply เข้า Mongo จริง: **3,353 stamped rows + 30 registry active**
 - verify จริง: `file_kb_ready` searchable; Kieslect promo hit @KieslectThailand / 0 hits @ZMIThailand (isolation ผ่าน)
 - ค้าง: 88 files เหลือรอ staff map (รวม 11 blackshark-ambiguous) → apply ต่อ; K5 flip gate
+
+## ผ่านแล้ว — K2 apply ครบ 118/118 เข้า shared Mongo + fix mapping bug
+- mapping v2 (maximal shopname + brand alias + platform ตามชื่อไฟล์): 118 upsert zaapi_kb_mappings; scoped 75 / unscoped 43
+- apply 118/118 → zaapi_kb stamped rows, registry 118 active, visible triple rows = 8,600 ตรง census, file_kb_ready searchable, import_log 148
+- **bug จับได้เอง**: file 018 "ทุกแบรนด์-ยกเว้น-imilab-cuktech-zmi-ztec" automap scope ผิดทิศ (scoped ให้ร้านที่ถูกยกเว้น) → unscoped + re-apply rev2 + registry accounts=[] (apply inherit-empty → ต้องแก้ registry ตรง) → visible pairs พิสูจน์ทุก shop
+- isolation: 003 Kieslect promo @Kieslect=True @ZMI=False ผ่าน
+- ค้าง: admin ทบทวน mapping บนเวป / K5 flip gate (ยังไม่ flip — kb_source=legacy คงเดิม)
