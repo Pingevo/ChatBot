@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12328 |
-| active_integrity_prefix_sha256 | `47f139f234dff03ef8f6ba852ff4ff77415dc2e891694c81bfdd0ac35a50f044` |
-| active_line_count_at_baseline | 12328 (bytes 2375364) |
-| active_integrity_recorded_at | 2026-11-09T09:33+0700 |
+| active_integrity_prefix_lines | 12443 |
+| active_integrity_prefix_sha256 | `2eb180d9be8b2eac` (full SHA: 2eb180d9be8b2eac6546ebd8b0e3a1009c5e665e8c4e708b67219535095130d4) |
+| active_line_count_at_baseline | 12443 |
+| active_integrity_recorded_at | 2026-11-09T12:15+0700 |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -158,6 +158,14 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12300–12308 | read + indexed (A-106) |
 | 12309–12318 | read + indexed (A-107) |
 | 12319–12328 | read + indexed (A-108) |
+| 12329–12343 | read + indexed (A-109) |
+| 12344–12352 | read + indexed (A-110) |
+| 12353–12358 | read + indexed (A-111) |
+| 12359–12361 | read + indexed (A-112) |
+| 12362–12371 | read + indexed (A-113) |
+| 12372–12381 | read + indexed (A-114) |
+| 12382–12389 | read + indexed (A-115) |
+| 12390–12397 | read + indexed (A-116) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -287,6 +295,12 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | A-103 | 12254–12269 | Zaapi KB file-backed implementation ตาม spec v4 — code+tests (offline+disposable Mongo verify; ไม่มี shared write/activation/commit) 2026-11-06 | passed behavior | ใหม่ kb_zaapi_files.py owner เดียว: parse verbatim/preview read-only/apply full-replace (staged rev+1→CAS active_rev→old expire_at 7d; filename=identity)/rollback/export_xlsx/zaapi_search (refs+trigram prefilter→lazy-embed cosine)/file_kb_ready/log coll · kb_zaapi.zaapi_kb_evidence rewired→zaapi_search (kind="kb", record_id=file::sheet::row, meta file/sheet/row); canonical path dormant ไม่ลบ · knowledge_base search_qa+get_general_faq zaapi branches; legacy reads ทุกเส้นผ่าน _legacy_allowed (zaapi=0 reads) · app.py +5 endpoints (preview/apply/rollback/export/files) · AdminUI: ZaapiKbPanel import section +3 binary-safe routes +zaapiKbReady→file_kb_ready +route.ts mode=docs รับ source_file · bug fix: direct `from runtime_config import` bind names ตอน import → test monkeypatch ไม่ถึง → เปลี่ยน module-attr access ทั้ง kb_zaapi/kb_zaapi_files · [offline] 40 passed/13 dormant-skipped exit 0 · [Mongo จริง mongo:7 :27019] 22 passed exit 0 (container ลบแล้ว) · regression 303 passed exit 0 · SRS §6.34b/c + endpoints อัปเดต | verified | งานค้าง=shared Mongo write/migration (raw_sources→source_file backfill), live provider E2E ภาษาไทย, activation kb_source=zaapi, commit แรก — ทั้งหมดต้องอนุมัติแยก; sweep_expired ยังไม่มี caller; conflicting-rows gate ระดับ evidence เท่านั้น |
 | A-107 | 12309–12318 | H0–H3 bot-worker human review mock-send plan 2026-11-09 | decision/approval | ผู้ใช้เลื่อนงาน H ขึ้นทำก่อน KB และกำหนด mock Shopee เท่านั้น; ตรวจ owner จริง: shadow_replies เก็บ draft, `|||` split ที่ UI, send route ปัจจุบัน sandbox, botworker_events random ID; เพิ่มแผน per-bubble review/inline edit บันทึก·บันทึกและส่ง·ยกเลิก, ordered mock requests + product-card intent, `sent_text` ว่างใน mock; remaining-work register เปลี่ยนลำดับ H0–H3 ก่อน K, H4/live แยก gate; ไม่มี production/test/Mongo/API call | verified | เป็น design/priority verified เท่านั้น; implementation และ real delivery ยังไม่เริ่ม |
 | A-108 | 12319–12328 | Zaapi KB WIP precommit + Draft PR preparation 2026-11-09 | pending/deferred work | ผู้ใช้สั่งเก็บ candidate และเปิด Draft PR โดยห้าม merge main จากนั้นแยก bot-worker branch จาก PR head; precommit verification `.venv/bin/python -m pytest` 7 files 424 passed/13 skipped exit 0, `npx tsc --noEmit` exit 0, `py_compile` 6 files exit 0, `git diff --check` exit 0; candidate รวม file-backed KB กับ H mock plan | verified | WIP เท่านั้น; shared Mongo migration/live provider E2E/selector activation/v2-scope review ยังเปิด; commit/PR/branch เป็นขั้นหลัง ledger entry นี้ |
+| A-109 | 12329–12343 | H0–H3 bot-worker human review mock-send implementation 2026-11-09 | passed behavior | `reviewService.ts` owner เดียว: `buildReviewBubbles` freeze `review_bubbles` ตอน insert (storeBotReply+storeWorkflowDelivered, `bot_reply_text` immutable); `applyReviewAction` conditional-update ต่อ transition (save/approve/save_and_approve/reject/send_card), op dedupe `reviewop:<id>`, ordering gate earlier=settled, retry mock_failed ด้วย deterministic event id เดิม; `mockSendService.ts` seam — deterministic `botworker_events` `mocksend:<reply>:<bubble>:<part>` type `mock_send`, receipt provider=mock delivered=false เสมอ, ไม่มี Shopee URL/cred/HTTP, SAFETY ไม่แตะ; route POST `.../review` server-derive actor/designated config; messages route คืน review_bubbles+can_review; UI 3 ปุ่ม+inline edit+card attach+label จำลองส่ง; tests `test-botworker-review.ts` 20/20 + boundary 20/20 + tsc 0 + diff-check 0 | verified | sent_text absent เสมอ; card payload ไม่ใช่ Shopee schema; live/deploy/merge นอก scope; commit รอ approval · corrected-by A-110 |
+| A-110 | 12344–12352 | H mock closeout corrections — independent review 5 findings 2026-11-09 | regression lock | F1 write-order: CAS#1 decision+approved_text ก่อน mock เสมอ → winner log=persisted text, loser=409 ก่อน mock; CAS#2 delivery→mock_sent/failed; card เหมือนกัน (CAS intent ก่อน) · F2 reviewop binding {actor,shop,conv,reply,bubble,action,edited_text,card_item_id} — op id ซ้ำ binding ต่าง → 409 ไม่แตะ state · F3 I2 = workflow path จริง (wfkw→let_ai_respond→storeWorkflowDelivered) · F4 UI act() คืน bool — editor ปิดเฉพาะ success + `src/lib/reviewUi.ts` mergeBubbleResult · F5 Next docs อ่านได้ผ่าน cat · crash recovery: decided+not_requested → retry ส่ง persisted text เท่านั้น; event exists → E11000 receipt เดิม · tests 26/26 + boundary 20/20 + tsc 0 + diff-check 0 | verified | mechanism delta รอบนี้: +1 lib file (reviewUi test seam), +0 helpers/guards/regex/tables/owners; commit รอ approval · corrected-by A-111 |
+| A-111 | 12353–12358 | H mock closeout round 2 — 3 findings 2026-11-09 | regression lock | UI retry ซ่อนใน pending block → ย้าย decided&&mock_failed block แยก · recovery path รับ approve+save_and_approve (persisted text เท่านั้น) · send_card gate decision==="rejected"→409 ก่อน intent CAS · tests J7/J8 → 28/28 + boundary 20/20 + tsc 0 + diff-check 0 | verified | commit รอ approval · corrected-by A-112 |
+| A-112 | 12359–12361 | J7 same-op crash-resume test gap 2026-11-09 | regression lock | J7 เดิมใช้ op id ใหม่ → seed `review_op` in_progress + request binding เดิม → retry ด้วย op เดิมพิสูจน์ resume จริง: op→done+outcome, mock event เดียว persisted text, replay idempotent · 28/28 + tsc 0 | verified | commit รอ approval · corrected-by A-113 |
+| A-114 | 12372–12381 | live provider + real transport-failure test 2026-11-09 | passed behavior | LIVE: bot จริง :8010 (secret via dotenv ไม่แสดง) → inbound → flush → LLM answer จริง → shadow_replies+1 bubble → approve → mock event text=persisted=real answer · TRANSPORT FAIL: schema validator reject `^mocksend` (code121) → CAS#1 ok + delivery mock_failed + 409 + b1 blocked + op done → remove validator → retry resume → mock_sent 1 event · env cleanup ครบ | verified | crash กลาง CAS#1↔mock window = state-seeded proof only (ไม่ใช่ process kill จริง) |
+| A-113 | 12362–12371 | H mock full-system test + config merge defect 2026-11-09 | passed behavior | isolated env: docker mongo:7 :27099 `botreview_admin`, stub bot :8011, Next dev :3210 (turbopack, /tmp copy+hardlink node_modules — user dev :3000 ไม่แตะ) · **defect: `getSystemConfig` merge ทิ้ง `bot_review_admin_id`/`bot_review_shop_id` → review 403 ตลอด → passthrough fix** · worker path inbound→poll→shadow_replies+review_bubbles ✓ workflow `:wf0` ✓ · HTTP API 13/13 (ordering, save/edit/reject, dup op binding, wrong admin, card, concurrent 200+409 event=persisted, crash windows) ตรวจ Mongo จริง · playwright UI 5/5 + screenshots · regressions 28/28+20/20+tsc0+diff0 · cleanup docker+tmp+test scripts | verified | mock-fail mid-flight proven เฉพาะ fake-mongo (crash windows proven ผ่าน Mongo state seeding); provider bot = stub; commit รอ approval |
 
 ## 7. Known semantic coverage gaps
 
@@ -320,3 +334,5 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 - [ ] tail ถูกอ่านและสรุปเป็น entry ก่อนเลื่อน integrity prefix
 - [ ] ทุก entry เป็น exact inclusive range + category + status; `verified` มี evidence ใน raw log
 - [ ] ก่อน `coverage: complete`: union ของ coverage ranges ครบทุกบรรทัดของ frozen และ active ไม่มี gap/overlap ที่อธิบายไม่ได้, integrity ทั้งสองตรง, independent review ผ่าน
+| A-115 | 12382–12389 | live provider per-shop 3 ร้าน 2026-11-09 | passed behavior | product_recommend timeout รอบแรก (bot Pass1 ~61s > worker 90s → bot_failed guard ถูก) → shipping q รอบสอง: 3/3 conv bot_answered → 3 shadow docs; approve pingevox → 200 mock_sent event=persisted=real answer; ร้านอื่น 403 pilot gate; wattaka pending | verified | bot-side product query slowness เป็น constraint ของ bot ไม่ใช่ review feature; multi-bubble live ยังไม่เคยเห็น |
+| A-116 | 12390–12397 | full system ผ่าน flush buffer (real bot 3 ร้าน) 2026-11-09 | passed behavior | bot_buffer_enabled → 6 msgs buffered (2/conv, window 15s) → buffer rows+locks ค้าง → t+21s flush → bot จริงตอบ → 3 shadow docs; pingevox approve→mock_sent event=persisted; wattaka 403 pilot gate · slowness root: provider spike+concurrency+--reload watcher ไม่ใช่ quota (20 keys=280RPM) | verified | งานค้างเดิม: process-kill window, multi-bubble live |

@@ -24,6 +24,7 @@ import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { MessageContent } from "@/components/chat/MessageContent";
 import { DateBanner, dayKey } from "@/components/shadow/DateBanner";
 import { splitAnswerSegments } from "@/lib/answerSegments";
+import { mergeBubbleResult } from "@/lib/reviewUi";
 import { chatService } from "@/lib/services";
 import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
@@ -32,6 +33,20 @@ import { adminBubbleColor, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
 import type { Conversation, ChatMessage, CloseHistoryRecord, AdminUser, ProblemCategory } from "@/lib/types";
 
 type MobileView = "list" | "chat" | "info";
+
+// ⚡ review — per-bubble contract (ตรง reviewService.ts)
+interface ReviewBubble {
+  bubble_id: string;
+  ordinal: number;
+  original_text: string;
+  edited_text?: string;
+  decision: "pending" | "approved" | "edited_approved" | "rejected";
+  decided_by?: string;
+  decided_at?: string;
+  approved_text?: string;
+  delivery: { state: "not_requested" | "mock_sent" | "mock_failed"; request_id?: string; receipt?: { provider: string; delivered: boolean }; error?: string };
+  card?: { item_id: string; delivery: { state: string; error?: string } };
+}
 
 // ⚡ Phase 2T — unified message ที่ merge จาก messages_shp + shadow_replies
 interface UnifiedMessage {
@@ -51,6 +66,8 @@ interface UnifiedMessage {
   origin?: string;
   image_desc?: string;
   bubble_color?: string; // ⚡ สี bubble ที่ admin เลือก (จาก botworker_messages)
+  bot_products?: { item_id?: string; itemid?: string; name?: string; price?: number; image?: string; shop?: string; shop_id?: string; shopid?: string }[]; // ⚡ review — card attach
+  review_bubbles?: ReviewBubble[]; // ⚡ review — frozen per-bubble state (absent = legacy draft)
   // ⚡ rich media (parsed from raw_payload) — เหมือน /tickets
   message_type?: string;
   media?: { type: string; url?: string; thumb_url?: string; thumb_width?: number; thumb_height?: number; duration_seconds?: number };
@@ -74,6 +91,7 @@ export default function BotWorkerPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<UnifiedMessage[]>([]);
+  const [canReview, setCanReview] = useState(false); // ⚡ designated review admin+shop (server-derived)
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingConversations, setLoadingConversations] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>("list");
@@ -187,10 +205,11 @@ export default function BotWorkerPage() {
     useCallback(async () => {
       if (!selectedId) return;
       try {
-        const r = await api().get<{ messages: UnifiedMessage[]; total: number }>(
+        const r = await api().get<{ messages: UnifiedMessage[]; total: number; can_review?: boolean }>(
           `/botworker/conversations/${selectedId}/messages`,
           { params: { limit: "200" }, timeout: 30000 }
         );
+        setCanReview(r.data.can_review === true);
         const seen = new Set<string>();
         setMessages((r.data.messages || []).filter((m) => {
           if (seen.has(m.id)) return false;
@@ -350,6 +369,37 @@ export default function BotWorkerPage() {
     }
   }, [selectedId]);
 
+  // ⚡ review action — POST /review; server คืน bubble ใหม่ → patch message state
+  // ⚡ op id reuse ต่อ (bubble,action,payload) — retry เจตนาเดิมได้ replay guarantee จาก server
+  const opIdsRef = useRef<Map<string, string>>(new Map());
+  const handleReviewAction = useCallback(async (msgId: string, bubbleId: string, action: string, extra: Record<string, unknown> = {}) => {
+    if (!selectedId) return;
+    const opKey = `${msgId}:${bubbleId}:${action}:${JSON.stringify(extra)}`;
+    let opId = opIdsRef.current.get(opKey);
+    if (!opId) {
+      opId = `ui_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      opIdsRef.current.set(opKey, opId);
+    }
+    try {
+      const r = await api().post<{ ok: boolean; message?: string; bubble?: ReviewBubble }>(
+        `/botworker/conversations/${selectedId}/review`,
+        { reply_id: msgId, bubble_id: bubbleId, action, operation_id: opId, ...extra }
+      );
+      const data = r.data as { ok?: boolean; message?: string; bubble?: ReviewBubble; detail?: string };
+      if (!data.ok && !data.bubble) throw new Error(data.message || data.detail || "review action failed");
+      if (data.bubble) {
+        setMessages((prev) => mergeBubbleResult(prev, msgId, data.bubble!));
+      }
+      if (!data.ok) throw new Error(data.message || "review action failed");
+      opIdsRef.current.delete(opKey);
+    } catch (e) {
+      // network/transport error → เก็บ op id ไว้ retry เจตนาเดิม; app-level 409/422 เปลี่ยนเจตนาแล้ว → ล้าง
+      if (e instanceof Error && !/failed|conflict|invalid/i.test(e.message)) throw e;
+      opIdsRef.current.delete(opKey);
+      throw e;
+    }
+  }, [selectedId]);
+
   const handleToggleAccepting = useCallback(async () => {
     setTogglingAccept(true);
     try {
@@ -417,6 +467,8 @@ export default function BotWorkerPage() {
           onTransfer={handleTransfer}
           onSend={handleSend}
           admins={admins}
+          canReview={canReview}
+          onReviewAction={handleReviewAction}
         />
       </div>
 
@@ -530,9 +582,11 @@ interface BotWorkerChatPanelProps {
   onTransfer?: (newAdminId: string) => void;
   onSend?: (text: string) => Promise<void>;
   admins?: AdminUser[];
+  canReview?: boolean;
+  onReviewAction?: (msgId: string, bubbleId: string, action: string, extra?: Record<string, unknown>) => Promise<void>;
 }
 
-function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, onSend, admins = [] }: BotWorkerChatPanelProps) {
+function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, onSend, admins = [], canReview, onReviewAction }: BotWorkerChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
@@ -653,7 +707,7 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
               return (
                 <React.Fragment key={msg.id}>
                   {showDate && <DateBanner timestamp={msg.timestamp} onlyToday />}
-                  <UnifiedBubble msg={msg} customerName={conversation?.customer_name} customerAvatar={conversation?.customer_avatar} />
+                  <UnifiedBubble msg={msg} customerName={conversation?.customer_name} customerAvatar={conversation?.customer_avatar} canReview={canReview} onReviewAction={onReviewAction} />
                 </React.Fragment>
               );
             })}
@@ -720,7 +774,7 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
 import { useRef } from "react";
 import { User, Zap, Bot as BotIcon } from "lucide-react";
 
-function UnifiedBubble({ msg, customerName, customerAvatar }: { msg: UnifiedMessage; customerName?: string; customerAvatar?: string }) {
+function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewAction }: { msg: UnifiedMessage; customerName?: string; customerAvatar?: string; canReview?: boolean; onReviewAction?: (msgId: string, bubbleId: string, action: string, extra?: Record<string, unknown>) => Promise<void> }) {
   const isUser = msg.role === "user";
   const isZaapi = msg.role === "zaapi";
   const isBot = msg.role === "bot";
@@ -805,11 +859,16 @@ function UnifiedBubble({ msg, customerName, customerAvatar }: { msg: UnifiedMess
             {isBot && msg.trigger_id && <Badge tone="neutral" className="text-[8px]">trigger</Badge>}
           </div>
         )}
-        {segmentMsgs.map((segMsg, i) => (
-          <div key={i} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleClass}`} style={isZaapi ? { backgroundColor: ZAAPI_COLOR } : isBot ? { backgroundColor: BOT_COLOR } : isAdmin ? { backgroundColor: adminColor } : undefined}>
-            <MessageContent msg={toChatMsg(segMsg)} variant={isUser ? "user" : "out"} />
-          </div>
-        ))}
+        {isBot && Array.isArray(msg.review_bubbles) ? (
+          // ⚡ review mode — 1 persisted bubble = 1 UI bubble + controls ตาม decision
+          <ReviewBubbleList msg={msg} canReview={!!canReview} onAction={onReviewAction} toChatMsg={toChatMsg} bubbleClass={bubbleClass} />
+        ) : (
+          segmentMsgs.map((segMsg, i) => (
+            <div key={i} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleClass}`} style={isZaapi ? { backgroundColor: ZAAPI_COLOR } : isBot ? { backgroundColor: BOT_COLOR } : isAdmin ? { backgroundColor: adminColor } : undefined}>
+              <MessageContent msg={toChatMsg(segMsg)} variant={isUser ? "user" : "out"} />
+            </div>
+          ))
+        )}
         {/* Timestamp + metadata */}
         <div className="flex items-center gap-1.5 mt-1 text-[10px] text-text-subtle">
           {isBot && <BotIcon size={10} />}
@@ -921,5 +980,175 @@ function BotWorkerTransferDropdown({
         </>
       )}
     </div>
+  );
+}
+
+// ─── ReviewBubbleList — per-bubble review controls (mock send) ───
+// ⚡ pending: อนุมัติส่ง / แก้ไข / ไม่อนุมัติส่ง (+ card attach)
+//    editing: บันทึก / บันทึกและส่ง / ยกเลิก (inline ใน bubble นั้น)
+//    decided: read-only — แสดง original/saved edit/decision/actor/mock outcome
+//    mock_sent ต้อง label "จำลองส่งเท่านั้น — ลูกค้ายังไม่ได้รับ" เสมอ
+function ReviewBubbleList({
+  msg, canReview, onAction, toChatMsg, bubbleClass,
+}: {
+  msg: UnifiedMessage;
+  canReview: boolean;
+  onAction?: (msgId: string, bubbleId: string, action: string, extra?: Record<string, unknown>) => Promise<void>;
+  toChatMsg: (m: UnifiedMessage) => ChatMessage;
+  bubbleClass: string;
+}) {
+  const bubbles = msg.review_bubbles || [];
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<{ bubbleId: string; message: string } | null>(null);
+
+  const settled = (b: ReviewBubble) => b.decision === "rejected" || b.delivery.state === "mock_sent";
+  const gateOk = (i: number) => bubbles.slice(0, i).every(settled);
+
+  async function act(bubbleId: string, action: string, extra?: Record<string, unknown>): Promise<boolean> {
+    if (!onAction) return false;
+    setBusy(true); setErr(null);
+    try { await onAction(msg.id, bubbleId, action, extra); return true; }
+    catch (e) { setErr({ bubbleId, message: e instanceof Error ? e.message : "action failed" }); return false; }
+    finally { setBusy(false); }
+  }
+
+  const products = (msg.bot_products || []).map((p, i) => ({
+    key: String(p.item_id ?? p.itemid ?? `no-id-${i}`),
+    item_id: String(p.item_id ?? p.itemid ?? ""),
+    name: p.name || "(ไม่มีชื่อ)",
+    verifiable: !!p.item_id && !!(p.shop || p.shop_id || p.shopid), // server verify จริง — UI แค่ hint
+  })).filter((p) => p.item_id);
+
+  return (
+    <>
+      {bubbles.map((b, i) => {
+        const decided = b.decision !== "pending";
+        const sendable = canReview && !decided && gateOk(i);
+        const editing = editingId === b.bubble_id;
+        return (
+          <div key={b.bubble_id} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleClass}`} style={{ backgroundColor: BOT_COLOR }}>
+            {/* original vs saved edit */}
+            {b.edited_text && b.edited_text !== b.original_text && (
+              <div className="text-[10px] opacity-70 border-b border-white/20 pb-1 mb-1">
+                <span className="line-through">{b.original_text}</span>
+              </div>
+            )}
+            {editing ? (
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                rows={3}
+                className="w-full resize-none rounded-md border border-white/30 bg-white/10 px-2 py-1 text-sm text-white placeholder:text-white/50 focus:outline-none"
+              />
+            ) : (
+              <MessageContent msg={toChatMsg({ ...msg, text: b.edited_text ?? b.original_text })} variant="out" />
+            )}
+
+            {/* status line */}
+            <div className="flex items-center gap-1.5 mt-1 text-[10px] text-white/70">
+              <span>
+                {b.decision === "pending" && "รอตรวจ"}
+                {b.decision === "approved" && "อนุมัติแล้ว"}
+                {b.decision === "edited_approved" && "อนุมัติ (แก้ไขแล้ว)"}
+                {b.decision === "rejected" && "ไม่อนุมัติ"}
+              </span>
+              {b.decided_by && <span>· {b.decided_by}</span>}
+              {b.decided_at && <span>· {new Date(b.decided_at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}</span>}
+              {b.delivery.state === "mock_sent" && (
+                <span className="ml-1 rounded bg-white/15 px-1.5 py-0.5 font-medium text-yellow-200">
+                  จำลองส่งเท่านั้น — ลูกค้ายังไม่ได้รับ
+                </span>
+              )}
+              {b.delivery.state === "mock_failed" && (
+                <span className="ml-1 rounded bg-red-500/30 px-1.5 py-0.5">จำลองส่งล้มเหลว</span>
+              )}
+              {b.card && (
+                <span className="ml-1 rounded bg-white/15 px-1.5 py-0.5">
+                  card:{b.card.item_id} {b.card.delivery.state === "mock_sent" ? "(จำลอง)" : "(ล้มเหลว)"}
+                </span>
+              )}
+            </div>
+
+            {/* controls */}
+            {canReview && !decided && !editing && (
+              <div className="flex items-center gap-1.5 mt-2">
+                <button
+                  disabled={!sendable || busy}
+                  onClick={() => act(b.bubble_id, "approve")}
+                  className="rounded-md bg-white/20 hover:bg-white/30 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
+                  title={!gateOk(i) ? "ต้องตัดสินบับเบิ้ลก่อนหน้าก่อน" : ""}
+                >อนุมัติส่ง</button>
+                <button
+                  disabled={busy}
+                  onClick={() => { setEditingId(b.bubble_id); setDraft(b.edited_text ?? b.original_text); }}
+                  className="rounded-md bg-white/15 hover:bg-white/25 disabled:opacity-40 px-2 py-1 text-[11px]"
+                >แก้ไข</button>
+                <button
+                  disabled={busy}
+                  onClick={() => act(b.bubble_id, "reject")}
+                  className="rounded-md bg-red-500/40 hover:bg-red-500/60 disabled:opacity-40 px-2 py-1 text-[11px]"
+                >ไม่อนุมัติส่ง</button>
+                {b.delivery.state === "mock_failed" && (
+                  <button
+                    disabled={!sendable || busy}
+                    onClick={() => act(b.bubble_id, "approve")}
+                    className="rounded-md bg-yellow-500/40 hover:bg-yellow-500/60 disabled:opacity-40 px-2 py-1 text-[11px]"
+                  >ลองส่งใหม่</button>
+                )}
+                {products.length > 0 && (
+                  <select
+                    disabled={!sendable || busy}
+                    defaultValue=""
+                    onChange={(e) => { if (e.target.value) act(b.bubble_id, "send_card", { card_item_id: e.target.value }); e.target.value = ""; }}
+                    className="rounded-md bg-white/15 px-1.5 py-1 text-[11px] text-white disabled:opacity-40"
+                  >
+                    <option value="" disabled>+ การ์ดสินค้า</option>
+                    {products.map((p) => (
+                      <option key={p.key} value={p.item_id} disabled={!p.verifiable} className="text-black">
+                        {p.name} ({p.item_id}){p.verifiable ? "" : " — ยืนยัน shop ไม่ได้"}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            )}
+            {canReview && editing && (
+              <div className="flex items-center gap-1.5 mt-2">
+                <button
+                  disabled={busy || !draft.trim()}
+                  onClick={async () => { if (await act(b.bubble_id, "save", { edited_text: draft })) setEditingId(null); }}
+                  className="rounded-md bg-white/20 hover:bg-white/30 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
+                >บันทึก</button>
+                <button
+                  disabled={!sendable || busy || !draft.trim()}
+                  onClick={async () => { if (await act(b.bubble_id, "save_and_approve", { edited_text: draft })) setEditingId(null); }}
+                  className="rounded-md bg-green-500/40 hover:bg-green-500/60 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
+                  title={!gateOk(i) ? "ต้องตัดสินบับเบิ้ลก่อนหน้าก่อน" : ""}
+                >บันทึกและส่ง</button>
+                <button
+                  disabled={busy}
+                  onClick={() => { setEditingId(null); setDraft(b.edited_text ?? b.original_text); }}
+                  className="rounded-md bg-white/15 hover:bg-white/25 disabled:opacity-40 px-2 py-1 text-[11px]"
+                >ยกเลิก</button>
+              </div>
+            )}
+            {/* decided + mock_failed → ปุ่มลองส่งใหม่ (อยู่นอก pending block — bubble ตัดสินแล้ว) */}
+            {canReview && decided && b.delivery.state === "mock_failed" && (
+              <div className="flex items-center gap-1.5 mt-2">
+                <button
+                  disabled={!gateOk(i) || busy}
+                  onClick={() => act(b.bubble_id, "approve")}
+                  className="rounded-md bg-yellow-500/40 hover:bg-yellow-500/60 disabled:opacity-40 px-2 py-1 text-[11px]"
+                  title={!gateOk(i) ? "ต้องตัดสินบับเบิ้ลก่อนหน้าก่อน" : ""}
+                >ลองส่งใหม่</button>
+              </div>
+            )}
+            {err && err.bubbleId === b.bubble_id && <div className="text-[10px] text-red-200 mt-1">{err.message}</div>}
+          </div>
+        );
+      })}
+    </>
   );
 }
