@@ -37,9 +37,10 @@
 
 ### Test (สคริปต์ทดสอบ + ผลลัพธ์)
 
-- `docs/test/` — suite ทดสอบ: `testQA2.py`, `test_200.py`, `test_comprehensive.py`, `test_all_conditions.py`, `test_flow.py`, `test_car_charger_regression.py`, `run_daily_tests.py`, `run_fresh_tests.sh`, `check_progress.py`, `diag_car_charger.py`, `analyze_qa_replays.py`, `find_qa_conversations.py`
+- `docs/test/` — suite ทดสอบ แยกเป็น `live/` (ยิง bot server/Mongo/Gemini จริง), `offline/` (pytest logic — conftest stub), `tools/` (script ครั้งเดียว/diag/eval)
   - `docs/test/logs/` — log การทดสอบ (gitignore)
   - `docs/test/results/` — ผลลัพธ์ replay/JSON (`replay_*.json`, `openrouter_shadow_*.json`) (gitignore)
+  - `docs/test/README.md` — index จำแนกไฟล์ทั้งหมด
 
 ### ผลลัพธ์ (results/output — ไม่ใช่โค้ด)
 
@@ -68,9 +69,9 @@
 
 ### Plan (แผนงาน)
 
-- `docs/plans/planner.md` — Plan: Message Buffering (Debounce) สำหรับ bot-worker
-- `docs/plans/workflow-planner.md` — Plan: Workflow Engine (แบบ Zaapi Flow Builder)
-- `docs/plans/implentplanworkflow.md` — Plan: Workflow Implement (multi-branch condition)
+- `docs/plans/archive/planner.md` — Plan: Message Buffering (Debounce) สำหรับ bot-worker
+- `docs/plans/archive/workflow-planner.md` — Plan: Workflow Engine (แบบ Zaapi Flow Builder)
+- `docs/plans/archive/implentplanworkflow.md` — Plan: Workflow Implement (multi-branch condition)
 
 ### Rule (กฎสำหรับ AI agent)
 
@@ -79,7 +80,7 @@
 
 ### Waythrough log (ledger + active tail — กฎข้อ 8)
 
-- `docs/waythrough-ledger.md` — **canonical ledger** (ดัชนี/สรุป อ่านครบทุกครั้ง) + แผน `docs/plans/waythrough-ledger-migration.md`
+- `docs/waythrough-ledger.md` — **canonical ledger** (ดัชนี/สรุป อ่านครบทุกครั้ง) + แผน `docs/plans/active/waythrough-ledger-migration.md`
 - `getoutofmywaybotkaikrook.md` — **history (freeze)** — เคสเก่าที่ผ่าน/ปัญหาเก่า อ่านอย่างเดียว ห้ามเขียนเพิ่ม
 - `getoutofmywaybotkaikrook2.md` — **active log** — กำลังจะทำ/กำลังทำ/ผ่านแล้วใหม่/งานค้าง เขียนที่นี่เท่านั้น
 - `มาแล้วจ้า.md` — ไฟล์ secret deploy (ห้ามอ่านซ้ำ — อนุญาตตอนสร้างครั้งเดียว)

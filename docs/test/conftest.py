@@ -62,6 +62,9 @@ dotenv.load_dotenv = _dotenv_stub
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "chatbot"))
+sys.path.insert(0, str(Path(__file__).parent / "live"))
+sys.path.insert(0, str(Path(__file__).parent / "offline"))
+sys.path.insert(0, str(Path(__file__).parent / "tools"))
 
 from shopeechat import knowledge_base as _kb  # noqa: E402
 

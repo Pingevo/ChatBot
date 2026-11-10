@@ -12691,3 +12691,27 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Import modal: platform chips ก่อน → checkbox ร้านแยกหัวข้อ platform (จาก /zaapi-kb/mapping shops[{name,platform}]) เลือกได้หลายร้าน + text input สำหรับชื่อที่ไม่มีในระบบ; toast แสดง error detail จาก server
 - verify: pytest test_zaapi_kb_files 52/52 (incl. test_toggle_file_enabled ใหม่) · py_compile OK · tsc --noEmit OK · manual UI ยังไม่ได้
 - หมายเหตุ: import preview 400 — ตอนนี้ toast จะโชว์ detail จริง; น่าจะ "no data rows"/filename ไม่ผ่าน _valid_filename (.xlsx/.txt เท่านั้น)
+
+---
+## [กำลังจะทำ] ลบ comment เก่าที่ไม่เกี่ยวกับโค้ดปัจจุบัน — ตรวจ scope ก่อน
+- ต้นทาง: ผู้ใช้สั่ง "clear comment เก่าทุกบรรทัดที่ไม่เกี่ยวข้องกับโค้ดปัจจุบัน"
+- อยู่ระหว่างถามขอบเขต (repo-wide vs เฉพาะส่วน) ก่อนลงมือ — ยังไม่แก้โค้ด
+
+## [ยกเลิก] ลบ stale comment — ผู้ใช้ยกเลิกก่อนลงมือ
+- ไม่มีการแก้โค้ดใดๆ
+
+## [ผ่านแล้ว] Documentation restructure — schema/workflow/pool/waythrough docs
+- เพิ่ม docs/pool-and-mainflow.md, docs/system-workflow.md, docs/waythrough-README.md (ใหม่)
+- อัปเดต docs/schema.md (workflow version collections §2.35, zaapi_kb §5.10-5.14, §1.2 table)
+- อัปเดต docs/SRS_SSD.md (§6.40 prompt_sections.py) + docs/function and process.md (doc pointers)
+- ไม่แก้โค้ด — docs only; งานก่อนหน้าใน session นี้ไม่ได้ append pre-work (missed protocol) — บันทึกย้อนหลังตรงนี้
+
+## [กำลังจะทำ] จัดระเบียบ docs/plans + docs/test + exports logs
+- แยก plans เก่า/ใหม่, จัดหมวด test (live/unit/one-off), ย้าย logs เก่าเข้า exports/logs, เขียน README index
+
+## [ผ่านแล้ว] จัดระเบียบ docs/plans + docs/test + exports logs
+- docs/plans → active/(17) + archive/(22) + README index; อัปเดต refs ใน AGENTS.md/SRS/plan docs
+- docs/test → live/(32 ยิง server/Mongo/Gemini จริง) + offline/(84 pytest logic) + tools/(30 script ครั้งเดียว) + README index; conftest +sys.path subdirs; patch parents[2]→[3] 105 ไฟล์; ย้าย script-style sys.exit 3+1 ไฟล์เป็น check_*.py
+- exports/*.log 32 ไฟล์ → exports/logs/ (exports/ gitignored — schema.md §7 บันทึกสถานะ used/unused แทน)
+- verify: pytest docs/test collect 2624 tests 0 errors (เดิม collection พังอยู่แล้วจาก script-style + env-needing files)
+- ยกเลิก/เก็บ: test_compat_mode_filter+test_handoff_transport+test_flow ต้องการ env จริง → tools/check_*

@@ -2,7 +2,7 @@
 
 **อัปเดตล่าสุด:** 2026-10-02 (เขียนใหม่ทั้งไฟล์จากโค้ดจริง — แทนที่ฉบับ 2026-09-02)
 **ขอบเขต:** `chatbot/shopeechat/` (production) + `chat_v2` + `chatbotv3/` + `scripts/*` + `ChatAdminWeb/` + `lazadachat/`/`tiktokchat/` (placeholder)
-**อ้างอิงเสริม:** `docs/schema.md` (field-level DB schema) · `docs/plans/2026-09-21-retrieval-hybrid-rerank-plan.md` · `docs/plans/2026-09-21-qa-remaining-bugs-plan.md` · `getoutofmywaybotkaikrook2.md` (work log)
+**อ้างอิงเสริม:** `docs/schema.md` (field-level DB schema) · `docs/plans/archive/2026-09-21-retrieval-hybrid-rerank-plan.md` · `docs/plans/archive/2026-09-21-qa-remaining-bugs-plan.md` · `getoutofmywaybotkaikrook2.md` (work log)
 
 > **กฎเอกสาร:** อ้างอิงด้วย *ชื่อฟังก์ชัน/โมดูล* เท่านั้น — ไม่ใช้ line numbers (ตายหลัง refactor) · ไม่ใส่ changelog ย่อยใน cell (อยู่ใน waythrough log)
 
@@ -374,7 +374,7 @@ listing path:
 | `_finalize_answer` | **Phase 8 — production finalizer เดียวของ typed path — `AnswerComposition` → `ChatResponse` เดียว (M1: render+order+dedupe+warranty-append+segments+marker+prose ทั้งหมดอยู่ที่นี่)** | comp, *, message, limit, products, source, shop, model, elapsed, cost, intent, timing, steps, routing_decision, image_desc="" | ChatResponse | `_render_composition` (production caller เดียว), `_append_base_warranty` (ไม่มี claim_guidance — claim เป็น segment แล้ว), `llm.split_segments`, `guards.policy_outcome_text` | `_chat_impl` — 2 flag-ON callsites (KB/main) — **sole normal-path composition renderer — downstream ไม่แตะ prose บน valid-marker path (enforce อาจ wholesale-replace ทั้ง answer เฉพาะเมื่อ marker invalid — fail-closed guard ไม่ใช่ composition); callsite ไม่ render — LLM2 step observe `resp.answer` post-finalize ผ่าน `resp.steps[idx]` patch** | render → ว่าง → `EMPTY_CONTEXT_REPLY` → warranty append ครั้งเดียว → split_segments ครั้งเดียว → stamp `routing_decision["composition"]={domains,unanswered,policy_text,**segments**}` (marker ที่ enforce อ่าน — **final-acceptance: segments = per-result {domain,origin,text,need_indices,subject_ids} typed provenance; deterministic segment claims exempt จาก prose grounding เมื่อ text match verbatim — malformed/mismatch → `composition_marker_invalid` fail closed**) ** **+ `routing_decision["spec_measured"]` จาก `comp.context.spec_measured_facts` (r12c — identity-scoped evidence artifact/audit — ไม่ใช่ guard grounding channel อีกต่อไป)** → ChatResponse; pure ของ comp (re-apply byte-identical); usage จาก comp.usage; web_search_used จาก typed web_used/admission | — |
 | `_chat_impl` | **legacy orchestrator + Phase 4B request-snapshot owner — `snap=_gen.SNAP_UNSET` → resolve 1× post-lock pre-dispatch → `_snap` (อาจเป็น None) ส่งต่อทุก generated-source consumer (`fetch_products`×n, `lookup_kb`, `qa_context`, `materialize_subject_cards`, `get_active_product`, handoffs/warranty ctx, `_device_spec_lookup`, `reanswer`, `fuzzy_match_products`, `run_grouped_selection`/`_shadow`, v2/v3 dispatch) — consumer ไม่ resolve ซ้ำ; captured None → fail-closed ทั้ง request** | ChatRequest | ChatResponse | ทุกโมดูล (§5.2) + `_wf_lock._is_active_post_handoff`/`_build_post_handoff_response` | chat() | **2B.5: post-handoff ownership lock ที่ entry บรรทัดแรก — production owner เดียว: ticket_state=handoff/open/pending → wait-admin response ทันที ก่อน v3/v2 dispatch, `_db()`, vision, persona, shadow, deterministic, intent, retrieval, LLM; closed/resolved/bot → pipeline ปกติ** → pipeline ตาม §5.2 · **2C.3 correction: `decide_turn` เรียกครั้งเดียว post-classify แบบ fail-closed (exception → HTTPException 500 — ไม่มี fallback plan, ไม่มี planless legacy path) → `primary_action` gate เป็น sole post-classify action owner (unconditional — non-execute actions return ตรงนั้น; `handoff` ส่ง `plan_decided_reason` (required kwarg, closed Literal set — **อ่านจาก `TurnPlan.flags` เท่านั้น; `TurnNeed.provenance` เป็น diagnostic ห้ามเลือก reason**) ให้ transport + fail-closed เมื่อไม่มีผลลัพธ์; mixed claim+product → `_WarrantyDisposition.TERMINAL` ชนะเสมอ (handoff dominance — ไม่มีงานต่อ), `CONTINUE_PRODUCT` + productish need → claim answer เป็น presentation carry (**flag OFF** — `_append_base_warranty(claim_guidance=...)` ครั้งเดียวทุก answer family; **flag ON** — `_mixed_claim_carry` เป็น typed input ของ `_typed_answer_boundary` → `DomainResult("claim")` segment ผ่าน `compose_answer`+`_finalize_answer`; routing invariant: domain branch เลือกเหมือนกันไม่ว่ามี carry หรือไม่) → subject resolve ≤1/turn → pipeline** | writes: conversation_products, handoff POST, usage; RuntimeError/planner error→HTTPException 500; ⚠️ client.close() บน shared client (§10#2) |
 | ↳ `_resolve_charger_subtype` | subtype resolution | message, intent, anchor, ctx | subtype str | product_store._detect_charger_subtype | _chat_impl | anchor > intent > message; carry ยกเว้น subtype ชัดใหม่ | — |
-| ↳ `_rd_extra` | **Phase 5-R1 H2 — typed decision + subject identity carrier (Task5-simp: pair verdict channel ถูกลบตาม defer)** | (closure: `_pdec`, `_pdec_ptype`, subject cards, `_ref_regex_products`, anchors, `products`) | dict | policy_resolver dataclass asdict + `resolve_compat`+`extract_field_facts`, candidate_pool._identity_key, `units._units_coll` | ทุก `ChatResponse(...)` return site หลัง decision point (×7) | `routing_decision["policy_decision"]`/`subject_ids` เดิม (Task5-simp: `pair_verdicts` channel ถูกลบ — product↔product pairing deferred, ดู `docs/plans/deferred-pairing-contract.md`) | — |
+| ↳ `_rd_extra` | **Phase 5-R1 H2 — typed decision + subject identity carrier (Task5-simp: pair verdict channel ถูกลบตาม defer)** | (closure: `_pdec`, `_pdec_ptype`, subject cards, `_ref_regex_products`, anchors, `products`) | dict | policy_resolver dataclass asdict + `resolve_compat`+`extract_field_facts`, candidate_pool._identity_key, `units._units_coll` | ทุก `ChatResponse(...)` return site หลัง decision point (×7) | `routing_decision["policy_decision"]`/`subject_ids` เดิม (Task5-simp: `pair_verdicts` channel ถูกลบ — product↔product pairing deferred, ดู `docs/plans/active/deferred-pairing-contract.md`) | — |
 | ↳ `_extract_charger_constraints` | spec constraints | text | dict | regex | _chat_impl | parse "≥45W"/"20000mAh"/น้ำหนัก | — |
 | ↳ `_is_good_keyword` | keyword quality | w | bool | stoplist | _chat_impl (search requery) | กรองคำกว้าง | — |
 | ↳ `_extract_max_mah`/`_extract_weight` | sort helpers | p | float | regex | _chat_impl | สกัด mAh/น้ำหนักจาก card | — |
@@ -1383,6 +1383,21 @@ module ใหม่ที่แยก pure detectors ออกจาก `knowled
 
 **Task 2 correction — customer segment (`_compat_segment`).** Input `v: CompatVerdict` (subject_name, target, decision); output `str`; caller `compose_answer` ใน compatibility result ต่อ need. อ่านเฉพาะ typed `CompatDecision.outcome/reason_codes` ไม่อ่าน prose/protocol token: `compatible` + `cable_capacity_covers_target` ต่อท้าย clause deterministic *หนึ่งครั้ง* ว่า “สายรองรับกำลังไฟตามที่อุปกรณ์ต้องการ แต่กำลังชาร์จจริงยังขึ้นกับหัวชาร์จ อุปกรณ์ และโปรโตคอลที่รองรับค่ะ”; ไม่อ้างว่าสายจ่ายไฟ, ไม่อ้าง protocol ที่ไม่พิสูจน์. `insufficient_wattage`/`wattage_variant_unconfirmed`/`missing_wattage_evidence` ยังใช้ caveat เดิมตามลำดับ; incompatible ใช้ negative segment เดิม; unsupported outcome คืน `""` (fail closed). ไม่มี DB/network/provider call/side effects.
 
+### 6.40 `prompt_sections.py` — modular system prompt split ตาม intent (R0)
+
+**Purpose:** แยก `_SYS_CORE_B` ออกเป็นส่วนตาม need/intent — ลด token + ทำให้ prompt ตรง context มากขึ้น
+
+| field | ค่า |
+|---|---|
+| Purpose | สร้าง system prompt แบบ modular — core + เฉพาะ sections ที่ intent ต้องการ |
+| Input | runtime config `prompt_modular` (bool, จาก `system_configs`), intent/need context |
+| Output | prompt string (sections ตาม flag) |
+| Calls | `runtime_config.get_runtime_config()` (อ่าน `prompt_modular`), `llm.py` |
+| Called by | `llm.py:1484` (`answer` path) |
+| How it works | `modular_enabled()` อ่าน `prompt_modular` — OFF/missing → behavior เดิม (prompt เดียว); ON → render เฉพาะ sections ที่เกี่ยวกับ need ปัจจุบัน |
+| Side effects | ไม่มี — pure prompt assembly |
+| Error/fallback | flag invalid/missing → legacy single-prompt path |
+
 ## 7. คอนฟิกและตัวแปรสำคัญ
 
 ### 7.1 Engine / app
@@ -1486,8 +1501,8 @@ module ใหม่ที่แยก pure detectors ออกจาก `knowled
 
 | Plan | สาระ | ไฟล์ |
 |---|---|---|
-| Retrieval hybrid rerank v2 | ลบ query-time regex → pipeline เดียวเหนือ 2 data sources | `docs/plans/2026-09-21-retrieval-hybrid-rerank-plan.md` |
-| QA remaining bugs | RC-A trust boundary / RC-B claim slots / RC-C keyword whack-a-mole / RC-D error leak / RC-E measurement — 16 tasks | `docs/plans/2026-09-21-qa-remaining-bugs-plan.md` |
+| Retrieval hybrid rerank v2 | ลบ query-time regex → pipeline เดียวเหนือ 2 data sources | `docs/plans/archive/2026-09-21-retrieval-hybrid-rerank-plan.md` |
+| QA remaining bugs | RC-A trust boundary / RC-B claim slots / RC-C keyword whack-a-mole / RC-D error leak / RC-E measurement — 16 tasks | `docs/plans/archive/2026-09-21-qa-remaining-bugs-plan.md` |
 
 ### 9.2 ระยะกลาง
 

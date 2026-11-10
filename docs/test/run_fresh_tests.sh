@@ -96,7 +96,7 @@ for KEY_NUM in 2 3 4 5 6 7; do
   echo "   args: $RUN_ARGS"
   echo ""
 
-  python test/testQA2.py $RUN_ARGS 2>&1 | tee "$LOG_DIR/testQA2_key${KEY_NUM}.log"
+  python test/live/testQA2.py $RUN_ARGS 2>&1 | tee "$LOG_DIR/testQA2_key${KEY_NUM}.log"
 
   # นับเคสที่ทำได้
   DONE=$(python3 -c "
