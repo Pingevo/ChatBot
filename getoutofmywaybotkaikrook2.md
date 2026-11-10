@@ -12589,3 +12589,46 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 ## ผ่านแล้ว — R5 GAP1 fix: timezone parse 3 stats routes
 - live/admin-activity/performance: new Date(customStart) UTC-bug → manual YYYY-MM-DD parse local (แบบ dashboard owner เดียวกัน)
 - verify tsc clean — ตัวเลข analytics ตรงเวลาไทยแล้ว
+
+## กำลังจะทำ — R4 audit closeout / 2026-11-10
+- User approved read-only Mongo audit and process-local load_dotenv; no credentials printed or persisted.
+- Protocol exception: pre-work entry appended after read-only inspection already began; do not claim strict pre-work ordering passed.
+- Frozen SHA and active prefix 1..12493 verified; previous tail 12398..12591 read/indexed. Historical coverage remains partial.
+- Scope: reconcile archive totals, keeper references, duplicates and actual indexes; no archive/delete/restore/index mutation.
+
+## ผ่านแล้วเฉพาะ audit — R4 NOT CLOSED / 2026-11-10
+- Fresh read-only Mongo: shadow_replies=8,057 + shadow_replies_archive=30,933 =38,990; stable on second count. Prior handoff 13,793/25,225 was not final; no contemporaneous batch log found to explain its 28-doc discrepancy.
+- Archive/live _id overlap=0; all 30,933 _dup_group_keep refs resolve to live docs, all same conversation; no restore executed, rollback fidelity not proven without pre-archive snapshot.
+- Keeper comparisons: same text+same inbound=16,685; same text/different inbound=2,919; different text+different inbound=6,609; different text/same inbound=4,720. Thus 11,329 archived answers differ from keeper; cannot certify all archived rows as exact duplicates or archive policy as safe.
+- Active duplicate groups: conversation+text=234 (2,596 excess); inbound_message_id=280 (2,644 excess), all inbound IDs nonempty strings. Duplicate docs span 2026-09-08..2026-11-09 06:01:28.901 UTC; no proof they were created after archive.
+- Actual shadow_replies indexes: _id and three nonunique shop/conversation/created_at indexes; declared inbound_message_id unique sparse index ABSENT. Existing duplicates would prevent building it. Worker startup calls ensureIndexes but warns/continues on failure; exact historical failure not established.
+- buffer_messages unique sparse message_id index exists; 15 docs. chat_processing=380,668, _id index only; message_id repeats (9,809 groups/366,904 excess) are not proof of duplicates because deterministic claim identity and lifecycle must be checked before cleanup.
+- DB writes=0, code changes=0, credentials never printed/persisted. Blocked follow-up: user-approved policy review for nonidentical archived answers, safe rollback/recovery plan, writer/idempotency audit and inbound-index repair plan. No automatic restore/archive/delete/index changes; no completion claim for full R4.
+
+## R4 approved investigation continuation / 2026-11-10
+- User approved investigation and plan; no authorization for specific DB mutation. Bookkeeping recorded after read-only analysis (pre-work ordering exception retained).
+- Confirmed code contracts: generateConversationShadowReplies intentionally mints generation_batch_id per run and inserts each inbound answer; generateShadowReply also inserts a new manual result. Global unique inbound_message_id conflicts with retained generation history; absence of that index is not by itself proof that all repeated IDs are corruption.
+- Worker storeBotReply callers all pass replyIdFor(ctx.batch_id); storeWorkflowDelivered uses wfReplyId(batchId,i), with _id uniqueness for replay. Old worker duplicates all have ObjectId identities; this proves legacy shape, not the exact external writer or deployed version that produced them.
+- Fresh DB: scoped worker repeats 215 groups / 2,418 excess, including 21 groups with different texts; do not combine these with intentional manual generation history.
+- Archive origin counts: worker=25,768; manual_conversation=5,123; manual=42. All keeper refs share shop/platform/conversation, but 9,528 differ in inbound_message_id; 70 manual_conversation rows share inbound but differ in generation_batch_id. Thus conversation/text collapse is not a safe dedup identity. Original archive script unavailable; exact executed grouping criteria remain unproven.
+- Impact: restoring broad history affects list counts, KPI/ratings and historical comparisons; global inbound unique index breaks regenerate/manual-versus-worker coexistence. Root plan: preserve all archive docs, classify by owner identity (worker batch reply ID; manual generation batch+inbound; legacy missing batch ambiguous), inspect archive visibility/reference consumers, then approve explicit recovery IDs and owner-scoped index changes separately. No text-based deletion, global inbound uniqueness or automatic restore.
+- R1 side observation: existing description process log reached 27,155/27,155 and All done rows=27155; artifact contents not yet validated, name correction/product build/publish still separate approval.
+- Consumers verified: listShadowReplies/getShadowReply/generation batch listing and reviewService.loadReply read active collection only; archive rows are not visible to these paths. Archive therefore changes accessible history, not merely physical storage.
+- Minimal proposed code fix (not executed): retire the global inbound unique declaration and retain native deterministic worker _id idempotency; behavioral tests must prove same-batch worker retry dedup and distinct manual generations coexist. Do not add replacement semantic guards/helpers/regex/owners. Historical worker cleanup/recovery requires exact-ID review and separate DB authorization; do not dedup manual generations by inbound or answer text.
+- Continuation audit completed; R4 remediation remains blocked on user approval of the concrete recovery/index contract. No DB writes, production/test changes or credential persistence.
+
+## กำลังจะทำ — R4 global-index declaration fix / 2026-11-10
+- User explicitly approved code-only index declaration fix and tests; DB restore/delete/index operations and deploy remain excluded.
+- Root cause: inbound-only uniqueness conflates intentional manual generation batches with worker replay identity. Remove exactly that declaration; preserve deterministic worker _id replay and all remaining indexes.
+- Scope: mongoClient.ts plus executable regression test reusing existing fake Mongo; no new runtime owners/helpers/guards/regex/dependencies. Plan: RED actual ensureIndexes→manual generation fails; remove declaration; GREEN manual regeneration + worker coexistence; run existing worker idempotency/review suites and tsc.
+- Impact: new/fresh databases permit intentional generations; already-existing global index on other hosts is not dropped by this patch and requires separate operator review. Shared Mongo audited here has no such index. Archive untouched; R4 data remediation remains open.
+- Branch codex/zaapi-kb-closeout working tree only; no commit until separate branch/first-commit approval. Next local docs remain ignore-denied despite read-scope grant; no Next framework API/UI changes in this fix.
+
+## ผ่านแล้วเฉพาะ code fix — R4 global inbound index / 2026-11-10
+- RED: new executable test runs real ensureIndexes with shared fake Mongo and real generateConversationShadowReplies; second generation fails E11000 on inbound_message_id_1. Initial harness data-URL loader and Node type mismatches fixed in test only before final verification.
+- GREEN: remove one safeCreateIndex declaration in mongoClient.ts; no replacement owner/guard/helper/regex/keyword/dependency. Worker deterministic _id and other indexes unchanged; no dropIndex command added.
+- New scripts/test-shadow-index-contract.ts: 4 executable checks (two generation batches, repeated single generation, manual+worker coexistence/native _id replay rejection, buffer uniqueness); Node v24.18.1, shared fake Mongo + leaf hooks, no real Mongo/provider writes. Existing worker pipeline replay covered by independent regression suite.
+- Verification exit 0: index contract 4 checks; test-botworker-idempotency.ts 71/71; test-shadow-batch-isolation.ts 22/22; test-botworker-review.ts 35/35; tsc --noEmit --incremental false; git diff --check.
+- R1 artifact verified read-only: current product_embeddings.npz is description data, embeddings=(27155,1024) float32 finite, unique chunk_ids, matching generation; no rename/rebuild/publish. Unit artifact already verified (28044,1024).
+- Impact: fixes fresh-schema generation conflict only; does not remove preexisting global index on another DB or recover historical archive. R4 archive recovery and legacy cleanup remain open, protected by explicit DB-operation approval. Credentials not printed or saved; DB mutations/deploy/commit=0.
+- Files: mongoClient.ts (-1 production line), one new test file, active log + ledger. Working tree only; first commit/branch decision awaits user review.
