@@ -130,7 +130,8 @@ export async function applyReviewAction(opts: {
   if (!doc) return { ok: false, code: "not_found", message: "reply not found" };
   // shop/actor fence — persisted doc เท่านั้น
   if (doc.shop_id !== opts.designatedShopId) return { ok: false, code: "forbidden", message: "shop outside pilot scope" };
-  if (opts.actor !== opts.designatedAdminId) return { ok: false, code: "forbidden", message: "not the designated review admin" };
+  // ⚡ "*" = pilot เปิดให้ทุกแอดมินรีวิว (shop ยัง fence เหมือนเดิม)
+  if (opts.designatedAdminId !== "*" && opts.actor !== opts.designatedAdminId) return { ok: false, code: "forbidden", message: "not the designated review admin" };
   const bubbles = doc.review_bubbles;
   if (!Array.isArray(bubbles) || bubbles.length === 0) {
     return { ok: false, code: "conflict", message: "draft has no review_bubbles (legacy or empty draft — not approvable)" };
