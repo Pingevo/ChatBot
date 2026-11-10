@@ -12748,3 +12748,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แก้ราก: `setBotWorkerGlobalEnabled` CAS owner เดียว (OFF→ON stamp edge / ON→OFF clear / idempotent no-op / stale→applied:false) + เอา key ออกจาก whitelist + PUT /config branch {flag,expected_,single-command→409} + test-assignment toggle_worker เปลี่ยนไปเรียก CAS + config page ส่ง expected_
 - เทส: test-botworker-global-enabled-cas.ts 8/8 (G1-G8 incl. whitelist drop + missing-edge fail-closed) · config-failclosed 8/8 · enable-checkpoint 18/18 · scope-gate 107/107 · tsc clean
 - งานค้าง: ผู้ใช้เปิด global อีกครั้ง (edge มีแล้ว) → worker รับข้อความใหม่หลัง edge เท่านั้น; canary จริงรอผู้ใช้ส่งข้อความทดสอบเข้าร้าน SuperITMall
+
+## 2026-11-10 — R3 pilot closeout (ปิดแล้ว)
+
+- local canary จบครบวงจร: toggle ON ผ่าน UI (CAS stamp edge 05:33:38Z อัตโนมัติหลัง fix) → inbound Shopee จริง → buffer_flush (3msg→1batch) → bot draft → shadow_replies + review_bubbles → admin approve/edit/reject → mock_sent (delivered:false เสมอ)
+- แก้ระหว่าง pilot: review gate `bot_review_admin_id="*"` เปิดทุกแอดมิน (shop fence 22997004 เดิม) — commit e496fcc
+- audit: decided_by/decided_at/original+edited/approved_text/receipt ครบใน doc; config.toggle+buffer_flush ลง admin_logs ถูก
+- ปิด: bot_worker_enabled=false (ผู้ใช้ปิดเอง/verify false+edge null) + kill worker local
+- ค้าง (แยกงาน): คุณภาพคำตอบบอทยังแย่ (สินค้าผิด/มั่ว) — เดี๋ยวทำทีหลัง; cost-stop gate ยังไม่มี (เฝ้ามือตามตกลง)

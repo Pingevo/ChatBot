@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12750 |
-| active_integrity_prefix_sha256 | `4a945bf6cb7e7d0092bf73565740d1df097cdcdcb49a4cd22f7b2f8df20ce7bc` |
-| active_line_count_at_baseline | 12750 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R3 global enable-edge CAS fix |
+| active_integrity_prefix_lines | 12758 |
+| active_integrity_prefix_sha256 | `9f2b9ce98607933f0a695ccf4d3c5756b4b4e7cd0897fbba9377c012308bb71b` |
+| active_line_count_at_baseline | 12758 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), R3 pilot closeout |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -369,3 +369,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-133 | 12725–12735 | generation pipeline functions (driver+API+UI v1+retention) / 2026-11-10 | passed behavior | build_generation.py --mode daily|weekly: subprocess steps, build_log.jsonl, generation_runs percent, build lock, carry+re-stamp desc via _save_verified_npz (27,155 rows verified), import colls, validate+manifest→pending. app.py /admin/generations{,/{gid},/publish,/discard,/rollback}; generic /api/chatbot proxy reused. UI /generations + BuildProgressCat + GenPendingDot + nav items. cleanup_generations keep=active+previous+3daily+2weekly. | verified | py_compile+tsc OK; live endpoint test on uvicorn, real end-to-end build, and cron install still pending (separate approval). |
 | A-134 | 12736–12741 | /generations UI v2 header+detail+rollback (+GenTracks 4-lane commit 6df1549) / 2026-11-10 | passed behavior | Header: active/next build (09:00 TH, Mon=weekly)/last build timing; building ETA; empty state. RunDetail: files+size, manifest counts, log tail; per-gen rollback buttons; rollback re-validates then CAS; no partial rollback (bundle contract). GenTracks lanes (3 daily+1 weekly, status colors, cat at bar end) committed in 6df1549 with backfilled run doc for g20261109. | verified | py_compile+tsc OK; live browser check pending. |
 | A-135 | 12742–12750 | R3 canary — global bot_worker_enabled missing enable edge / 2026-11-10 | regression lock | Root cause: whitelist $set wrote flag but no code path stamped bot_worker_enabled_at → resolveBotworkerScope fail-closed (empty scope), worker silent. Fix: stamped edge 2026-11-10T05:24:37Z (1 field); setBotWorkerGlobalEnabled CAS owner (stamp/clear/idempotent/stale→applied:false); key removed from updateSystemConfig whitelist; PUT /config CAS branch {flag+expected_, single-command, 409}; test-assignment toggle_worker → CAS; config page sends expected_. | verified | New suite test-botworker-global-enabled-cas 8/8; config-failclosed 8/8; enable-checkpoint 18/18; scope-gate 107/107; tsc clean. Pending: user re-enables global; real canary awaits test message to SuperITMall; cost-stop gate still unimplemented (user chose manual watch). |
+| A-136 | 12751–12758 | R3 pilot closeout / 2026-11-10 | passed behavior | Local canary completed end-to-end: UI toggle ON stamped edge via new CAS (05:33:38Z); real Shopee inbound → buffer_flush debounce → bot draft → shadow_replies review_bubbles → approve/edit/reject → mock_sent delivered:false always. Mid-pilot fix e496fcc: review gate "*" for all admins (shop fence kept). Audit fields complete in doc; config/buffer events in admin_logs. Worker disabled + local worker killed. | verified | Pending: bot answer quality poor (wrong products) — separate task; cost-stop gate unimplemented (manual watch per user). |
