@@ -12865,3 +12865,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แผน: เพิ่ม offline executable regression ที่เรียก _save_quota_day กับ temp file หลายครั้ง + FileFilter จริง; ไม่แตะ quota จริง/process/live config; ไม่มี production patch หากไม่พบ churn
 - ผ่านแล้ว: test_quota_reload 2 passed exit 0 — repeated atomic saves ค่าถูกต้อง/no tmp เหลือ; real filter reject quota json/tmp แม้เพิ่ม *.json include (hidden-file exclude คง); source py ยัง reload ได้
 - S7 ปิดสำหรับ current default/runtime: ไม่พบ quota-driven reload; production delta=0; ห้ามขยายเป็นการรับรอง custom watcher ทุกแบบ
+
+## R5 provider attempt gaps — กำลังจะทำ
+- Audit: _generate log Gemini ClientError เท่านั้น; SDK ServerError/transport timeout หลุดทั้ง main/fallback call ไม่มี ai_usage; OR broad exception logging มีอยู่แล้ว
+- แผน: executable RED tests ใช้ fake provider + in-memory usage sink; log non-ClientError ใน owner _generate เดิมแล้ว re-raise โดยไม่เปลี่ยน retry/fallback policy; เก็บ error class ไม่เก็บข้อความ exception ใหม่เพื่อลด secret risk; helpers/guards/regex/keywords/decision owners delta=0
+- UI nested-button task ยัง pending: local Next docs ถูก ignore filter บล็อกแม้ user อนุญาติ; ไม่แก้ config เพื่อ bypass; R4 ยังรอ external owner
+- ผ่านแล้ว: RED 4 failures (main missing 1 doc, fallback missing second doc); GREEN 4 passed — ServerError/timeout ทั้ง main/fallback log ครบจำนวน attempts+correlation/key_ref/latency และ re-raise exception object เดิม ไม่มี retry เพิ่ม
+- regression: provider contract เดิม 21 pass/0 fail ผ่าน subprocess suppress dotenv; full offline 1981 passed/15 skipped/1 xfailed exit 0; SRS _generate อัปเดต; mechanism delta=0
+- R5 ยังไม่ปิด: request_id จาก Python ยังสุ่มเฉพาะฝั่ง ไม่มี propagation เข้า shadow chain; missing-usage success ยัง return ก่อน persist; route/lifecycle reconciliation และ rollout verification ยังต้องตรวจ

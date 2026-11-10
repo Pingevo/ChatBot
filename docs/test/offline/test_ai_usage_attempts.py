@@ -1,0 +1,50 @@
+from types import SimpleNamespace
+
+import pytest
+
+from shopeechat import knowledge_base, llm
+
+
+@pytest.fixture
+def usage_sink(monkeypatch):
+    docs = []
+    coll = SimpleNamespace(insert_one=lambda doc: docs.append(doc))
+    monkeypatch.setattr(knowledge_base, "_admin_db", lambda: {"ai_usage": coll})
+    monkeypatch.setenv("AI_USAGE_LOG", "1")
+    monkeypatch.setattr(llm, "get_provider", lambda role: "gemini")
+    monkeypatch.setattr(llm, "_acquire", lambda model, tokens: model)
+    monkeypatch.setattr(llm, "_next_api_key", lambda: "test-key")
+    monkeypatch.setattr(llm, "_active_keys", lambda: ["test-key"])
+    token = llm._ai_call_ctx.set({"conv_id": "test-conv", "request_id": "test-request"})
+    yield docs
+    llm._ai_call_ctx.reset(token)
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize("failure", [
+    TimeoutError("sensitive-provider-detail"),
+    llm.genai_errors.ServerError(503, {"error": {"message": "sensitive-provider-detail"}}),
+])
+def test_every_failed_provider_attempt_is_recorded(monkeypatch, usage_sink, fallback, failure):
+    calls = []
+    monkeypatch.setattr(llm, "_MODEL_FALLBACK", {"primary": "fallback"})
+
+    def generate_content(*, model, contents, config):
+        calls.append(model)
+        if fallback and len(calls) == 1:
+            raise llm.genai_errors.ClientError(429, {"error": {"message": "quota"}})
+        raise failure
+
+    monkeypatch.setattr(llm, "_client", lambda key: SimpleNamespace(
+        models=SimpleNamespace(generate_content=generate_content)))
+    with pytest.raises(type(failure)) as raised:
+        llm._generate("primary", "offline", {}, path="typed", role="answer")
+    assert raised.value is failure
+    assert calls == (["primary", "fallback"] if fallback else ["primary"])
+    assert len(usage_sink) == len(calls)
+    assert [d["attempt"] for d in usage_sink] == list(range(1, len(calls) + 1))
+    for doc in usage_sink:
+        assert doc["status"] == "error" and doc["provider"] == "gemini"
+        assert doc["conv_id"] == "test-conv" and doc["request_id"] == "test-request"
+        assert doc["key_ref"] == "k0" and doc["elapsed_ms"] >= 0
+    assert usage_sink[-1]["error"] == type(failure).__name__

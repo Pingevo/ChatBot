@@ -1147,10 +1147,20 @@ def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
                 if getattr(exc2, "code", None) == 401 or "UNAUTHENTICATED" in str(exc2):
                     _DEAD_KEYS.add(key2)
                 raise
+            except Exception as exc2:
+                _persist_usage(m2, 0, 0, path=path, provider="gemini", status="error",
+                               error=type(exc2).__name__, attempt=tried + 1, key_ref=kref2,
+                               elapsed_ms=round((_time.time() - _t0) * 1000))
+                raise
             _record_tokens(m2, resp, path=path, provider="gemini",
                            attempt=tried + 1, key_ref=kref2,
                            elapsed_ms=round((_time.time() - _t0) * 1000))
             return resp
+        except Exception as exc:
+            _persist_usage(m, 0, 0, path=path, provider="gemini", status="error",
+                           error=type(exc).__name__, attempt=tried + 1, key_ref=kref,
+                           elapsed_ms=round((_time.time() - _t0) * 1000))
+            raise
 
 
 # ---- multi-bubble segment splitter (Phase 1) --------------------------------
