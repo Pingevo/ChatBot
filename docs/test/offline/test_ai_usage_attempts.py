@@ -71,6 +71,20 @@ def test_success_without_usage_still_records_the_call(
     assert doc["elapsed_ms"] >= 0
 
 
+def test_chat_response_carries_turn_request_id(monkeypatch):
+    """chat() stamp request_id เดียวกับ _ai_call_ctx ลง response — caller join ai_usage ได้"""
+    from shopeechat import app, guards
+
+    def fake_impl(req):
+        llm._ai_call_ctx.set({"request_id": "turn-123"})
+        return app.ChatResponse(answer="ok", products=[], shop=None, model="m")
+
+    monkeypatch.setattr(app, "_chat_impl", fake_impl)
+    monkeypatch.setattr(guards, "enforce", lambda resp, req: resp)
+    out = app.chat(app.ChatRequest(message="hi"))
+    assert out.request_id == "turn-123"
+
+
 def test_reported_usage_retains_cost_and_token_accounting(monkeypatch, usage_sink):
     response = SimpleNamespace(usage_metadata=SimpleNamespace(
         prompt_token_count=10, candidates_token_count=3, cost=0.001))

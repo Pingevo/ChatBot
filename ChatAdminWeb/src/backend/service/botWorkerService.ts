@@ -474,6 +474,7 @@ async function storeBotReply(opts: {
     products?: unknown[];
     image_desc?: string;
     chat_engine?: "legacy" | "v2" | "v3";
+    request_id?: string;
   };
   triggerId?: string;
   // ⚡ deterministic reply identity — E11000 = persist ไปแล้ว (recovery reuse)
@@ -529,6 +530,7 @@ async function storeBotReply(opts: {
     trigger_id: opts.triggerId,
     chat_engine: opts.botResp.chat_engine || "legacy", // ⚡ บันทึก engine ที่ใช้
     bot_image_desc: opts.botResp.image_desc,           // ⚡ vision desc บน reply doc ด้วย (self-contained)
+    request_id: opts.botResp.request_id,               // ⚡ R5 — turn correlation → ai_usage join
     created_at: now,
     updated_at: now,
   });
@@ -596,6 +598,7 @@ async function storeWorkflowDelivered(opts: {
       origin: "workflow",  // สร้างจาก workflow engine (Flow Builder)
       mode: "standalone",  // ⚡ Phase 2R — โหมด standalone (worker path)
       chat_engine: "legacy", // ⚡ workflow ยังใช้ legacy path (ไม่ผ่าน callBot)
+      request_id: d.request_id, // ⚡ R5 — turn correlation → ai_usage join (let_ai_respond เท่านั้น)
       created_at: now,
       updated_at: now,
     } as ShadowReplyDoc);

@@ -477,11 +477,31 @@ async function main() {
       platform: "shopee", text: "wfkw product request", claimContext: ctx,
       shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" },
     });
-    const docs = (mocks.fakeColl("shadow_replies") as { conversation_id: string; origin?: string; bot_products?: { item_id: string }[] }[])
+    const docs = (mocks.fakeColl("shadow_replies") as { conversation_id: string; origin?: string; bot_products?: { item_id: string }[]; request_id?: string }[])
       .filter((d) => d.conversation_id === conv && d.origin === "workflow");
     assert(docs.length >= 1, "no workflow shadow doc persisted");
     assert(docs.some((d) => d.bot_products?.some((p) => p.item_id === "P100")),
       `bot_products not persisted: ${JSON.stringify(docs.map((d) => d.bot_products))}`);
+    assert(docs.some((d) => d.request_id === "req-mock-1"),
+      `request_id not persisted (workflow): ${JSON.stringify(docs.map((d) => d.request_id))}`);
+  });
+
+  await test("E7c worker path: request_id persist ลง shadow doc (join ai_usage ได้)", async () => {
+    const conv = "conv_e7c";
+    seedConv(conv);
+    seedUserMsg(conv, "m_cur", "hello question");
+    const ctx = makeCtx(["m_cur"]);
+    seedClaimsForCtx(ctx, conv);
+    await svc.processMessage({
+      message_id: "m_cur", conversation_id: conv, shop_id: "shop_1",
+      platform: "shopee", text: "hello question", claimContext: ctx,
+      shop_ctx: { config_shop_key: "shop_1", shopname: "shop_1" },
+    });
+    const docs = (mocks.fakeColl("shadow_replies") as { conversation_id: string; origin?: string; request_id?: string }[])
+      .filter((d) => d.conversation_id === conv && d.origin === "worker");
+    assert(docs.length >= 1, "no worker shadow doc persisted");
+    assert(docs.some((d) => d.request_id === "req-mock-1"),
+      `request_id not persisted (worker): ${JSON.stringify(docs.map((d) => d.request_id))}`);
   });
 
   await test("E8 exclusion ไม่กระทบ conversation/platform อื่น + reply priority คงเดิม", async () => {

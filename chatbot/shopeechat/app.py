@@ -208,6 +208,9 @@ class ChatResponse(BaseModel):
     # caller (Next.js/admin) ใช้ flag นี้ trigger UI/notify แอดมิน
     handoff_to_admin: bool = Field(False, description="บอทขอส่งต่อแอดมิน (warranty claim)")
     handoff_reason: str | None = Field(None, description="เหตุผลที่ส่งต่อ เช่น 'warranty_claim_in_warranty' | 'warranty_claim_out_of_warranty'")
+    # ⚡ R5 — turn correlation id (ตัวเดียวกับ ai_usage.request_id) → caller ผูก
+    #   shadow_reply/botworker_events กลับหา LLM calls ของ turn นี้ได้ตรง
+    request_id: str | None = Field(None, description="turn correlation id — ตรง ai_usage.request_id")
     # ข้อมูล claim ที่บอทรวบรวมจากลูกค้า (ส่งให้แอดมิน)
     handoff_claim: dict[str, Any] = Field(default_factory=dict, description="ข้อมูล warranty claim: name, phone, order_id, topic, product, warranty_status")
     # ── Pass 1 intent classification (debug/observability) ──
@@ -856,7 +859,12 @@ def chat(req: ChatRequest) -> ChatResponse:
     #   ครอบทุก engine (legacy/v2/v3) + ทุก return path — กันคำตอบอ้างสิ่งที่ไม่ได้ทำจริง
     resp = _chat_impl(req)
     from . import guards as _guards
-    return _guards.enforce(resp, req)
+    resp = _guards.enforce(resp, req)
+    # ⚡ R5 — stamp request_id เดียวกับ _ai_call_ctx ลง response ทุก return path
+    _ctx = llm._ai_call_ctx.get()
+    if isinstance(_ctx, dict) and _ctx.get("request_id"):
+        resp.request_id = _ctx["request_id"]
+    return resp
 
 
 def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
