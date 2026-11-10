@@ -12879,3 +12879,12 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แผน: RED tests main Gemini/OR missing/None metadata; persist success ที่ owner เดิมก่อน return พร้อม usage_available=false, est_cost_usd=null (unknown ไม่ใช่ free); additive schema, ไม่เปลี่ยน answer/routing/quota; no new helpers/guards/regex/keywords/decision owners
 - ผ่านแล้ว: RED 5 failed/4 passed; GREEN focused 9 passed; missing/None metadata ทั้ง Gemini/OR persist success หนึ่ง doc และ return response เดิม; reported usage คง token counters+actual OR cost; error attempts ไม่มี metadata จึง usage_available=false/cost=null เช่นกัน
 - regression: full offline 1986 passed/15 skipped/1 xfailed exit 0; existing provider contract 21 pass/0 fail; SRS _record_tokens/_persist_usage อัปเดต; ยังไม่มี live provider calls/customer delivery
+
+## R0 typed product serialization — กำลังจะทำ
+- Audit: AnswerContext.context_text ใช้ json.dumps(indent=2) ใน product payload; whitespace-only overhead ไม่ใช่ retrieval evidence
+- แผน: RED behavioral roundtrip/compact tests หลาย brand/type + nested JSON/Unicode/null/false; เปลี่ยน separators ใน owner เดิมหนึ่งบรรทัด; header/evidence/availability/constraints ไม่แตะ; วัด UTF8 bytes/conservative token estimates ก่อนหลัง (ไม่อ้าง provider truth); answer quality/live measurement ยังต้อง S1 gate
+- ผลกระทบ: lossless serialization ไม่เพิ่มลด identity/facts/cards; อาจเปลี่ยน model presentation จึงยังไม่ปิด R0 โดย offline tests อย่างเดียว; mechanism delta=0; R5 correlation/route cross-TS ยังรอ local-doc access
+- ผ่านแล้ว: RED lossless/compact 6 failed → GREEN 6 passed (3 brand/type fixtures ×1/10 cards); roundtrip fields/values/order/Unicode/escaping/null/false+nonmutation+evidence/shop/availability/constraint safety preserved
+- fixture measurement (ไม่ใช่ provider truth): 1-card context bytes 2274→2118, 2273→2117, 2277→2121; 10-card 7234→5683, 7224→5673, 7264→5713 (~21%); conservative estimated tokens 2412→1895 / 2408→1891 / 2422→1905
+- regression: full offline แรก 4 failed เพราะ ordinal tests ผูก indentation; เปลี่ยนเป็น JSON roundtrip item_id→need_indices assertion (คงพฤติกรรม/เข้มกว่า substring) แล้ว full offline 1992 passed/15 skipped/1 xfailed exit 0; SRS อัปเดต
+- S1 auth blocker: GET local bot /openapi.json HTTP401 (ไม่เรียก provider); ต้อง authenticated config ผ่าน environment ที่อนุญาตก่อน live QA; รอบนี้ provider spend=0, R0 live before/after/cost/latency/quality ยังไม่ปิด
