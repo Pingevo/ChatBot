@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12890 |
-| active_integrity_prefix_sha256 | `d5d9524d452264fea28304a8000dadc2050956386301a8f61f4a35f0f48fca9f` |
-| active_line_count_at_baseline | 12890 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R0 lossless context compaction verified offline; live gate open |
+| active_integrity_prefix_lines | 12898 |
+| active_integrity_prefix_sha256 | `d30de0b802a0d7e446a157fb12bd30b67928addeb3bf49baa574667f7e81bf6f` |
+| active_line_count_at_baseline | 12898 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), S3 frozen 241–781 indexed; semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -45,7 +45,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | range | state |
 | --- | --- |
 | 1–240 | read + indexed (ส่วนที่ 6: F-001..F-013) |
-| 241–8624 | ไม่ได้ index (gap) |
+| 241–781 | read + indexed (F-014..F-022) |
+| 782–8624 | ไม่ได้ index (gap) |
 
 ## 5. Active semantic coverage ranges
 
@@ -189,11 +190,12 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12868–12875 | read + indexed (A-152) |
 | 12876–12881 | read + indexed (A-153) |
 | 12882–12890 | read + indexed (A-154) |
+| 12891–12898 | read + indexed (A-155) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
 
-F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240); A-xxx = active `getoutofmywaybotkaikrook2.md` — exact ranges ในคอลัมน์ `lines` (A-001..A-019 ครอบหลายช่วง) — ช่วงบรรทัดตรวจกับต้นฉบับแล้ว
+F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–781); A-xxx = active `getoutofmywaybotkaikrook2.md` — exact ranges ในคอลัมน์ `lines` (A-001..A-019 ครอบหลายช่วง) — ช่วงบรรทัดตรวจกับต้นฉบับแล้ว
 
 | id | lines | task / date | category | summary | status | superseded-by / note |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -209,7 +211,16 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 | F-010 | 149–160 | Replay UI | passed behavior | `run_conv` + `?history=1` + 3 tabs; typecheck/build ผ่าน, ผู้ใช้ยังไม่ทดสอบจริง | historical-unverified | — |
 | F-011 | 162–188 | Phase 2Z++++ 2026-09-07 | regression lock | `is_target_device_kw` เพิ่ม regex `^1[1-7][฀-๿]+$` + `ไอโฟน\s*\d+` กัน "13คะ" ทำให้ข้าม CONV-ACTIVE; unit 14 cases ผ่าน, replay จริงยังไม่ verify. **ประวัติขยาย regex/keyword เฉพาะ case — สนับสนุนกฎ: ห้ามเพิ่ม semantic table/regex โดยไม่ขออนุญาต** (ดูเพิ่ม F-006 `new_topic_kws`, F-009 `desc_kw`) | historical-unverified | — |
 | F-012 | 190–216 | Phase 2Z++++ (duplicate) | failed/rejected approach | เนื้อหาซ้ำ F-011 ทุกบรรทัด | superseded | superseded-by: F-011 — duplicate, ไม่มี info ใหม่ |
-| F-013 | 218–240 | Phase 3C order lookup ครบ + order anchor 2026-09-07 | pending/deferred work | `[order: sn]`, ฟิลด์ order เพิ่ม, order anchor, ส่งเลข order เฉยๆ → ตอบรับสั้นไม่เรียก LLM, `order_sn` ใน ChatRequest; py_compile/tsc/lookup ผ่าน; **หัวข้อยังต่อหลังบรรทัด 240 และยังไม่ indexed (gap ส่วน 7)** | historical-unverified | — |
+| F-013 | 218–240 | Phase 3C order lookup ครบ + order anchor 2026-09-07 | pending/deferred work | `[order: sn]`, ฟิลด์ order เพิ่ม, order anchor, ส่งเลข order เฉยๆ → ตอบรับสั้นไม่เรียก LLM, `order_sn` ใน ChatRequest; py_compile/tsc/lookup ผ่าน; **หัวข้อยังต่อหลังบรรทัด 240 — continuation indexed ใน F-014** | historical-unverified | — |
+| F-014 | 241–277 | Phase 3C continuation / car-charger 2026-09-13 | regression lock | Order card/follow-up live verification pending; ShpOrders buyer_user_id query lacked index (~6.5s). Car-charger retrieval fixed vehicle category and limit crowd-out, removed bare ในรถ false-positive, aligned typo/subtype prompt; compile and 16 regression cases recorded. | historical-unverified | Real end-to-end car-charger replay explicitly pending; historical semantic changes are not permission to expand tables now. |
+| F-015 | 278–312 | Shadow Inbox trash / 2026-09-10 | passed behavior | Trash grouped by conversation, restore reloads detail, pre-batch-id replies remain visible; restore-by-conversation audit event. Raw evidence records typecheck/build and manual multi-shop restore success. | verified | Historical evidence, not rerun this audit. |
+| F-016 | 313–358 | Phase 3b dual-tier / 2026-09-16 | regression lock | Connector exactness, both cable ends, watt/protocol minimums and description evidence; baseline+upgrade only from retrieved products. Compile/regression and three live examples recorded. | historical-unverified | Connector filtering still model-dependent; raw claims of prompt sufficiency do not prove deterministic safety; SRS update pending in source. |
+| F-017 | 359–387 | Charger shorthand / 2026-09-19 | failed/rejected approach | Tokenizer-compound assumption disproven: newmm splits some compounds and merges มีหัว. Historical hybrid context+fallback+compound blacklist added; parity 42/42, car 16/16, multi-shop 42/42 recorded. | verified | Records rejected token-only premise and historical test evidence, not current implementation endorsement. |
+| F-018 | 388–435 | EC6 anchor + live-assignment reopen / 2026-09-10 | pending/deferred work | Model keyword and compat-target barriers bypassed EC6 anchor; anchor-matched numeric codes preserved item continuity (9 unit +16 regression). Reopen button changed from toast to processing API, with busy state and build/typecheck. | historical-unverified | Actual EC6 replay and manual close/reopen explicitly unverified. |
+| F-019 | 436–470 | CTL301 + replay pagination / 2026-09-10 | passed behavior | User-text model anchor, model-code description inclusion, removed no-desc handoff phrase triggering uncertainty cascade; 42 replay cases recorded. Replay inbox switched 10000-item fetch to shared paginated store/server search/infinite scroll; build/typecheck recorded. | verified | Historical source evidence only; no new web/provider invocation in audit. |
+| F-020 | 471–588 | Admin counts/dashboard/shadow history / 2026-09-10..11 | regression lock | Team counts moved from 5000-row in-memory cap to DB counts; dashboard activity uses last_message_timestamp, response stats capped 30 days with cache. Shadow history fetches selected conversation replies, cursor-paginates conversations, disables history/trash polling to avoid lost pages; bot context cards hidden visually but retained in DB. | historical-unverified | Builds/typechecks recorded; predicted latency and limited-period response metrics are not full-range accuracy evidence. |
+| F-021 | 589–723 | Catalog availability, device specs and stock / 2026-09-10 | invariant | Historical decision: retain unavailable products for factual answers; no selling during claim/problem, no invented stock. Exact anchors preserved through tiering. Device-target lookup detached from intent and queried protocol/specs. Shopee stock source changed from seller-inclusive summary to summed shopee_stock (9 mocks +16 regression). | historical-unverified | Source includes real replays but MI17→ultrasonic mismatch and wattage-only full-speed claim are historical limitations, not validated product truth. No authorization to enable web search now. |
+| F-022 | 724–781 | Subtype/dedupe consolidation / 2026-09-16 | regression lock | Eight subtype-resolution callsites consolidated with anchor→explicit strong override→intent→message→history priority; fourteen text-detection sites retained; three dedup blocks consolidated. Compile, 16 regression and ten edge cases recorded. | historical-unverified | Real end-to-end multi-shop replay explicitly pending. |
 | A-001 | 10823–10832 | waythrough protocol correction 2026-11-03 | decision/approval | ผู้ใช้อนุมัติเปลี่ยนกฎข้อ 8 เป็น ledger + incremental tail; แยก integrity prefix ออกจาก semantic coverage; docs only | verified | — |
 | A-002 | 595–683 | Phase 4A/4B design 2026-10-19 | invariant | generation precedent: `exports/gen/<gid>` + `sellable_units_g<gid>` + pointer `sellable_units_meta{_id:"active"}` fenced CAS (bootstrap `$exists:false`, previous embedded = rollback target), manifest finalize+verify ก่อน CAS, verify-ก่อน-replace, `image_texts_g<gid>` per-gen published vs shared cache, grace 24h cleanup, fail-closed ห้าม fallback base coll; request snapshot resolve 1×/request | verified | — |
 | A-003 | 6490–6569 | Phase 7 R1–R3 evidence boundary | invariant | closed emit `_EVIDENCE_OUT_FIELDS`; `_EVIDENCE_TEXT_KEYS` precedence → `payload["text"]`; `_EVIDENCE_RECORD_BYTES` bound + byte-boundary cut + `evidence_truncated:*`/`record_too_large`; `request_id` attribution ก่อน compile ถูกลบออกจาก final; kinds closed รวม `"kb"`; compile owner เดียว | verified | — |
@@ -327,7 +338,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–240);
 
 ## 7. Known semantic coverage gaps
 
-- frozen 241–8624 ไม่ได้ index (F-013 ปิดที่ 240 แต่หัวข้อ Phase 3C ยังต่อหลัง 240)
+- frozen 782–8624 ยังไม่ได้ index; 241–781 อ่านและสรุปเป็น F-014..F-022 แล้ว (ไม่ได้ rerun historical tests)
 - active gap ที่ยังไม่ได้ index: 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 — targeted coverage เท่านั้น ห้ามอ้าง full audit
 - Q14 / order (F-006, F-007) ระดับ answer ไม่ verify เพราะ provider 429
 - ไม่ใช้ `/tmp/p4ledger/ledger.md` (ไม่ได้ตรวจ checksum/ต้นฉบับ)
@@ -397,3 +408,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-152 | 12868–12875 | R5 non-client provider-attempt error coverage | passed behavior | _generate previously recorded ClientError only; added non-client exception logging to main/fallback call branches in same owner, then re-raise unchanged. New error records use exception class, not sensitive message. RED four missing-attempt cases; GREEN 4 passed, prior provider contract 21/21, full offline 1981 passed/15 skipped/1 xfailed exit 0. SRS updated; mechanism delta zero. | verified | Full R5 remains open: request-ID propagation, missing-usage success records, lifecycle/route reconciliation and rollout. Nested-button UI fix blocked on ignored local Next docs despite user approval; R4 remains externally blocked. |
 | A-153 | 12876–12881 | R5 missing-usage success records and unknown-cost truth | passed behavior | _record_tokens now persists success when provider metadata is absent/None; additive usage_available=false and null estimated cost distinguish unknown from free. Errors without metadata also mark unknown. Existing token counters/reported OR cost unchanged; same response object returned. RED 5 failures/4 passes; focused GREEN 9 passed, old provider contract 21/21, full offline 1986 passed/15 skipped/1 xfailed exit 0. | verified | SRS updated. Full R5 still open for correlation, lifecycle/route and rollout proof; no live provider calls/customer sends. |
 | A-154 | 12882–12890 | R0 lossless typed-context product JSON compaction | passed behavior | Replaced pretty-print product JSON with compact separators in existing context_text owner; no facts/identities/cards/evidence removed. Six roundtrip/safety/nonmutation tests across three brand/type fixtures and one/ten cards RED→GREEN. Ten-card context bytes 7234→5683, 7224→5673, 7264→5713 (~21%); conservative estimates only, not provider tokens. Updated ordinal tests to decoded JSON identity→ordinal assertions. Full offline 1992 passed/15 skipped/1 xfailed exit 0; SRS updated. | verified | R0 live cost/latency/quality and S1 remain open. Local protected bot endpoint HTTP401, needs authenticated runner configuration; spend this round zero. R5 cross-TS work/UI still blocked on local-doc ignore filter; R4 waits external owner. |
+| A-155 | 12891–12898 | S3 historical coverage batch frozen 241–781 | pending/deferred work | Frozen SHA/size/lines matched and active prefix matched before work. Read exact frozen 241–781 and indexed F-014..F-022 with historical evidence vs unverified live/answer/manual limits distinguished; source text unchanged. Identified missing coverage-table rows for existing A-132..145, to confirm against raw source before adding. | verified | Batch indexing only, not S3 completion; frozen 782–8624 and active gaps still open, independent review pending, coverage partial. No provider/DB/customer operations. |

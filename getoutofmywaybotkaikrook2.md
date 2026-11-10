@@ -12888,3 +12888,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - fixture measurement (ไม่ใช่ provider truth): 1-card context bytes 2274→2118, 2273→2117, 2277→2121; 10-card 7234→5683, 7224→5673, 7264→5713 (~21%); conservative estimated tokens 2412→1895 / 2408→1891 / 2422→1905
 - regression: full offline แรก 4 failed เพราะ ordinal tests ผูก indentation; เปลี่ยนเป็น JSON roundtrip item_id→need_indices assertion (คงพฤติกรรม/เข้มกว่า substring) แล้ว full offline 1992 passed/15 skipped/1 xfailed exit 0; SRS อัปเดต
 - S1 auth blocker: GET local bot /openapi.json HTTP401 (ไม่เรียก provider); ต้อง authenticated config ผ่าน environment ที่อนุญาตก่อน live QA; รอบนี้ provider spend=0, R0 live before/after/cost/latency/quality ยังไม่ปิด
+
+## S3 historical semantic coverage — กำลังจะทำ
+- Frozen 8624 lines/892284 bytes/SHA ตรง; active 12890 lines/2464473 bytes/SHA ตรง prefix ledger; working tree clean ก่อน append
+- แผน: อ่าน raw exact ranges ที่ gap แล้ว index invariant/passed/unverified/pending ตามหลักฐานเดิม; ไม่ rerun ทุก historical test และไม่อ้าง full audit จน union ครบ+independent review
+- อ่าน ledger ปัจจุบันทั้ง sections แล้วพบ coverage-table ยังไม่ได้รวม A-132..145 แม้ entries มีอยู่; ต้องเติมหลังอ่าน source range จริง และคง exceptions/overclaims เป็น historical limitations ไม่ rewrite raw
+- ผ่านแล้วเฉพาะ batch: อ่าน frozen 241–781 จริงแล้วเพิ่ม F-014..F-022 + coverage/gap table; แยก historical unit/build proof ออกจาก live/answer/manual pending; ไม่เปลี่ยน raw frozen หรือ production
+- พบข้อจำกัดประวัติ: prompt connector sufficiency ไม่ใช่ deterministic proof, MI17→ultrasonic false match, wattage-only full-speed overclaim, dashboard predicted latency/30-day response stats ไม่ใช่ full-range measurement — ledger ไม่รับรองเป็น product truth
+- งานค้าง S3: frozen 782–8624, active gaps เดิมและ coverage-table A-132..145, independent review; coverage คง partial ไม่อ้างปิด S3; ไม่มี provider/DB/customer operations
