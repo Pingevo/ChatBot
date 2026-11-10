@@ -12732,3 +12732,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - retention: cleanup_generations keep = active+previous+3 daily+2 weekly (build_kind จาก generation_runs)
 - verify: py_compile ×3, tsc --noEmit OK, carry test 27,155 rows re-stamp gid ผ่าน
 - ค้าง: cron install (แยกอนุมัติ), live endpoint test บน uvicorn จริง, deploy sync gen เข้า exports_data volume
+
+## [ผ่านแล้ว] /generations UI v2 — header schedule + expandable detail + per-gen rollback 2026-11-10
+- page: header 3 ใบ (active / next build 09:00 จันทร์=weekly / last build start→เสร็จ), building ETA จาก overall%, empty state + cat
+- RunCard expand → RunDetail: files+size, manifest counts, build_log tail; rollback ปุ่มต่อ gen ที่ published/previous
+- app.py: detail endpoint +files+manifest+pointer; list +previous; rollback รับ gid → re-publish ไป gen นั้น (re-validate ก่อน CAS); ไม่มี partial rollback (bundle contract)
+- verify: py_compile + tsc --noEmit OK

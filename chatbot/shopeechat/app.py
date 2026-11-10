@@ -5793,7 +5793,10 @@ def admin_generations_list(status: str = "", limit: int = 20) -> dict:
     for r in rows:
         r["_id"] = str(r["_id"])
     ptr = adb["sellable_units_meta"].find_one({"_id": "active"}) or {}
-    return JSONResponse({"active": ptr.get("generation_id"), "runs": rows})
+    return JSONResponse({"active": ptr.get("generation_id"),
+                         "previous": (ptr.get("previous") or {})
+                         .get("generation_id"),
+                         "runs": rows})
 
 
 @app.get("/admin/generations/{gid}")
@@ -5804,12 +5807,29 @@ def admin_generation_detail(gid: str) -> dict:
     if not run:
         raise HTTPException(status_code=404, detail=f"no generation_runs {gid}")
     run["_id"] = str(run["_id"])
-    log_path = _EXPORTS_ROOT / "gen" / gid / "build_log.jsonl"
+    gen_dir = _EXPORTS_ROOT / "gen" / gid
+    log_path = gen_dir / "build_log.jsonl"
     log_tail: list[dict] = []
     if log_path.exists():
         lines = log_path.read_text(encoding="utf-8").splitlines()[-50:]
         log_tail = [json.loads(l) for l in lines if l.strip()]
-    return JSONResponse({"run": run, "build_log_tail": log_tail})
+    files = [{"name": p.name, "size": p.stat().st_size}
+             for p in sorted(gen_dir.iterdir()) if p.is_file()] \
+        if gen_dir.is_dir() else []
+    manifest = None
+    mpath = gen_dir / "manifest.json"
+    if mpath.exists():
+        try:
+            manifest = json.loads(mpath.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = None
+    ptr = adb["sellable_units_meta"].find_one({"_id": "active"}) or {}
+    return JSONResponse({"run": run, "build_log_tail": log_tail,
+                         "files": files, "manifest": manifest,
+                         "pointer_active": ptr.get("generation_id"),
+                         "pointer_previous":
+                             (ptr.get("previous") or {})
+                             .get("generation_id")})
 
 
 @app.post("/admin/generations/publish")
@@ -5850,10 +5870,22 @@ def admin_generation_discard(request: Request, gid: str) -> dict:
 
 
 @app.post("/admin/generations/rollback")
-def admin_generation_rollback(request: Request) -> dict:
-    """CAS กลับไป previous (pointer.previous ฝัง snapshot ไว้แล้ว)."""
+def admin_generation_rollback(request: Request, gid: str = "") -> dict:
+    """rollback: gid ระบุ → CAS กลับไป gen นั้น (re-validate ก่อน —
+    ไม่มี gid → pointer.previous เดิม). partial rollback ไม่รองรับ —
+    artifact เป็น bundle สลับทั้งชุดเท่านั้น"""
     from .scripts import publish_generation as pg
     adb = knowledge_base._admin_db()
+    if gid:
+        gen_dir = _EXPORTS_ROOT / "gen" / gid
+        if not gen_dir.is_dir():
+            raise HTTPException(status_code=404,
+                                detail=f"gen dir {gid} ไม่มีอยู่ (rollback ไม่ได้)")
+        res = pg.publish(adb, gen_dir, gid, expected_current="auto",
+                         exports_root=_EXPORTS_ROOT,
+                         require_description=True)
+        return JSONResponse({"result": res, "to": gid,
+                             "by": _admin_name(request)})
     active = (adb["sellable_units_meta"].find_one({"_id": "active"}) or {}
               ).get("generation_id")
     res = pg.rollback(adb, expected_active=active or "")
