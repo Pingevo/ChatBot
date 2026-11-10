@@ -12787,3 +12787,14 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - เขียน chatbot/testscript/dedupe_conversations.py — dry-run default, canonical=freshness+_id tiebreak, losers→conversations_shp_dup_archive (ไม่ลบ = rollback ได้), CAS re-read ก่อนเขียน, --apply ต้อง --token APPLY-DEDUPE; verify dry-run+ordering unit check ผ่าน
 - BLOCKED ตาม plan §Stage0: รอ external Sellcenter writer ระบุ repo/owner แก้ upsert ก่อน — cleanup เร็วกว่านั้นมีแต่เสี่ยง dup ใหม่เกิดซ้ำ
 - unique index conversation_id สร้างได้หลัง dedup เสร็จ (ตอนนี้ E11000)
+
+## R5 — stats range contract fix (กำลังทำ)
+- เจอ: dashboard ตีความ daily=วันนี้ (ถูกตาม picker "วันนี้") แต่ live/admin-activity/performance ตีความ daily=rolling 7 วัน → label โกหก
+- custom range ส่งไม่มี range → default daily → labels 7 วันล่าสุดคู่ bounds custom (ผิด)
+- Mongo $group ใน admin-activity/performance ใช้ UTC fields ไม่ใช่ Asia/Bangkok (dashboard ใช้ถูก) → day-edge คลาด
+- แผน: statsRange.ts canonical (daily=today, weekly=7d, monthly, yearly, all, custom=local-midnight) + statsSeries derive slots จาก bounds (ไม่ใช่ชื่อ range) + routes ใช้ helper เดียว + pages default preset→weekly + keyOf grain-aware + timezone Bangkok ใน $group
+- ผ่านแล้ว: statsRange.ts canonical — parseStatsRange(daily=วันนี้/weekly=7d/monthly/yearly/all/custom=local-midnight) + statsSeries(slots derive จาก bounds, ≤62d→day, >62d→month, all→data-years) + statsBucketId/statsAggKey (Bangkok tz) + statsRangeLabel/statsCompareLabel
+- routes: live/admin-activity/performance/dashboard ใช้ helper เดียว — ลบ getBounds ซ้ำ 4 จุด; admin-activity/performance chart slots+keyOf+bucket grain-driven (custom range ไม่หลุด year-bucket อีก)
+- pages: live/admin-activity/performance default preset daily→weekly (แสดง 7 วันเหมือนเดิม แต่ label "7 วันล่าสุด" ตรงจริง); daily="วันนี้" ทำงานถูกแล้วทุกหน้า
+- verify: test-stats-range.ts 22/22 + tsc clean
+- งานค้าง R5: verify analytics numbers vs Mongo source, end-to-end trace turn/import/approval ใน observability

@@ -1,6 +1,6 @@
 // GET /api/stats/admin-activity — "การทำงานของแอดมิน" — Zaapi-style overview
 // Phase 4: ใช้ MongoDB aggregation สด
-// Query: range = daily (default) | monthly | yearly | all
+// Query: range = daily | weekly (default page) | monthly | yearly | all | custom dates
 import { NextRequest } from "next/server";
 import { requirePageAccess } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
@@ -9,24 +9,11 @@ import { auth } from "@/backend/service/authService";
 import { shopService } from "@/backend/service/shopService";
 import { computeResponseStats } from "@/backend/lib/responseStats";
 
-function getBounds(range: string): { start: Date | null; end: Date | null } {
-  const now = new Date();
-  if (range === "all") return { start: null, end: null };
-  if (range === "monthly") {
-    return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now };
-  }
-  if (range === "yearly") {
-    return { start: new Date(now.getFullYear(), 0, 1), end: now };
-  }
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - 6);
-  return { start, end: now };
-}
+import {
+  parseStatsRange, statsSeries,
+  statsRangeLabel, statsCompareLabel,
+} from "@/backend/lib/statsRange";
 
-function fmtDay(d: Date): string {
-  return d.toLocaleDateString("th-TH", { day: "2-digit", month: "short" });
-}
 
 export async function GET(req: NextRequest) {
   const r = await requirePageAccess(req, "analytics");
@@ -37,18 +24,9 @@ export async function GET(req: NextRequest) {
   const customStart = url.searchParams.get("start_date");
   const customEnd = url.searchParams.get("end_date");
 
-  let weekStart: Date | null;
-  let weekEnd: Date | null;
-  if (customStart) {
-    const [_sy,_sm,_sd]=customStart.split('-').map(Number);
-    weekStart = new Date(_sy,_sm-1,_sd,0,0,0,0);
-    const [_ey,_em,_ed]=customEnd?customEnd.split('-').map(Number):[_sy,_sm,_sd];
-    weekEnd = new Date(_ey,_em-1,_ed,23,59,59,999);
-  } else {
-    const bounds = getBounds(range);
-    weekStart = bounds.start;
-    weekEnd = bounds.end;
-  }
+  const { start: weekStart, end: weekEnd } =
+    parseStatsRange(range, customStart, customEnd);
+  const series = statsSeries(range, weekStart, weekEnd);
 
   const convColl = await getCollection(COLLECTIONS.conversations);
   const msgColl = await getCollection(COLLECTIONS.messages);
@@ -60,26 +38,14 @@ export async function GET(req: NextRequest) {
 
   const adminMap = new Map(admins.map((a) => [a.admin_id, a]));
 
-  // dayLabels ตาม range
-  let dayLabels: string[] = [];
-  if (range === "daily") {
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setHours(0, 0, 0, 0);
-      d.setDate(d.getDate() - i);
-      dayLabels.push(d.toLocaleDateString("th-TH", { weekday: "short" }));
-    }
-  } else if (range === "monthly") {
-    const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
-    for (let i = 1; i <= daysInMonth; i++) dayLabels.push(String(i));
-  } else if (range === "yearly") {
-    dayLabels = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
-  } else {
+  // chart slots derive จาก bounds — all → data-driven years
+  let slots = series.slots;
+  if (!slots.length) {
     const yearsAgg = await convColl.aggregate<{ _id: number }>([
-      { $group: { _id: { $year: "$created_at" } } },
+      { $group: { _id: { $year: { date: "$created_at", timezone: "Asia/Bangkok" } } } },
       { $sort: { _id: 1 } },
     ]).toArray();
-    dayLabels = yearsAgg.map((y) => `${y._id + 543}`);
+    slots = yearsAgg.map((y) => ({ key: `${y._id}`, label: `${y._id + 543}` }));
   }
 
   const dateFilter = (field: string) => {
@@ -140,44 +106,18 @@ export async function GET(req: NextRequest) {
     .slice(0, 10)
     .map(([id]) => id);
 
-  // 2. Conversations by admin per day — bucket ใน JS จาก in-range dates ของ meta owner
-  const conversationsByAdminPerDay: Record<string, unknown>[] = dayLabels.map((date) => ({ date }));
+  // 2. Conversations by admin per slot — bucket ใน JS จาก in-range dates ของ meta owner
+  const conversationsByAdminPerDay: Record<string, unknown>[] = slots.map((s) => ({ date: s.label }));
   for (const adminId of topAdminIds) {
     const name = adminMap.get(adminId)?.name || adminId;
     const map = new Map<string, number>();
     for (const d of perOwner.get(adminId)?.dates || []) {
-      const key = range === "daily"
-        ? `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
-        : range === "monthly"
-        ? `${d.getDate()}`
-        : range === "yearly"
-        ? `${d.getMonth() + 1}`
-        : `${d.getFullYear()}`;
+      const key = series.keyOf(d);
       map.set(key, (map.get(key) || 0) + 1);
     }
-    if (range === "daily") {
-      for (let i = 6; i >= 0; i--) {
-        const d = new Date();
-        d.setHours(0, 0, 0, 0);
-        d.setDate(d.getDate() - i);
-        const idx = 6 - i;
-        conversationsByAdminPerDay[idx][name] = map.get(`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`) || 0;
-      }
-    } else if (range === "monthly") {
-      const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
-      for (let i = 1; i <= daysInMonth; i++) {
-        conversationsByAdminPerDay[i - 1][name] = map.get(`${i}`) || 0;
-      }
-    } else if (range === "yearly") {
-      for (let i = 1; i <= 12; i++) {
-        conversationsByAdminPerDay[i - 1][name] = map.get(`${i}`) || 0;
-      }
-    } else {
-      dayLabels.forEach((label, idx) => {
-        const year = parseInt(label) - 543;
-        conversationsByAdminPerDay[idx][name] = map.get(`${year}`) || 0;
-      });
-    }
+    slots.forEach((s, idx) => {
+      conversationsByAdminPerDay[idx][name] = map.get(s.key) || 0;
+    });
   }
 
   // 3. Individual performance — ⚡ parallel aggregation + ใช้ helper แทน $lookup ต่อ admin
@@ -234,26 +174,14 @@ export async function GET(req: NextRequest) {
   ]);
   // overallConv / overallClosed — จาก Promise.all ข้างบน (countDocuments + meta-closed agg)
 
-  // date_range_label ตาม range
-  let dateRangeLabel = "";
-  if (range === "daily") {
-    const start7 = new Date();
-    start7.setDate(start7.getDate() - 6);
-    dateRangeLabel = `${fmtDay(start7)} - ${fmtDay(new Date())}, ${new Date().getFullYear() + 543}`;
-  } else if (range === "monthly") {
-    dateRangeLabel = new Date().toLocaleDateString("th-TH", { month: "long", year: "numeric" });
-  } else if (range === "yearly") {
-    dateRangeLabel = `${new Date().getFullYear() + 543}`;
-  } else {
-    dateRangeLabel = "ทั้งหมด";
-  }
+  const dateRangeLabel = statsRangeLabel(range, weekStart, weekEnd, slots.length);
 
   return json({
     has_real_data: overallConv > 0 || totalConversations > 0,
     range,
     connected_shops: shops.length,
     date_range_label: dateRangeLabel,
-    compare_label: range === "daily" ? "7 วันที่แล้ว" : range === "monthly" ? "เดือนที่แล้ว" : range === "yearly" ? "ปีที่แล้ว" : "ทั้งหมด",
+    compare_label: statsCompareLabel(range),
     // overall stats (แม้ไม่มี assigned admins ก็แสดง)
     overall: {
       total_conversations: overallConv,

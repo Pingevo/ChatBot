@@ -30,7 +30,7 @@ export default function AdminActivityPage() {
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<DateRangeValue>({
-    preset: "daily",
+    preset: "weekly",
     startDate: null,
     endDate: null,
   });

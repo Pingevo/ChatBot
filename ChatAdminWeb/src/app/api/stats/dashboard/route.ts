@@ -6,6 +6,7 @@ import { requirePageAccess } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { computeResponseStats } from "@/backend/lib/responseStats";
+import { parseStatsRange } from "@/backend/lib/statsRange";
 
 // ⚡ ป้องกัน Next.js cache — ต้องดึงข้อมูลสดทุกครั้ง
 export const dynamic = "force-dynamic";
@@ -17,26 +18,6 @@ interface CacheEntry { data: unknown; ts: number; }
 const cache = new Map<string, CacheEntry>();
 const CACHE_TTL_MS = 60_000; // 60 วินาที
 
-function getBounds(range: string): { start: Date | null; end: Date | null } {
-  const now = new Date();
-  if (range === "all") return { start: null, end: null };
-  if (range === "weekly") {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    start.setDate(start.getDate() - 6);
-    return { start, end: now };
-  }
-  if (range === "monthly") {
-    return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now };
-  }
-  if (range === "yearly") {
-    return { start: new Date(now.getFullYear(), 0, 1), end: now };
-  }
-  // daily — วันนี้ 00:00 ถึง ตอนนี้
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  return { start, end: now };
-}
 
 export async function GET(req: NextRequest) {
   const r = await requirePageAccess(req, "dashboard");
@@ -54,26 +35,8 @@ export async function GET(req: NextRequest) {
     return json(cached.data);
   }
 
-  // ถ้ามี custom date ให้ใช้แทน range
-  // ⚡ สร้าง Date จาก "YYYY-MM-DD" โดยตรง ไม่ใช้ new Date(string) เพราะมัน parse เป็น UTC midnight
-  // แล้ว setHours ใช้ local timezone → ผิด 1 วันใน timezone +7
-  let start: Date | null;
-  let end: Date | null;
-  if (customStart) {
-    // parse "YYYY-MM-DD" → local date 00:00
-    const [sy, sm, sd] = customStart.split("-").map(Number);
-    start = new Date(sy, sm - 1, sd, 0, 0, 0, 0);
-    if (customEnd) {
-      const [ey, em, ed] = customEnd.split("-").map(Number);
-      end = new Date(ey, em - 1, ed, 23, 59, 59, 999);
-    } else {
-      end = new Date(sy, sm - 1, sd, 23, 59, 59, 999);
-    }
-  } else {
-    const bounds = getBounds(range);
-    start = bounds.start;
-    end = bounds.end;
-  }
+  // custom date + range bounds — canonical parser เดียวกับ stats routes ทุกตัว
+  const { start, end } = parseStatsRange(range, customStart, customEnd);
 
   // ⚡ debug log — เช็คว่า range ส่งมาถูกไหม + ช่วงเวลาที่คำนวณ
   console.log(`[dashboard] range=${range} customStart=${customStart || "-"} start=${start?.toISOString()} end=${end?.toISOString()}`);

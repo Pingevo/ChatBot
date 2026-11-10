@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12789 |
-| active_integrity_prefix_sha256 | `540c9f2c531710f17e7818c5a4a501a2c280d5bc6ab9cb08a237724e05476ccf` |
+| active_integrity_prefix_lines | 12800 |
+| active_integrity_prefix_sha256 | `b607a73b8a565c668829c9b348ee0a991bfa506583ea1c56040d54178f7c13be` |
 | active_line_count_at_baseline | 12789 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R4 census + dedupe tooling |
+| active_integrity_recorded_at | 2026-11-10 (+0700), R5 stats range contract fix |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -374,3 +374,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-138 | 12767–12774 | R0: ai_usage enrich + modular into answer_typed / 2026-11-10 | passed behavior | ai_usage gains path label, elapsed_ms, _ai_call_ctx turn correlation (shop/conv_id/platform/request_id set at _chat_impl — covers all engines/nested). answer_typed uses build_core_b_typed (kinds from task.tasks; flag off = byte-identical TYPED_SYSTEM_INSTRUCTION). Found prompt_modular=True already live (config_key doc). Section split verified complete (27,711 chars = CORE_B). | verified |
 | A-139 | 12775–12781 | R0 A/B replay measurement / 2026-11-10 | verified measurement | 12 real customer messages ×2 modes via local /chat (24 real Gemini calls, disclosed). intent 4,692 tok med, typed 14-20k, general 1,720; latency 1.7s/3.4s/2.8s. Modular: system 27,299→25,191 est (-7.7%), typed call 20,804→17,106 (-17.8%). Context 4.9-9.7k = next biggest block (retrieval-bound, untouched). QA gate passed both modes; flag restored True. Pending: production traffic accumulation for cost/day + p95. | verified |
 | A-140 | 12782–12789 | R4 census update + dedupe tooling / 2026-11-10 | pending/deferred work | conversations_shp 883 dup groups/1,165 extra (grew from 731 — writer still inserting, 62 in Nov); messages_shp 1,318/1,323 (quiet since Oct); shadow_replies real dups only 366 same-batch groups (3,554 = designed regenerations). New chatbot/testscript/dedupe_conversations.py: dry-run default, freshness+_id canonical, archive-not-delete, CAS re-read, --token APPLY-DEDUPE gate. BLOCKED on external Sellcenter writer fix (plan Stage 0) then unique index. | verified (dry-run + unit check) |
+| A-141 | 12790–12800 | R5 stats range contract / 2026-11-10 | passed behavior | Found: dashboard daily=today (correct per picker "วันนี้") but live/admin-activity/performance daily=rolling-7d (label lied); custom range fell into year-bucket (rangeToParams sends no range); UTC $group vs dashboard's Asia/Bangkok. Fix: new backend/lib/statsRange.ts — parseStatsRange + statsSeries (bounds-derived slots: ≤62d→day, >62d→month, all→data-years; monthly/yearly full-period) + statsBucketId/statsAggKey (Bangkok tz) + label helpers. All 4 routes share helper; duplicated getBounds/custom-parse removed; analytics pages default preset→weekly (same 7d view, honest label). | verified | test-stats-range 22/22 + tsc clean. Pending: numbers-vs-source reconciliation, end-to-end observability trace. |
