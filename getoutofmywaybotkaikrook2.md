@@ -12929,3 +12929,38 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - หลักฐานจำกัด: compile/typecheck/unit/live replay ตามที่ raw log ระบุ; หลาย manual/browser/deploy/live-compare ยัง pending; repeated history ไม่ใช่ independent verification; stock-field conflict เดิมยังไม่ตัดสิน
 - integrity: frozen 8624 lines / 892284 bytes / sha256 a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341 ยังตรง; active prefix เดิม 12921 ไม่ถูกแก้ย้อนหลัง; batch นี้ append-only
 - งานค้าง: active semantic gaps + A-132..145 coverage-table confirmation + independent review; coverage ยัง partial; ไม่มี provider/DB/customer operations ไม่แตะ R4
+
+## S3 active-gap indexing batch 1 — กำลังจะทำ
+- อ่าน/index active getoutofmywaybotkaikrook2.md gap 1–594 (ก่อน covered range แรก 595–683)
+- ไม่แก้ raw active/frozen/production; เก็บ exact ranges + evidence limits; coverage ยัง partial
+- หลังจบ: สรุปเข้า ledger + coverage table + เลื่อน integrity prefix ตาม protocol
+
+## R5 — closeout work (กำลังจะทำ)
+- เป้าหมาย: ปิด R5 (Logging and Analytics Truth) — เหลือ request_id propagation เข้า shadow chain + route/lifecycle reconcile ใน probe + nested-button fix (ZaapiKbPanel); rollout verification ผ่านแล้วบน live data (enriched fields ครบ 63 provider/status/attempt/key_ref + 118 request_id/conv_id docs)
+- tail ก่อนหน้า: entry 12932–12936 (S3 batch-1 announce ไม่มี closeout) สรุปเข้า ledger เป็น A-160 historical-unverified; gap 1–594 ยังไม่ได้ index
+- ห้ามเปลี่ยน behavior ตอบลูกค้า/routing/quota/review logic; field ใหม่เป็น additive optional เท่านั้น
+
+## R5 closeout — ผ่านแล้ว (2026-11-10)
+
+### แก้อะไร
+- request_id propagation (gap เดียวที่เหลือจริง): Python `chat()` stamp `resp.request_id` จาก `_ai_call_ctx` หลัง `guards.enforce` → ครอบทุก engine/return path จุดเดียว; `callBot` map เข้า `BotCallResponse`; stamp ลง shadow doc ครบ 4 path — `storeBotReply` (worker/trigger), `storeWorkflowDelivered` (ผ่าน `DeliveredMessage.request_id` จาก `let_ai_respond`), `generateShadowReply` + `generateConversationShadowReplies` (manual)
+- probe-observability-trace +section 7: per-bubble lifecycle reconcile — decided bubble ↔ review_op, mock_sent ↔ mock_send (events ใน botworker_events ไม่ใช่ admin_logs)
+- nested button ZaapiKbPanel: ย้าย shop-peek ออกมาเป็น sibling (commit 85f91ae)
+- test-stats-reconcile: null-coalesce ตาม parseStatsRange signature (commit b6ce672)
+
+### verify
+- `.venv/bin/pytest docs/test/offline/test_ai_usage_attempts.py` — 10/10 (เพิ่ม test chat() stamp request_id)
+- `npx tsc --noEmit` — clean
+- `npx tsx scripts/test-botworker-boundary.ts` — 22/22 (E7b assert workflow doc, E7c ใหม่ assert worker doc)
+- `npx tsx scripts/test-stats-reconcile.ts` — 10/10 (mongo==js==naive ทุก range/grain)
+- `npx tsx scripts/probe-observability-trace.ts` (live, read-only) — run clean; latest doc เป็น manual gen เก่า (ก่อน deploy) → req match=0 ตามคาด
+- live census: ai_usage enriched — path/request_id/conv_id/elapsed_ms=120, provider/status/attempt/key_ref/usage_available=63, error=33; review_op=4, mock_send=1 ใน botworker_events (id pattern `mocksend:<reply>:<bubble>:<part>`)
+
+### งานค้าง/ข้อจำกัด
+- shadow docs เก่าไม่มี request_id (additive field — เริ่มมีเมื่อ Next.js ฝั่งใหม่ประมวลผล turn ใหม่); ai_usage เก่าก็ไม่มี enriched fields เช่นกัน
+- route reconciliation บน live ยังเป็น sample-level (review_op=4/mock_send=1 ตรงกัน); per-bubble reconcile จะพิสูจน์เต็มเมื่อมี decided draft ใหม่
+- ยังไม่มี browser/manual verification ของ shadow inbox UI
+- coverage: partial ตามเดิม; active gap 1–594 ยังไม่ index (A-160 announce-only)
+
+### commits
+- 85f91ae nested-button fix · b6ce672 stats-reconcile sig fix · c9f4004 request_id propagation + tests + SRS · 447d106 probe reconcile

@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12931 |
-| active_integrity_prefix_sha256 | `09ec4674d9ef7087bba8b546bfbcdf9cecbdb7f8c6b273de4dc949139dce959d` |
-| active_line_count_at_baseline | 12931 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), S3 frozen 1–8624 indexed; semantic coverage remains partial |
+| active_integrity_prefix_lines | 12966 |
+| active_integrity_prefix_sha256 | `ff5becb0454e6df75d8927f23af68894e49b27cf63b63352a7b5d8402fe43847` |
+| active_line_count_at_baseline | 12966 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), R5 closed (A-161/A-162); semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -199,6 +199,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12904–12909 | read + indexed (A-157) |
 | 12910–12921 | read + indexed (A-158) |
 | 12922–12931 | read + indexed (A-159) |
+| 12932–12936 | read + indexed (A-160) |
+| 12937–12966 | read + indexed (A-161, A-162) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -477,3 +479,6 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-157 | 12904–12909 | S3 frozen 1224–3021 indexing | pending/deferred work | Read exact source range, added F-031..F-044, separated repeated history from independent evidence and flagged compile-only, predicted-throughput, warranty-default and rollout-vs-test limitations. Frozen checksum unchanged; raw active append only. | verified | Batch indexing only; frozen 3022–8624, active gaps/A-132..145 coverage-table and independent review pending; coverage partial, no provider/DB/customer operations. |
 | A-158 | 12910–12921 | S3 frozen 3022–3976 indexing | pending/deferred work | Exact source indexed F-045..F-058; separated workflow compile/unit from live/browser proof, proposals from implementation, v3 mocks from real handoff smoke, result fallback provenance and conflicting historical stock-field claims. Frozen size/lines/SHA matched; prior active committed prefix matched and active diff append-only; diff check passed. | verified | Batch indexing only, not S3 closure; frozen3977–8624, active gaps/A-132..145 table and independent review pending. Docs-only, zero mechanism delta, no provider/DB/customer operations; R4 unchanged. |
 | A-159 | 12922–12931 | S3 frozen 3977–8624 indexing + batch closeout | pending/deferred work | Read exact frozen tail and indexed F-059..F-079; frozen coverage now 1–8624 but still requires independent review plus active gaps before complete. Preserved repeated-history vs independent-evidence distinction, compile/typecheck vs live/manual limits, and prior stock-field conflict. Frozen 8624 lines/892284 bytes/SHA matched; active append-only, prior prefix untouched, diff-check clean. | verified | Batch indexing only, not S3 closure; active semantic gaps and independent review pending, coverage partial. Docs-only, zero mechanism delta, no provider/DB/customer operations; R4 unchanged. |
+| A-160 | 12932–12936 | S3 active-gap indexing batch 1 announced, no closeout / 2026-11-10 | pending/deferred work | Pre-work marker only: announced reading/indexing active gap 1–594 (before covered range 595–683); no "ผ่านแล้ว" closeout appended and §5 still lists 1–594 uncovered → prior session interrupted before ledger step; whether the read/index was performed is not recorded. | historical-unverified | Gap 1–594 remains uncovered in §5; resume or re-announce before indexing it. |
+| A-161 | 12937–12942 | R5 closeout pre-work announce / 2026-11-10 | decision/approval | Scope declared: request_id propagation into shadow chain + probe lifecycle reconcile + ZaapiKbPanel nested button; additive optional fields only, no customer-answer/routing/quota/review behavior change; noted A-160 orphan and unindexed gap 1–594. | verified | Plan executed at A-162; commits 85f91ae/b6ce672/c9f4004/447d106. |
+| A-162 | 12943–12966 | R5 closeout / 2026-11-10 | passed behavior | **request_id propagation:** `chat()` stamps `ChatResponse.request_id` from `_ai_call_ctx` post-enforce (all engines/paths); `callBot`→`BotCallResponse`; stamped on shadow docs in `storeBotReply`, `storeWorkflowDelivered` (via `DeliveredMessage.request_id`), `generateShadowReply`, `generateConversationShadowReplies`. **Probe +§7:** per-bubble reconcile decided↔`review_op`, `mock_sent`↔`mock_send` (botworker_events). **UI:** nested `<button>` moved to sibling (85f91ae). **Verify:** pytest 10/10 (new chat-stamp test), tsc clean, boundary 22/22 (E7b workflow doc + new E7c worker doc), stats-reconcile 10/10 live Mongo, probe runs clean on live. **Live census:** ai_usage enriched path/request_id/conv_id/elapsed_ms=120, provider/status/attempt/key_ref/usage_available=63, error=33; review_op=4, mock_send=1. | verified | Limits recorded: old shadow docs/ai_usage lack new fields (additive); live reconcile is sample-level until new decided drafts; no browser/manual UI verify; coverage remains partial; gap 1–594 still unindexed. |
