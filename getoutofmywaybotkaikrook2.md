@@ -12859,3 +12859,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แผน: คง canonical TS unique index assertion; scope source scan ที่ conversation_products/warranty_flow; เพิ่ม create_index tripwire ใน claim fake collection เพื่อให้ behavioral lifecycle/race tests จับ request-time DDL; ไม่แก้ production หรือ index จริง
 - ผ่านแล้ว: full offline forward และ reversed execution อย่างละ 1975 passed/15 skipped/1 xfailed exit 0; focused reversed file-import order 191 passed เดิม; warnings 12 เดิม (dependency deprecations/anchor return-bool) ไม่ใช่ failure
 - S2 ปิด: dotenv alias/import path isolation พร้อม executable regression; production delta=0; runtime tripwire เพิ่มใน test double เท่านั้น
+
+## S7 quota reload — กำลังจะทำ
+- ตรวจจริง: llm default quota file=exports/.gemini_quota.json; process 89354 uvicorn :8010 ไม่มี --reload; Uvicorn FileFilter(default reload_dirs=chatbot) reject quota json/tmp ทั้ง exports และ old source location, accept llm.py
+- แผน: เพิ่ม offline executable regression ที่เรียก _save_quota_day กับ temp file หลายครั้ง + FileFilter จริง; ไม่แตะ quota จริง/process/live config; ไม่มี production patch หากไม่พบ churn
+- ผ่านแล้ว: test_quota_reload 2 passed exit 0 — repeated atomic saves ค่าถูกต้อง/no tmp เหลือ; real filter reject quota json/tmp แม้เพิ่ม *.json include (hidden-file exclude คง); source py ยัง reload ได้
+- S7 ปิดสำหรับ current default/runtime: ไม่พบ quota-driven reload; production delta=0; ห้ามขยายเป็นการรับรอง custom watcher ทุกแบบ
