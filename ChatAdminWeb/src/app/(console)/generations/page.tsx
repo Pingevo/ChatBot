@@ -13,6 +13,7 @@ import { useToastError, toast } from "@/components/ui/Toast";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
 import { BuildProgressCat } from "@/components/generations/BuildProgressCat";
+import { GenTracks } from "@/components/generations/GenTracks";
 
 const API = "/chatbot/shopee/admin/generations";
 const STEP_ORDER = [
@@ -302,6 +303,8 @@ export default function GenerationsPage() {
           </div>
         </div>
       </div>
+      <GenTracks runs={runs} active={active} />
+      <div className="mt-3" />
       {loading ? <Loading /> : (
         <div className="space-y-3">
           {runs.length === 0 && (
