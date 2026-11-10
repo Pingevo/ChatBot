@@ -5737,6 +5737,20 @@ def zaapi_kb_export(file: str):
                  f"attachment; filename*=UTF-8''{quote(file)}"})
 
 
+@app.post("/zaapi-kb/files/toggle")
+def zaapi_kb_file_toggle(request: Request, file: str,
+                       enabled: bool = True) -> dict:
+    """enable/disable ไฟล์เดียว — swap active_*↔disabled_* ใน registry
+    (rows คงอยู่ restore ได้ทันที; ไม่แตะไฟล์อื่น)."""
+    from . import kb_zaapi_files as _zkf
+    try:
+        return JSONResponse(_zkf.set_file_enabled(
+            knowledge_base._admin_db(), filename=file,
+            enabled=enabled, admin=_admin_name(request)))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get("/zaapi-kb/files")
 def zaapi_kb_files_list() -> dict:
     """registry + live counts — readiness/visibility สำหรับ Zaapi KB tab."""

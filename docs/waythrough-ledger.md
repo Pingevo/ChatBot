@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12661 |
-| active_integrity_prefix_sha256 | `28744536bc1289f8010f9d0b97ad668649be867bb72e8c08151b72a92cc7c91d` |
-| active_line_count_at_baseline | 12661 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), kb-mapping platform-grouped shop list |
+| active_integrity_prefix_lines | 12693 |
+| active_integrity_prefix_sha256 | `ebaccee85da90369546dd33c08928db4cae97289383eb422aa6e7293f10d209f` |
+| active_line_count_at_baseline | 12693 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), zaapi-kb toggle + file stats + import UI |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -175,6 +175,9 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12635–12647 | read + indexed (A-123, A-124) |
 | 12648–12654 | read + indexed (A-125) |
 | 12655–12661 | read + indexed (A-126) |
+| 12662–12674 | read + indexed (A-127) |
+| 12675–12679 | read + indexed (A-128) |
+| 12680–12693 | read + indexed (A-129) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -352,6 +355,9 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-121 | 12607–12618 | R4 identity-contract investigation / 2026-11-10 | decision/approval | Manual regeneration intentionally retains distinct batches; global inbound unique index conflicts with writer contract. Worker retries use deterministic _id; scoped legacy worker repeats 215 groups/2,418 excess. Archive 9,528 refs point to different inbound; archive invisible to active readers. Proposed fix: retire global index declaration, preserve native worker idempotency and manual history, approve explicit recovery IDs separately. | verified | Code/DB reads verified; exact historical archive algorithm unknown. No production changes/DB writes; proposed fix and recovery not executed. R1 log done 27,155 but artifact validation pending. |
 | A-122 | 12619–12634 | R4 global-index code fix / 2026-11-10 | passed behavior | User approved code only: remove one global inbound unique declaration, preserving native deterministic worker _id. New actual-ensureIndexes/manual-generation regression RED E11000→GREEN 4 checks; worker idempotency 71, batch isolation 22, review 35 and tsc all exit 0. R1 description artifact validated (27155,1024), finite/unique chunks/gid matched, still misnamed. | verified | Working tree only, no commit/deploy/DB mutation. Archive recovery/legacy cleanup and R1 artifact correction/product build/publish remain pending. No runtime mechanisms/dependencies added. |
 | A-124 | 12635–12647 | parallel KB mapping multi-select note / 2026-11-10 | passed behavior | Parallel-appended log entry อธิบายงานเดียวกับ A-123 (mapping page shop/platform chips + API platforms=[] support); renumbered จาก A-123 เพราะ id ชน | historical-unverified | superseded-by: A-123 — duplicate coverage ของงานเดียวกัน |
-| A-125 | 12648–12654 | parallel session: R4 historical recovery dry-run plan / 2026-11-10 | pending/deferred work | Parallel agent pre-work block: R4 code fix committed b878acd; แผน read-only census + full-doc recovery dry-run (strip เฉพาะ _archived_*/_dup_group_keep), pin source digest, no destructive cleanup; R1 report: ไม่มี build process, ไม่มี product-level export/manifest — ห้ามอ้าง R1 complete | historical-unverified | งานของ parallel session — owner ต้องปิด closeout เอง |
+| A-125 | 12648–12654 | R4 historical recovery dry-run plan / 2026-11-10 | pending/deferred work | Pre-work: R4 code fix b878acd; read-only recovery dry-run and separate exact-operation approval. Full-document network transfer stopped read-only due latency; server-side audit used instead. Source digest was NOT established. R1 has no current build process. | verified | Completed recovery evidence in A-127; legacy rows preserved, no broad dedup claim. |
 | A-126 | 12655–12661 | kb-mapping platform-grouped shop checkboxes / 2026-11-10 | passed behavior | Rev A-123: GET mapping คืน shops=[{name,platform}] (projection+dedupe แทน distinct); shop cell = checkbox list แยกหัวข้อ platform โผล่เฉพาะ platform ที่เลือก (platform ว่าง → บอกให้เลือกก่อน); accounts เก็บ shopname เดิม; tsc exit 0 | verified | manual UI test ยังไม่ได้ทำ; protocol exception — entry รวม pre+post เพราะ parallel tail แทรก |
 | A-123 | 12635–12647 | zaapi-kb-mapping multi-select shop+platform / 2026-11-10 | passed behavior | Mapping page: shop จาก single-select → chip multi-select (ว่าง=ทุกร้าน warning เดิม) + คอลัมน์ platform chips ใหม่ (shopee/lazada/tiktok/facebook/line official, ว่าง=ทุก platform, draft default shopee); POST mapping รับ platforms:[] = ทุก platform ตาม `_scope_ok` — default `["shopee"]` เหลือเฉพาะ field ไม่ถูกส่ง; schema doc เดิม saved docs อ่านได้ | verified | tsc --noEmit exit 0; manual UI test ยังไม่ได้ทำ; ยังไม่ commit |
+| A-127 | 12662–12674 | R4 approved additive archive recovery / 2026-11-10 | passed behavior | User explicitly approved $merge of all 30,933 originals with keepExisting/insert, removing only 3 archive metadata fields from copies. Counts/range preconditions passed; active 8,057→38,990, archive unchanged 30,933. Server lookup/all-field comparison: found 30,933/30,933 and exact originals 30,933/30,933; shadow_reply_id duplicate groups=0. Code fix committed b878acd. | verified | Approved code+history recovery complete, not full legacy dedup. No delete/active overwrite/index/config/send/deploy. Archive retained as backup (not independent corpus); R1 still missing actual product build/artifact corrections/completeness validation/publish/cron. Bookkeeping initially held for review; parallel mapping commits now isolated, so recovery-only log/ledger diff can be committed separately. |
+| A-128 | 12675–12679 | parallel session: R1 generation prep steps 1-4 plan / 2026-11-10 | pending/deferred work | User approved R1 steps 1-4 only (rename mislabeled description npz, export snapshot → gen dir, import sellable_units/image_texts per-gid, OCR nonsellable); NOT approved: product_embeddings build, publish/CAS pointer, cron. Preconditions: live pointer g20261024 untouched, per-gid collections absent | historical-unverified | Parallel session owner must close out; no result recorded in this range |
+| A-129 | 12680–12693 | zaapi-kb per-file toggle + stats + import platform-first UI / 2026-11-10 | passed behavior | `set_file_enabled` swap active_*↔disabled_* + CAS + audit; `list_files` +disabled/sheets[]/type_counts (rev fallback disabled_*); `export_file` fallback disabled rev (แก้ 404); POST /zaapi-kb/files/toggle + Next proxy; UI badge ปิดอยู่ + ToggleSwitch + meta stats + จำนวนร้าน click-to-reveal; import modal platform chips → grouped shop checkboxes; toast แสดง error detail | verified | pytest test_zaapi_kb_files 52/52 (incl. test_toggle_file_enabled ใหม่), py_compile+tsc OK; manual UI + สาเหตุ import preview 400 จริงยังไม่ verify (toast จะแสดง detail) |

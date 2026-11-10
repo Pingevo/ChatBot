@@ -432,15 +432,41 @@ def sweep_expired(db) -> dict:
 
 
 def list_files(db) -> list[dict]:
-    """registry + live row counts สำหรับ UI/status."""
+    """registry + live row counts + sheets/type breakdown สำหรับ UI/status.
+    stats = aggregate เดียว group ตาม (file,rev,apply,type) ครอบทุกไฟล์ —
+    key ตาม active triple; ไฟล์ disabled → stats ของ rev ที่ปิดอยู่."""
+    stats: dict = {}
+    try:
+        for g in db[_COLL].aggregate([
+            {"$match": {"file_rev": {"$exists": True}}},
+            {"$group": {"_id": {"f": "$source_file", "r": "$file_rev",
+                                "a": "$apply_id", "t": "$content_type"},
+                        "n": {"$sum": 1},
+                        "sheets": {"$addToSet": "$sheet"}}},
+        ]):
+            k = (g["_id"]["f"], g["_id"]["r"], g["_id"]["a"])
+            s = stats.setdefault(k, {"sheets": set(), "type_counts": {}})
+            s["sheets"].update(x for x in g["sheets"] if x)
+            t = g["_id"]["t"] or "untyped"
+            s["type_counts"][t] = s["type_counts"].get(t, 0) + g["n"]
+    except Exception:
+        stats = {}
     out = []
     for d in db[_FILES_COLL].find({}).sort("_id", 1):
         rev = d.get("active_rev") or 0
+        apply_id = d.get("active_apply")
+        if not rev:
+            rev = d.get("disabled_rev") or 0
+            apply_id = d.get("disabled_apply")
         filt: dict = {"source_file": d["_id"], "file_rev": rev}
-        if d.get("active_apply"):
-            filt["apply_id"] = d["active_apply"]
+        if apply_id:
+            filt["apply_id"] = apply_id
+        st = stats.get((d["_id"], rev, apply_id), {})
         out.append({
-            "file": d["_id"], "active_rev": rev,
+            "file": d["_id"], "active_rev": d.get("active_rev") or 0,
+            "disabled": bool(d.get("disabled_rev")),
+            "sheets": sorted(st.get("sheets") or ()),
+            "type_counts": st.get("type_counts") or {},
             "prev_rev": d.get("prev_rev"),
             "content_type": d.get("content_type"),
             "sheet_types": d.get("sheet_types") or {},
@@ -455,17 +481,54 @@ def list_files(db) -> list[dict]:
     return out
 
 
+def set_file_enabled(db, *, filename: str, enabled: bool,
+                     admin: str = "") -> dict:
+    """toggle visibility ต่อไฟล์: disable = ย้าย active_rev/active_apply →
+    disabled_rev/disabled_apply (rows คงอยู่ restore ได้), enable = ย้ายกลับ.
+    CAS บน rev ที่อ่าน (matched=0 → registry เปลี่ยนกลางทาง → retry);
+    สถานะตรงเป้าอยู่แล้ว → ok unchanged; log op=toggle ลง import log.
+    กระทบเฉพาะ registry doc ไฟล์นี้ — rows และไฟล์อื่นไม่แตะ."""
+    fn = _valid_filename(filename)
+    files = db[_FILES_COLL]
+    reg = files.find_one({"_id": fn})
+    if not reg:
+        raise ValueError(f"unknown file: {fn}")
+    src, dst = (("active", "disabled") if not enabled
+                else ("disabled", "active"))
+    rev = reg.get(f"{src}_rev")
+    if reg.get(f"{dst}_rev"):
+        return {"ok": True, "file": fn, "enabled": bool(enabled),
+                "rev": reg[f"{dst}_rev"], "unchanged": True}
+    if not rev:
+        raise ValueError(f"file has no {src} revision: {fn}")
+    apply_id = reg.get(f"{src}_apply")
+    res = files.update_one(
+        {"_id": fn, f"{src}_rev": rev},
+        {"$set": {f"{dst}_rev": rev, f"{dst}_apply": apply_id,
+                  "updated_at": _utcnow()},
+         "$unset": {f"{src}_rev": "", f"{src}_apply": ""}})
+    if res.matched_count == 0:
+        raise ValueError("registry changed concurrently — retry")
+    _log(db, {"op": "toggle", "file": fn, "rev_to": rev,
+              "status": "ok", "admin": admin, "enabled": bool(enabled)})
+    return {"ok": True, "file": fn, "enabled": bool(enabled), "rev": rev}
+
+
 def export_file(db, *, filename: str) -> bytes | None:
     """active revision rows → file bytes — .txt คืน text verbatim,
     .xlsx คืน workbook (ค่า verbatim; re-import ชื่อเดิม = replace)."""
     fn = _valid_filename(filename)
     reg = db[_FILES_COLL].find_one({"_id": fn}) or {}
     rev = reg.get("active_rev")
+    apply_id = reg.get("active_apply")
+    if not rev:  # disabled file → export revision ที่ถูกปิดอยู่แทน
+        rev = reg.get("disabled_rev")
+        apply_id = reg.get("disabled_apply")
     if not rev:
         return None
     filt: dict = {"source_file": fn, "file_rev": rev}
-    if reg.get("active_apply"):
-        filt["apply_id"] = reg["active_apply"]
+    if apply_id:
+        filt["apply_id"] = apply_id
     rows = list(db[_COLL].find(filt).sort(
         [("sheet", 1), ("row_index", 1)]))
     if not rows:
