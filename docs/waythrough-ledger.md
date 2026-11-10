@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12898 |
-| active_integrity_prefix_sha256 | `d30de0b802a0d7e446a157fb12bd30b67928addeb3bf49baa574667f7e81bf6f` |
-| active_line_count_at_baseline | 12898 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), S3 frozen 241–781 indexed; semantic coverage remains partial |
+| active_integrity_prefix_lines | 12903 |
+| active_integrity_prefix_sha256 | `afb1f6d6d4da8c602e0723773da2f8b3d24a5ff130f8c91220f464417e4cc003` |
+| active_line_count_at_baseline | 12903 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), S3 frozen 782–1223 indexed; semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -46,7 +46,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | --- | --- |
 | 1–240 | read + indexed (ส่วนที่ 6: F-001..F-013) |
 | 241–781 | read + indexed (F-014..F-022) |
-| 782–8624 | ไม่ได้ index (gap) |
+| 782–1223 | read + indexed (F-023..F-030) |
+| 1224–8624 | ไม่ได้ index (gap) |
 
 ## 5. Active semantic coverage ranges
 
@@ -191,11 +192,12 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12876–12881 | read + indexed (A-153) |
 | 12882–12890 | read + indexed (A-154) |
 | 12891–12898 | read + indexed (A-155) |
+| 12899–12903 | read + indexed (A-156) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
 
-F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–781); A-xxx = active `getoutofmywaybotkaikrook2.md` — exact ranges ในคอลัมน์ `lines` (A-001..A-019 ครอบหลายช่วง) — ช่วงบรรทัดตรวจกับต้นฉบับแล้ว
+F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–1223); A-xxx = active `getoutofmywaybotkaikrook2.md` — exact ranges ในคอลัมน์ `lines` (A-001..A-019 ครอบหลายช่วง) — ช่วงบรรทัดตรวจกับต้นฉบับแล้ว
 
 | id | lines | task / date | category | summary | status | superseded-by / note |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -221,6 +223,14 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–781);
 | F-020 | 471–588 | Admin counts/dashboard/shadow history / 2026-09-10..11 | regression lock | Team counts moved from 5000-row in-memory cap to DB counts; dashboard activity uses last_message_timestamp, response stats capped 30 days with cache. Shadow history fetches selected conversation replies, cursor-paginates conversations, disables history/trash polling to avoid lost pages; bot context cards hidden visually but retained in DB. | historical-unverified | Builds/typechecks recorded; predicted latency and limited-period response metrics are not full-range accuracy evidence. |
 | F-021 | 589–723 | Catalog availability, device specs and stock / 2026-09-10 | invariant | Historical decision: retain unavailable products for factual answers; no selling during claim/problem, no invented stock. Exact anchors preserved through tiering. Device-target lookup detached from intent and queried protocol/specs. Shopee stock source changed from seller-inclusive summary to summed shopee_stock (9 mocks +16 regression). | historical-unverified | Source includes real replays but MI17→ultrasonic mismatch and wattage-only full-speed claim are historical limitations, not validated product truth. No authorization to enable web search now. |
 | F-022 | 724–781 | Subtype/dedupe consolidation / 2026-09-16 | regression lock | Eight subtype-resolution callsites consolidated with anchor→explicit strong override→intent→message→history priority; fourteen text-detection sites retained; three dedup blocks consolidated. Compile, 16 regression and ten edge cases recorded. | historical-unverified | Real end-to-end multi-shop replay explicitly pending. |
+| F-023 | 782–826 | Legacy fallback consolidation / 2026-09-09..15 | regression lock | Replaced direct search answer with extract→catalog requery→LLM answer; delayed no-product guard until search opportunity and retained unavailable facts. Shared nested _web_search_reanswer removes duplicate branches but device-spec injection remains separate. Compile +16 regression recorded, live replay explicitly pending. | historical-unverified | Historical fallback design does not authorize web search now; subtype precedence cleanup deferred in source. |
+| F-024 | 827–843 | Mi17 stock/subtype/device-spec attempt / 2026-09-14 | failed/rejected approach | Earlier attempt enabled availability filtering for recommendation/compat, fenced hybrid-anchor subtype and added device lookup/URL stripping. Compile +16 regressions recorded; actual pingevox replay pending. | historical-unverified | Availability filtering conflicts with later retain-all-factual-evidence decision (F-021/F-023); chronology is non-monotonic. |
+| F-025 | 844–892 | Rich-media parity + inbox pagination / 2026-09-08..10 | regression lock | toBotText/toBotImages used by test/live replay and history; item/order placeholders converted and product cards batch-resolved. Inbox filters before pagination, unanswered map page-scoped, head+tail polling preserves loaded pages; status-conversation indexes declared. | historical-unverified | Typecheck only; rich-media/manual pagination/assignment cases and index-creation restart explicitly pending. |
+| F-026 | 893–986 | Annotation batches, permissions and replay isolation / 2026-09-07 | invariant | Polling must preserve selected batch. Annotation uniqueness becomes batch-aware with legacy partial index; replay saves insert distinct replay_batch_id, manual shadow generates distinct generation_batch_id, ratings/annotations/details target selected batch. Page-role read/edit/none matrix and guards defined; admin-result grouping includes admin+batch. | historical-unverified | Recorded typecheck is not permission/security/manual proof; index migration required restart. Distinct manual batches are intended history, not duplicates to purge. |
+| F-027 | 987–1044 | Review-history/KPI + admin display / 2026-09-05..07 | pending/deferred work | Per-admin replay/shadow history and soft deletion, manual-only KPI excluding worker; audit replayed_by/generated_by. Admin display dedupes by id but prefers name. | historical-unverified | KPI/restructure lacks executable evidence in range; InfoTab typecheck only. |
+| F-028 | 1045–1102 | Follow-up identity, image-claim cascade and MagSafe / 2026-09-12 | regression lock | Name fallback introduced when vector/ref-digit path loses prior product; image placeholder handling and bounded warranty-history scan address image-only accidental claim. Prompt-only image/MagSafe edits preceded state-machine root-cause correction. | historical-unverified | Compile/reload only; no answer-quality proof. Magnetic attachment is not wireless charging; historical semantic additions are not approval for new keyword rules. |
+| F-029 | 1103–1147 | Ticket/worker state separation + old replies / 2026-09-12 | invariant | Tickets own real status_conversation/reopen, worker reads real assignment but writes test_status_conversation source=botworker; history retains old reply versions per inbound rather than only latest. | historical-unverified | Typecheck only; real reopen/no-interference/manual old-version evidence absent. |
+| F-030 | 1148–1223 | Worker display/history/mode / 2026-09-12 | invariant | Worker bot history merges user messages with own shadow replies, excludes Zaapi/admin; display separately merges user/Zaapi/own bot in three colors. mode standalone/shadowbot/ticket is separate from origin worker/manual/workflow and stamped in direct/workflow persistence. | historical-unverified | Typecheck only. Display data and model history have deliberately different authority; ticket mode described as future. |
 | A-001 | 10823–10832 | waythrough protocol correction 2026-11-03 | decision/approval | ผู้ใช้อนุมัติเปลี่ยนกฎข้อ 8 เป็น ledger + incremental tail; แยก integrity prefix ออกจาก semantic coverage; docs only | verified | — |
 | A-002 | 595–683 | Phase 4A/4B design 2026-10-19 | invariant | generation precedent: `exports/gen/<gid>` + `sellable_units_g<gid>` + pointer `sellable_units_meta{_id:"active"}` fenced CAS (bootstrap `$exists:false`, previous embedded = rollback target), manifest finalize+verify ก่อน CAS, verify-ก่อน-replace, `image_texts_g<gid>` per-gen published vs shared cache, grace 24h cleanup, fail-closed ห้าม fallback base coll; request snapshot resolve 1×/request | verified | — |
 | A-003 | 6490–6569 | Phase 7 R1–R3 evidence boundary | invariant | closed emit `_EVIDENCE_OUT_FIELDS`; `_EVIDENCE_TEXT_KEYS` precedence → `payload["text"]`; `_EVIDENCE_RECORD_BYTES` bound + byte-boundary cut + `evidence_truncated:*`/`record_too_large`; `request_id` attribution ก่อน compile ถูกลบออกจาก final; kinds closed รวม `"kb"`; compile owner เดียว | verified | — |
@@ -338,7 +348,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–781);
 
 ## 7. Known semantic coverage gaps
 
-- frozen 782–8624 ยังไม่ได้ index; 241–781 อ่านและสรุปเป็น F-014..F-022 แล้ว (ไม่ได้ rerun historical tests)
+- frozen 1224–8624 ยังไม่ได้ index; 241–1223 อ่านและสรุปเป็น F-014..F-030 แล้ว (ไม่ได้ rerun historical tests)
 - active gap ที่ยังไม่ได้ index: 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 — targeted coverage เท่านั้น ห้ามอ้าง full audit
 - Q14 / order (F-006, F-007) ระดับ answer ไม่ verify เพราะ provider 429
 - ไม่ใช้ `/tmp/p4ledger/ledger.md` (ไม่ได้ตรวจ checksum/ต้นฉบับ)
@@ -409,3 +419,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-153 | 12876–12881 | R5 missing-usage success records and unknown-cost truth | passed behavior | _record_tokens now persists success when provider metadata is absent/None; additive usage_available=false and null estimated cost distinguish unknown from free. Errors without metadata also mark unknown. Existing token counters/reported OR cost unchanged; same response object returned. RED 5 failures/4 passes; focused GREEN 9 passed, old provider contract 21/21, full offline 1986 passed/15 skipped/1 xfailed exit 0. | verified | SRS updated. Full R5 still open for correlation, lifecycle/route and rollout proof; no live provider calls/customer sends. |
 | A-154 | 12882–12890 | R0 lossless typed-context product JSON compaction | passed behavior | Replaced pretty-print product JSON with compact separators in existing context_text owner; no facts/identities/cards/evidence removed. Six roundtrip/safety/nonmutation tests across three brand/type fixtures and one/ten cards RED→GREEN. Ten-card context bytes 7234→5683, 7224→5673, 7264→5713 (~21%); conservative estimates only, not provider tokens. Updated ordinal tests to decoded JSON identity→ordinal assertions. Full offline 1992 passed/15 skipped/1 xfailed exit 0; SRS updated. | verified | R0 live cost/latency/quality and S1 remain open. Local protected bot endpoint HTTP401, needs authenticated runner configuration; spend this round zero. R5 cross-TS work/UI still blocked on local-doc ignore filter; R4 waits external owner. |
 | A-155 | 12891–12898 | S3 historical coverage batch frozen 241–781 | pending/deferred work | Frozen SHA/size/lines matched and active prefix matched before work. Read exact frozen 241–781 and indexed F-014..F-022 with historical evidence vs unverified live/answer/manual limits distinguished; source text unchanged. Identified missing coverage-table rows for existing A-132..145, to confirm against raw source before adding. | verified | Batch indexing only, not S3 completion; frozen 782–8624 and active gaps still open, independent review pending, coverage partial. No provider/DB/customer operations. |
+| A-156 | 12899–12903 | S3 historical coverage batch frozen 782–1223 | pending/deferred work | Read exact range and indexed F-023..F-030: fallback consolidation, rich-media/page/batch identity, per-role guards, image-claim root cause, real/test status separation, and distinct model-history/display authority. Historical typechecks/compile do not prove manual/security/answer behavior. | verified | Batch indexing only; frozen 1224–8624 and active gaps still open, independent review pending, coverage partial. No production/raw-frozen/provider/DB/customer changes. |

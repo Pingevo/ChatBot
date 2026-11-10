@@ -12896,3 +12896,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ผ่านแล้วเฉพาะ batch: อ่าน frozen 241–781 จริงแล้วเพิ่ม F-014..F-022 + coverage/gap table; แยก historical unit/build proof ออกจาก live/answer/manual pending; ไม่เปลี่ยน raw frozen หรือ production
 - พบข้อจำกัดประวัติ: prompt connector sufficiency ไม่ใช่ deterministic proof, MI17→ultrasonic false match, wattage-only full-speed overclaim, dashboard predicted latency/30-day response stats ไม่ใช่ full-range measurement — ledger ไม่รับรองเป็น product truth
 - งานค้าง S3: frozen 782–8624, active gaps เดิมและ coverage-table A-132..145, independent review; coverage คง partial ไม่อ้างปิด S3; ไม่มี provider/DB/customer operations
+
+## S3 historical coverage batch 2 — กำลังจะทำ
+- อ่าน/index frozen ต่อจาก 782 แบบ exact ranges; ไม่แก้ raw history, ไม่เปลี่ยน production; แยก historical proof ออกจาก pending/overclaims เหมือน batch 1; coverage ยัง partial
+- ผ่านแล้วเฉพาะ batch: อ่าน 782–1223 จริงและ index F-023..F-030; legacy fallback/unit-vs-live limits, rich-message/page/batch identity, role guards, worker-history vs display authority และ real-vs-test status separation; manual batches ต้องเก็บเป็นประวัติไม่ purge
+- งานค้าง: frozen 1224–8624 + active gaps + independent review; ไม่อ้างปิด S3; raw frozen ไม่เปลี่ยน ไม่มี provider/DB/customer calls
