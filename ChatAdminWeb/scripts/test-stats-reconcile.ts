@@ -35,7 +35,7 @@ const CASES: Case[] = [
 async function main() {
   let pass = 0;
   for (const c of CASES) {
-    const { start, end } = parseStatsRange(c.range, c.start, c.end);
+    const { start, end } = parseStatsRange(c.range, c.start ?? null, c.end ?? null);
     const series = statsSeries(c.range, start, end);
     const coll = await getCollection(c.coll);
 
