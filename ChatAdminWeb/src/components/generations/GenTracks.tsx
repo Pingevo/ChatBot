@@ -7,7 +7,7 @@ import { PixelCat } from "./BuildProgressCat";
 type Run = {
   _id: string; build_kind?: string; status: string;
   current_step?: string;
-  steps?: Record<string, { status: string; percent?: number | null }>;
+  steps?: Record<string, { status: string; percent?: number | null } | null>;
 };
 
 const SLOT_ORDER = 9; // จำนวน step ใน pipeline (สำหรับ overall%)
@@ -28,7 +28,7 @@ function overall(run: Run): number {
   const keys = Object.keys(steps);
   if (!keys.length) return 0;
   return Math.round(keys.reduce((a, s) =>
-    a + (steps[s].status === "done" ? 100 : (steps[s].percent ?? 0)), 0)
+    a + (steps[s]?.status === "done" ? 100 : (steps[s]?.percent ?? 0)), 0)
     / SLOT_ORDER);
 }
 
