@@ -12919,3 +12919,13 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - historical stock contract ขัดกัน: F-021 ใช้ shopee_stock เลี่ยง seller-inclusive summary แต่ 3811–3845 กลับใช้ summary_info; เก็บทั้งสองและไม่ตัดสิน current truth จากประวัติ/วันที่อย่างเดียว
 - Verify: git diff --check exit0, frozen8624 lines/892284 bytes/SHA a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341 ตรง; committed active prefix12909 SHA7010f6ce66a0b8c2d84111daf88cd7659d86a350d683eb1e522a6faf39a70864 ตรงและ diff active เป็น append-only
 - งานค้าง: frozen3977–8624 + active gaps/A-132..145 coverage table + independent review; coverage partial; docs-only mechanism delta helpers/guards/regex/keywords/owners=0; ไม่มี provider/DB/customer operations ไม่แตะ R4
+
+## S3 historical coverage batch 5 — กำลังจะทำ
+- อ่าน/index frozen ต่อจาก 3977; ไม่แก้ raw history/production; เก็บ exact ranges และ historical evidence limits; coverage ยัง partial
+
+## S3 historical coverage batch 5 — ผ่านแล้ว
+- อ่าน/index frozen 3977–8624 ครบ: F-059..F-063 (3977–5156) + F-064..F-079 (5157–8624); frozen coverage ตอนนี้ 1–8624 แต่ยังต้อง independent review + active gaps จึงไม่ใช่ complete
+- เนื้อหาหลักที่เพิ่ม: admin-chat-result/detail/ZMI context-loss fixes, chat_v2 pipeline + warranty_flow + use_v2/chat_engine, repo/docker/test reorg, Phase6 intent-first live verify, Phase7 anchor compare, Phase8 QA-pairs/context limit + admin llm_context_limit, warranty delivery-date, _available_for_sale, replay 500 hardening, cushion-back keyword, shadow SSE, TISI มอก., live-assignment close fix, device-spec KB path, UX/security rounds, product-type audits, order item anchor + return/refund handoff, link/vision/compat/address/p23 fixes, app.py refactor extraction, replay/unit tests, KB QA wiring/TTL/npz reload/refresh_data, quota/LLM config/roles//llm UI/OpenRouter/AES, sellable-first ranking/live stock/compat gate/suggestion compare, image_texts resume
+- หลักฐานจำกัด: compile/typecheck/unit/live replay ตามที่ raw log ระบุ; หลาย manual/browser/deploy/live-compare ยัง pending; repeated history ไม่ใช่ independent verification; stock-field conflict เดิมยังไม่ตัดสิน
+- integrity: frozen 8624 lines / 892284 bytes / sha256 a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341 ยังตรง; active prefix เดิม 12921 ไม่ถูกแก้ย้อนหลัง; batch นี้ append-only
+- งานค้าง: active semantic gaps + A-132..145 coverage-table confirmation + independent review; coverage ยัง partial; ไม่มี provider/DB/customer operations ไม่แตะ R4
