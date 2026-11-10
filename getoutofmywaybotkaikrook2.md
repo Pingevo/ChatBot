@@ -12810,3 +12810,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - S8 cleanup: ลบ dead fields — DocLike.inbound_message_ids/batch_id (ไม่มีผู้อ่านใน reviewService) + response field review_admin_id (ไม่มี consumer)
 - verify: test-botworker-boundary เพิ่ม E7b (RED→GREEN) 21/21 + tsc clean (stale incremental cache เคยทำ error ค้าง — rm tsconfig.tsbuildinfo)
 - ผลกระทบเคสอื่น: send_message/send_card/stay_retry ไม่มี products → field absent เหมือนเดิม; storeBotReply path ปกติไม่แตะ
+
+## R5 — numeric reconcile + end-to-end observability trace (ผ่านแล้ว)
+- เขียน scripts/test-stats-reconcile.ts (read-only): ต่อทุกเคส naive countDocuments(bounds) == Mongo $group bucket sum == JS keyOf sum และทุก doc ลง slot (lost=0)
+- ผลจริงบน prod data: 10/10 — conv.created_at daily(148)/weekly(1637)/monthly(2397)/yearly(155682)/all(158747)/custom(1734), conv.last_msg_ts weekly(2308)/daily(348), msg.created_ts weekly(17957)/monthly(25912) — grain/slots/Bangkok-tz ตรงกันทั้ง 2 paths
+- เขียน scripts/probe-observability-trace.ts: turn ล่าสุด (conv shp_98777118463033313) — inbound found, botworker_events=10, admin_logs=0 (pending review ถูกต้อง), mock_sent=0; chain ไม่ขาดสำหรับ pending turn
+- ai_usage schema coexist ยืนยันใน DB: 87 docs = 55 เก่า + 32 enriched (path/conv_id/request_id/elapsed_ms); provider/status/attempt/key_ref จะมีหลัง prod bot restart (code verify แล้ว test 21/21)
+- admin_logs field จริง = action_type/timestamp (probe รอบแรกใช้ action/created_at ผิด → undefined ทั้งหมด); vocabulary 43 ประเภทครบ bot.*/shadow_reply.*/workflow.*/config.*/zaapi_kb.*/assignment.*/user.*/login
+- งานค้าง R5: ai_usage enriched rollout หลัง deploy; bot.buffer_flush volume สูง (35,813 events) — ไม่ใช่ขาด แต่ noise ถ้าจะทำ dashboard feed ควร aggregate
