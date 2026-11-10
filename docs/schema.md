@@ -345,7 +345,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | conversationService, หลาย route, Python `replay_compare.py`, `docs/test/find_qa_conversations.py` | `/admin/conversations`, `/botworker/conversations`, `/shadow-inbox/conversations`, `/test-assignment` |
+| Read | conversationService, หลาย route, Python `replay_compare.py`, `docs/test/tools/find_qa_conversations.py` | `/admin/conversations`, `/botworker/conversations`, `/shadow-inbox/conversations`, `/test-assignment` |
 | Write (create) | createConversation, findOrCreateConversation | `bot-handoff`, data writer ภายนอก |
 | Update (internal) | touchLastMessage, resetUnread | messageService.addMessage |
 | Update (close/reopen) | closeConversation, reopenConversation → delegate ไป statusConversationService | `/conversations/[id]/close`, `/conversations/[id]/reopen` |
@@ -1107,7 +1107,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 
 **Access:**
 | Read | getTestAssignment, listTestAssignments, listHistoryByAdmin, listReplayBatches, stats, liveAssignmentService, adminKpiService | `/test-assignment`, `/live-assignment`, `/admin-chat-result`, `/stats` |
-| Write/Update | saveReplayResult (insertOne), rateMessage, rateConversation, `docs/test/push_unit_reg_to_admin.py` (unit regression results, `replayed_by=unit_reg_*`) | `/test-assignment` POST, script |
+| Write/Update | saveReplayResult (insertOne), rateMessage, rateConversation, `docs/test/tools/push_unit_reg_to_admin.py` (unit regression results, `replayed_by=unit_reg_*`) | `/test-assignment` POST, script |
 | Soft delete | softDelete, restore | `/test-assignment` POST |
 
 **หน้าที่เข้าถึง:** `/test-assignment`, `/replay-compare`, `/live-assignment`, `/admin-chat-result`
@@ -1765,6 +1765,11 @@ Task 3/4 canonical artifacts — **ไม่ถูก runtime อ่าน** (fi
 | `exports/image_texts.jsonl` | `scripts/build_image_texts.py` (Gemini vision batch) | `import_image_texts.py` → Mongo |
 | `exports/typo_dict.json` | `scripts/build_typo_dict.py` (คำจริงจาก catalog) | `route_context.py` `normalize_message` |
 | `device_specs_data.py` | curated module (ไม่ใช่ไฟล์ data — เป็น dict `DEVICE_SPECS` ในโค้ด) | `device_compat.py` (compatibility engine) |
+| `exports/gen/` | R1 generation dirs (per-gid `sellable_units_*`/`image_texts_*` + pointer) | active pipeline — ห้ามลบ |
+| `exports/zaapi_kb_gen/` | Zaapi KB generation artifacts | active |
+| `exports/logs/` | log เก่า (uvicorn_*, image_texts_run_*, rebuild_*, refresh_*) | **ไม่ใช้แล้ว** — เก็บเป็นประวัติ (exports/ ทั้งโฟลเดอร์ gitignored) |
+
+> ทุก npz/jsonl เป็น **derived artifacts** — สร้างใหม่ได้จาก source; `product_embeddings.npz` เคยถูกเรียกผิดว่า description embeddings (ดู `docs/plans/active/2026-11-09-r1-phase4b-refresh-runbook.md`)
 
 ---
 
@@ -1862,4 +1867,4 @@ Task 3/4 canonical artifacts — **ไม่ถูก runtime อ่าน** (fi
 | `docs/adminbase/script/import_adminbase.py` | import `kb_products`/`kb_qa`/`kb_raw` จาก `docs/adminbase/*.xlsx` |
 | `chatbot/frontendScript/replay_compare.py` | replay engine — อ่าน `conversations_shp`/`messages_shp`/`triggers`/`ShpProducts` |
 | `chatbot/testscript/shadow_openrouter.py` | shadow test — เขียน `test_chat_sessions` (source=script_test) |
-| `docs/test/push_unit_reg_to_admin.py` | เขียน `test_assignment` (unit regression) |
+| `docs/test/tools/push_unit_reg_to_admin.py` | เขียน `test_assignment` (unit regression) |

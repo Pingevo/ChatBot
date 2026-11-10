@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12707 |
-| active_integrity_prefix_sha256 | `afdebb39d634301317ed1648b10f0a374622b5d6d0fae3995c9f0a27fbe0a2c6` |
-| active_line_count_at_baseline | 12707 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), docs restructure commit |
+| active_integrity_prefix_lines | 12717 |
+| active_integrity_prefix_sha256 | `4dc0fcbe30d3d42807d79465036bbc2da3eaec2fa1257b33ee215871143791ec` |
+| active_line_count_at_baseline | 12717 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), docs/plans+test reorganization |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -179,6 +179,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12675–12679 | read + indexed (A-128) |
 | 12680–12693 | read + indexed (A-129) |
 | 12694–12707 | read + indexed (A-130) |
+| 12708–12717 | read + indexed (A-131) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -363,3 +364,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-128 | 12675–12679 | parallel session: R1 generation prep steps 1-4 plan / 2026-11-10 | pending/deferred work | User approved R1 steps 1-4 only (rename mislabeled description npz, export snapshot → gen dir, import sellable_units/image_texts per-gid, OCR nonsellable); NOT approved: product_embeddings build, publish/CAS pointer, cron. Preconditions: live pointer g20261024 untouched, per-gid collections absent | historical-unverified | Parallel session owner must close out; no result recorded in this range |
 | A-129 | 12680–12693 | zaapi-kb per-file toggle + stats + import platform-first UI / 2026-11-10 | passed behavior | `set_file_enabled` swap active_*↔disabled_* + CAS + audit; `list_files` +disabled/sheets[]/type_counts (rev fallback disabled_*); `export_file` fallback disabled rev (แก้ 404); POST /zaapi-kb/files/toggle + Next proxy; UI badge ปิดอยู่ + ToggleSwitch + meta stats + จำนวนร้าน click-to-reveal; import modal platform chips → grouped shop checkboxes; toast แสดง error detail | verified | pytest test_zaapi_kb_files 52/52 (incl. test_toggle_file_enabled ใหม่), py_compile+tsc OK; manual UI + สาเหตุ import preview 400 จริงยังไม่ verify (toast จะแสดง detail) |
 | A-130 | 12694–12707 | docs restructure + cancelled stale-comment task / 2026-11-10 | decision/approval | New docs: pool-and-mainflow.md (pool/switch/simple functions), system-workflow.md (end-to-end flow), waythrough-README.md (3-layer log system). Updated schema.md (workflow version collections §2.35, zaapi_kb §5.10-5.14, §1.2 table), SRS_SSD.md (§6.40 prompt_sections.py), function and process.md (doc pointers). Comment-cleanup request cancelled by user before any code change — zero code edits. Docs work missed pre-work append; recorded retroactively in same range | verified | docs-only commit; no code changed; coverage remains partial |
+| A-131 | 12708–12717 | docs/plans+test+exports reorganization / 2026-11-10 | passed behavior | plans → active/(17)/archive/(22)+README; test → live/(32)/offline/(84)/tools/(30)+README, conftest +3 sys.path, parents[2]→[3] patch 105 files, script-style sys.exit → check_*.py ×4; exports logs → exports/logs/; schema.md §7 used/unused; refs updated AGENTS/SRS/plans (ledger+superpowers plans ไม่แตะ history) | verified | pytest docs/test collect 2624/0 errors (pre-existing collection breakage fixed by reorg); test semantics ไม่เปลี่ยน — path anchors only |
