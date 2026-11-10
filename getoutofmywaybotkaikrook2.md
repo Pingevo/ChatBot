@@ -12853,3 +12853,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - RED: fresh-process canary import ใช้ docs/test path เดิมแทน live และ subprocess ไม่ติด dotenv boundary ของ conftest (มี KEYS log จึงมีความเสี่ยงเปิด env โดย import)
 - แผน: ชี้ live directory; suppress dotenv และ block network ก่อน production imports ใน subprocess; ไม่รัน canary/provider, คง assertion before/after bindings เดิม; fix เฉพาะ offline test
 - ผ่านแล้ว: canary retry/import/seam tests 9 passed exit 0; subprocess ไม่อ่าน env และ network tripwire armed; production delta=0
+
+## S2 claim index contract scope — กำลังจะทำ
+- RED: claim unique-index test scan ทุก Python module แล้วชน KB apply_import index ที่คนละ collection/owner; claim state runtime ยังต้องห้าม DDL เช่นเดิม
+- แผน: คง canonical TS unique index assertion; scope source scan ที่ conversation_products/warranty_flow; เพิ่ม create_index tripwire ใน claim fake collection เพื่อให้ behavioral lifecycle/race tests จับ request-time DDL; ไม่แก้ production หรือ index จริง
+- ผ่านแล้ว: full offline forward และ reversed execution อย่างละ 1975 passed/15 skipped/1 xfailed exit 0; focused reversed file-import order 191 passed เดิม; warnings 12 เดิม (dependency deprecations/anchor return-bool) ไม่ใช่ failure
+- S2 ปิด: dotenv alias/import path isolation พร้อม executable regression; production delta=0; runtime tripwire เพิ่มใน test double เท่านั้น

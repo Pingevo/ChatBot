@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12855 |
-| active_integrity_prefix_sha256 | `cc98036a0083d422f5847d8b1778b24bb0caf33c7b9d57d2ccb054069fb997ba` |
-| active_line_count_at_baseline | 12855 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), S2 canary subprocess isolation verified |
+| active_integrity_prefix_lines | 12861 |
+| active_integrity_prefix_sha256 | `7732173e2fc876a90792d22770c0195eb359f0a803581128ce867fc271efa0b3` |
+| active_line_count_at_baseline | 12861 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), S2 full offline forward/reverse verified |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -184,6 +184,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12841–12845 | read + indexed (A-147) |
 | 12846–12850 | read + indexed (A-148) |
 | 12851–12855 | read + indexed (A-149) |
+| 12856–12861 | read + indexed (A-150) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -387,3 +388,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-147 | 12841–12845 | S2 shared fixture path after test reorganization | passed behavior | FIXTURES owner in test_zaapi_kb_import corrected from offline/fixtures to docs/test/fixtures; importer/diff/correction suites 303 passed exit 0. Full offline now 1956 passed, 19 failed, 15 skipped, 1 xfailed, zero setup errors (286 missing-fixture errors removed). | verified | Tests only, production unchanged. Remaining cursor/subprocess/index-contract failures are separate follow-up fixes; full regression still open. |
 | A-148 | 12846–12850 | S2 bounded-query test cursor API | passed behavior | Production max_time_ms calls exposed missing fluent API in shared mongo_doubles and two local cursor doubles. Added nonnegative integer timeout validation and self-return, preserving existing filters/limits. Affected product selection/source union/profile suites 95 passed exit 0. | verified | Production mechanisms unchanged; remaining full-suite failures tracked separately. |
 | A-149 | 12851–12855 | S2 fresh-process canary import boundary | passed behavior | Corrected subprocess path to docs/test/live and suppressed dotenv before all production imports; network tripwires and offline HF flags prevent accidental external access. Existing before/after production-binding identity assertion preserved. Canary retry/import/seam suite 9 passed exit 0. | verified | Test-only changes; no live provider calls or production edits. |
+| A-150 | 12856–12861 | S2 claim index ownership and full regression closeout | passed behavior | Scoped source ownership pin to claim-state modules rather than unrelated KB import DDL; retained TS unique conversation_products index assertion and added runtime create_index tripwire to claim fake. Full offline forward and reversed execution each 1975 passed, 15 skipped, 1 xfailed, exit 0. Focused reversed file-import batch previously 191 passed. | verified | S2 closed. Production unchanged. Twelve existing dependency/return-value warnings remain, not failed assertions. |

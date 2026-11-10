@@ -87,6 +87,9 @@ class _FakeColl:
     def doc(self, v):
         self.docs = [dict(v)] if v else []
 
+    def create_index(self, *a, **k):
+        pytest.fail("claim request attempted index creation", pytrace=False)
+
     def find_one(self, q, *_a, **_k):
         self.calls.append(("find_one",))
         for d in self.docs:
@@ -547,7 +550,8 @@ def test_r5_unique_index_declaration_owner_pin():
     assert "unique: true" in lines[0]
     # Python runtime must never create indexes in the request path
     import pathlib
-    for p in (ROOT / "chatbot/shopeechat").glob("*.py"):
+    for module in (conversation_products, warranty_flow):
+        p = pathlib.Path(module.__file__)
         src = p.read_text()
         assert "create_index" not in src and "createIndex" not in src, p.name
 
