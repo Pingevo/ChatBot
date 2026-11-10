@@ -929,6 +929,9 @@ def _record_tokens(model: str, resp, path: str | None = None,
                    key_ref: str | None = None) -> None:
     usage = getattr(resp, "usage_metadata", None)
     if not usage:
+        _persist_usage(model, 0, 0, path=path, elapsed_ms=elapsed_ms,
+                       provider=provider, attempt=attempt, key_ref=key_ref,
+                       usage_available=False)
         return
     pt = getattr(usage, "prompt_token_count", 0) or 0
     ct = getattr(usage, "candidates_token_count", 0) or 0
@@ -958,20 +961,23 @@ def _persist_usage(model: str, prompt_t: int, output_t: int,
                    attempt: int | None = None,
                    error: str | None = None,
                    key_ref: str | None = None,
-                   cost_usd: float | None = None) -> None:
+                   cost_usd: float | None = None,
+                   usage_available: bool = True) -> None:
     """ai_usage log — fire-and-forget persist ของ token usage ทุก LLM call (R0).
     kill-switch: AI_USAGE_LOG=0. ห้าม throw — measurement ห้ามทำ request พัง"""
     if os.environ.get("AI_USAGE_LOG", "1") == "0":
         return
     try:
         from . import knowledge_base as _kb
+        usage_available = usage_available and status == "success"
         doc = {
             "ts": _dt.datetime.now(_dt.UTC),
             "model": model,
             "prompt_tokens": prompt_t,
             "output_tokens": output_t,
             "total_tokens": prompt_t + output_t,
-            "est_cost_usd": cost_usd if cost_usd is not None else _gemini_cost(prompt_t, output_t),
+            "est_cost_usd": (cost_usd if cost_usd is not None else _gemini_cost(prompt_t, output_t)) if usage_available else None,
+            "usage_available": usage_available,
             "status": status,
         }
         if provider:

@@ -12873,3 +12873,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ผ่านแล้ว: RED 4 failures (main missing 1 doc, fallback missing second doc); GREEN 4 passed — ServerError/timeout ทั้ง main/fallback log ครบจำนวน attempts+correlation/key_ref/latency และ re-raise exception object เดิม ไม่มี retry เพิ่ม
 - regression: provider contract เดิม 21 pass/0 fail ผ่าน subprocess suppress dotenv; full offline 1981 passed/15 skipped/1 xfailed exit 0; SRS _generate อัปเดต; mechanism delta=0
 - R5 ยังไม่ปิด: request_id จาก Python ยังสุ่มเฉพาะฝั่ง ไม่มี propagation เข้า shadow chain; missing-usage success ยัง return ก่อน persist; route/lifecycle reconciliation และ rollout verification ยังต้องตรวจ
+
+## R5 success without usage — กำลังจะทำ
+- Root cause: _record_tokens return เมื่อ usage_metadata ไม่มี/None ทำให้ success call หายจาก ai_usage
+- แผน: RED tests main Gemini/OR missing/None metadata; persist success ที่ owner เดิมก่อน return พร้อม usage_available=false, est_cost_usd=null (unknown ไม่ใช่ free); additive schema, ไม่เปลี่ยน answer/routing/quota; no new helpers/guards/regex/keywords/decision owners
+- ผ่านแล้ว: RED 5 failed/4 passed; GREEN focused 9 passed; missing/None metadata ทั้ง Gemini/OR persist success หนึ่ง doc และ return response เดิม; reported usage คง token counters+actual OR cost; error attempts ไม่มี metadata จึง usage_available=false/cost=null เช่นกัน
+- regression: full offline 1986 passed/15 skipped/1 xfailed exit 0; existing provider contract 21 pass/0 fail; SRS _record_tokens/_persist_usage อัปเดต; ยังไม่มี live provider calls/customer delivery

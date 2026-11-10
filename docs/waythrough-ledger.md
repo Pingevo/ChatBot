@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12875 |
-| active_integrity_prefix_sha256 | `12bb4032589774bb44be62a5783ee5cd0379a877d6f44437ace7dd857858915c` |
-| active_line_count_at_baseline | 12875 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R5 non-client provider errors verified; full R5 open |
+| active_integrity_prefix_lines | 12881 |
+| active_integrity_prefix_sha256 | `6605e6a90456c77005df61a32f6a5de9636bdc863734082ac6175f73a0cec9a7` |
+| active_line_count_at_baseline | 12881 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), R5 missing-usage calls verified; full R5 open |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -187,6 +187,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12856–12861 | read + indexed (A-150) |
 | 12862–12867 | read + indexed (A-151) |
 | 12868–12875 | read + indexed (A-152) |
+| 12876–12881 | read + indexed (A-153) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -393,3 +394,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-150 | 12856–12861 | S2 claim index ownership and full regression closeout | passed behavior | Scoped source ownership pin to claim-state modules rather than unrelated KB import DDL; retained TS unique conversation_products index assertion and added runtime create_index tripwire to claim fake. Full offline forward and reversed execution each 1975 passed, 15 skipped, 1 xfailed, exit 0. Focused reversed file-import batch previously 191 passed. | verified | S2 closed. Production unchanged. Twelve existing dependency/return-value warnings remain, not failed assertions. |
 | A-151 | 12862–12867 | S7 quota-file reload regression closeout | passed behavior | Verified current bot process has no --reload, default quota file is exports/.gemini_quota.json, and real Uvicorn filter rejects json/tmp while accepting source py. Added offline executable tests with repeated _save_quota_day to temporary files; atomic-save values correct and no tmp remains. Filter also rejects hidden quota paths with *.json include. Two tests passed exit 0. | verified | S7 closed for current runtime/default filter, not arbitrary custom watchers. Production unchanged; no real quota/config/process writes. |
 | A-152 | 12868–12875 | R5 non-client provider-attempt error coverage | passed behavior | _generate previously recorded ClientError only; added non-client exception logging to main/fallback call branches in same owner, then re-raise unchanged. New error records use exception class, not sensitive message. RED four missing-attempt cases; GREEN 4 passed, prior provider contract 21/21, full offline 1981 passed/15 skipped/1 xfailed exit 0. SRS updated; mechanism delta zero. | verified | Full R5 remains open: request-ID propagation, missing-usage success records, lifecycle/route reconciliation and rollout. Nested-button UI fix blocked on ignored local Next docs despite user approval; R4 remains externally blocked. |
+| A-153 | 12876–12881 | R5 missing-usage success records and unknown-cost truth | passed behavior | _record_tokens now persists success when provider metadata is absent/None; additive usage_available=false and null estimated cost distinguish unknown from free. Errors without metadata also mark unknown. Existing token counters/reported OR cost unchanged; same response object returned. RED 5 failures/4 passes; focused GREEN 9 passed, old provider contract 21/21, full offline 1986 passed/15 skipped/1 xfailed exit 0. | verified | SRS updated. Full R5 still open for correlation, lifecycle/route and rollout proof; no live provider calls/customer sends. |
