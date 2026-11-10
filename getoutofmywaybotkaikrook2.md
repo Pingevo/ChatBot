@@ -12798,3 +12798,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - pages: live/admin-activity/performance default preset daily→weekly (แสดง 7 วันเหมือนเดิม แต่ label "7 วันล่าสุด" ตรงจริง); daily="วันนี้" ทำงานถูกแล้วทุกหน้า
 - verify: test-stats-range.ts 22/22 + tsc clean
 - งานค้าง R5: verify analytics numbers vs Mongo source, end-to-end trace turn/import/approval ใน observability
+
+## R5 — ai_usage provider-log gap fix (กำลังทำ→ผ่านแล้ว)
+- เจอ: _openrouter_generate return ตรงไม่ผ่าน _record_tokens → OR calls ไม่เข้า ai_usage เลย; gemini error attempts เงียบ; doc ขาด provider/status/attempt/error/key_ref
+- แก้: _persist_usage +_record_tokens รับ provider/status/attempt/error/key_ref/cost_usd; _key_ref helper = index ใน active pool (ไม่ใส่ key จริง); _generate log ทุก attempt (OR success/error → gemini fallback ยังทำงาน); OR body มี usage.include → cost จริง
+- verify: test_ai_usage_fields 21/21 + py_compile; SRS อัปเดตแล้ว

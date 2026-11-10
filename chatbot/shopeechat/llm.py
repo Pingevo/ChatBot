@@ -923,7 +923,10 @@ _ai_call_ctx = _contextvars.ContextVar("ai_call_ctx", default=None)
 
 
 def _record_tokens(model: str, resp, path: str | None = None,
-                   elapsed_ms: int | None = None) -> None:
+                   elapsed_ms: int | None = None,
+                   provider: str | None = None,
+                   attempt: int | None = None,
+                   key_ref: str | None = None) -> None:
     usage = getattr(resp, "usage_metadata", None)
     if not usage:
         return
@@ -932,12 +935,30 @@ def _record_tokens(model: str, resp, path: str | None = None,
     n = pt + ct
     with _q_lock:
         _q_tok.setdefault(model, _deque()).append((_time.time(), n))
-    _persist_usage(model, pt, ct, path=path, elapsed_ms=elapsed_ms)
+    _persist_usage(model, pt, ct, path=path, elapsed_ms=elapsed_ms,
+                   provider=provider, attempt=attempt, key_ref=key_ref,
+                   cost_usd=getattr(usage, "cost", None))
+
+
+def _key_ref(key: str | None) -> str | None:
+    """safe key reference — index ใน active pool (ไม่ใส่ค่า key จริงลง log)"""
+    if not key:
+        return None
+    try:
+        return f"k{_active_keys().index(key)}"
+    except Exception:
+        return "k?"
 
 
 def _persist_usage(model: str, prompt_t: int, output_t: int,
                    path: str | None = None,
-                   elapsed_ms: int | None = None) -> None:
+                   elapsed_ms: int | None = None,
+                   provider: str | None = None,
+                   status: str = "success",
+                   attempt: int | None = None,
+                   error: str | None = None,
+                   key_ref: str | None = None,
+                   cost_usd: float | None = None) -> None:
     """ai_usage log — fire-and-forget persist ของ token usage ทุก LLM call (R0).
     kill-switch: AI_USAGE_LOG=0. ห้าม throw — measurement ห้ามทำ request พัง"""
     if os.environ.get("AI_USAGE_LOG", "1") == "0":
@@ -950,12 +971,21 @@ def _persist_usage(model: str, prompt_t: int, output_t: int,
             "prompt_tokens": prompt_t,
             "output_tokens": output_t,
             "total_tokens": prompt_t + output_t,
-            "est_cost_usd": _gemini_cost(prompt_t, output_t),
+            "est_cost_usd": cost_usd if cost_usd is not None else _gemini_cost(prompt_t, output_t),
+            "status": status,
         }
+        if provider:
+            doc["provider"] = provider
         if path:
             doc["path"] = path
         if elapsed_ms is not None:
             doc["elapsed_ms"] = elapsed_ms
+        if attempt is not None:
+            doc["attempt"] = attempt
+        if error:
+            doc["error"] = error
+        if key_ref:
+            doc["key_ref"] = key_ref
         ctx = _ai_call_ctx.get()
         if isinstance(ctx, dict):
             for k in ("shop", "conv_id", "platform", "request_id"):
@@ -1012,6 +1042,7 @@ def _openrouter_generate(model: str, contents, config: dict):
     body: dict = {
         "model": or_model,
         "messages": _or_messages(contents, config),
+        "usage": {"include": True},   # OR คืน usage.cost จริง → ai_usage cost ไม่ใช่ gemini estimate
     }
     if config.get("temperature") is not None:
         body["temperature"] = config["temperature"]
@@ -1040,6 +1071,7 @@ def _openrouter_generate(model: str, contents, config: dict):
         prompt_token_count=u.get("prompt_tokens", 0) or 0,
         candidates_token_count=u.get("completion_tokens", 0) or 0,
         total_token_count=u.get("total_tokens", 0) or 0,
+        cost=u.get("cost"),   # OR usage.include → cost จริง (None ถ้า provider ไม่คืน)
     )
     print(f"[LLM] provider=openrouter model={or_model} total={usage.total_token_count}",
           file=_sys.stderr)
@@ -1053,9 +1085,16 @@ def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
     openrouter พัง → fallback gemini path เดิมอัตโนมัติ
     path = ai_usage call-path label ("answer"|"typed"|"vision"|"kb"|"general"|"intent")"""
     if role and get_provider(role) == "openrouter":
+        _t0 = _time.time()
         try:
-            return _openrouter_generate(model, contents, config)
+            resp = _openrouter_generate(model, contents, config)
+            _record_tokens(model, resp, path=path, provider="openrouter",
+                           attempt=1, elapsed_ms=round((_time.time() - _t0) * 1000))
+            return resp
         except Exception as exc:
+            _persist_usage(model, 0, 0, path=path, provider="openrouter",
+                           status="error", error=str(exc)[:300], attempt=1,
+                           elapsed_ms=round((_time.time() - _t0) * 1000))
             print(f"[PROVIDER] openrouter call failed ({exc}) → fallback gemini {model}",
                   file=_sys.stderr)
     if est_tokens is None:
@@ -1069,14 +1108,19 @@ def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
     while True:
         key = _next_api_key()   # ข้าม dead keys ใน owner เดียว — RuntimeError เมื่อ pool ว่าง/dead หมด
         client = _client(key)   # ต้องเก็บ reference — GC client กลาง call จะปิด shared httpx
+        kref = _key_ref(key)
         try:
             _t0 = _time.time()
             resp = client.models.generate_content(model=m, contents=contents, config=config)
-            _record_tokens(m, resp, path=path,
+            _record_tokens(m, resp, path=path, provider="gemini",
+                           attempt=tried + 1, key_ref=kref,
                            elapsed_ms=round((_time.time() - _t0) * 1000))
             return resp
         except genai_errors.ClientError as exc:
             tried += 1
+            _persist_usage(m, 0, 0, path=path, provider="gemini", status="error",
+                           error=str(exc)[:300], attempt=tried, key_ref=kref,
+                           elapsed_ms=round((_time.time() - _t0) * 1000))
             is_auth = getattr(exc, "code", None) == 401 or "UNAUTHENTICATED" in str(exc)
             if is_auth:
                 _DEAD_KEYS.add(key)
@@ -1092,14 +1136,19 @@ def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
             m2 = _acquire(fb, est_tokens)
             key2 = _next_api_key()
             client = _client(key2)
+            kref2 = _key_ref(key2)
             try:
                 _t0 = _time.time()
                 resp = client.models.generate_content(model=m2, contents=contents, config=config)
             except genai_errors.ClientError as exc2:
+                _persist_usage(m2, 0, 0, path=path, provider="gemini", status="error",
+                               error=str(exc2)[:300], attempt=tried + 1, key_ref=kref2,
+                               elapsed_ms=round((_time.time() - _t0) * 1000))
                 if getattr(exc2, "code", None) == 401 or "UNAUTHENTICATED" in str(exc2):
                     _DEAD_KEYS.add(key2)
                 raise
-            _record_tokens(m2, resp, path=path,
+            _record_tokens(m2, resp, path=path, provider="gemini",
+                           attempt=tried + 1, key_ref=kref2,
                            elapsed_ms=round((_time.time() - _t0) * 1000))
             return resp
 
