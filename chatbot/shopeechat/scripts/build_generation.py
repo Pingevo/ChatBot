@@ -29,6 +29,7 @@ from chatbot.shopeechat.generation_pointer import mint_generation_id  # noqa: E4
 _RUNS_COLL = "generation_runs"
 _STALE_BUILD_SECONDS = 24 * 3600
 _PROGRESS_RE = re.compile(r"(\d[\d,]*)/(\d[\d,]*)")
+_PCT_RE = re.compile(r"pct=(\d+(?:\.\d+)?)")
 
 
 def _now() -> str:
@@ -70,12 +71,17 @@ def _run_script(gen_dir: Path, db, gid: str, step: str, args: list[str]) -> None
     with log_path.open("w", encoding="utf-8") as lf:
         for line in proc.stdout:
             lf.write(line)
+            lf.flush()
             m = _PROGRESS_RE.search(line)
             if m:
                 done, total = (int(x.replace(",", "")) for x in m.groups())
                 if total:
                     _step_update(db, gid, gen_dir, step, "running",
                                  percent=min(99.0, round(done / total * 100, 1)))
+            pm = _PCT_RE.search(line)
+            if pm:
+                _step_update(db, gid, gen_dir, step, "running",
+                             percent=min(99.0, float(pm.group(1))))
     rc = proc.wait()
     if rc != 0:
         _step_update(db, gid, gen_dir, step, "failed",

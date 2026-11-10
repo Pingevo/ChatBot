@@ -12756,3 +12756,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - audit: decided_by/decided_at/original+edited/approved_text/receipt ครบใน doc; config.toggle+buffer_flush ลง admin_logs ถูก
 - ปิด: bot_worker_enabled=false (ผู้ใช้ปิดเอง/verify false+edge null) + kill worker local
 - ค้าง (แยกงาน): คุณภาพคำตอบบอทยังแย่ (สินค้าผิด/มั่ว) — เดี๋ยวทำทีหลัง; cost-stop gate ยังไม่มี (เฝ้ามือตามตกลง)
+
+## R1 daily build #1 (g20261110-054801-c989b70a) — progress reporting fix + กำลัง build
+
+- อาการ: UI ค้าง 11% step OCR 0% นาน → ดูเหมือน hang แต่จริงทำงานอยู่ (sample: block sock_recv ระหว่าง coll.find({}) cache 73k docs; cache upserts last_generation_id นับได้ 7k+ ตัวเพิ่มเรื่อยๆ)
+- เกิดเพราะ: build_image_texts.py ไม่ print N/total เลย → driver parse ไม่ได้ → percent=0 ตลอด step; แถม driver lf.write() buffer 8KB ไม่ flush → log ว่างทั้งที่ script print แล้ว
+- แก้: (1) driver +_PCT_RE `pct=NN` คู่ regex เดิม + lf.flush() ทุกบรรทัด (2) script emit pct monotonic — scan 0→35 (ทุก 1k docs, total จาก _count_export_docs binary count '  {'), cache_load 35, classify 38, loop 38→99 ทุก 50 ตัว, merge 99
+- verify: --max-calls 0 --limit 300 (zero-call, ไม่ยิง Gemini/ไม่ upsert) emit ครบ pct=3→99; worklist sellable=18,960 รูป, 300 ตัวแรก new=220 → run จริงมีงาน OCR จริงเยอะ (ไม่ใช่ reuse ล้วน)
+- ผลกระทบ: run ปัจจุบันโหลดโค้ดเก่าไปแล้ว → % ยัง 0 จนจบ step แล้วกระโดด 100 (monitor ผ่าน cache upsert count แทน); run ถัดไป (cron) % ขยับ real-time

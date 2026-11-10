@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12758 |
-| active_integrity_prefix_sha256 | `9f2b9ce98607933f0a695ccf4d3c5756b4b4e7cd0897fbba9377c012308bb71b` |
-| active_line_count_at_baseline | 12758 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R3 pilot closeout |
+| active_integrity_prefix_lines | 12766 |
+| active_integrity_prefix_sha256 | `e7e944335b554071535d222706d7999446659614338f5bd7f666475fa5ca08b9` |
+| active_line_count_at_baseline | 12766 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), generation progress reporting fix |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -370,3 +370,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-134 | 12736–12741 | /generations UI v2 header+detail+rollback (+GenTracks 4-lane commit 6df1549) / 2026-11-10 | passed behavior | Header: active/next build (09:00 TH, Mon=weekly)/last build timing; building ETA; empty state. RunDetail: files+size, manifest counts, log tail; per-gen rollback buttons; rollback re-validates then CAS; no partial rollback (bundle contract). GenTracks lanes (3 daily+1 weekly, status colors, cat at bar end) committed in 6df1549 with backfilled run doc for g20261109. | verified | py_compile+tsc OK; live browser check pending. |
 | A-135 | 12742–12750 | R3 canary — global bot_worker_enabled missing enable edge / 2026-11-10 | regression lock | Root cause: whitelist $set wrote flag but no code path stamped bot_worker_enabled_at → resolveBotworkerScope fail-closed (empty scope), worker silent. Fix: stamped edge 2026-11-10T05:24:37Z (1 field); setBotWorkerGlobalEnabled CAS owner (stamp/clear/idempotent/stale→applied:false); key removed from updateSystemConfig whitelist; PUT /config CAS branch {flag+expected_, single-command, 409}; test-assignment toggle_worker → CAS; config page sends expected_. | verified | New suite test-botworker-global-enabled-cas 8/8; config-failclosed 8/8; enable-checkpoint 18/18; scope-gate 107/107; tsc clean. Pending: user re-enables global; real canary awaits test message to SuperITMall; cost-stop gate still unimplemented (user chose manual watch). |
 | A-136 | 12751–12758 | R3 pilot closeout / 2026-11-10 | passed behavior | Local canary completed end-to-end: UI toggle ON stamped edge via new CAS (05:33:38Z); real Shopee inbound → buffer_flush debounce → bot draft → shadow_replies review_bubbles → approve/edit/reject → mock_sent delivered:false always. Mid-pilot fix e496fcc: review gate "*" for all admins (shop fence kept). Audit fields complete in doc; config/buffer events in admin_logs. Worker disabled + local worker killed. | verified | Pending: bot answer quality poor (wrong products) — separate task; cost-stop gate unimplemented (manual watch per user). |
+| A-137 | 12759–12766 | R1 daily build — OCR step silent progress / 2026-11-10 | failed/rejected approach → fix | Symptom: UI stuck 11%, image_texts_sellable 0% for minutes — process alive but silent (sock_recv on image_texts coll.find 73k docs; cache upserts with last_generation_id growing = actually working). Cause: build_image_texts prints no N/total → driver percent stays 0; driver lf.write buffered → log empty. Fix: driver adds pct=NN regex (additive to N/total) + lf.flush per line; script emits monotonic pct (scan 0→35 via _count_export_docs, cache_load 35, classify 38, loop 38→99 per 50, merge 99). Verified --max-calls 0 --limit 300 (no Gemini, no upsert): pct=3→99 emitted; sellable worklist=18,960 (220/300 new → real OCR work). Current run unaffected (old code loaded); monitor via cache upsert count. | verified |
