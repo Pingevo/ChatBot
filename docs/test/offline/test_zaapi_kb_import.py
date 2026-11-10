@@ -26,7 +26,7 @@ from import_zaapi_kb import import_source, import_snapshot  # noqa: E402
 from export_zaapi_kb import export_snapshot  # noqa: E402
 import export_zaapi_kb as exporter  # noqa: E402
 
-FIXTURES = Path(__file__).parent / "fixtures" / "zaapi_kb_minimal"
+FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "zaapi_kb_minimal"
 
 
 class MemoryCollection:

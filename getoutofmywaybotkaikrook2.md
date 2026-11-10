@@ -12838,3 +12838,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แก้ test owner เดิม: subprocess import path เป็น offline; ตรวจ provider+app+knowledge_base alias identity ใน subprocess สะอาดพร้อม no-op dotenv ก่อน import (ไม่เปิด env)
 - GREEN: focused forward/reverse 191/191 exit 0 ทั้งสองลำดับ; production behavior/helpers/guards/regex/keyword/decision owners delta=0
 - Full offline gate: 1666 passed/23 failed/286 errors/15 skipped/1 xfailed; หลายรายการ fixture paths เก่าหลังย้าย test directories — ต้องแก้ infrastructure ก่อนปิด S2 ทั้งหมด; ไม่อ้าง full regression ผ่าน
+
+## S2 regression infrastructure — กำลังจะทำ
+- RED full offline พบ test_zaapi_kb_import.FIXTURES ยังอ้าง offline/fixtures แต่ไฟล์จริงอยู่ docs/test/fixtures; กระทบ importer/diff/correction tests ที่ reuse fixture owner เดียว
+- แผน: แก้ path owner เป็น parent.parent/fixtures; ไม่ย้ายไฟล์ ไม่ลด assertions ไม่แก้ importer production; รัน affected suites และ full offline ใหม่
+- ผ่านแล้ว: affected importer/diff/corrections 303 passed exit 0; full offline 1956 passed/19 failed/15 skipped/1 xfailed/0 errors (286 fixture setup errors หาย); remaining failures ส่วนหนึ่ง fake cursor ไม่รองรับ max_time_ms และ subprocess path/index expectation เก่า — แยก fix ถัดไป
