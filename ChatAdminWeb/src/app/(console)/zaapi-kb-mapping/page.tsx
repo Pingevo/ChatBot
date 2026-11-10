@@ -21,8 +21,15 @@ type SavedMap = {
   mapped_by?: string; mapped_at?: string;
 };
 const TYPES = ["product", "troubleshooting", "faq", "warranty"];
-const ALL = "ทุกร้าน";
+const PLATFORMS = [
+  { v: "shopee", l: "Shopee" },
+  { v: "lazada", l: "Lazada" },
+  { v: "tiktok", l: "TikTok" },
+  { v: "facebook", l: "Facebook" },
+  { v: "line official", l: "LINE Official" },
+];
 const SEL = "w-full bg-surface text-text border border-border rounded-md px-2 py-1.5 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/40";
+const CHIP = "px-2 py-1 rounded-lg border text-[11px]";
 
 export default function ZaapiKbMappingPage() {
   const { user } = useAuth();
@@ -84,7 +91,7 @@ export default function ZaapiKbMappingPage() {
       await api().post("/zaapi-kb/mapping", {
         file: f.file,
         accounts: d.accounts || [],
-        platforms: d.platforms || ["shopee"],
+        platforms: d.platforms || [],
         content_type: d.content_type,
         sheet_types: d.sheet_types || {},
       });
@@ -112,7 +119,8 @@ export default function ZaapiKbMappingPage() {
             <tr className="text-left text-text-muted border-b border-border">
               <th className="py-2 pr-3 w-8">#</th>
               <th className="pr-3">ไฟล์</th>
-              <th className="pr-3 w-56">shop</th>
+              <th className="pr-3 w-72">shop (ว่าง = ทุกร้าน)</th>
+              <th className="pr-3 w-52">platform (ว่าง = ทุก platform)</th>
               <th className="pr-3 w-40">type ไฟล์</th>
               <th className="pr-3">type ต่อ sheet</th>
               <th className="w-20"></th>
@@ -131,17 +139,45 @@ export default function ZaapiKbMappingPage() {
                     {mapped && <div className="text-emerald-500 text-[10px]">mapped by {saved[f.file].mapped_by}</div>}
                   </td>
                   <td className="pr-3 py-2">
-                    <select className={SEL}
-                      disabled={!editable}
-                      value={(d.accounts && d.accounts[0]) || ALL}
-                      onChange={(e) => setField(f.file, {
-                        accounts: e.target.value === ALL ? [] : [e.target.value],
-                      })}>
-                      <option value={ALL}>{ALL} (ไม่จำกัด scope)</option>
-                      {shops.map((s) => <option key={s} value={s}>{s}</option>)}
-                    </select>
+                    <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
+                      {shops.map((s) => {
+                        const on = (d.accounts || []).includes(s);
+                        return (
+                          <button key={s} type="button" disabled={!editable}
+                            onClick={() => setField(f.file, {
+                              accounts: on
+                                ? (d.accounts || []).filter((x) => x !== s)
+                                : [...(d.accounts || []), s],
+                            })}
+                            className={`${CHIP} ${on ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted"}`}>
+                            {s}
+                          </button>
+                        );
+                      })}
+                    </div>
                     {!d.accounts?.length && (
                       <div className="text-amber-500 text-[10px] mt-1">เสิร์ฟทุกร้าน — ระวังข้อมูลเฉพาะร้านรั่ว</div>
+                    )}
+                  </td>
+                  <td className="pr-3 py-2">
+                    <div className="flex flex-wrap gap-1.5">
+                      {PLATFORMS.map((p) => {
+                        const on = (d.platforms || []).includes(p.v);
+                        return (
+                          <button key={p.v} type="button" disabled={!editable}
+                            onClick={() => setField(f.file, {
+                              platforms: on
+                                ? (d.platforms || []).filter((x) => x !== p.v)
+                                : [...(d.platforms || []), p.v],
+                            })}
+                            className={`${CHIP} ${on ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted"}`}>
+                            {p.l}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {!d.platforms?.length && (
+                      <div className="text-text-muted text-[10px] mt-1">ทุก platform</div>
                     )}
                   </td>
                   <td className="pr-3 py-2">

@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12493 |
-| active_integrity_prefix_sha256 | `d3b3fa7661b0c114` (full SHA: d3b3fa7661b0c114472043431dcdcd49b11231fcfb4302a211eacedb101eecff) |
-| active_line_count_at_baseline | 12493 |
-| active_integrity_recorded_at | 2026-11-09T12:15+0700 |
+| active_integrity_prefix_lines | 12647 |
+| active_integrity_prefix_sha256 | `b9b4997c16e7ccf4bebdfcbc343e0dc39f6678e2980b5961e25507286d87873c` |
+| active_line_count_at_baseline | 12647 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), zaapi-kb-mapping multi-select |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -166,6 +166,13 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12372–12381 | read + indexed (A-114) |
 | 12382–12389 | read + indexed (A-115) |
 | 12390–12397 | read + indexed (A-116) |
+| 12398–12444 | read + indexed (A-117) |
+| 12445–12493 | read + indexed (A-118) |
+| 12494–12591 | read + indexed (A-119) |
+| 12592–12606 | read + indexed (A-120) |
+| 12607–12618 | read + indexed (A-121) |
+| 12619–12634 | read + indexed (A-122) |
+| 12635–12647 | read + indexed (A-123) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -336,3 +343,10 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 - [ ] ก่อน `coverage: complete`: union ของ coverage ranges ครบทุกบรรทัดของ frozen และ active ไม่มี gap/overlap ที่อธิบายไม่ได้, integrity ทั้งสองตรง, independent review ผ่าน
 | A-115 | 12382–12389 | live provider per-shop 3 ร้าน 2026-11-09 | passed behavior | product_recommend timeout รอบแรก (bot Pass1 ~61s > worker 90s → bot_failed guard ถูก) → shipping q รอบสอง: 3/3 conv bot_answered → 3 shadow docs; approve pingevox → 200 mock_sent event=persisted=real answer; ร้านอื่น 403 pilot gate; wattaka pending | verified | bot-side product query slowness เป็น constraint ของ bot ไม่ใช่ review feature; multi-bubble live ยังไม่เคยเห็น |
 | A-116 | 12390–12397 | full system ผ่าน flush buffer (real bot 3 ร้าน) 2026-11-09 | passed behavior | bot_buffer_enabled → 6 msgs buffered (2/conv, window 15s) → buffer rows+locks ค้าง → t+21s flush → bot จริงตอบ → 3 shadow docs; pingevox approve→mock_sent event=persisted; wattaka 403 pilot gate · slowness root: provider spike+concurrency+--reload watcher ไม่ใช่ quota (20 keys=280RPM) | verified | งานค้างเดิม: process-kill window, multi-bubble live |
+| A-117 | 12398–12444 | H mock follow-up / 2026-11-09 | regression lock | Raw log records shadow generation, disposable Mongo failpoint + real SIGKILL recovery, 35 review + 20 boundary tests; dormant failures intentionally wait for distinct new inbound (user decision), no auto-retry; worker-before-index race identified. | verified | Historical test evidence from raw log, not rerun in R4 audit. |
+| A-118 | 12445–12493 | K2–K5 file-backed rollout / 2026-11-09 | passed behavior | File-backed serving replaces planned canonical rollout; 118 files applied, 36 risky files disabled, 82 active / 7,130 rows; source selector flipped to zaapi with isolation checks. | verified | Admin review of 36 disabled files and real canary QA remain pending; no full historical audit. |
+| A-119 | 12494–12591 | S4–S8, R0/R1/R3/R4/R5 handoff / 2026-11-09 | pending/deferred work | Log records query bounds, 90s timeout decision, worker ensureIndexes startup, quota override, dotenv order checks, modular prompt + usage/toggle, R5 timezone fix; R1 unit build then product missing and publish separate approval; R3 canary approval pending; R4 census/duplicate archive proposal only, no archive closeout in this range. | historical-unverified | Individual tests recorded in raw log; broad live completion claims not independently reverified. |
+| A-120 | 12592–12606 | R4 read-only audit / 2026-11-10 | pending/deferred work | Fresh Mongo active 8,057 + archive 30,933 =38,990; no _id overlap, all keeper refs live/same conversation, but 11,329 archived texts differ from keeper. Active inbound duplicates 280 groups/2,644 excess; inbound unique index absent despite declaration. Buffer unique index exists. No DB writes/code change/restore; full R4 blocked on archive policy and writer/index remediation approval. | verified | Audit evidence only, not R4 acceptance or proven rollback. Protocol exception: pre-work log appended after read-only inspection began. Credentials process-local only; historical coverage partial. |
+| A-121 | 12607–12618 | R4 identity-contract investigation / 2026-11-10 | decision/approval | Manual regeneration intentionally retains distinct batches; global inbound unique index conflicts with writer contract. Worker retries use deterministic _id; scoped legacy worker repeats 215 groups/2,418 excess. Archive 9,528 refs point to different inbound; archive invisible to active readers. Proposed fix: retire global index declaration, preserve native worker idempotency and manual history, approve explicit recovery IDs separately. | verified | Code/DB reads verified; exact historical archive algorithm unknown. No production changes/DB writes; proposed fix and recovery not executed. R1 log done 27,155 but artifact validation pending. |
+| A-122 | 12619–12634 | R4 global-index code fix / 2026-11-10 | passed behavior | User approved code only: remove one global inbound unique declaration, preserving native deterministic worker _id. New actual-ensureIndexes/manual-generation regression RED E11000→GREEN 4 checks; worker idempotency 71, batch isolation 22, review 35 and tsc all exit 0. R1 description artifact validated (27155,1024), finite/unique chunks/gid matched, still misnamed. | verified | Working tree only, no commit/deploy/DB mutation. Archive recovery/legacy cleanup and R1 artifact correction/product build/publish remain pending. No runtime mechanisms/dependencies added. |
+| A-123 | 12635–12647 | zaapi-kb-mapping multi-select shop+platform / 2026-11-10 | passed behavior | Mapping page: shop จาก single-select → chip multi-select (ว่าง=ทุกร้าน warning เดิม) + คอลัมน์ platform chips ใหม่ (shopee/lazada/tiktok/facebook/line official, ว่าง=ทุก platform, draft default shopee); POST mapping รับ platforms:[] = ทุก platform ตาม `_scope_ok` — default `["shopee"]` เหลือเฉพาะ field ไม่ถูกส่ง; schema doc เดิม saved docs อ่านได้ | verified | tsc --noEmit exit 0; manual UI test ยังไม่ได้ทำ; ยังไม่ commit |

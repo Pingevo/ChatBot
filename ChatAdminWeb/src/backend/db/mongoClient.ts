@@ -169,7 +169,6 @@ export async function ensureIndexes(): Promise<void> {
     safeCreateIndex(db, COLLECTIONS.platformTeamAssignments, { platform: 1, admin_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.platformTeamAssignments, { admin_id: 1, is_active: 1 }),
     // shadow_replies — bot output stored locally (never sent to Shopee)
-    safeCreateIndex(db, COLLECTIONS.shadowReplies, { inbound_message_id: 1 }, { unique: true, sparse: true }),
     safeCreateIndex(db, COLLECTIONS.shadowReplies, { shop_id: 1, created_at: -1 }),
     safeCreateIndex(db, COLLECTIONS.shadowReplies, { conversation_id: 1, created_at: -1 }),
     // quick_replies — admin-configurable canned responses
