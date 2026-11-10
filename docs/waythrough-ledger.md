@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12909 |
-| active_integrity_prefix_sha256 | `7010f6ce66a0b8c2d84111daf88cd7659d86a350d683eb1e522a6faf39a70864` |
-| active_line_count_at_baseline | 12909 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), S3 frozen 1224–3021 indexed; semantic coverage remains partial |
+| active_integrity_prefix_lines | 12921 |
+| active_integrity_prefix_sha256 | `a21224ef7859b940355d0d0351e58e12072df0f9ad5d3d661bc7bbeb13209150` |
+| active_line_count_at_baseline | 12921 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), S3 frozen 3022–3976 indexed; semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -48,7 +48,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 241–781 | read + indexed (F-014..F-022) |
 | 782–1223 | read + indexed (F-023..F-030) |
 | 1224–3021 | read + indexed (F-031..F-044) |
-| 3022–8624 | ไม่ได้ index (gap) |
+| 3022–3976 | read + indexed (F-045..F-058) |
+| 3977–8624 | ไม่ได้ index (gap) |
 
 ## 5. Active semantic coverage ranges
 
@@ -195,11 +196,12 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12891–12898 | read + indexed (A-155) |
 | 12899–12903 | read + indexed (A-156) |
 | 12904–12909 | read + indexed (A-157) |
+| 12910–12921 | read + indexed (A-158) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
 
-F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–3021); A-xxx = active `getoutofmywaybotkaikrook2.md` — exact ranges ในคอลัมน์ `lines` (A-001..A-019 ครอบหลายช่วง) — ช่วงบรรทัดตรวจกับต้นฉบับแล้ว
+F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–3976); A-xxx = active `getoutofmywaybotkaikrook2.md` — exact ranges ในคอลัมน์ `lines` (A-001..A-019 ครอบหลายช่วง) — ช่วงบรรทัดตรวจกับต้นฉบับแล้ว
 
 | id | lines | task / date | category | summary | status | superseded-by / note |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -247,6 +249,20 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–3021)
 | F-042 | 2910–2937 | Claim state7 and early handoff / 2026-09-10 | passed behavior | Added awaiting-claim-info state, skip generic order lookup in claim, exclude image/date placeholders from customer name, handoff at claim-info request then acknowledge submitted evidence. Three curl cases recorded. | verified | Historical narrow evidence only; no change to current claim owner in audit. |
 | F-043 | 2938–2975 | Workflow Phase6 tests and rollout / 2026-09-03..04 | passed behavior | 69 unit cases, 16 real-Mongo E2E checks with test cleanup and config restore; typecheck/build recorded. Separate GodungIT rollout created enabled published workflow and enabled global workflow flag. | verified | Test restore and deliberate real rollout are distinct operations; does not establish current config or approve new writes/sends. |
 | F-044 | 2976–3021 | Workflow lifecycle audit and scoped-shop UI / 2026-09-04 | regression lock | Soft delete retained; restore service/API/log, workflow_name, update changes and previous_enabled enriched audit; logs UI category. Workflow styling consistency and shop-id dedupe with platform merging; shop editor deliberately keeps platform rows. | historical-unverified | Typecheck/build only; no route-vs-source/lifecycle completeness proof. One shop across platforms is not necessarily duplicate identity. |
+| F-045 | 3022–3101 | Workflow phases1–5 / 2026-09-03 | regression lock | Dynamic condition branches with legacy fallback; per-node wait answer validation/retry/no_reply with audit and timeout transition; multi-label atomic add; template resolution with once-per-node lookup; styled node cards. Recorded unit counts25→47→53→69 plus typecheck/build. | historical-unverified | Phase-specific Mongo E2E and browser review explicitly pending here; timeout race-safety claim is not a concurrency test result. |
+| F-046 | 3102–3147 | Workflow shell/list/foundation / 2026-09-03 | invariant | Empty draft shell precedes graph editing; empty platform/shop scopes mean all, multiple flows ordered by priority/date. Engine extracted callBot to break cycle, cancels on admin ownership, step cap50; delivered messages shadow-only, HTTP has SSRF validation. Six graph smoke checks plus typecheck/build recorded. | historical-unverified | Foundation E2E pending in source; historical shadow-only design does not establish current deployment or authorize sends. |
+| F-047 | 3148–3248 | Historical answer QA + prompt changes / 2026-09-03 | passed behavior | Recorded real-bot Q14 anchor and adapter carry checks; ambiguous short-turn history, warranty brevity vs explicit terms, elaboration and trust-without-sales-link/image controls. | verified | Narrow historical QA, not current answer-quality proof; trust results repeated with stale TODO, not independent extra verification. No current semantic-rule changes. |
+| F-048 | 3249–3294 | Carry simulation + Docker/Caddy / 2026-09-09 | pending/deferred work | Subtype history fallback simulated and compiled; real15-question replay pending in this block. Deployment removed nonexistent COPY, added proxy/internal bindings and health ordering, documented placeholder platforms. | historical-unverified | YAML parse only, no Docker build/start because Docker unavailable; chronological carry claims differ from F-047, preserve both. |
+| F-049 | 3295–3392 | Worker/source-isolation refactor proposal / 2026-09-10 | decision/approval | Historical plan: preserve chat-list scroll, media parity, source-filtered assignment, grouped own-bot-over-Zaapi history; proposed fake-worker source in messages with explicit ticket exclusion. Historical user approval limited status reset to fields, not document deletion. | historical-unverified | Plan/old approval is not implementation evidence or permission for new production reset/writes; preserve real/test separation. |
+| F-050 | 3393–3498 | Team metrics/date range and date separators / 2026-09-05 | regression lock | Team workload sourced from admin meta, shop/platform loaded on mount and date-scoped history from admin logs; shared date banners added across chat pages. Typecheck/build and claimed cases recorded. | historical-unverified | No route-vs-source numeric reconciliation or captured browser evidence; absence-of-risk statements are not proof. |
+| F-051 | 3499–3548 | Sticker/raw-payload parity / 2026-09-05 | regression lock | Sticker URL parsed/rendered with no-URL fallback; worker API rich parsing/product lookup aligned; TS/Python placeholder early-return fixed so sticker switch can run. | historical-unverified | Typecheck/build/compile only; display parity is not proof model history/buffer sees sticker images (source says those unchanged). |
+| F-052 | 3549–3596 | Test-chat session ownership/log view / 2026-09-07 | invariant | Session creator headers persisted, list scoped to caller with legacy sessions shared; log filter supports caller/all, UI shows actor/action metadata. | historical-unverified | Compile/typecheck only; header-based filtering and admin_id=all are not authorization/security proof. |
+| F-053 | 3597–3680 | Rich aliases/bundles/product media / 2026-09-08 | regression lock | TS/Python normalize rich aliases, APIs return bundle children and product identities, results share MessageContent. Product image singular/plural schema and separate CDN handled. Nested bundle source/content child IDs parsed/fetched with count fallback. | historical-unverified | Manual checks pending. Missing child records or old raw_payload=null cannot reconstruct product identity; do not invent data to hide upstream gap. |
+| F-054 | 3681–3746 | Suggestion timeline omission + logs view / 2026-09-07 | regression lock | KB return paths lacked suggestion recording and lost next-turn active product; two owner calls added, compile passed but replay pending. Audit UI adds table/list, legacy/current metadata and categories with typecheck/build. | historical-unverified | Rendering all log fields does not prove lifecycle logging complete; historical web-containing path does not authorize web now. |
+| F-055 | 3747–3810 | v3 OpenRouter-first prototype / 2026-09-20 | pending/deferred work | Raw message/history/images/shop passed to OR and answer names matched catalog; removed legacy retrieval/KB/subtype/timeline. Opt-in dispatch default off; import/pure smoke and six mocked engine cases recorded. | historical-unverified | Live OR/Mongo/endpoint/replay explicitly untested; prototype does not supersede current typed context/safety contracts. |
+| F-056 | 3811–3845 | Stock-field reversal / 2026-09-20 | regression lock | Historical switch back from shopee_stock to summary_info with per-model aggregation; DB examples,16 car-charger +42 brand regressions and scoped live recommendations recorded. | historical-unverified | Conflicts with F-021 seller-inclusive-summary warning. Historical dates/counts do not establish canonical stock truth; resolve against current data contract, not rewrite either claim. |
+| F-057 | 3846–3917 | v3 parity additions / 2026-09-20 | passed behavior | Added handoff POST, persona/order context, segments, v3 config wiring; image_desc deliberately empty, timeline deliberately omitted. Seven smoke cases recorded, including real handoff HTTP. | verified | Historical side effects are not current authorization; live OR/product match/endpoint/UI gates still pending and parity incomplete by design. |
+| F-058 | 3918–3976 | Shadow temporal history and result provenance / 2026-09-12 | regression lock | History capped strictly before inbound timestamp with prior manual replies; result detail corrected for Axios data wrapper, own shadow answer preferred with rich user content from message map. Subsequent empty-detail fallback can show fullMessages instead. | historical-unverified | Typecheck only; fallback source may be Zaapi, not own-bot evidence. Temporal boundary/provenance need behavioral checks before current closure claims. |
 | A-001 | 10823–10832 | waythrough protocol correction 2026-11-03 | decision/approval | ผู้ใช้อนุมัติเปลี่ยนกฎข้อ 8 เป็น ledger + incremental tail; แยก integrity prefix ออกจาก semantic coverage; docs only | verified | — |
 | A-002 | 595–683 | Phase 4A/4B design 2026-10-19 | invariant | generation precedent: `exports/gen/<gid>` + `sellable_units_g<gid>` + pointer `sellable_units_meta{_id:"active"}` fenced CAS (bootstrap `$exists:false`, previous embedded = rollback target), manifest finalize+verify ก่อน CAS, verify-ก่อน-replace, `image_texts_g<gid>` per-gen published vs shared cache, grace 24h cleanup, fail-closed ห้าม fallback base coll; request snapshot resolve 1×/request | verified | — |
 | A-003 | 6490–6569 | Phase 7 R1–R3 evidence boundary | invariant | closed emit `_EVIDENCE_OUT_FIELDS`; `_EVIDENCE_TEXT_KEYS` precedence → `payload["text"]`; `_EVIDENCE_RECORD_BYTES` bound + byte-boundary cut + `evidence_truncated:*`/`record_too_large`; `request_id` attribution ก่อน compile ถูกลบออกจาก final; kinds closed รวม `"kb"`; compile owner เดียว | verified | — |
@@ -364,7 +380,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–3021)
 
 ## 7. Known semantic coverage gaps
 
-- frozen 3022–8624 ยังไม่ได้ index; 241–3021 อ่านและสรุปเป็น F-014..F-044 แล้ว (ไม่ได้ rerun historical tests)
+- frozen 3977–8624 ยังไม่ได้ index; 241–3976 อ่านและสรุปเป็น F-014..F-058 แล้ว (ไม่ได้ rerun historical tests)
 - active gap ที่ยังไม่ได้ index: 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 — targeted coverage เท่านั้น ห้ามอ้าง full audit
 - Q14 / order (F-006, F-007) ระดับ answer ไม่ verify เพราะ provider 429
 - ไม่ใช้ `/tmp/p4ledger/ledger.md` (ไม่ได้ตรวจ checksum/ต้นฉบับ)
@@ -437,3 +453,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-155 | 12891–12898 | S3 historical coverage batch frozen 241–781 | pending/deferred work | Frozen SHA/size/lines matched and active prefix matched before work. Read exact frozen 241–781 and indexed F-014..F-022 with historical evidence vs unverified live/answer/manual limits distinguished; source text unchanged. Identified missing coverage-table rows for existing A-132..145, to confirm against raw source before adding. | verified | Batch indexing only, not S3 completion; frozen 782–8624 and active gaps still open, independent review pending, coverage partial. No provider/DB/customer operations. |
 | A-156 | 12899–12903 | S3 historical coverage batch frozen 782–1223 | pending/deferred work | Read exact range and indexed F-023..F-030: fallback consolidation, rich-media/page/batch identity, per-role guards, image-claim root cause, real/test status separation, and distinct model-history/display authority. Historical typechecks/compile do not prove manual/security/answer behavior. | verified | Batch indexing only; frozen 1224–8624 and active gaps still open, independent review pending, coverage partial. No production/raw-frozen/provider/DB/customer changes. |
 | A-157 | 12904–12909 | S3 frozen 1224–3021 indexing | pending/deferred work | Read exact source range, added F-031..F-044, separated repeated history from independent evidence and flagged compile-only, predicted-throughput, warranty-default and rollout-vs-test limitations. Frozen checksum unchanged; raw active append only. | verified | Batch indexing only; frozen 3022–8624, active gaps/A-132..145 coverage-table and independent review pending; coverage partial, no provider/DB/customer operations. |
+| A-158 | 12910–12921 | S3 frozen 3022–3976 indexing | pending/deferred work | Exact source indexed F-045..F-058; separated workflow compile/unit from live/browser proof, proposals from implementation, v3 mocks from real handoff smoke, result fallback provenance and conflicting historical stock-field claims. Frozen size/lines/SHA matched; prior active committed prefix matched and active diff append-only; diff check passed. | verified | Batch indexing only, not S3 closure; frozen3977–8624, active gaps/A-132..145 table and independent review pending. Docs-only, zero mechanism delta, no provider/DB/customer operations; R4 unchanged. |
