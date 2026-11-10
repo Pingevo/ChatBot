@@ -15,7 +15,7 @@ export default function LiveStatsPage() {
   const [error, setError] = useState<string | null>(null);
   const [secondsAgo, setSecondsAgo] = useState(0);
   const [dateRange, setDateRange] = useState<DateRangeValue>({
-    preset: "daily",
+    preset: "weekly",
     startDate: null,
     endDate: null,
   });

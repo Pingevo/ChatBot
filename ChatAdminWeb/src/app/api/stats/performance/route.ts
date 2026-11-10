@@ -1,34 +1,20 @@
 // GET /api/stats/performance — "ภาพรวม Performance" — Zaapi-style KPI grid
 // Phase 4: ใช้ MongoDB aggregation สด
-// Query: range = daily (default) | monthly | yearly | all
+// Query: range = daily | weekly (default page) | monthly | yearly | all | custom dates
 import { NextRequest } from "next/server";
 import { requirePageAccess } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { shopService } from "@/backend/service/shopService";
 import { computeResponseStats } from "@/backend/lib/responseStats";
+import {
+  parseStatsRange, statsSeries, statsBucketId, statsAggKey,
+  statsRangeLabel, statsCompareLabel,
+} from "@/backend/lib/statsRange";
 import type { Platform } from "@/backend/service/conversationService";
 
 const PLATFORMS: Platform[] = ["shopee", "tiktok", "lazada"];
 
-function getBounds(range: string): { start: Date | null; end: Date | null } {
-  const now = new Date();
-  if (range === "all") return { start: null, end: null };
-  if (range === "monthly") {
-    return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now };
-  }
-  if (range === "yearly") {
-    return { start: new Date(now.getFullYear(), 0, 1), end: now };
-  }
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - 6);
-  return { start, end: now };
-}
-
-function fmtDay(d: Date): string {
-  return d.toLocaleDateString("th-TH", { day: "2-digit", month: "short" });
-}
 
 export async function GET(req: NextRequest) {
   const r = await requirePageAccess(req, "analytics");
@@ -38,50 +24,24 @@ export async function GET(req: NextRequest) {
   const range = url.searchParams.get("range") || "daily";
   const customStart = url.searchParams.get("start_date");
   const customEnd = url.searchParams.get("end_date");
-
-  let weekStart: Date | null;
-  let weekEnd: Date | null;
-  if (customStart) {
-    const [_sy,_sm,_sd]=customStart.split('-').map(Number);
-    weekStart = new Date(_sy,_sm-1,_sd,0,0,0,0);
-    const [_ey,_em,_ed]=customEnd?customEnd.split('-').map(Number):[_sy,_sm,_sd];
-    weekEnd = new Date(_ey,_em-1,_ed,23,59,59,999);
-  } else {
-    const bounds = getBounds(range);
-    weekStart = bounds.start;
-    weekEnd = bounds.end;
-  }
+  const { start: weekStart, end: weekEnd } = parseStatsRange(range, customStart, customEnd);
+  const series = statsSeries(range, weekStart, weekEnd);
 
   const convColl = await getCollection(COLLECTIONS.conversations);
   const msgColl = await getCollection(COLLECTIONS.messages);
   const statusColl = await getCollection(COLLECTIONS.statusConversation);
   const shops = await shopService.listShops();
 
-  // สร้าง dayLabels ตาม range
-  let dayLabels: string[] = [];
-  if (range === "daily") {
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setHours(0, 0, 0, 0);
-      d.setDate(d.getDate() - i);
-      dayLabels.push(d.toLocaleDateString("th-TH", { weekday: "short" }));
-    }
-  } else if (range === "monthly") {
-    const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
-    for (let i = 1; i <= daysInMonth; i++) {
-      dayLabels.push(String(i));
-    }
-  } else if (range === "yearly") {
-    const monthNames = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
-    dayLabels = monthNames;
-  } else {
-    // all — ดึงปีทั้งหมดที่มีข้อมูล
+  // chart slots derive จาก bounds — all → data-driven years
+  let slots = series.slots;
+  if (!slots.length) {
     const yearsAgg = await convColl.aggregate<{ _id: number }>([
-      { $group: { _id: { $year: "$created_at" } } },
+      { $group: { _id: { $year: { date: "$created_at", timezone: "Asia/Bangkok" } } } },
       { $sort: { _id: 1 } },
     ]).toArray();
-    dayLabels = yearsAgg.map((y) => `${y._id + 543}`);
+    slots = yearsAgg.map((y) => ({ key: `${y._id}`, label: `${y._id + 543}` }));
   }
+  const dayLabels = slots.map((s) => s.label);
 
   const dateFilter = (field: string) => {
     const f: Record<string, unknown> = {};
@@ -91,60 +51,19 @@ export async function GET(req: NextRequest) {
   };
 
   // 1. Conversations per day (overall) — aggregation
-  // bucket ตาม range type
-  let bucketId: Record<string, unknown>;
-  if (range === "daily") {
-    bucketId = { y: { $year: "$created_at" }, m: { $month: "$created_at" }, d: { $dayOfMonth: "$created_at" } };
-  } else if (range === "monthly") {
-    bucketId = { d: { $dayOfMonth: "$created_at" } };
-  } else if (range === "yearly") {
-    bucketId = { m: { $month: "$created_at" } };
-  } else {
-    bucketId = { y: { $year: "$created_at" } };
-  }
+  // bucket ตาม series grain (Bangkok timezone — contract เดียวกับ dashboard)
+  const bucketId = statsBucketId("$created_at", series.grain);
 
   const convPerDayAgg = await convColl.aggregate<{ _id: Record<string, number>; count: number }>([
     { $match: { ...dateFilter("created_at") } },
     { $group: { _id: bucketId, count: { $sum: 1 } } },
     { $sort: { "_id.y": 1, "_id.m": 1, "_id.d": 1 } },
   ]).toArray();
-  // map index ตาม label
   const convPerDayMap = new Map<string, number>();
   for (const d of convPerDayAgg) {
-    const key = range === "daily"
-      ? `${d._id.y}-${d._id.m}-${d._id.d}`
-      : range === "monthly"
-      ? `${d._id.d}`
-      : range === "yearly"
-      ? `${d._id.m}`
-      : `${d._id.y}`;
-    convPerDayMap.set(key, d.count);
+    convPerDayMap.set(statsAggKey(d._id, series.grain), d.count);
   }
-  // build conversationsPerDay array
-  let conversationsPerDay: number[] = [];
-  if (range === "daily") {
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date();
-      d.setHours(0, 0, 0, 0);
-      d.setDate(d.getDate() - i);
-      conversationsPerDay.push(convPerDayMap.get(`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`) || 0);
-    }
-  } else if (range === "monthly") {
-    const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
-    for (let i = 1; i <= daysInMonth; i++) {
-      conversationsPerDay.push(convPerDayMap.get(`${i}`) || 0);
-    }
-  } else if (range === "yearly") {
-    for (let i = 1; i <= 12; i++) {
-      conversationsPerDay.push(convPerDayMap.get(`${i}`) || 0);
-    }
-  } else {
-    // all — ใช้ label เป็นปี พ.ศ.
-    for (const label of dayLabels) {
-      const year = parseInt(label) - 543;
-      conversationsPerDay.push(convPerDayMap.get(`${year}`) || 0);
-    }
-  }
+  const conversationsPerDay = slots.map((s) => convPerDayMap.get(s.key) || 0);
 
   // 2. Customers by channel per day — ⚡ parallel per platform (แทน sequential loop)
   const customersByChannel: Record<string, unknown>[] = dayLabels.map((date) => ({ date }));
@@ -160,38 +79,11 @@ export async function GET(req: NextRequest) {
   for (const { platform: p, agg } of platformAggs) {
     const map = new Map<string, number>();
     for (const d of agg) {
-      const key = range === "daily"
-        ? `${d._id.y}-${d._id.m}-${d._id.d}`
-        : range === "monthly"
-        ? `${d._id.d}`
-        : range === "yearly"
-        ? `${d._id.m}`
-        : `${d._id.y}`;
-      map.set(key, d.count);
+      map.set(statsAggKey(d._id, series.grain), d.count);
     }
-    if (range === "daily") {
-      for (let i = 6; i >= 0; i--) {
-        const d = new Date();
-        d.setHours(0, 0, 0, 0);
-        d.setDate(d.getDate() - i);
-        const idx = 6 - i;
-        customersByChannel[idx][p] = map.get(`${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`) || 0;
-      }
-    } else if (range === "monthly") {
-      const daysInMonth = new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
-      for (let i = 1; i <= daysInMonth; i++) {
-        customersByChannel[i - 1][p] = map.get(`${i}`) || 0;
-      }
-    } else if (range === "yearly") {
-      for (let i = 1; i <= 12; i++) {
-        customersByChannel[i - 1][p] = map.get(`${i}`) || 0;
-      }
-    } else {
-      dayLabels.forEach((label, idx) => {
-        const year = parseInt(label) - 543;
-        customersByChannel[idx][p] = map.get(`${year}`) || 0;
-      });
-    }
+    slots.forEach((s, idx) => {
+      customersByChannel[idx][p] = map.get(s.key) || 0;
+    });
   }
 
   // 3. Messages received / sent totals
@@ -303,26 +195,14 @@ export async function GET(req: NextRequest) {
     messages_sent: { value: messagesSent, spark },
   };
 
-  // date_range_label ตาม range
-  let dateRangeLabel = "";
-  if (range === "daily") {
-    const start7 = new Date();
-    start7.setDate(start7.getDate() - 6);
-    dateRangeLabel = `${fmtDay(start7)} - ${fmtDay(new Date())}, ${new Date().getFullYear() + 543}`;
-  } else if (range === "monthly") {
-    dateRangeLabel = new Date().toLocaleDateString("th-TH", { month: "long", year: "numeric" });
-  } else if (range === "yearly") {
-    dateRangeLabel = `${new Date().getFullYear() + 543}`;
-  } else {
-    dateRangeLabel = "ทั้งหมด";
-  }
+  const dateRangeLabel = statsRangeLabel(range, weekStart, weekEnd, slots.length);
 
   return json({
     has_real_data: totals.total > 0,
     range,
     connected_shops: shops.length,
     date_range_label: dateRangeLabel,
-    compare_label: range === "daily" ? "7 วันที่แล้ว" : range === "monthly" ? "เดือนที่แล้ว" : range === "yearly" ? "ปีที่แล้ว" : "ทั้งหมด",
+    compare_label: statsCompareLabel(range),
     overview,
     insight: {
       customers_by_channel: customersByChannel,

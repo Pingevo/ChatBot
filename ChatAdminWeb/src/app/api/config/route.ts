@@ -165,6 +165,39 @@ export async function PUT(req: NextRequest) {
     return json({ ok: true, config: await systemConfigService.getSystemConfig(true) });
   }
 
+  // ⚡ bot_worker_enabled global switch — CAS owner เดียว (enable edge
+  //   `bot_worker_enabled_at` stamp ใน write เดียวกัน) + expected_ บังคับ;
+  //   single-command payload — stale caller → 409 · zero write/zero audit
+  if ("bot_worker_enabled" in body) {
+    const v = body.bot_worker_enabled;
+    if (typeof v !== "boolean") {
+      return error("bot_worker_enabled must be boolean", 422);
+    }
+    const exp = body.expected_bot_worker_enabled;
+    if (typeof exp !== "boolean") {
+      return error("expected_bot_worker_enabled must be a boolean", 400);
+    }
+    const extraKeys = Object.keys(body).filter(
+      (k) => k !== "bot_worker_enabled" && k !== "expected_bot_worker_enabled"
+    );
+    if (extraKeys.length > 0) {
+      return error(`bot_worker_enabled is a single-command payload — do not combine with: ${extraKeys.join(",")}`, 422);
+    }
+    const updatedBy = r.ctx.admin.username || r.ctx.admin.email || 'admin';
+    const res = await systemConfigService.setBotWorkerGlobalEnabled(v, exp, updatedBy);
+    if (!res.applied) {
+      return error(`bot_worker_enabled changed by another admin — current=${res.current}`, 409);
+    }
+    if (res.changed) {
+      await logAdminEvent({
+        action_type: "config.update",
+        actor: r.ctx.admin.admin_id,
+        metadata: { changes: { bot_worker_enabled: v }, updated_by: updatedBy },
+      });
+    }
+    return json({ ok: true, config: await systemConfigService.getSystemConfig(true) });
+  }
+
   // ⚡ Phase 2D — bot_worker_platforms CAS: object ของ boolean ต่อ platform เท่านั้น
   //   + expected_bot_worker_platforms บังคับ (optimistic CAS เหมือน shop toggle):
   //   write filter บน persisted===expected (missing ≡ false) — stale caller → 409

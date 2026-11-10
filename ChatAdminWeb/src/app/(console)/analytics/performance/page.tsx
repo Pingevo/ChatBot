@@ -27,7 +27,7 @@ export default function PerformanceStatsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<DateRangeValue>({
-    preset: "daily",
+    preset: "weekly",
     startDate: null,
     endDate: null,
   });

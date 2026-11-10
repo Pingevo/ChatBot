@@ -480,6 +480,8 @@ export function makeCallBotMock(state) {
       elapsed: state.callBotDelayMs / 1000,
       usage: { prompt: 1, output: 1, total: 2 },
       chat_engine: "legacy",
+      request_id: "req-mock-1",
+      ...(state.callBotProducts ? { products: state.callBotProducts } : {}),
     };
   };
 }

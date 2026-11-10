@@ -32,7 +32,7 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
-import { getSystemConfig, updateSystemConfig, shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "@/backend/service/systemConfigService";
+import { getSystemConfig, setBotWorkerGlobalEnabled, shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "@/backend/service/systemConfigService";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { handoffService } from "@/backend/service/handoffService";
 // ⚡ Phase 2J — test-assignment ใช้ test version (เก็บใน test_status_conversation ไม่ใช่ status_conversation จริง)
@@ -468,7 +468,10 @@ export async function POST(req: NextRequest) {
     // ── toggle worker ──
     if (body.action === "toggle_worker") {
       const enabled = !!body.enabled;
-      await updateSystemConfig({ bot_worker_enabled: enabled }, r.ctx.admin.admin_id);
+      // ⚡ global switch เขียนผ่าน CAS owner เดียว (stamp enable edge ใน write เดียวกัน)
+      const cur = await getSystemConfig(true);
+      const res = await setBotWorkerGlobalEnabled(enabled, cur.bot_worker_enabled === true, r.ctx.admin.admin_id);
+      if (!res.applied) return error(`bot_worker_enabled changed by another admin — current=${res.current}`, 409);
       return json({ ok: true, bot_worker_enabled: enabled });
     }
 

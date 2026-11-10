@@ -47,8 +47,10 @@ import {
   UserCog,
   Inbox,
   Map,
+  Database,
   type LucideIcon,
 } from "lucide-react";
+import { GenPendingDot } from "./GenPendingDot";
 
 /* ------------------------------------------------------------------ */
 /* Types                                                              */
@@ -98,6 +100,7 @@ const navGroups: NavGroup[] = [
       { href: "/quick-replies", label: "คำตอบเร็ว", icon: Reply, page: "quickreply" },
       { href: "/knowledge", label: "ฐานความรู้", icon: BookOpen, page: "kb" },
       { href: "/zaapi-kb-mapping", label: "แมป Zaapi KB", icon: Map, page: "kb" },
+      { href: "/generations", label: "Gen Pipeline", icon: Database, badge: "gen-pending", page: "kb" },
       { href: "/persona", label: "ตัวแทนร้าน", icon: Sparkles, page: "persona" },
       { href: "/shop-settings", label: "ตั้งค่าร้าน", icon: Settings2, page: "shop-setting" },
     ],
@@ -540,6 +543,9 @@ export function Sidebar({ mobileOpen, onMobileClose, collapsed, onCollapsedChang
                           )}
                           {collapsed && item.badge === "live" && (
                             <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-error animate-pulse-soft" />
+                          )}
+                          {item.badge === "gen-pending" && (
+                            <GenPendingDot collapsed={collapsed} />
                           )}
                         </Link>
                       );

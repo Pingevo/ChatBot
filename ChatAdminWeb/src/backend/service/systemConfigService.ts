@@ -48,6 +48,10 @@ export interface SystemConfigDoc extends Document {
   //   ใน updateSystemConfig (server-derived — ไม่อยู่ใน allowedKeys);
   //   flag=true แต่ timestamp หาย/null → resolver fail-closed
   bot_worker_platform_enabled_at?: { shopee?: Date | null; tiktok?: Date | null; lazada?: Date | null };
+  // ⚡ global enable rising-edge — stamp โดย setBotWorkerGlobalEnabled CAS
+  //   เจ้าของเดียว (ไม่อยู่ใน allowedKeys); flag=true แต่ timestamp หาย/null
+  //   → resolver fail-closed (worker เงียบ)
+  bot_worker_enabled_at?: Date | null;
 
   // === Human review pilot (mock send) — designated admin + shop ===
   // ไม่ตั้ง = review disabled (route 403); server-derived เท่านั้น
@@ -203,6 +207,7 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     // ⚡ carry enable edges — ไม่ normalize (Date เท่านั้นที่นับเป็นเปิด;
     //   null/missing = fail-closed ใน resolver)
     bot_worker_platform_enabled_at: dbConfig.bot_worker_platform_enabled_at,
+    bot_worker_enabled_at: dbConfig.bot_worker_enabled_at,
     // ⚡ review pilot — passthrough; missing = review off (route 403)
     bot_review_admin_id: dbConfig.bot_review_admin_id,
     bot_review_shop_id: dbConfig.bot_review_shop_id,
@@ -353,7 +358,9 @@ export async function updateSystemConfig(
     'mock_mode_enabled',
     'shadow_bot_enabled',
     'polling_interval_ms',
-    'bot_worker_enabled',
+    // ⚡ bot_worker_enabled ไม่อยู่ใน whitelist นี้ — enable edge ต้องเขียนผ่าน
+    //   setBotWorkerGlobalEnabled (CAS + stamp bot_worker_enabled_at) เจ้าของเดียว
+    //   เท่านั้น; ปล่อยให้ $set ดิบ → flag ON แต่ edge หาย → worker เงียบ
     'bot_worker_interval_ms',
     // ⚡ bot_worker_platforms ไม่อยู่ใน whitelist นี้ — enable edge ต้องเขียนผ่าน
     //   setBotWorkerPlatformEnabled (CAS on expected state) เจ้าของเดียวเท่านั้น
@@ -465,6 +472,58 @@ export async function setBotWorkerPlatformEnabled(
     if ((e as { code?: number }).code !== 11000) throw e;
   }
   // CAS miss → one bounded reread to report persisted truth (no retry)
+  return reportCurrent();
+}
+
+/**
+ * ⚡ global bot-worker enable-edge CAS owner เดียว (เหมือน platform writer):
+ *   OFF→ON stamp `bot_worker_enabled_at` ใน write เดียวกัน · ON→OFF clear null ·
+ *   true→true idempotent = no write ไม่ขยับ edge · CAS miss → reread 1 ครั้ง → 409
+ */
+export async function setBotWorkerGlobalEnabled(
+  enabled: boolean,
+  expected: boolean,
+  updatedBy = 'admin'
+): Promise<{ applied: true; changed: boolean } | { applied: false; current: boolean }> {
+  const coll = await getCollection<SystemConfigDoc>(COLLECTIONS.systemConfigs);
+  const stateFilter: Record<string, unknown> = expected
+    ? { bot_worker_enabled: true }
+    : { $or: [{ bot_worker_enabled: false }, { bot_worker_enabled: { $exists: false } }] };
+  const reportCurrent = async () => {
+    const cur = await coll.findOne({ config_key: 'main_config' });
+    return { applied: false as const, current: cur?.bot_worker_enabled === true };
+  };
+
+  // desired === expected → idempotent no-op probe (zero write, edge ไม่ขยับ)
+  if (enabled === expected) {
+    const probe = await coll.findOne(
+      { config_key: 'main_config', ...stateFilter },
+      { projection: { _id: 1 } }
+    );
+    if (probe) return { applied: true, changed: false };
+    return reportCurrent();
+  }
+
+  try {
+    const applied = await coll.updateOne(
+      { config_key: 'main_config', ...stateFilter },
+      {
+        $set: {
+          bot_worker_enabled: enabled,
+          bot_worker_enabled_at: enabled ? new Date() : null,
+          updated_by: updatedBy,
+          updated_at: new Date(),
+        },
+      },
+      { upsert: !expected }
+    );
+    if (applied.matchedCount === 1 || applied.upsertedCount > 0) {
+      cachedConfig = null;
+      return { applied: true, changed: true };
+    }
+  } catch (e) {
+    if ((e as { code?: number }).code !== 11000) throw e;
+  }
   return reportCurrent();
 }
 
@@ -748,6 +807,7 @@ export const systemConfigService = {
   getSystemConfig,
   updateSystemConfig,
   setBotWorkerPlatformEnabled,
+  setBotWorkerGlobalEnabled,
   setKbSource,
   zaapiKbReady,
   testIntegration,

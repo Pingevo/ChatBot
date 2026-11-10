@@ -208,6 +208,9 @@ class ChatResponse(BaseModel):
     # caller (Next.js/admin) ใช้ flag นี้ trigger UI/notify แอดมิน
     handoff_to_admin: bool = Field(False, description="บอทขอส่งต่อแอดมิน (warranty claim)")
     handoff_reason: str | None = Field(None, description="เหตุผลที่ส่งต่อ เช่น 'warranty_claim_in_warranty' | 'warranty_claim_out_of_warranty'")
+    # ⚡ R5 — turn correlation id (ตัวเดียวกับ ai_usage.request_id) → caller ผูก
+    #   shadow_reply/botworker_events กลับหา LLM calls ของ turn นี้ได้ตรง
+    request_id: str | None = Field(None, description="turn correlation id — ตรง ai_usage.request_id")
     # ข้อมูล claim ที่บอทรวบรวมจากลูกค้า (ส่งให้แอดมิน)
     handoff_claim: dict[str, Any] = Field(default_factory=dict, description="ข้อมูล warranty claim: name, phone, order_id, topic, product, warranty_status")
     # ── Pass 1 intent classification (debug/observability) ──
@@ -856,12 +859,21 @@ def chat(req: ChatRequest) -> ChatResponse:
     #   ครอบทุก engine (legacy/v2/v3) + ทุก return path — กันคำตอบอ้างสิ่งที่ไม่ได้ทำจริง
     resp = _chat_impl(req)
     from . import guards as _guards
-    return _guards.enforce(resp, req)
+    resp = _guards.enforce(resp, req)
+    # ⚡ R5 — stamp request_id เดียวกับ _ai_call_ctx ลง response ทุก return path
+    _ctx = llm._ai_call_ctx.get()
+    if isinstance(_ctx, dict) and _ctx.get("request_id"):
+        resp.request_id = _ctx["request_id"]
+    return resp
 
 
 def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
     import time as _time
     _total_start = _time.time()
+    import uuid as _uuid
+    llm._ai_call_ctx.set({"shop": req.shop, "conv_id": req.conversation_id,
+                          "platform": req.platform,
+                          "request_id": str(_uuid.uuid4())[:12]})
     # ⚡ 2B.5 — post-handoff ownership lock (production owner เดียวที่ /chat
     #   boundary): ticket_state = authority เดียว — handoff/open/pending →
     #   wait-admin response ทุกข้อความ ก่อน engine dispatch (v3/v2/legacy),
@@ -5773,3 +5785,126 @@ def zaapi_kb_import_log(file: str = "", limit: int = 30) -> dict:
         if r.get("at"):
             r["at"] = r["at"].isoformat()
     return JSONResponse({"log": rows})
+
+
+# ─────────────────────────────────────────────────────────────
+# /admin/generations — generation pipeline status + publish/discard/rollback
+# (build_generation.py เขียน generation_runs; CAS = publish_generation.publish)
+# ─────────────────────────────────────────────────────────────
+
+_EXPORTS_ROOT = Path(__file__).resolve().parents[2] / "exports"
+
+
+@app.get("/admin/generations")
+def admin_generations_list(status: str = "", limit: int = 20) -> dict:
+    """list generation_runs + active pointer — admin poll สถานะ build/pending."""
+    adb = knowledge_base._admin_db()
+    q = {"status": status} if status else {}
+    rows = list(adb["generation_runs"].find(q).sort("created_at", -1)
+                .limit(min(limit, 100)))
+    for r in rows:
+        r["_id"] = str(r["_id"])
+    ptr = adb["sellable_units_meta"].find_one({"_id": "active"}) or {}
+    return JSONResponse({"active": ptr.get("generation_id"),
+                         "previous": (ptr.get("previous") or {})
+                         .get("generation_id"),
+                         "runs": rows})
+
+
+@app.get("/admin/generations/{gid}")
+def admin_generation_detail(gid: str) -> dict:
+    """run doc + build_log tail (gen dir) — หน้า UI แสดง progress/สรุป."""
+    adb = knowledge_base._admin_db()
+    run = adb["generation_runs"].find_one({"_id": gid})
+    if not run:
+        raise HTTPException(status_code=404, detail=f"no generation_runs {gid}")
+    run["_id"] = str(run["_id"])
+    gen_dir = _EXPORTS_ROOT / "gen" / gid
+    log_path = gen_dir / "build_log.jsonl"
+    log_tail: list[dict] = []
+    if log_path.exists():
+        lines = log_path.read_text(encoding="utf-8").splitlines()[-50:]
+        log_tail = [json.loads(l) for l in lines if l.strip()]
+    files = [{"name": p.name, "size": p.stat().st_size}
+             for p in sorted(gen_dir.iterdir()) if p.is_file()] \
+        if gen_dir.is_dir() else []
+    manifest = None
+    mpath = gen_dir / "manifest.json"
+    if mpath.exists():
+        try:
+            manifest = json.loads(mpath.read_text(encoding="utf-8"))
+        except Exception:
+            manifest = None
+    ptr = adb["sellable_units_meta"].find_one({"_id": "active"}) or {}
+    return JSONResponse({"run": run, "build_log_tail": log_tail,
+                         "files": files, "manifest": manifest,
+                         "pointer_active": ptr.get("generation_id"),
+                         "pointer_previous":
+                             (ptr.get("previous") or {})
+                             .get("generation_id")})
+
+
+@app.post("/admin/generations/publish")
+def admin_generation_publish(request: Request, gid: str,
+                             expected_active: str = "auto") -> dict:
+    """admin accept → CAS pointer (status ต้อง pending เท่านั้น)."""
+    from .scripts import publish_generation as pg
+    adb = knowledge_base._admin_db()
+    run = adb["generation_runs"].find_one({"_id": gid})
+    if not run or run.get("status") != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{gid} status={(run or {}).get('status')} != pending")
+    res = pg.publish(adb, _EXPORTS_ROOT / "gen" / gid, gid,
+                     expected_current=expected_active,
+                     exports_root=_EXPORTS_ROOT, require_description=True)
+    if res in ("published", "bootstrap"):
+        adb["generation_runs"].update_one(
+            {"_id": gid},
+            {"$set": {"status": "published",
+                      "published_by": _admin_name(request),
+                      "published_at": pg._utc_now_iso()}})
+    return JSONResponse({"result": res})
+
+
+@app.post("/admin/generations/discard")
+def admin_generation_discard(request: Request, gid: str) -> dict:
+    """reject pending gen — mark discarded (ไม่ลบไฟล์; retention เป็นคนลบ)."""
+    adb = knowledge_base._admin_db()
+    res = adb["generation_runs"].update_one(
+        {"_id": gid, "status": "pending"},
+        {"$set": {"status": "discarded",
+                  "discarded_by": _admin_name(request),
+                  "updated_at": pg_now()}})
+    if not res.modified_count:
+        raise HTTPException(status_code=409, detail=f"{gid} not pending")
+    return JSONResponse({"result": "discarded"})
+
+
+@app.post("/admin/generations/rollback")
+def admin_generation_rollback(request: Request, gid: str = "") -> dict:
+    """rollback: gid ระบุ → CAS กลับไป gen นั้น (re-validate ก่อน —
+    ไม่มี gid → pointer.previous เดิม). partial rollback ไม่รองรับ —
+    artifact เป็น bundle สลับทั้งชุดเท่านั้น"""
+    from .scripts import publish_generation as pg
+    adb = knowledge_base._admin_db()
+    if gid:
+        gen_dir = _EXPORTS_ROOT / "gen" / gid
+        if not gen_dir.is_dir():
+            raise HTTPException(status_code=404,
+                                detail=f"gen dir {gid} ไม่มีอยู่ (rollback ไม่ได้)")
+        res = pg.publish(adb, gen_dir, gid, expected_current="auto",
+                         exports_root=_EXPORTS_ROOT,
+                         require_description=True)
+        return JSONResponse({"result": res, "to": gid,
+                             "by": _admin_name(request)})
+    active = (adb["sellable_units_meta"].find_one({"_id": "active"}) or {}
+              ).get("generation_id")
+    res = pg.rollback(adb, expected_active=active or "")
+    return JSONResponse({"result": res,
+                         "by": _admin_name(request)})
+
+
+def pg_now() -> str:
+    from .scripts import publish_generation as pg
+    return pg._utc_now_iso()

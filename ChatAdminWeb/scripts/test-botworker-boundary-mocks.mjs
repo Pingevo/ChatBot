@@ -36,6 +36,8 @@ export const state = {
   /** @type {Error | null} */
   callBotError: null,
   callBotHang: false,
+  /** @type {any[] | undefined} products ที่ callBot mock คืน (S8 persist test) */
+  callBotProducts: undefined,
   config: {
     bot_worker_enabled: true,
     bot_worker_platforms: { shopee: true, tiktok: false, lazada: false }, // ⚡ Phase 2D
@@ -79,6 +81,7 @@ export function resetState() {
   state.callBotDelayMs = 0;
   state.callBotError = null;
   state.callBotHang = false;
+  state.callBotProducts = undefined;
   Object.assign(state.config, JSON.parse(JSON.stringify(DEFAULT_CONFIG)));
   fm.store.clear();
 }

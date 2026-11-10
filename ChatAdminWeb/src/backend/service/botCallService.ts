@@ -43,6 +43,8 @@ export interface BotCallResponse {
   image_desc?: string;
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2 / v3)
   chat_engine?: "legacy" | "v2" | "v3";
+  // ⚡ R5 — turn correlation id จาก Python (ตรง ai_usage.request_id) → shadow chain
+  request_id?: string;
 }
 
 /** ⚡ Phase 2B.6 — admin claim outcome ที่ transport ไป Python (production เท่านั้น) */
@@ -253,6 +255,7 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       products: data.products,
       image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
       chat_engine: useV3 ? "v3" : useV2 ? "v2" : "legacy",
+      request_id: typeof data.request_id === "string" ? data.request_id : undefined,
     };
   } finally {
     if (slotHeld) await releaseBotCallSlot();

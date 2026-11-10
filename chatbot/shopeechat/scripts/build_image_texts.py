@@ -109,15 +109,28 @@ def _doc_images(d: dict) -> dict[str, str]:
     return ids
 
 
+def _count_export_docs(path: Path) -> int:
+    """นับ doc ใน export (chunk binary หา line-start '  {') — เร็วพอสำหรับ progress."""
+    n = 0
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            n += chunk.count(b"\n  {")
+    return n
+
+
 def _discover_images(path: Path) -> dict[str, dict]:
     """image_id → {image_url, used_by, item_ids, sellable_item_ids} จาก export ทั้งก้อน.
 
-    discovery owner เดียวของ generation — materialize/classify/units ใช้ map เดียวกัน
+    discovery owner เดียวของ generation — materialize/classify/units ใช้ map เดียวกัน;
+    emit pct=0..35 ให้ driver parse (scan = ช่วงแรกของ step)
     """
     info: dict[str, dict] = {}
     n_docs = 0
+    total_docs = _count_export_docs(path)
     for d in _iter_export_docs(path):
         n_docs += 1
+        if n_docs % 1000 == 0:
+            print(f"pct={35.0 * n_docs / max(total_docs, 1):.1f} scan_docs={n_docs}/{total_docs}")
         sellable = d.get("item_status") == "NORMAL" and _doc_stock(d) > 0
         try:
             item_id = int(d.get("item_id"))
@@ -280,19 +293,23 @@ def run_generation_ocr(work: list[dict], db, gen_dir: Path, gid: str,
     - เขียน gen_dir/image_texts.counts.json = per-scope+totals breakdown
       (manifest/publish-gate evidence — empty publish ต้องมี record นี้)
     """
+    print("pct=35 phase=cache_load")
     coll = db["image_texts"]
     cache_docs = list(coll.find({}))
     cache = {d["image_id"]: d for d in cache_docs if d.get("image_id")}
     malformed_cache = len(cache_docs) - len(cache)
     discovered = {w["image_id"]: w["image_url"] for w in work}
     cls = _classify_images(discovered, cache)
+    print(f"pct=38 cache={len(cache)} classified work={len(work)}")
     evidence: list[dict] = []
     counts = {"unchanged": 0, "new": 0, "changed": 0, "retryable_error": 0,
               "deferred": 0, "processed": 0, "calls": 0}
     carried = reusable = emitted_new = 0
     calls_used = 0
     stop = False
-    for item in work:
+    for idx, item in enumerate(work):
+        if idx and idx % 50 == 0:
+            print(f"pct={38 + 61 * idx / max(len(work), 1):.1f} ocr={idx}/{len(work)}")
         iid = item["image_id"]
         state = cls[iid]
         fp = _fingerprint(iid, item["image_url"])
@@ -470,6 +487,7 @@ def run_generation_ocr(work: list[dict], db, gen_dir: Path, gid: str,
                    encoding="utf-8")
     os.replace(tmp, counts_path)
     print(f"ocr gen={gid} counts={counts} evidence={len(evidence)}")
+    print("pct=99 merge_done")
     return counts
 
 

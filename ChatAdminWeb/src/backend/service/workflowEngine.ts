@@ -143,6 +143,8 @@ export interface DeliveredMessage {
   source: string;    // "workflow.send_message" | "workflow.let_ai_respond" | "workflow.stay_retry"
   node_id: string;
   image_url?: string; // ⚡ Zaapi send_message type=image — media passthrough ไป delivery pipeline
+  products?: unknown[]; // ⚡ let_ai_respond → persist ลง shadow doc.bot_products (send_card identity verify)
+  request_id?: string; // ⚡ R5 — let_ai_respond → shadow doc.request_id (turn correlation)
 }
 
 export type EngineResult = {
@@ -1756,7 +1758,7 @@ async function performAction(
       context.bot_model = botResp.model;
       context.bot_products = botResp.products;
       if (botResp.answer) {
-        delivered.push({ text: botResp.answer, source: "workflow.let_ai_respond", node_id: node.node_id });
+        delivered.push({ text: botResp.answer, source: "workflow.let_ai_respond", node_id: node.node_id, products: botResp.products, request_id: botResp.request_id });
       }
       return {};
     }

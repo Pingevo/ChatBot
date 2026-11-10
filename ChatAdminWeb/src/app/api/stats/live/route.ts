@@ -1,27 +1,13 @@
 // GET /api/stats/live — "ข้อมูลสด" — real-time-ish snapshot widgets
 // Phase 4: ใช้ aggregation สด แทน load-all
-// Query: range = daily (default) | monthly | yearly | all
+// Query: range = daily | weekly (default page) | monthly | yearly | all | custom dates
 import { NextRequest } from "next/server";
 import { requirePageAccess } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { auth } from "@/backend/service/authService";
 import { shopService } from "@/backend/service/shopService";
-
-function getBounds(range: string): { start: Date | null; end: Date | null } {
-  const now = new Date();
-  if (range === "all") return { start: null, end: null };
-  if (range === "monthly") {
-    return { start: new Date(now.getFullYear(), now.getMonth(), 1), end: now };
-  }
-  if (range === "yearly") {
-    return { start: new Date(now.getFullYear(), 0, 1), end: now };
-  }
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - 6);
-  return { start, end: now };
-}
+import { parseStatsRange } from "@/backend/lib/statsRange";
 
 export async function GET(req: NextRequest) {
   const r = await requirePageAccess(req, "analytics");
@@ -31,19 +17,7 @@ export async function GET(req: NextRequest) {
   const range = url.searchParams.get("range") || "daily";
   const customStart = url.searchParams.get("start_date");
   const customEnd = url.searchParams.get("end_date");
-
-  let start: Date | null;
-  let end: Date | null;
-  if (customStart) {
-    const [_sy,_sm,_sd]=customStart.split('-').map(Number);
-    start = new Date(_sy,_sm-1,_sd,0,0,0,0);
-    const [_ey,_em,_ed]=customEnd?customEnd.split('-').map(Number):[_sy,_sm,_sd];
-    end = new Date(_ey,_em-1,_ed,23,59,59,999);
-  } else {
-    const bounds = getBounds(range);
-    start = bounds.start;
-    end = bounds.end;
-  }
+  const { start, end } = parseStatsRange(range, customStart, customEnd);
 
   const convColl = await getCollection(COLLECTIONS.conversations);
   const statusColl = await getCollection(COLLECTIONS.statusConversation);

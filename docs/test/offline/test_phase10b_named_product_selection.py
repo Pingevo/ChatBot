@@ -182,6 +182,10 @@ def _doc_match(doc: dict, query: dict) -> bool:
 
 
 class _FakeCursor(list):
+    def max_time_ms(self, value):
+        assert isinstance(value, int) and value >= 0
+        return self
+
     def limit(self, n):
         return _FakeCursor(self[:n])
 

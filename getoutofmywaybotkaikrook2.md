@@ -12715,3 +12715,257 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - exports/*.log 32 ไฟล์ → exports/logs/ (exports/ gitignored — schema.md §7 บันทึกสถานะ used/unused แทน)
 - verify: pytest docs/test collect 2624 tests 0 errors (เดิม collection พังอยู่แล้วจาก script-style + env-needing files)
 - ยกเลิก/เก็บ: test_compat_mode_filter+test_handoff_transport+test_flow ต้องการ env จริง → tools/check_*
+
+## [ผ่านแล้ว] R1 publish g20261109 → live (CAS) 2026-11-10
+- artifact ครบ: unit 28,044 / product 11,781 / desc 27,155 / image_texts 13,927 (2 scopes) — npz gid ตรงทุกไฟล์, validate+manifest ผ่าน
+- docker smoke (canary image + โค้ดปัจจุบัน + exports:ro): Mongo ถึง, npz load, embed+search จริง top-5 score 0.70
+- CAS: active g20261024→g20261109, previous=g20261024 (ไฟล์อยู่ rollback ได้), cleanup ลบแค่ g20261027
+- ค้าง: cron daily/weekly + admin accept UI + retention 3daily/2weekly (plan รอเขียน), deploy server ต้อง copy gen dir เข้า exports_data volume
+
+## [กำลังจะทำ] Generation pipeline — build_generation.py + generation_runs + admin accept UI
+- implement ตาม plan docs/plans/active/2026-11-10 — ฟังก์ชันที่ cron จะ call; ไม่ติดตั้ง cron
+
+## [ผ่านแล้ว] Generation pipeline functions — build/admin UI/retention (cron ยังไม่ติดตั้ง) 2026-11-10
+- build_generation.py: driver daily|weekly — subprocess steps + build_log.jsonl + generation_runs (percent จาก N/total), build lock, carry+re-stamp desc (daily) ผ่าน _save_verified_npz, import colls, validate+manifest → pending
+- app.py +/admin/generations{,/{gid},/publish,/discard,/rollback} — publish เฉพาะ status=pending; generic /api/chatbot proxy ใช้ได้เลยไม่ต้องสร้าง route ใหม่
+- UI: /generations page (poll 5s, per-step bars, Accept/Reject/rollback via confirm.ask) + BuildProgressCat pixel sprite + GenPendingDot badge (poll 30s) + nav item ทั้ง Sidebar/MobileNav
+- retention: cleanup_generations keep = active+previous+3 daily+2 weekly (build_kind จาก generation_runs)
+- verify: py_compile ×3, tsc --noEmit OK, carry test 27,155 rows re-stamp gid ผ่าน
+- ค้าง: cron install (แยกอนุมัติ), live endpoint test บน uvicorn จริง, deploy sync gen เข้า exports_data volume
+
+## [ผ่านแล้ว] /generations UI v2 — header schedule + expandable detail + per-gen rollback 2026-11-10
+- page: header 3 ใบ (active / next build 09:00 จันทร์=weekly / last build start→เสร็จ), building ETA จาก overall%, empty state + cat
+- RunCard expand → RunDetail: files+size, manifest counts, build_log tail; rollback ปุ่มต่อ gen ที่ published/previous
+- app.py: detail endpoint +files+manifest+pointer; list +previous; rollback รับ gid → re-publish ไป gen นั้น (re-validate ก่อน CAS); ไม่มี partial rollback (bundle contract)
+- verify: py_compile + tsc --noEmit OK
+
+## 2026-11-10 — R3 canary: global bot_worker_enabled ไม่ stamp edge → worker เงียบ (fixed)
+
+- เคส: เปิด global switch ใน UI แล้วส่งข้อความเข้าร้าน → บอทไม่ตอบ
+- สาเหตุ: `updateSystemConfig` whitelist `$set` ดิบ `bot_worker_enabled` — ไม่มี code path เขียน `bot_worker_enabled_at` → `resolveBotworkerScope` เจอ globalEnabledSince ไม่ใช่ Date → return empty scope (fail-closed ตาม design)
+- สถานะ DB ตอนเจอ: global=false→ผู้ใช้เปิด→true แต่ edge หาย; platform shopee ON (edge 19 ต.ค.), shop armed = SuperITMall ร้านเดียว (MiLiThailand ถูกปิดแล้ว), concurrency=1
+- แก้ data: stamp `bot_worker_enabled_at=2026-11-10T05:24:37Z` (1 field)
+- แก้ราก: `setBotWorkerGlobalEnabled` CAS owner เดียว (OFF→ON stamp edge / ON→OFF clear / idempotent no-op / stale→applied:false) + เอา key ออกจาก whitelist + PUT /config branch {flag,expected_,single-command→409} + test-assignment toggle_worker เปลี่ยนไปเรียก CAS + config page ส่ง expected_
+- เทส: test-botworker-global-enabled-cas.ts 8/8 (G1-G8 incl. whitelist drop + missing-edge fail-closed) · config-failclosed 8/8 · enable-checkpoint 18/18 · scope-gate 107/107 · tsc clean
+- งานค้าง: ผู้ใช้เปิด global อีกครั้ง (edge มีแล้ว) → worker รับข้อความใหม่หลัง edge เท่านั้น; canary จริงรอผู้ใช้ส่งข้อความทดสอบเข้าร้าน SuperITMall
+
+## 2026-11-10 — R3 pilot closeout (ปิดแล้ว)
+
+- local canary จบครบวงจร: toggle ON ผ่าน UI (CAS stamp edge 05:33:38Z อัตโนมัติหลัง fix) → inbound Shopee จริง → buffer_flush (3msg→1batch) → bot draft → shadow_replies + review_bubbles → admin approve/edit/reject → mock_sent (delivered:false เสมอ)
+- แก้ระหว่าง pilot: review gate `bot_review_admin_id="*"` เปิดทุกแอดมิน (shop fence 22997004 เดิม) — commit e496fcc
+- audit: decided_by/decided_at/original+edited/approved_text/receipt ครบใน doc; config.toggle+buffer_flush ลง admin_logs ถูก
+- ปิด: bot_worker_enabled=false (ผู้ใช้ปิดเอง/verify false+edge null) + kill worker local
+- ค้าง (แยกงาน): คุณภาพคำตอบบอทยังแย่ (สินค้าผิด/มั่ว) — เดี๋ยวทำทีหลัง; cost-stop gate ยังไม่มี (เฝ้ามือตามตกลง)
+
+## R1 daily build #1 (g20261110-054801-c989b70a) — progress reporting fix + กำลัง build
+
+- อาการ: UI ค้าง 11% step OCR 0% นาน → ดูเหมือน hang แต่จริงทำงานอยู่ (sample: block sock_recv ระหว่าง coll.find({}) cache 73k docs; cache upserts last_generation_id นับได้ 7k+ ตัวเพิ่มเรื่อยๆ)
+- เกิดเพราะ: build_image_texts.py ไม่ print N/total เลย → driver parse ไม่ได้ → percent=0 ตลอด step; แถม driver lf.write() buffer 8KB ไม่ flush → log ว่างทั้งที่ script print แล้ว
+- แก้: (1) driver +_PCT_RE `pct=NN` คู่ regex เดิม + lf.flush() ทุกบรรทัด (2) script emit pct monotonic — scan 0→35 (ทุก 1k docs, total จาก _count_export_docs binary count '  {'), cache_load 35, classify 38, loop 38→99 ทุก 50 ตัว, merge 99
+- verify: --max-calls 0 --limit 300 (zero-call, ไม่ยิง Gemini/ไม่ upsert) emit ครบ pct=3→99; worklist sellable=18,960 รูป, 300 ตัวแรก new=220 → run จริงมีงาน OCR จริงเยอะ (ไม่ใช่ reuse ล้วน)
+- ผลกระทบ: run ปัจจุบันโหลดโค้ดเก่าไปแล้ว → % ยัง 0 จนจบ step แล้วกระโดด 100 (monitor ผ่าน cache upsert count แทน); run ถัดไป (cron) % ขยับ real-time
+
+## R0 ต่อ — ai_usage enrich + modular เข้า answer_typed (path production หลัก)
+
+- พบ: modularization เดิม wire เฉพาะ legacy `answer()`; `prompt_modular=True` ใน main_config อยู่แล้ว (doc key = `config_key` ไม่ใช่ `_id`) → ขยายเข้า `answer_typed` ด้วย `build_core_b_typed` (kinds จาก `context.task.tasks`: compare→+compare section, product/compat→recommend+product_match, ว่าง→เต็ม; flag off = TYPED_SYSTEM_INSTRUCTION byte-identical)
+- ai_usage เติม fields ตาม plan เดิมที่ขาด: `path` (answer|typed|vision|kb|general|intent) + `elapsed_ms` (วัดรอบ generate_content ไม่รวม quota wait) + `_ai_call_ctx` contextvar {shop,conv_id,platform,request_id} — set ที่ `_chat_impl` entry ครอบทุก engine/nested call
+- verify: split ครบ 27,711 chars (sections รวมกันเท่า CORE_B — re-order ตาม design เดิม), modular off→byte-identical (flag เดิม), py_compile ผ่าน; measured CORE_B cut: product/compat 25.1k/27.7k (~9%), compare 27.2k (~98%) — ประหยัดจริงจำกัด เพราะ core_answer+recommend+product_match ส่งเสมอ
+- ต่อ: replay วัดจริง + QA gate ก่อนสรุป R0
+
+## R0 — A/B replay วัดจริง + ai_usage enrich verified E2E
+
+- วิธี: replay 12 ข้อความลูกค้าจริง (shadow_replies ล่าสุด) ผ่าน /chat local — flip prompt_modular OFF→ON (config write ชั่วคราว, OFF=promptเดิมปลอดภัย) — ยิง Gemini จริง ~24 turns แจ้งผู้ใช้ก่อนแล้ว
+- ai_usage verified: intent(4,692 tok med) + typed(14-20k) + general(1,720) correlate ผ่าน request_id/conv_id/shop ครบ; latency med intent 1.7s / typed 3.4s
+- ผล modular จริง: system est 27,299→25,191 (-7.7%); typed call เดียวกัน 20,804→17,106 (-17.8%); context est 4.9-9.7k = ตัวใหญ่ที่เหลือ (retrieval-bound — ยังไม่แตะ รอ answer-quality task)
+- QA gate: คำตอบสมเหตุทั้ง 2 โหมด deterministic replies เหมือนเดิม; prompt_modular กลับ True แล้ว (prod ไม่กระทบ — ON อยู่แล้วเดิม)
+- ค้าง: รอ production traffic ผ่าน ai_usage ใหม่สะสม → วัด cost/day + p50/p95 ต่อ path อีกครั้ง
+
+## R4 — census update + dedupe tooling พร้อม (blocked: external writer)
+
+- census ใหม่: conversations_shp 883 dup groups / 1,165 extra (โตจาก 731 ตอน plan เดิม — writer ยังสร้างซ้ำ 62 groups ใน Nov); messages_shp 1,318/1,323 (หยุดหลัง Oct); shadow_replies "dup" จริงแค่ 366 groups (batch เดียวกัน) — 3,554 เป็น regeneration ตาม design ไม่ใช่ขยะ
+- dup docs diverge (ต่าง last_message/unread/updated) — parallel snapshots ของ conv เดียวกัน
+- เขียน chatbot/testscript/dedupe_conversations.py — dry-run default, canonical=freshness+_id tiebreak, losers→conversations_shp_dup_archive (ไม่ลบ = rollback ได้), CAS re-read ก่อนเขียน, --apply ต้อง --token APPLY-DEDUPE; verify dry-run+ordering unit check ผ่าน
+- BLOCKED ตาม plan §Stage0: รอ external Sellcenter writer ระบุ repo/owner แก้ upsert ก่อน — cleanup เร็วกว่านั้นมีแต่เสี่ยง dup ใหม่เกิดซ้ำ
+- unique index conversation_id สร้างได้หลัง dedup เสร็จ (ตอนนี้ E11000)
+
+## R5 — stats range contract fix (กำลังทำ)
+- เจอ: dashboard ตีความ daily=วันนี้ (ถูกตาม picker "วันนี้") แต่ live/admin-activity/performance ตีความ daily=rolling 7 วัน → label โกหก
+- custom range ส่งไม่มี range → default daily → labels 7 วันล่าสุดคู่ bounds custom (ผิด)
+- Mongo $group ใน admin-activity/performance ใช้ UTC fields ไม่ใช่ Asia/Bangkok (dashboard ใช้ถูก) → day-edge คลาด
+- แผน: statsRange.ts canonical (daily=today, weekly=7d, monthly, yearly, all, custom=local-midnight) + statsSeries derive slots จาก bounds (ไม่ใช่ชื่อ range) + routes ใช้ helper เดียว + pages default preset→weekly + keyOf grain-aware + timezone Bangkok ใน $group
+- ผ่านแล้ว: statsRange.ts canonical — parseStatsRange(daily=วันนี้/weekly=7d/monthly/yearly/all/custom=local-midnight) + statsSeries(slots derive จาก bounds, ≤62d→day, >62d→month, all→data-years) + statsBucketId/statsAggKey (Bangkok tz) + statsRangeLabel/statsCompareLabel
+- routes: live/admin-activity/performance/dashboard ใช้ helper เดียว — ลบ getBounds ซ้ำ 4 จุด; admin-activity/performance chart slots+keyOf+bucket grain-driven (custom range ไม่หลุด year-bucket อีก)
+- pages: live/admin-activity/performance default preset daily→weekly (แสดง 7 วันเหมือนเดิม แต่ label "7 วันล่าสุด" ตรงจริง); daily="วันนี้" ทำงานถูกแล้วทุกหน้า
+- verify: test-stats-range.ts 22/22 + tsc clean
+- งานค้าง R5: verify analytics numbers vs Mongo source, end-to-end trace turn/import/approval ใน observability
+
+## R5 — ai_usage provider-log gap fix (กำลังทำ→ผ่านแล้ว)
+- เจอ: _openrouter_generate return ตรงไม่ผ่าน _record_tokens → OR calls ไม่เข้า ai_usage เลย; gemini error attempts เงียบ; doc ขาด provider/status/attempt/error/key_ref
+- แก้: _persist_usage +_record_tokens รับ provider/status/attempt/error/key_ref/cost_usd; _key_ref helper = index ใน active pool (ไม่ใส่ key จริง); _generate log ทุก attempt (OR success/error → gemini fallback ยังทำงาน); OR body มี usage.include → cost จริง
+- verify: test_ai_usage_fields 21/21 + py_compile; SRS อัปเดตแล้ว
+
+## R5/S8 — workflow bot_products persist + dead fields (ผ่านแล้ว)
+- เจอ: workflowEngine.let_ai_respond set context.bot_products แต่ DeliveredMessage ไม่มี field products → storeWorkflowDelivered เขียน shadow doc โดย bot_products ตกหล่น (send_card verify อ่านไม่ได้)
+- แก้: DeliveredMessage +products?: unknown[]; let_ai_respond push products จาก botResp; storeWorkflowDelivered เขียน bot_products ลง shadow doc (idempotency/deterministic-id เดิมไม่เปลี่ยน)
+- S8 cleanup: ลบ dead fields — DocLike.inbound_message_ids/batch_id (ไม่มีผู้อ่านใน reviewService) + response field review_admin_id (ไม่มี consumer)
+- verify: test-botworker-boundary เพิ่ม E7b (RED→GREEN) 21/21 + tsc clean (stale incremental cache เคยทำ error ค้าง — rm tsconfig.tsbuildinfo)
+- ผลกระทบเคสอื่น: send_message/send_card/stay_retry ไม่มี products → field absent เหมือนเดิม; storeBotReply path ปกติไม่แตะ
+
+## R5 — numeric reconcile + end-to-end observability trace (ผ่านแล้ว)
+- เขียน scripts/test-stats-reconcile.ts (read-only): ต่อทุกเคส naive countDocuments(bounds) == Mongo $group bucket sum == JS keyOf sum และทุก doc ลง slot (lost=0)
+- ผลจริงบน prod data: 10/10 — conv.created_at daily(148)/weekly(1637)/monthly(2397)/yearly(155682)/all(158747)/custom(1734), conv.last_msg_ts weekly(2308)/daily(348), msg.created_ts weekly(17957)/monthly(25912) — grain/slots/Bangkok-tz ตรงกันทั้ง 2 paths
+- เขียน scripts/probe-observability-trace.ts: turn ล่าสุด (conv shp_98777118463033313) — inbound found, botworker_events=10, admin_logs=0 (pending review ถูกต้อง), mock_sent=0; chain ไม่ขาดสำหรับ pending turn
+- ai_usage schema coexist ยืนยันใน DB: 87 docs = 55 เก่า + 32 enriched (path/conv_id/request_id/elapsed_ms); provider/status/attempt/key_ref จะมีหลัง prod bot restart (code verify แล้ว test 21/21)
+- admin_logs field จริง = action_type/timestamp (probe รอบแรกใช้ action/created_at ผิด → undefined ทั้งหมด); vocabulary 43 ประเภทครบ bot.*/shadow_reply.*/workflow.*/config.*/zaapi_kb.*/assignment.*/user.*/login
+- งานค้าง R5: ai_usage enriched rollout หลัง deploy; bot.buffer_flush volume สูง (35,813 events) — ไม่ใช่ขาด แต่ noise ถ้าจะทำ dashboard feed ควร aggregate
+
+## R1 — g20261110 publish ผ่าน admin Accept (ปิด R1 สมบูรณ์)
+- user กด Accept → CAS pointer sellable_units_meta.active flip → g20261110-054801-c989b70a (activated_at 07:59:12Z = publish 07:59:13Z)
+- bundle atomic ครบ: units_collection/image_texts_collection/units_npz/product_npz/units_jsonl/manifest+sha ชี้ gid เดียวกันหมด
+- previous = g20261109 retained พร้อม manifest → rollback พร้อม (ไม่มี partial rollback)
+- flow ครบตาม design: daily build 09:00 → pending → admin Accept → atomic publish → prev retained
+- note: run docs ทั้ง 2 gid แสดง status "published" — pointer คือ authority ของตัวจริง (status = last event เฉยๆ)
+
+## R0/R5/S1/S2/S3/S7 closeout — กำลังจะทำ
+- ผู้ใช้อนุมัติแผน closeout และงบ provider ไม่เกิน US$1; ห้ามส่งลูกค้าจริง/เปิด web search/อ่าน env files; R4 รอ external owner แยกไว้
+- baseline: branch codex/zaapi-kb-closeout clean; frozen SHA และ active prefix 1..12827 ตรง ledger; semantic coverage ยัง partial
+- ลำดับ: reproduce S2 dotenv ordering → S7 quota watcher → R5 lifecycle/route truth → R0 payload optimization+S1 bounded live QA → S3 historical coverage+review; test ก่อนแก้, commit แยก fix
+- S2 วิเคราะห์เบื้องต้น: test หลายไฟล์ patch dotenv ตอน collection; ต้องพิสูจน์ alias identity ใน forward/reverse batch ก่อนแก้ ไม่เปลี่ยน production env behavior
+- S7 ปัจจุบัน default quota file อยู่ exports แล้ว; ต้องตรวจ watcher จริงก่อนสรุปว่า churn ยังเกิด
+
+## S2 — dotenv import-test isolation (ผ่าน focused gate; full regression ยังเปิด)
+- RED: focused 3 modules 189 passed/2 failed — subprocess ใช้ docs/test แทน docs/test/offline; alias test เปรียบ global หลัง sibling collection เปลี่ยน dotenv ไปแล้ว
+- แก้ test owner เดิม: subprocess import path เป็น offline; ตรวจ provider+app+knowledge_base alias identity ใน subprocess สะอาดพร้อม no-op dotenv ก่อน import (ไม่เปิด env)
+- GREEN: focused forward/reverse 191/191 exit 0 ทั้งสองลำดับ; production behavior/helpers/guards/regex/keyword/decision owners delta=0
+- Full offline gate: 1666 passed/23 failed/286 errors/15 skipped/1 xfailed; หลายรายการ fixture paths เก่าหลังย้าย test directories — ต้องแก้ infrastructure ก่อนปิด S2 ทั้งหมด; ไม่อ้าง full regression ผ่าน
+
+## S2 regression infrastructure — กำลังจะทำ
+- RED full offline พบ test_zaapi_kb_import.FIXTURES ยังอ้าง offline/fixtures แต่ไฟล์จริงอยู่ docs/test/fixtures; กระทบ importer/diff/correction tests ที่ reuse fixture owner เดียว
+- แผน: แก้ path owner เป็น parent.parent/fixtures; ไม่ย้ายไฟล์ ไม่ลด assertions ไม่แก้ importer production; รัน affected suites และ full offline ใหม่
+- ผ่านแล้ว: affected importer/diff/corrections 303 passed exit 0; full offline 1956 passed/19 failed/15 skipped/1 xfailed/0 errors (286 fixture setup errors หาย); remaining failures ส่วนหนึ่ง fake cursor ไม่รองรับ max_time_ms และ subprocess path/index expectation เก่า — แยก fix ถัดไป
+
+## S2 regression cursor API — กำลังจะทำ
+- RED: 17 failures บน product/subject/KB/profile paths เพราะ FakeCursor ไม่มี max_time_ms หลัง production เพิ่ม bounded query
+- แผน: เติม fluent method ใน shared mongo_doubles และ local cursors สองตัว พร้อม validate timeout int>=0; ไม่เปลี่ยน production query/timeouts/assertions; รัน affected suites ใหม่
+- ผ่านแล้ว: affected 3 suites 95 passed exit 0; fake cursor fluent API restored; production helpers/guards/regex/keywords/owners delta=0
+
+## S2 canary subprocess isolation — กำลังจะทำ
+- RED: fresh-process canary import ใช้ docs/test path เดิมแทน live และ subprocess ไม่ติด dotenv boundary ของ conftest (มี KEYS log จึงมีความเสี่ยงเปิด env โดย import)
+- แผน: ชี้ live directory; suppress dotenv และ block network ก่อน production imports ใน subprocess; ไม่รัน canary/provider, คง assertion before/after bindings เดิม; fix เฉพาะ offline test
+- ผ่านแล้ว: canary retry/import/seam tests 9 passed exit 0; subprocess ไม่อ่าน env และ network tripwire armed; production delta=0
+
+## S2 claim index contract scope — กำลังจะทำ
+- RED: claim unique-index test scan ทุก Python module แล้วชน KB apply_import index ที่คนละ collection/owner; claim state runtime ยังต้องห้าม DDL เช่นเดิม
+- แผน: คง canonical TS unique index assertion; scope source scan ที่ conversation_products/warranty_flow; เพิ่ม create_index tripwire ใน claim fake collection เพื่อให้ behavioral lifecycle/race tests จับ request-time DDL; ไม่แก้ production หรือ index จริง
+- ผ่านแล้ว: full offline forward และ reversed execution อย่างละ 1975 passed/15 skipped/1 xfailed exit 0; focused reversed file-import order 191 passed เดิม; warnings 12 เดิม (dependency deprecations/anchor return-bool) ไม่ใช่ failure
+- S2 ปิด: dotenv alias/import path isolation พร้อม executable regression; production delta=0; runtime tripwire เพิ่มใน test double เท่านั้น
+
+## S7 quota reload — กำลังจะทำ
+- ตรวจจริง: llm default quota file=exports/.gemini_quota.json; process 89354 uvicorn :8010 ไม่มี --reload; Uvicorn FileFilter(default reload_dirs=chatbot) reject quota json/tmp ทั้ง exports และ old source location, accept llm.py
+- แผน: เพิ่ม offline executable regression ที่เรียก _save_quota_day กับ temp file หลายครั้ง + FileFilter จริง; ไม่แตะ quota จริง/process/live config; ไม่มี production patch หากไม่พบ churn
+- ผ่านแล้ว: test_quota_reload 2 passed exit 0 — repeated atomic saves ค่าถูกต้อง/no tmp เหลือ; real filter reject quota json/tmp แม้เพิ่ม *.json include (hidden-file exclude คง); source py ยัง reload ได้
+- S7 ปิดสำหรับ current default/runtime: ไม่พบ quota-driven reload; production delta=0; ห้ามขยายเป็นการรับรอง custom watcher ทุกแบบ
+
+## R5 provider attempt gaps — กำลังจะทำ
+- Audit: _generate log Gemini ClientError เท่านั้น; SDK ServerError/transport timeout หลุดทั้ง main/fallback call ไม่มี ai_usage; OR broad exception logging มีอยู่แล้ว
+- แผน: executable RED tests ใช้ fake provider + in-memory usage sink; log non-ClientError ใน owner _generate เดิมแล้ว re-raise โดยไม่เปลี่ยน retry/fallback policy; เก็บ error class ไม่เก็บข้อความ exception ใหม่เพื่อลด secret risk; helpers/guards/regex/keywords/decision owners delta=0
+- UI nested-button task ยัง pending: local Next docs ถูก ignore filter บล็อกแม้ user อนุญาติ; ไม่แก้ config เพื่อ bypass; R4 ยังรอ external owner
+- ผ่านแล้ว: RED 4 failures (main missing 1 doc, fallback missing second doc); GREEN 4 passed — ServerError/timeout ทั้ง main/fallback log ครบจำนวน attempts+correlation/key_ref/latency และ re-raise exception object เดิม ไม่มี retry เพิ่ม
+- regression: provider contract เดิม 21 pass/0 fail ผ่าน subprocess suppress dotenv; full offline 1981 passed/15 skipped/1 xfailed exit 0; SRS _generate อัปเดต; mechanism delta=0
+- R5 ยังไม่ปิด: request_id จาก Python ยังสุ่มเฉพาะฝั่ง ไม่มี propagation เข้า shadow chain; missing-usage success ยัง return ก่อน persist; route/lifecycle reconciliation และ rollout verification ยังต้องตรวจ
+
+## R5 success without usage — กำลังจะทำ
+- Root cause: _record_tokens return เมื่อ usage_metadata ไม่มี/None ทำให้ success call หายจาก ai_usage
+- แผน: RED tests main Gemini/OR missing/None metadata; persist success ที่ owner เดิมก่อน return พร้อม usage_available=false, est_cost_usd=null (unknown ไม่ใช่ free); additive schema, ไม่เปลี่ยน answer/routing/quota; no new helpers/guards/regex/keywords/decision owners
+- ผ่านแล้ว: RED 5 failed/4 passed; GREEN focused 9 passed; missing/None metadata ทั้ง Gemini/OR persist success หนึ่ง doc และ return response เดิม; reported usage คง token counters+actual OR cost; error attempts ไม่มี metadata จึง usage_available=false/cost=null เช่นกัน
+- regression: full offline 1986 passed/15 skipped/1 xfailed exit 0; existing provider contract 21 pass/0 fail; SRS _record_tokens/_persist_usage อัปเดต; ยังไม่มี live provider calls/customer delivery
+
+## R0 typed product serialization — กำลังจะทำ
+- Audit: AnswerContext.context_text ใช้ json.dumps(indent=2) ใน product payload; whitespace-only overhead ไม่ใช่ retrieval evidence
+- แผน: RED behavioral roundtrip/compact tests หลาย brand/type + nested JSON/Unicode/null/false; เปลี่ยน separators ใน owner เดิมหนึ่งบรรทัด; header/evidence/availability/constraints ไม่แตะ; วัด UTF8 bytes/conservative token estimates ก่อนหลัง (ไม่อ้าง provider truth); answer quality/live measurement ยังต้อง S1 gate
+- ผลกระทบ: lossless serialization ไม่เพิ่มลด identity/facts/cards; อาจเปลี่ยน model presentation จึงยังไม่ปิด R0 โดย offline tests อย่างเดียว; mechanism delta=0; R5 correlation/route cross-TS ยังรอ local-doc access
+- ผ่านแล้ว: RED lossless/compact 6 failed → GREEN 6 passed (3 brand/type fixtures ×1/10 cards); roundtrip fields/values/order/Unicode/escaping/null/false+nonmutation+evidence/shop/availability/constraint safety preserved
+- fixture measurement (ไม่ใช่ provider truth): 1-card context bytes 2274→2118, 2273→2117, 2277→2121; 10-card 7234→5683, 7224→5673, 7264→5713 (~21%); conservative estimated tokens 2412→1895 / 2408→1891 / 2422→1905
+- regression: full offline แรก 4 failed เพราะ ordinal tests ผูก indentation; เปลี่ยนเป็น JSON roundtrip item_id→need_indices assertion (คงพฤติกรรม/เข้มกว่า substring) แล้ว full offline 1992 passed/15 skipped/1 xfailed exit 0; SRS อัปเดต
+- S1 auth blocker: GET local bot /openapi.json HTTP401 (ไม่เรียก provider); ต้อง authenticated config ผ่าน environment ที่อนุญาตก่อน live QA; รอบนี้ provider spend=0, R0 live before/after/cost/latency/quality ยังไม่ปิด
+
+## S3 historical semantic coverage — กำลังจะทำ
+- Frozen 8624 lines/892284 bytes/SHA ตรง; active 12890 lines/2464473 bytes/SHA ตรง prefix ledger; working tree clean ก่อน append
+- แผน: อ่าน raw exact ranges ที่ gap แล้ว index invariant/passed/unverified/pending ตามหลักฐานเดิม; ไม่ rerun ทุก historical test และไม่อ้าง full audit จน union ครบ+independent review
+- อ่าน ledger ปัจจุบันทั้ง sections แล้วพบ coverage-table ยังไม่ได้รวม A-132..145 แม้ entries มีอยู่; ต้องเติมหลังอ่าน source range จริง และคง exceptions/overclaims เป็น historical limitations ไม่ rewrite raw
+- ผ่านแล้วเฉพาะ batch: อ่าน frozen 241–781 จริงแล้วเพิ่ม F-014..F-022 + coverage/gap table; แยก historical unit/build proof ออกจาก live/answer/manual pending; ไม่เปลี่ยน raw frozen หรือ production
+- พบข้อจำกัดประวัติ: prompt connector sufficiency ไม่ใช่ deterministic proof, MI17→ultrasonic false match, wattage-only full-speed overclaim, dashboard predicted latency/30-day response stats ไม่ใช่ full-range measurement — ledger ไม่รับรองเป็น product truth
+- งานค้าง S3: frozen 782–8624, active gaps เดิมและ coverage-table A-132..145, independent review; coverage คง partial ไม่อ้างปิด S3; ไม่มี provider/DB/customer operations
+
+## S3 historical coverage batch 2 — กำลังจะทำ
+- อ่าน/index frozen ต่อจาก 782 แบบ exact ranges; ไม่แก้ raw history, ไม่เปลี่ยน production; แยก historical proof ออกจาก pending/overclaims เหมือน batch 1; coverage ยัง partial
+- ผ่านแล้วเฉพาะ batch: อ่าน 782–1223 จริงและ index F-023..F-030; legacy fallback/unit-vs-live limits, rich-message/page/batch identity, role guards, worker-history vs display authority และ real-vs-test status separation; manual batches ต้องเก็บเป็นประวัติไม่ purge
+- งานค้าง: frozen 1224–8624 + active gaps + independent review; ไม่อ้างปิด S3; raw frozen ไม่เปลี่ยน ไม่มี provider/DB/customer calls
+
+## S3 historical coverage batch 3 — กำลังจะทำ
+- อ่าน/index frozen ต่อจาก 1224; ไม่แก้ source history/production; บันทึก exact source ranges และข้อจำกัดหลักฐานเดิม; coverage ยัง partial
+- ผ่านแล้วเฉพาะ batch: อ่าน/index 1224–3021 เป็น F-031..F-044; รวม worker/concurrency/status/log ownership, media/tracking/claim, description/rejection memory, historical workflow tests+rollout+restore audit; repeated history แยกจาก independent verification
+- ไม่รับรอง overclaims: not-touched≠regression proof, default warranty12mo≠product policy, public image/model availability≠current truth, test-config restore≠rollout config, platform rows≠dup identity เสมอ; ไม่มีโค้ด/provider/DB/customer changes
+- งานค้าง S3: frozen 3022–8624, active gaps/coverage-table A-132..145 และ independent review; coverage คง partial
+
+## S3 historical coverage batch 4 — กำลังจะทำ
+- อ่าน/index frozen ต่อจาก 3022; ไม่แก้ raw history/production; เก็บ exact ranges และ historical evidence limits; coverage ยัง partial
+- กำลังทำ: อ่าน frozen 3022–3746 แล้ว (ledger ยังไม่เพิ่ม) — 3022–3147 workflow phases5→1: node styles/browser pending, template69 tests/Mongo pending, labels53, wait47 with retry/timeout audit and legacy compat, multibranch25, shell/list UI and engine6 smoke; source says shadow-only+safe HTTP/50steps, not real delivery proof
+- 3148–3248 historical real-bot Q14/subtype carry, short ambiguous turns, warranty brevity/terms, answer elaboration, trust no-link/image controls; trust paragraph repeated and stale TODO remains. 3249–3294 subtype simulated logic only/live pending; Docker/Caddy YAML parse only/no compose build proof
+- 3295–3392 refactor plan only: source-specific assignment, proposed status clear + fake worker messages_shp source isolation, own-bot-over-Zaapi grouped history; historical approvals do not authorize current destructive writes. 3393–3442 team workload+date-range: build/typecheck, source claims behavior not captured route-vs-source reconciliation
+- 3443–3498 date separators across pages/build only; 3499–3548 sticker URL/placeholder early-return root cause + rich worker parser/build only; 3549–3596 testchat ownership/log UI header-based legacy-visible and admin_id=all (compile/typecheck not auth/security proof)
+- 3597–3680 rich aliases/bundle submessages/product image singular schema+CDN; old null raw_payload cannot recover product identity; missing bundle child DB docs fallback; manual pending. 3681–3711 missing suggestion record in KB returns causes next-turn product drift (compile only/replay pending). 3712–3746 logs table+fields/categories/build proof, not logging completeness. Next raw read=3747; current frozen ledger coverage still ends3021
+- ผ่านแล้วเฉพาะ batch: อ่าน/index frozen 3022–3976 เป็น F-045..F-058; v3 prototype/feature parity แยก mock/real handoff smoke จาก live OR/endpoint/UI pending; shadow history ต้องก่อน inbound และ fallback fullMessages ไม่ใช่หลักฐานคำตอบบอทเรา
+- historical stock contract ขัดกัน: F-021 ใช้ shopee_stock เลี่ยง seller-inclusive summary แต่ 3811–3845 กลับใช้ summary_info; เก็บทั้งสองและไม่ตัดสิน current truth จากประวัติ/วันที่อย่างเดียว
+- Verify: git diff --check exit0, frozen8624 lines/892284 bytes/SHA a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341 ตรง; committed active prefix12909 SHA7010f6ce66a0b8c2d84111daf88cd7659d86a350d683eb1e522a6faf39a70864 ตรงและ diff active เป็น append-only
+- งานค้าง: frozen3977–8624 + active gaps/A-132..145 coverage table + independent review; coverage partial; docs-only mechanism delta helpers/guards/regex/keywords/owners=0; ไม่มี provider/DB/customer operations ไม่แตะ R4
+
+## S3 historical coverage batch 5 — กำลังจะทำ
+- อ่าน/index frozen ต่อจาก 3977; ไม่แก้ raw history/production; เก็บ exact ranges และ historical evidence limits; coverage ยัง partial
+
+## S3 historical coverage batch 5 — ผ่านแล้ว
+- อ่าน/index frozen 3977–8624 ครบ: F-059..F-063 (3977–5156) + F-064..F-079 (5157–8624); frozen coverage ตอนนี้ 1–8624 แต่ยังต้อง independent review + active gaps จึงไม่ใช่ complete
+- เนื้อหาหลักที่เพิ่ม: admin-chat-result/detail/ZMI context-loss fixes, chat_v2 pipeline + warranty_flow + use_v2/chat_engine, repo/docker/test reorg, Phase6 intent-first live verify, Phase7 anchor compare, Phase8 QA-pairs/context limit + admin llm_context_limit, warranty delivery-date, _available_for_sale, replay 500 hardening, cushion-back keyword, shadow SSE, TISI มอก., live-assignment close fix, device-spec KB path, UX/security rounds, product-type audits, order item anchor + return/refund handoff, link/vision/compat/address/p23 fixes, app.py refactor extraction, replay/unit tests, KB QA wiring/TTL/npz reload/refresh_data, quota/LLM config/roles//llm UI/OpenRouter/AES, sellable-first ranking/live stock/compat gate/suggestion compare, image_texts resume
+- หลักฐานจำกัด: compile/typecheck/unit/live replay ตามที่ raw log ระบุ; หลาย manual/browser/deploy/live-compare ยัง pending; repeated history ไม่ใช่ independent verification; stock-field conflict เดิมยังไม่ตัดสิน
+- integrity: frozen 8624 lines / 892284 bytes / sha256 a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341 ยังตรง; active prefix เดิม 12921 ไม่ถูกแก้ย้อนหลัง; batch นี้ append-only
+- งานค้าง: active semantic gaps + A-132..145 coverage-table confirmation + independent review; coverage ยัง partial; ไม่มี provider/DB/customer operations ไม่แตะ R4
+
+## S3 active-gap indexing batch 1 — กำลังจะทำ
+- อ่าน/index active getoutofmywaybotkaikrook2.md gap 1–594 (ก่อน covered range แรก 595–683)
+- ไม่แก้ raw active/frozen/production; เก็บ exact ranges + evidence limits; coverage ยัง partial
+- หลังจบ: สรุปเข้า ledger + coverage table + เลื่อน integrity prefix ตาม protocol
+
+## R5 — closeout work (กำลังจะทำ)
+- เป้าหมาย: ปิด R5 (Logging and Analytics Truth) — เหลือ request_id propagation เข้า shadow chain + route/lifecycle reconcile ใน probe + nested-button fix (ZaapiKbPanel); rollout verification ผ่านแล้วบน live data (enriched fields ครบ 63 provider/status/attempt/key_ref + 118 request_id/conv_id docs)
+- tail ก่อนหน้า: entry 12932–12936 (S3 batch-1 announce ไม่มี closeout) สรุปเข้า ledger เป็น A-160 historical-unverified; gap 1–594 ยังไม่ได้ index
+- ห้ามเปลี่ยน behavior ตอบลูกค้า/routing/quota/review logic; field ใหม่เป็น additive optional เท่านั้น
+
+## R5 closeout — ผ่านแล้ว (2026-11-10)
+
+### แก้อะไร
+- request_id propagation (gap เดียวที่เหลือจริง): Python `chat()` stamp `resp.request_id` จาก `_ai_call_ctx` หลัง `guards.enforce` → ครอบทุก engine/return path จุดเดียว; `callBot` map เข้า `BotCallResponse`; stamp ลง shadow doc ครบ 4 path — `storeBotReply` (worker/trigger), `storeWorkflowDelivered` (ผ่าน `DeliveredMessage.request_id` จาก `let_ai_respond`), `generateShadowReply` + `generateConversationShadowReplies` (manual)
+- probe-observability-trace +section 7: per-bubble lifecycle reconcile — decided bubble ↔ review_op, mock_sent ↔ mock_send (events ใน botworker_events ไม่ใช่ admin_logs)
+- nested button ZaapiKbPanel: ย้าย shop-peek ออกมาเป็น sibling (commit 85f91ae)
+- test-stats-reconcile: null-coalesce ตาม parseStatsRange signature (commit b6ce672)
+
+### verify
+- `.venv/bin/pytest docs/test/offline/test_ai_usage_attempts.py` — 10/10 (เพิ่ม test chat() stamp request_id)
+- `npx tsc --noEmit` — clean
+- `npx tsx scripts/test-botworker-boundary.ts` — 22/22 (E7b assert workflow doc, E7c ใหม่ assert worker doc)
+- `npx tsx scripts/test-stats-reconcile.ts` — 10/10 (mongo==js==naive ทุก range/grain)
+- `npx tsx scripts/probe-observability-trace.ts` (live, read-only) — run clean; latest doc เป็น manual gen เก่า (ก่อน deploy) → req match=0 ตามคาด
+- live census: ai_usage enriched — path/request_id/conv_id/elapsed_ms=120, provider/status/attempt/key_ref/usage_available=63, error=33; review_op=4, mock_send=1 ใน botworker_events (id pattern `mocksend:<reply>:<bubble>:<part>`)
+
+### งานค้าง/ข้อจำกัด
+- shadow docs เก่าไม่มี request_id (additive field — เริ่มมีเมื่อ Next.js ฝั่งใหม่ประมวลผล turn ใหม่); ai_usage เก่าก็ไม่มี enriched fields เช่นกัน
+- route reconciliation บน live ยังเป็น sample-level (review_op=4/mock_send=1 ตรงกัน); per-bubble reconcile จะพิสูจน์เต็มเมื่อมี decided draft ใหม่
+- ยังไม่มี browser/manual verification ของ shadow inbox UI
+- coverage: partial ตามเดิม; active gap 1–594 ยังไม่ index (A-160 announce-only)
+
+### commits
+- 85f91ae nested-button fix · b6ce672 stats-reconcile sig fix · c9f4004 request_id propagation + tests + SRS · 447d106 probe reconcile
+
+### addendum — real E2E join proven บน live data (read-only)
+- ai_usage `conv_id` ของ generate path = `shadow:<conv>:<generation_batch_id>` → join shadow_replies.generation_batch_id ได้วันนี้โดยไม่ต้องรอ field ใหม่
+- พิสูจน์จริง: ai_usage req=`b3c286c8-c1f` conv_id=`shadow:shp_2052989613947223883:gen_shp_2052989613947223883_mwahjfe9_nynmja` → shadow `sr_xly5jx22mwahkgnq` FOUND (batch id ตรง)
+- request_id field ใหม่ทำให้ join ตรงขึ้น (ไม่ต้อง parse conv_id) — แต่ chain เดิม demonstrable อยู่แล้วสำหรับ generate path; worker path เดิม join ผ่าน conv_id ธรรมดา + ตอนนี้เพิ่ม request_id

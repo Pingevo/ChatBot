@@ -115,7 +115,14 @@ def test_harness_import_identity_fresh_process():
     import textwrap
     root = Path(__file__).resolve().parents[3]
     code = textwrap.dedent("""
-        import sys
+        import sys, os, dotenv, socket
+        os.environ['HF_HUB_OFFLINE'] = '1'
+        os.environ['TRANSFORMERS_OFFLINE'] = '1'
+        dotenv.load_dotenv = lambda *a, **k: False
+        def deny_network(*a, **k):
+            raise AssertionError('offline import attempted network access')
+        socket.socket.connect = deny_network
+        socket.create_connection = deny_network
         sys.path.insert(0, %r); sys.path.insert(0, %r)
         from shopeechat import retrieval_runtime as rrt
         from shopeechat import turn_decision as td
@@ -133,7 +140,7 @@ def test_harness_import_identity_fresh_process():
                  cp.get_subject_set, ws.search_and_extract,
                  rcfg.grouped_retrieval_selection_enabled)
         sys.exit(0 if before == after else 1)
-    """ % (str(root / "chatbot"), str(root / "docs" / "test")))
+    """ % (str(root / "chatbot"), str(root / "docs" / "test" / "live")))
     r = subprocess.run([sys.executable, "-c", code],
                        capture_output=True, timeout=120)
     assert r.returncode == 0, r.stderr[-500:]

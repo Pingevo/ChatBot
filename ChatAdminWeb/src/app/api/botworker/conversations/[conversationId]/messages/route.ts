@@ -375,8 +375,9 @@ export async function GET(
     const { getSystemConfig } = await import("@/backend/service/systemConfigService");
     const config = await getSystemConfig();
     canReview = !!config.bot_review_admin_id && !!config.bot_review_shop_id
-      && me === config.bot_review_admin_id && String(conv?.shop_id) === String(config.bot_review_shop_id);
+      && (me === config.bot_review_admin_id || config.bot_review_admin_id === "*")
+      && String(conv?.shop_id) === String(config.bot_review_shop_id);
   } catch { /* config read fail → review off */ }
 
-  return json({ messages: unified, total: unified.length, can_review: canReview, review_admin_id: canReview ? me : undefined });
+  return json({ messages: unified, total: unified.length, can_review: canReview });
 }

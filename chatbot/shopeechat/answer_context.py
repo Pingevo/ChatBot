@@ -354,7 +354,7 @@ class AnswerContext:
                          if i in ordinal])]
         header += f"จำนวนสินค้าใน context: {len(ser_products)}\n\n"
         if ser_products:
-            body = json.dumps(ser_products, ensure_ascii=False, indent=2)
+            body = json.dumps(ser_products, ensure_ascii=False, separators=(",", ":"))
         else:
             body = ("ไม่พบข้อมูลสินค้าที่ตรงกับคำถามในระบบค้นหา\n"
                     "ห้ามสรุปว่าสินค้าหมดสต็อก เลิกขาย หรือไม่มีจำหน่าย "

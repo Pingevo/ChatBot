@@ -17,7 +17,9 @@ pin:
 from __future__ import annotations
 
 import inspect
+import json
 import sys
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -39,6 +41,47 @@ from shopeechat import llm  # noqa: E402
 
 RetrievalRequest = rpl.RetrievalRequest
 TurnNeed = td.TurnNeed
+
+
+@pytest.mark.parametrize("brand,category", [
+    ("CukTech", "charger"), ("YOBYBO", "earphone"), ("Xiaomi", "air_purifier"),
+])
+@pytest.mark.parametrize("count", [1, 10])
+def test_compact_product_context_is_lossless_and_keeps_safety_sections(brand, category, count):
+    products = tuple({
+        "item_id": str(i), "name": f'{brand} สินค้าทดสอบ "รุ่น" {i}',
+        "brand": brand, "category": category, "need_indices": [3],
+        "price": {"min": 199, "max": 299}, "sold_out": False,
+        "variants": [{"name": "ขาว\\ดำ\nรุ่นย่อย", "stock": 0, "price": None}],
+        "canonical_specs": {"fixture_fact": "ข้อมูลทดสอบ ไม่ใช่สเปคจริง"},
+    } for i in range(count))
+    original = deepcopy(products)
+    ctx = acx.AnswerContext(
+        task=acx.AnswerTask(tasks=(acx.NeedTask(
+            kind="product", operation="describe", need_index=3),)),
+        products=products,
+        evidence=({"kind": "kb", "need_indices": [3], "identity": "i:0",
+                   "payload": "หลักฐานทดสอบ ห้ามแต่งสเปค"},),
+        availability_notes=({"name": "สินค้าหมดทดสอบ"},),
+        constraint_notes=({"item": "สินค้าทดสอบ", "detail": "ยังพิสูจน์ไม่ได้"},),
+        unanswered_needs=(), estimated_tokens=0)
+    rendered = ctx.context_text(shop_hint="ร้านทดสอบ")
+    header, body = rendered.split("\n\n", 1)
+    payload, end = json.JSONDecoder().raw_decode(body)
+    expected = [{**p, "need_indices": [1]} for p in products]
+    assert payload == expected
+    assert products == original
+    compact = json.dumps(expected, ensure_ascii=False, separators=(",", ":"))
+    assert body[:end] == compact
+    suffix = body[end:]
+    for text in ("หลักฐานทดสอบ ห้ามแต่งสเปค", "สินค้าหมดทดสอบ", "ยังพิสูจน์ไม่ได้"):
+        assert text in suffix
+    assert "ห้ามเสนอ/แนะนำ/เปรียบเทียบสินค้าจากร้านอื่น" in header
+    before = header + "\n\n" + json.dumps(expected, ensure_ascii=False, indent=2) + suffix
+    assert len(rendered.encode()) < len(before.encode())
+    assert acx.estimate_tokens(rendered) < acx.estimate_tokens(before)
+    print(f"{brand}/{category}/{count}: bytes {len(before.encode())}->{len(rendered.encode())}; "
+          f"estimated_tokens {acx.estimate_tokens(before)}->{acx.estimate_tokens(rendered)}")
 
 
 # ── builders ────────────────────────────────────────────────────────────────
@@ -700,7 +743,8 @@ def test_dropped_need_shifts_serialized_ordinals():
     assert "งานที่ 2" not in body, (
         "serialized need_indices ต้อง map เป็น visible ordinal — "
         "index เดิม+1=2 ชี้ผิดงาน")
-    assert '"need_indices": [\n      1' in body
+    products, _ = json.JSONDecoder().raw_decode(body.split("\n\n", 1)[1])
+    assert {p["item_id"]: p["need_indices"] for p in products} == {"9": [1]}
 
 
 def test_multiple_drops_before_survivor_maps_to_one():
@@ -719,7 +763,8 @@ def test_multiple_drops_before_survivor_maps_to_one():
                    (req0, req0b, req1), _profile())
     body = ctx.context_text()
     assert "งานที่ 2" not in body and "งานที่ 3" not in body
-    assert '"need_indices": [\n      1' in body
+    products, _ = json.JSONDecoder().raw_decode(body.split("\n\n", 1)[1])
+    assert {p["item_id"]: p["need_indices"] for p in products} == {"9": [1]}
 
 
 def test_two_surviving_needs_keep_ordinals():
@@ -743,8 +788,8 @@ def test_two_surviving_needs_keep_ordinals():
     assert rendered.count("งานที่") == 2
     body = ctx.context_text()
     assert "งานที่ 3" not in body
-    assert '"need_indices": [\n      1' in body
-    assert '"need_indices": [\n      2' in body
+    products, _ = json.JSONDecoder().raw_decode(body.split("\n\n", 1)[1])
+    assert {p["item_id"]: p["need_indices"] for p in products} == {"9": [1], "8": [2]}
 
 
 def test_product_with_only_dropped_owner_excluded():
@@ -785,8 +830,8 @@ def test_no_drop_baseline_ordinals_unchanged():
                    (_req(rid="req-0", types=("earphone",)),
                     _req(rid="req-1", types=("cable",))), _profile())
     body = ctx.context_text()
-    assert '"need_indices": [\n      1' in body
-    assert '"need_indices": [\n      2' in body
+    products, _ = json.JSONDecoder().raw_decode(body.split("\n\n", 1)[1])
+    assert {p["item_id"]: p["need_indices"] for p in products} == {"9": [1], "8": [2]}
 
 
 # ── Phase 10B Round 4: charger-family scope membership ─────────────────────

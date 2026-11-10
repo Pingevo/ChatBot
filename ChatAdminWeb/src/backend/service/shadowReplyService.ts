@@ -75,6 +75,9 @@ export interface ShadowReplyDoc extends Document {
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้มาจาก engine ไหน (legacy / v2 / v3)
   //    ใช้ตอนเปรียบเทียบ — แยกคำตอบ legacy vs v2 vs v3 ใน shadow inbox
   chat_engine?: "legacy" | "v2" | "v3";
+  // ⚡ R5 — turn correlation id จาก bot response (ตรง ai_usage.request_id)
+  //   ใช้ join shadow_reply ↔ LLM calls ของ turn เดียวกันใน probe-observability-trace
+  request_id?: string;
   // ⚡ Phase 3B-6 — id กลุ่มรอบ generate (unique ต่อรอบ กด Generate ซ้ำแชทเดิมแยกกัน)
   //   format: gen_<convId>_<ts36>_<rand>
   //   ใช้ group + sort รอบใน UI, แยก annotation ตามรอบ
@@ -318,6 +321,7 @@ export async function generateShadowReply(opts: {
     bot_handoff_reason: (botResp as any).handoff_reason,
     bot_image_desc: botResp.image_desc, // ⚡ A2 — cache vision description
     chat_engine: chatEngine || "legacy", // ⚡ บันทึก engine ที่ใช้
+    request_id: (botResp as any).request_id, // ⚡ R5 — turn correlation → ai_usage join
     created_at: now,
     updated_at: now,
   };
@@ -493,6 +497,7 @@ export async function generateConversationShadowReplies(opts: {
       bot_handoff_reason: (botResp as any).handoff_reason,
       bot_image_desc: botResp.image_desc, // ⚡ A2 — cache vision description
       chat_engine: chatEngine || "legacy", // ⚡ บันทึก engine ที่ใช้
+      request_id: (botResp as any).request_id, // ⚡ R5 — turn correlation → ai_usage join
       generation_batch_id: batchId,  // ⚡ Phase 3B-6 — tag รอบ generate
       created_at: now,
       updated_at: now,
