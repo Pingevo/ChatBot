@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12850 |
-| active_integrity_prefix_sha256 | `02da0c58087ea208555dac819d120cd96dd5b1a54817488a938bc3ff9c572f2c` |
-| active_line_count_at_baseline | 12850 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), S2 test cursor API verified; full regression open |
+| active_integrity_prefix_lines | 12855 |
+| active_integrity_prefix_sha256 | `cc98036a0083d422f5847d8b1778b24bb0caf33c7b9d57d2ccb054069fb997ba` |
+| active_line_count_at_baseline | 12855 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), S2 canary subprocess isolation verified |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -183,6 +183,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12828–12840 | read + indexed (A-146) |
 | 12841–12845 | read + indexed (A-147) |
 | 12846–12850 | read + indexed (A-148) |
+| 12851–12855 | read + indexed (A-149) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -385,3 +386,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-146 | 12828–12840 | R0/R5/S1/S2/S3/S7 approved closeout; S2 import isolation | passed behavior | User approved closeout plan and US$1 provider ceiling. Frozen and active integrity verified; clean same-direction branch. S2 reproduced focused failures: stale subprocess path after offline reorganization and alias assertion comparing globals after sibling collection mutated dotenv. Fix tests only: correct offline path and assert dotenv/app/KB restoration in clean subprocess with loader suppressed. Forward/reverse three-module batches each 191 passed exit 0. | verified | Production mechanisms delta 0. Full offline gate still fails: 23 failed/286 errors, many stale fixture paths; S2 full closure pending infrastructure regression. R0/R5/S1/S3/S7 remain open; no provider calls or customer sends. |
 | A-147 | 12841–12845 | S2 shared fixture path after test reorganization | passed behavior | FIXTURES owner in test_zaapi_kb_import corrected from offline/fixtures to docs/test/fixtures; importer/diff/correction suites 303 passed exit 0. Full offline now 1956 passed, 19 failed, 15 skipped, 1 xfailed, zero setup errors (286 missing-fixture errors removed). | verified | Tests only, production unchanged. Remaining cursor/subprocess/index-contract failures are separate follow-up fixes; full regression still open. |
 | A-148 | 12846–12850 | S2 bounded-query test cursor API | passed behavior | Production max_time_ms calls exposed missing fluent API in shared mongo_doubles and two local cursor doubles. Added nonnegative integer timeout validation and self-return, preserving existing filters/limits. Affected product selection/source union/profile suites 95 passed exit 0. | verified | Production mechanisms unchanged; remaining full-suite failures tracked separately. |
+| A-149 | 12851–12855 | S2 fresh-process canary import boundary | passed behavior | Corrected subprocess path to docs/test/live and suppressed dotenv before all production imports; network tripwires and offline HF flags prevent accidental external access. Existing before/after production-binding identity assertion preserved. Canary retry/import/seam suite 9 passed exit 0. | verified | Test-only changes; no live provider calls or production edits. |

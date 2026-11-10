@@ -12848,3 +12848,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - RED: 17 failures บน product/subject/KB/profile paths เพราะ FakeCursor ไม่มี max_time_ms หลัง production เพิ่ม bounded query
 - แผน: เติม fluent method ใน shared mongo_doubles และ local cursors สองตัว พร้อม validate timeout int>=0; ไม่เปลี่ยน production query/timeouts/assertions; รัน affected suites ใหม่
 - ผ่านแล้ว: affected 3 suites 95 passed exit 0; fake cursor fluent API restored; production helpers/guards/regex/keywords/owners delta=0
+
+## S2 canary subprocess isolation — กำลังจะทำ
+- RED: fresh-process canary import ใช้ docs/test path เดิมแทน live และ subprocess ไม่ติด dotenv boundary ของ conftest (มี KEYS log จึงมีความเสี่ยงเปิด env โดย import)
+- แผน: ชี้ live directory; suppress dotenv และ block network ก่อน production imports ใน subprocess; ไม่รัน canary/provider, คง assertion before/after bindings เดิม; fix เฉพาะ offline test
+- ผ่านแล้ว: canary retry/import/seam tests 9 passed exit 0; subprocess ไม่อ่าน env และ network tripwire armed; production delta=0
