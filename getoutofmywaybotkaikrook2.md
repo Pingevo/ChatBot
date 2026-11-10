@@ -12659,3 +12659,16 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ผลกระทบเคสอื่น: accounts ยังเก็บ shopname เหมือนเดิม (scope_ok เช็คชื่อร้าน); saved docs อ่านได้; ไม่มี migration
 - verify: npx tsc --noEmit exit 0; UI manual test ยังไม่ได้ทำ
 - หมายเหตุ: entry นี้รวม pre/post (parallel session แทรก tail ระหว่างทำงาน — protocol exception)
+
+## กำลังจะทำ — R4 approved additive archive recovery / 2026-11-10
+- User explicitly selected approval for all 30,933 originals restored via $merge into shadow_replies: whenMatched=keepExisting, whenNotMatched=insert; omit only _archived_at/_archived_from/_dup_group_keep from restored copies, keep source archive unchanged.
+- Baseline fresh server audit: active 8,057, archive 30,933 (~944 MB BSON), no _id overlap, invalid required fields=0, repeated archive shadow_reply_id groups=0. Full-document network digest dry-run stopped read-only due transfer latency; source digest was NOT established.
+- Preconditions: recheck counts and archived timestamp range 2026-11-09T10:41:00.669Z..11:17:26.757Z; drift => abort before write. No delete, overwrite, index/config change, provider call or outbound send.
+- Verify after merge: active expected 38,990, archive unchanged 30,933; every source original resolves by _id and all document fields match (order-independent outer document comparison). Legacy duplicates deliberately preserved; no claim of full dedup.
+
+## ผ่านแล้ว — R4 approved archive recovery / 2026-11-10
+- Executed only approved server-side $merge after exact count/range preconditions; active 8,057→38,990, archive retained 30,933. No active overwrite/delete/index/config change or outbound send.
+- Fresh verification: 30,933 source originals all found by _id; all original fields match for 30,933/30,933 (outer object order-independent); shadow_reply_id duplicate groups=0; final counts reconfirmed 38,990/30,933.
+- Closed approved repair: code b878acd + restoration of inaccessible historical answers. Legacy repeated inbound/text rows remain intentionally preserved; full historical dedup/external-writer provenance not established and must not be claimed complete. Archive is backup, not a second independent history corpus.
+- R1 status only (latest user priority): no build process running, unit 28,044 and description 27,155 previously validated; description remains misnamed product_embeddings.npz; actual product-level build, generation export/manifest/completeness checks, publish and cron remain pending. No new embedding/build/rename/live switch performed.
+- User parallel mapping UI/API files untouched. Recovery bookkeeping spans user-owned tail entries; leave uncommitted for review rather than silently commit parallel work. Frozen integrity unchanged, historical semantic coverage remains partial; no credentials printed or persisted.
