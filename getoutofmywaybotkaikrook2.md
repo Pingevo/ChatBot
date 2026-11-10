@@ -12818,3 +12818,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ai_usage schema coexist ยืนยันใน DB: 87 docs = 55 เก่า + 32 enriched (path/conv_id/request_id/elapsed_ms); provider/status/attempt/key_ref จะมีหลัง prod bot restart (code verify แล้ว test 21/21)
 - admin_logs field จริง = action_type/timestamp (probe รอบแรกใช้ action/created_at ผิด → undefined ทั้งหมด); vocabulary 43 ประเภทครบ bot.*/shadow_reply.*/workflow.*/config.*/zaapi_kb.*/assignment.*/user.*/login
 - งานค้าง R5: ai_usage enriched rollout หลัง deploy; bot.buffer_flush volume สูง (35,813 events) — ไม่ใช่ขาด แต่ noise ถ้าจะทำ dashboard feed ควร aggregate
+
+## R1 — g20261110 publish ผ่าน admin Accept (ปิด R1 สมบูรณ์)
+- user กด Accept → CAS pointer sellable_units_meta.active flip → g20261110-054801-c989b70a (activated_at 07:59:12Z = publish 07:59:13Z)
+- bundle atomic ครบ: units_collection/image_texts_collection/units_npz/product_npz/units_jsonl/manifest+sha ชี้ gid เดียวกันหมด
+- previous = g20261109 retained พร้อม manifest → rollback พร้อม (ไม่มี partial rollback)
+- flow ครบตาม design: daily build 09:00 → pending → admin Accept → atomic publish → prev retained
+- note: run docs ทั้ง 2 gid แสดง status "published" — pointer คือ authority ของตัวจริง (status = last event เฉยๆ)
