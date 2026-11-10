@@ -3,6 +3,9 @@
 เอกสารนี้อธิบายหลักการทำงานของทุกหน้าใน Admin Console, บอท, และกระบวนการย่อยทั้งหมด
 อ้างอิงจากโค้ดจริงใน `ChatAdminWeb/` (Next.js) และ `chatbot/shopeechat/` (Python FastAPI)
 
+> เอกสารคู่กัน: `SRS_SSD.md` (spec ฟังก์ชัน), `schema.md` (Mongo schema),
+> `system-workflow.md` (workflow ภาพรวม), `pool-and-mainflow.md` (pool/switch แบบง่าย)
+
 ---
 
 ## สารบัญ

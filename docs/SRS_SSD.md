@@ -1383,6 +1383,21 @@ module ใหม่ที่แยก pure detectors ออกจาก `knowled
 
 **Task 2 correction — customer segment (`_compat_segment`).** Input `v: CompatVerdict` (subject_name, target, decision); output `str`; caller `compose_answer` ใน compatibility result ต่อ need. อ่านเฉพาะ typed `CompatDecision.outcome/reason_codes` ไม่อ่าน prose/protocol token: `compatible` + `cable_capacity_covers_target` ต่อท้าย clause deterministic *หนึ่งครั้ง* ว่า “สายรองรับกำลังไฟตามที่อุปกรณ์ต้องการ แต่กำลังชาร์จจริงยังขึ้นกับหัวชาร์จ อุปกรณ์ และโปรโตคอลที่รองรับค่ะ”; ไม่อ้างว่าสายจ่ายไฟ, ไม่อ้าง protocol ที่ไม่พิสูจน์. `insufficient_wattage`/`wattage_variant_unconfirmed`/`missing_wattage_evidence` ยังใช้ caveat เดิมตามลำดับ; incompatible ใช้ negative segment เดิม; unsupported outcome คืน `""` (fail closed). ไม่มี DB/network/provider call/side effects.
 
+### 6.40 `prompt_sections.py` — modular system prompt split ตาม intent (R0)
+
+**Purpose:** แยก `_SYS_CORE_B` ออกเป็นส่วนตาม need/intent — ลด token + ทำให้ prompt ตรง context มากขึ้น
+
+| field | ค่า |
+|---|---|
+| Purpose | สร้าง system prompt แบบ modular — core + เฉพาะ sections ที่ intent ต้องการ |
+| Input | runtime config `prompt_modular` (bool, จาก `system_configs`), intent/need context |
+| Output | prompt string (sections ตาม flag) |
+| Calls | `runtime_config.get_runtime_config()` (อ่าน `prompt_modular`), `llm.py` |
+| Called by | `llm.py:1484` (`answer` path) |
+| How it works | `modular_enabled()` อ่าน `prompt_modular` — OFF/missing → behavior เดิม (prompt เดียว); ON → render เฉพาะ sections ที่เกี่ยวกับ need ปัจจุบัน |
+| Side effects | ไม่มี — pure prompt assembly |
+| Error/fallback | flag invalid/missing → legacy single-prompt path |
+
 ## 7. คอนฟิกและตัวแปรสำคัญ
 
 ### 7.1 Engine / app
