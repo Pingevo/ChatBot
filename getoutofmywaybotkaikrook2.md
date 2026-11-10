@@ -12771,3 +12771,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ai_usage เติม fields ตาม plan เดิมที่ขาด: `path` (answer|typed|vision|kb|general|intent) + `elapsed_ms` (วัดรอบ generate_content ไม่รวม quota wait) + `_ai_call_ctx` contextvar {shop,conv_id,platform,request_id} — set ที่ `_chat_impl` entry ครอบทุก engine/nested call
 - verify: split ครบ 27,711 chars (sections รวมกันเท่า CORE_B — re-order ตาม design เดิม), modular off→byte-identical (flag เดิม), py_compile ผ่าน; measured CORE_B cut: product/compat 25.1k/27.7k (~9%), compare 27.2k (~98%) — ประหยัดจริงจำกัด เพราะ core_answer+recommend+product_match ส่งเสมอ
 - ต่อ: replay วัดจริง + QA gate ก่อนสรุป R0
+
+## R0 — A/B replay วัดจริง + ai_usage enrich verified E2E
+
+- วิธี: replay 12 ข้อความลูกค้าจริง (shadow_replies ล่าสุด) ผ่าน /chat local — flip prompt_modular OFF→ON (config write ชั่วคราว, OFF=promptเดิมปลอดภัย) — ยิง Gemini จริง ~24 turns แจ้งผู้ใช้ก่อนแล้ว
+- ai_usage verified: intent(4,692 tok med) + typed(14-20k) + general(1,720) correlate ผ่าน request_id/conv_id/shop ครบ; latency med intent 1.7s / typed 3.4s
+- ผล modular จริง: system est 27,299→25,191 (-7.7%); typed call เดียวกัน 20,804→17,106 (-17.8%); context est 4.9-9.7k = ตัวใหญ่ที่เหลือ (retrieval-bound — ยังไม่แตะ รอ answer-quality task)
+- QA gate: คำตอบสมเหตุทั้ง 2 โหมด deterministic replies เหมือนเดิม; prompt_modular กลับ True แล้ว (prod ไม่กระทบ — ON อยู่แล้วเดิม)
+- ค้าง: รอ production traffic ผ่าน ai_usage ใหม่สะสม → วัด cost/day + p50/p95 ต่อ path อีกครั้ง
