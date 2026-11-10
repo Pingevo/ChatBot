@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12805 |
-| active_integrity_prefix_sha256 | `487af39f9bb05d5dd4eb8d093f1c1255260a27ab9e0b79e4d4dabc6436c0fd96` |
-| active_line_count_at_baseline | 12789 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R5 ai_usage provider-log gap fix |
+| active_integrity_prefix_lines | 12812 |
+| active_integrity_prefix_sha256 | `a3b2dd53a58f52690a55a6b521f01acc69fa3def2d34f243310406f937f877ee` |
+| active_line_count_at_baseline | 12812 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), R5/S8 workflow bot_products persist fix |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -376,3 +376,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-140 | 12782–12789 | R4 census update + dedupe tooling / 2026-11-10 | pending/deferred work | conversations_shp 883 dup groups/1,165 extra (grew from 731 — writer still inserting, 62 in Nov); messages_shp 1,318/1,323 (quiet since Oct); shadow_replies real dups only 366 same-batch groups (3,554 = designed regenerations). New chatbot/testscript/dedupe_conversations.py: dry-run default, freshness+_id canonical, archive-not-delete, CAS re-read, --token APPLY-DEDUPE gate. BLOCKED on external Sellcenter writer fix (plan Stage 0) then unique index. | verified (dry-run + unit check) |
 | A-141 | 12790–12800 | R5 stats range contract / 2026-11-10 | passed behavior | Found: dashboard daily=today (correct per picker "วันนี้") but live/admin-activity/performance daily=rolling-7d (label lied); custom range fell into year-bucket (rangeToParams sends no range); UTC $group vs dashboard's Asia/Bangkok. Fix: new backend/lib/statsRange.ts — parseStatsRange + statsSeries (bounds-derived slots: ≤62d→day, >62d→month, all→data-years; monthly/yearly full-period) + statsBucketId/statsAggKey (Bangkok tz) + label helpers. All 4 routes share helper; duplicated getBounds/custom-parse removed; analytics pages default preset→weekly (same 7d view, honest label). | verified | test-stats-range 22/22 + tsc clean. Pending: numbers-vs-source reconciliation, end-to-end observability trace. |
 | A-142 | 12801–12805 | R5 ai_usage provider-log gap / 2026-11-10 | passed behavior | Coverage audit: OCR (gemini vision) + web_search (OR) logged ai_usage already; but _openrouter_generate returned without _record_tokens → OR answer calls unlogged; gemini error attempts (429/auth) silent; docs lacked provider/status/attempt/error/key_ref. Fix: _persist_usage+_record_tokens accept provider/status/attempt/error/key_ref/cost_usd; _key_ref = pool index (no key material); _generate logs every attempt — OR success/error then gemini fallback intact; OR body usage.include → real cost not gemini estimate. Two ai_usage schemas coexist (old minimal vs new enriched) — additive, no migration. | verified | test-ai_usage_fields 21/21 + py_compile + SRS updated. Pending: numbers-vs-source reconciliation, end-to-end trace. |
+| A-143 | 12806–12812 | R5/S8 workflow bot_products persist + dead fields / 2026-11-10 | passed behavior | Found: let_ai_respond set context.bot_products but DeliveredMessage had no products field → storeWorkflowDelivered wrote shadow docs with bot_products dropped (send_card identity verify unreadable). Fix: DeliveredMessage +products?: unknown[]; let_ai_respond pushes botResp.products; storeWorkflowDelivered writes bot_products (deterministic-id/idempotency unchanged). S8: removed dead fields DocLike.inbound_message_ids/batch_id (no reader in reviewService) + response review_admin_id (no consumer). | verified | test-botworker-boundary new E7b RED→GREEN 21/21 + tsc clean (stale tsconfig.tsbuildinfo caused phantom error — deleted). Non-product actions unaffected (field absent). Pending: numbers-vs-source reconciliation, end-to-end trace. |

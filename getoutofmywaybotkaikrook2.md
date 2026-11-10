@@ -12803,3 +12803,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - เจอ: _openrouter_generate return ตรงไม่ผ่าน _record_tokens → OR calls ไม่เข้า ai_usage เลย; gemini error attempts เงียบ; doc ขาด provider/status/attempt/error/key_ref
 - แก้: _persist_usage +_record_tokens รับ provider/status/attempt/error/key_ref/cost_usd; _key_ref helper = index ใน active pool (ไม่ใส่ key จริง); _generate log ทุก attempt (OR success/error → gemini fallback ยังทำงาน); OR body มี usage.include → cost จริง
 - verify: test_ai_usage_fields 21/21 + py_compile; SRS อัปเดตแล้ว
+
+## R5/S8 — workflow bot_products persist + dead fields (ผ่านแล้ว)
+- เจอ: workflowEngine.let_ai_respond set context.bot_products แต่ DeliveredMessage ไม่มี field products → storeWorkflowDelivered เขียน shadow doc โดย bot_products ตกหล่น (send_card verify อ่านไม่ได้)
+- แก้: DeliveredMessage +products?: unknown[]; let_ai_respond push products จาก botResp; storeWorkflowDelivered เขียน bot_products ลง shadow doc (idempotency/deterministic-id เดิมไม่เปลี่ยน)
+- S8 cleanup: ลบ dead fields — DocLike.inbound_message_ids/batch_id (ไม่มีผู้อ่านใน reviewService) + response field review_admin_id (ไม่มี consumer)
+- verify: test-botworker-boundary เพิ่ม E7b (RED→GREEN) 21/21 + tsc clean (stale incremental cache เคยทำ error ค้าง — rm tsconfig.tsbuildinfo)
+- ผลกระทบเคสอื่น: send_message/send_card/stay_retry ไม่มี products → field absent เหมือนเดิม; storeBotReply path ปกติไม่แตะ

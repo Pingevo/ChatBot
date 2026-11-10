@@ -587,6 +587,7 @@ async function storeWorkflowDelivered(opts: {
       batch_id: opts.batchId,
       inbound_text: opts.messageText,
       bot_reply_text: d.text,
+      bot_products: d.products,   // ⚡ let_ai_respond products → send_card identity verify ได้
       review_bubbles: buildReviewBubbles(shadowReplyId, d.text),
       ...(d.image_url ? { bot_reply_image_url: d.image_url } : {}),
       bot_source: d.source,

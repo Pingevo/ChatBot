@@ -94,8 +94,6 @@ const mockSendEventId = (replyId: string, bubbleId: string, part: "text" | "prod
 
 interface DocLike extends ShadowReplyDoc {
   review_bubbles?: ReviewBubble[];
-  inbound_message_ids?: string[];
-  batch_id?: string;
 }
 
 async function loadReply(replyId: string, conversationId: string): Promise<DocLike | null> {
