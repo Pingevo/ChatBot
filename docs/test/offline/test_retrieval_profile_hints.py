@@ -21,6 +21,10 @@ class _FakeCursor(list):
         self._limit_log = limit_log
         self._query = query
 
+    def max_time_ms(self, value):
+        assert isinstance(value, int) and value >= 0
+        return self
+
     def limit(self, n):
         if self._limit_log is not None:
             self._limit_log.append((self._query, n))

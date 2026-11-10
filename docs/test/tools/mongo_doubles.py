@@ -77,6 +77,10 @@ def _match(doc: dict, filt: dict) -> bool:
 
 
 class _Cursor(list):
+    def max_time_ms(self, value):
+        assert isinstance(value, int) and value >= 0
+        return self
+
     def limit(self, n):
         return _Cursor(self[:n])
 

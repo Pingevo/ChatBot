@@ -12843,3 +12843,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - RED full offline พบ test_zaapi_kb_import.FIXTURES ยังอ้าง offline/fixtures แต่ไฟล์จริงอยู่ docs/test/fixtures; กระทบ importer/diff/correction tests ที่ reuse fixture owner เดียว
 - แผน: แก้ path owner เป็น parent.parent/fixtures; ไม่ย้ายไฟล์ ไม่ลด assertions ไม่แก้ importer production; รัน affected suites และ full offline ใหม่
 - ผ่านแล้ว: affected importer/diff/corrections 303 passed exit 0; full offline 1956 passed/19 failed/15 skipped/1 xfailed/0 errors (286 fixture setup errors หาย); remaining failures ส่วนหนึ่ง fake cursor ไม่รองรับ max_time_ms และ subprocess path/index expectation เก่า — แยก fix ถัดไป
+
+## S2 regression cursor API — กำลังจะทำ
+- RED: 17 failures บน product/subject/KB/profile paths เพราะ FakeCursor ไม่มี max_time_ms หลัง production เพิ่ม bounded query
+- แผน: เติม fluent method ใน shared mongo_doubles และ local cursors สองตัว พร้อม validate timeout int>=0; ไม่เปลี่ยน production query/timeouts/assertions; รัน affected suites ใหม่
+- ผ่านแล้ว: affected 3 suites 95 passed exit 0; fake cursor fluent API restored; production helpers/guards/regex/keywords/owners delta=0
