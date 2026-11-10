@@ -1398,6 +1398,21 @@ module ใหม่ที่แยก pure detectors ออกจาก `knowled
 | Side effects | ไม่มี — pure prompt assembly |
 | Error/fallback | flag invalid/missing → legacy single-prompt path |
 
+### 6.41 `scripts/build_generation.py` + `/admin/generations*` — generation pipeline (R1)
+
+**Purpose:** driver build generation ใหม่ (daily|weekly) + admin accept flow
+
+| field | ค่า |
+|---|---|
+| Purpose | รันขั้น build ครบชุด → generation_runs.status=pending → admin Accept = CAS publish |
+| Input | `--mode daily\|weekly` (`build()`), admin HTTP (`gid`, `expected_active`) |
+| Output | gen dir artifacts + `build_log.jsonl` + `generation_runs` doc; publish → `result` |
+| Calls | subprocess: `export_mongo`/`build_image_texts`(×2)/`build_sellable_units`/`build_embeddings`(units,product[,description]); `_carry_description` (daily — npz re-stamp ผ่าน `_save_verified_npz`); `_import_colls`; `publish_generation.validate_generation`/`finalize_manifest`; endpoints → `pg.publish`/`pg.rollback` |
+| Called by | cron/manual CLI; admin web ผ่าน `/api/chatbot/shopee/admin/generations*` proxy |
+| How it works | mint gid → run steps ตามลำดับ (แต่ละขั้น log+percent ลง generation_runs/build_log) → weekly build desc จริง, daily carry+re-stamp จาก gen ล่าสุด → import gen colls → validate+manifest → status=pending; publish endpoint กันเฉพาะ status=pending → CAS; discard mark discarded; rollback → pointer.previous |
+| Side effects | gen dirs/collections ใหม่, `generation_runs` writes, pointer CAS เฉพาะ publish endpoint |
+| Error/fallback | ขั้นใด raise → status=failed + error; build lock ปฏิเสธ concurrent build (stale>24h rerun ได้); CAS conflict → gen เก่าคง active; cleanup_generations keep = active+previous+3 daily+2 weekly ล่าสุด (build_kind จาก generation_runs) |
+
 ## 7. คอนฟิกและตัวแปรสำคัญ
 
 ### 7.1 Engine / app

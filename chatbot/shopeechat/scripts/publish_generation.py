@@ -411,14 +411,28 @@ def rollback(db, expected_active: str) -> str:
 
 
 def cleanup_generations(db, exports_root: Path, *, now: float | None = None,
-                        grace_seconds: float = GRACE_SECONDS) -> list[str]:
+                        grace_seconds: float = GRACE_SECONDS,
+                        keep_daily: int = 3, keep_weekly: int = 2) -> list[str]:
     """ลบ generations ที่ไม่ถูกอ้าง — keep: active, previous(rollback target),
+    keep_daily daily builds ล่าสุด + keep_weekly weekly builds ล่าสุด
+    (build_kind จาก generation_runs; ไม่มี doc = daily),
     อายุ < grace (ครอบ max request lifetime + pointer TTL + drain + margin);
     age parse ไม่ได้ → keep (safe); คืน list gid ที่ลบ"""
     now = time.time() if now is None else now
     ptr = _read_pointer(db) or {}
     keep = {ptr.get("generation_id"),
             (ptr.get("previous") or {}).get("generation_id")} - {None}
+    # retention by build_kind — gid เรียง timestamp ในชื่ออยู่แล้ว (ใหม่สุดก่อน)
+    kinds = {r["_id"]: r.get("build_kind", "daily")
+             for r in db["generation_runs"].find(
+                 {}, {"build_kind": 1})}
+    seen = {"daily": 0, "weekly": 0}
+    budget = {"daily": keep_daily, "weekly": keep_weekly}
+    for gid in sorted(kinds, reverse=True):
+        k = "weekly" if kinds[gid] == "weekly" else "daily"
+        if seen[k] < budget[k]:
+            seen[k] += 1
+            keep.add(gid)
     removed: list[str] = []
 
     def _expired(gid: str) -> bool:

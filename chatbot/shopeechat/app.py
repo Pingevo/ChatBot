@@ -5773,3 +5773,94 @@ def zaapi_kb_import_log(file: str = "", limit: int = 30) -> dict:
         if r.get("at"):
             r["at"] = r["at"].isoformat()
     return JSONResponse({"log": rows})
+
+
+# ─────────────────────────────────────────────────────────────
+# /admin/generations — generation pipeline status + publish/discard/rollback
+# (build_generation.py เขียน generation_runs; CAS = publish_generation.publish)
+# ─────────────────────────────────────────────────────────────
+
+_EXPORTS_ROOT = Path(__file__).resolve().parents[2] / "exports"
+
+
+@app.get("/admin/generations")
+def admin_generations_list(status: str = "", limit: int = 20) -> dict:
+    """list generation_runs + active pointer — admin poll สถานะ build/pending."""
+    adb = knowledge_base._admin_db()
+    q = {"status": status} if status else {}
+    rows = list(adb["generation_runs"].find(q).sort("created_at", -1)
+                .limit(min(limit, 100)))
+    for r in rows:
+        r["_id"] = str(r["_id"])
+    ptr = adb["sellable_units_meta"].find_one({"_id": "active"}) or {}
+    return JSONResponse({"active": ptr.get("generation_id"), "runs": rows})
+
+
+@app.get("/admin/generations/{gid}")
+def admin_generation_detail(gid: str) -> dict:
+    """run doc + build_log tail (gen dir) — หน้า UI แสดง progress/สรุป."""
+    adb = knowledge_base._admin_db()
+    run = adb["generation_runs"].find_one({"_id": gid})
+    if not run:
+        raise HTTPException(status_code=404, detail=f"no generation_runs {gid}")
+    run["_id"] = str(run["_id"])
+    log_path = _EXPORTS_ROOT / "gen" / gid / "build_log.jsonl"
+    log_tail: list[dict] = []
+    if log_path.exists():
+        lines = log_path.read_text(encoding="utf-8").splitlines()[-50:]
+        log_tail = [json.loads(l) for l in lines if l.strip()]
+    return JSONResponse({"run": run, "build_log_tail": log_tail})
+
+
+@app.post("/admin/generations/publish")
+def admin_generation_publish(request: Request, gid: str,
+                             expected_active: str = "auto") -> dict:
+    """admin accept → CAS pointer (status ต้อง pending เท่านั้น)."""
+    from .scripts import publish_generation as pg
+    adb = knowledge_base._admin_db()
+    run = adb["generation_runs"].find_one({"_id": gid})
+    if not run or run.get("status") != "pending":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{gid} status={(run or {}).get('status')} != pending")
+    res = pg.publish(adb, _EXPORTS_ROOT / "gen" / gid, gid,
+                     expected_current=expected_active,
+                     exports_root=_EXPORTS_ROOT, require_description=True)
+    if res in ("published", "bootstrap"):
+        adb["generation_runs"].update_one(
+            {"_id": gid},
+            {"$set": {"status": "published",
+                      "published_by": _admin_name(request),
+                      "published_at": pg._utc_now_iso()}})
+    return JSONResponse({"result": res})
+
+
+@app.post("/admin/generations/discard")
+def admin_generation_discard(request: Request, gid: str) -> dict:
+    """reject pending gen — mark discarded (ไม่ลบไฟล์; retention เป็นคนลบ)."""
+    adb = knowledge_base._admin_db()
+    res = adb["generation_runs"].update_one(
+        {"_id": gid, "status": "pending"},
+        {"$set": {"status": "discarded",
+                  "discarded_by": _admin_name(request),
+                  "updated_at": pg_now()}})
+    if not res.modified_count:
+        raise HTTPException(status_code=409, detail=f"{gid} not pending")
+    return JSONResponse({"result": "discarded"})
+
+
+@app.post("/admin/generations/rollback")
+def admin_generation_rollback(request: Request) -> dict:
+    """CAS กลับไป previous (pointer.previous ฝัง snapshot ไว้แล้ว)."""
+    from .scripts import publish_generation as pg
+    adb = knowledge_base._admin_db()
+    active = (adb["sellable_units_meta"].find_one({"_id": "active"}) or {}
+              ).get("generation_id")
+    res = pg.rollback(adb, expected_active=active or "")
+    return JSONResponse({"result": res,
+                         "by": _admin_name(request)})
+
+
+def pg_now() -> str:
+    from .scripts import publish_generation as pg
+    return pg._utc_now_iso()

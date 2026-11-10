@@ -12715,3 +12715,20 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - exports/*.log 32 ไฟล์ → exports/logs/ (exports/ gitignored — schema.md §7 บันทึกสถานะ used/unused แทน)
 - verify: pytest docs/test collect 2624 tests 0 errors (เดิม collection พังอยู่แล้วจาก script-style + env-needing files)
 - ยกเลิก/เก็บ: test_compat_mode_filter+test_handoff_transport+test_flow ต้องการ env จริง → tools/check_*
+
+## [ผ่านแล้ว] R1 publish g20261109 → live (CAS) 2026-11-10
+- artifact ครบ: unit 28,044 / product 11,781 / desc 27,155 / image_texts 13,927 (2 scopes) — npz gid ตรงทุกไฟล์, validate+manifest ผ่าน
+- docker smoke (canary image + โค้ดปัจจุบัน + exports:ro): Mongo ถึง, npz load, embed+search จริง top-5 score 0.70
+- CAS: active g20261024→g20261109, previous=g20261024 (ไฟล์อยู่ rollback ได้), cleanup ลบแค่ g20261027
+- ค้าง: cron daily/weekly + admin accept UI + retention 3daily/2weekly (plan รอเขียน), deploy server ต้อง copy gen dir เข้า exports_data volume
+
+## [กำลังจะทำ] Generation pipeline — build_generation.py + generation_runs + admin accept UI
+- implement ตาม plan docs/plans/active/2026-11-10 — ฟังก์ชันที่ cron จะ call; ไม่ติดตั้ง cron
+
+## [ผ่านแล้ว] Generation pipeline functions — build/admin UI/retention (cron ยังไม่ติดตั้ง) 2026-11-10
+- build_generation.py: driver daily|weekly — subprocess steps + build_log.jsonl + generation_runs (percent จาก N/total), build lock, carry+re-stamp desc (daily) ผ่าน _save_verified_npz, import colls, validate+manifest → pending
+- app.py +/admin/generations{,/{gid},/publish,/discard,/rollback} — publish เฉพาะ status=pending; generic /api/chatbot proxy ใช้ได้เลยไม่ต้องสร้าง route ใหม่
+- UI: /generations page (poll 5s, per-step bars, Accept/Reject/rollback via confirm.ask) + BuildProgressCat pixel sprite + GenPendingDot badge (poll 30s) + nav item ทั้ง Sidebar/MobileNav
+- retention: cleanup_generations keep = active+previous+3 daily+2 weekly (build_kind จาก generation_runs)
+- verify: py_compile ×3, tsc --noEmit OK, carry test 27,155 rows re-stamp gid ผ่าน
+- ค้าง: cron install (แยกอนุมัติ), live endpoint test บน uvicorn จริง, deploy sync gen เข้า exports_data volume
