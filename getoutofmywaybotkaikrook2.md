@@ -12738,3 +12738,13 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - RunCard expand → RunDetail: files+size, manifest counts, build_log tail; rollback ปุ่มต่อ gen ที่ published/previous
 - app.py: detail endpoint +files+manifest+pointer; list +previous; rollback รับ gid → re-publish ไป gen นั้น (re-validate ก่อน CAS); ไม่มี partial rollback (bundle contract)
 - verify: py_compile + tsc --noEmit OK
+
+## 2026-11-10 — R3 canary: global bot_worker_enabled ไม่ stamp edge → worker เงียบ (fixed)
+
+- เคส: เปิด global switch ใน UI แล้วส่งข้อความเข้าร้าน → บอทไม่ตอบ
+- สาเหตุ: `updateSystemConfig` whitelist `$set` ดิบ `bot_worker_enabled` — ไม่มี code path เขียน `bot_worker_enabled_at` → `resolveBotworkerScope` เจอ globalEnabledSince ไม่ใช่ Date → return empty scope (fail-closed ตาม design)
+- สถานะ DB ตอนเจอ: global=false→ผู้ใช้เปิด→true แต่ edge หาย; platform shopee ON (edge 19 ต.ค.), shop armed = SuperITMall ร้านเดียว (MiLiThailand ถูกปิดแล้ว), concurrency=1
+- แก้ data: stamp `bot_worker_enabled_at=2026-11-10T05:24:37Z` (1 field)
+- แก้ราก: `setBotWorkerGlobalEnabled` CAS owner เดียว (OFF→ON stamp edge / ON→OFF clear / idempotent no-op / stale→applied:false) + เอา key ออกจาก whitelist + PUT /config branch {flag,expected_,single-command→409} + test-assignment toggle_worker เปลี่ยนไปเรียก CAS + config page ส่ง expected_
+- เทส: test-botworker-global-enabled-cas.ts 8/8 (G1-G8 incl. whitelist drop + missing-edge fail-closed) · config-failclosed 8/8 · enable-checkpoint 18/18 · scope-gate 107/107 · tsc clean
+- งานค้าง: ผู้ใช้เปิด global อีกครั้ง (edge มีแล้ว) → worker รับข้อความใหม่หลัง edge เท่านั้น; canary จริงรอผู้ใช้ส่งข้อความทดสอบเข้าร้าน SuperITMall

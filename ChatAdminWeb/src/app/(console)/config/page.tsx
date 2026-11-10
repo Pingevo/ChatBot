@@ -202,7 +202,12 @@ export default function ConfigPage() {
     if (!ok) return;
     setSaving(true);
     try {
-      const r = await api().put<{ ok: boolean; config: SystemConfig }>("/config", { [key]: value });
+      const payload: Record<string, unknown> = { [key]: value };
+      // ⚡ global worker switch ผ่าน CAS เท่านั้น — ต้องส่ง expected state ปัจจุบัน
+      if (key === "bot_worker_enabled") {
+        payload.expected_bot_worker_enabled = config.bot_worker_enabled === true;
+      }
+      const r = await api().put<{ ok: boolean; config: SystemConfig }>("/config", payload);
       setConfig(r.data.config);
       toast.success(`เปลี่ยน "${label}" เป็น ${value ? "เปิด" : "ปิด"} แล้ว`);
     } catch (err) {
