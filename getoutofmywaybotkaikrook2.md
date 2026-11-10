@@ -12964,3 +12964,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 
 ### commits
 - 85f91ae nested-button fix · b6ce672 stats-reconcile sig fix · c9f4004 request_id propagation + tests + SRS · 447d106 probe reconcile
+
+### addendum — real E2E join proven บน live data (read-only)
+- ai_usage `conv_id` ของ generate path = `shadow:<conv>:<generation_batch_id>` → join shadow_replies.generation_batch_id ได้วันนี้โดยไม่ต้องรอ field ใหม่
+- พิสูจน์จริง: ai_usage req=`b3c286c8-c1f` conv_id=`shadow:shp_2052989613947223883:gen_shp_2052989613947223883_mwahjfe9_nynmja` → shadow `sr_xly5jx22mwahkgnq` FOUND (batch id ตรง)
+- request_id field ใหม่ทำให้ join ตรงขึ้น (ไม่ต้อง parse conv_id) — แต่ chain เดิม demonstrable อยู่แล้วสำหรับ generate path; worker path เดิม join ผ่าน conv_id ธรรมดา + ตอนนี้เพิ่ม request_id
