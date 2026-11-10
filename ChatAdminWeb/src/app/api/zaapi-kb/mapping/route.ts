@@ -20,18 +20,23 @@ async function loadManifest() {
 export async function GET(req: NextRequest) {
   const r = await requireAuth(req);
   if (!r.ok) return r.response;
-  const [manifest, saved, shops] = await Promise.all([
+  const [manifest, saved, shopDocs] = await Promise.all([
     loadManifest(),
     getCollection<{ _id: string }>(COLL).then((c) => c.find({}).toArray()),
     getCollection<{ shopname?: string; platform?: string }>("shops")
-      .then((c) => c.distinct("shopname", {})),
+      .then((c) => c.find({}, { projection: { shopname: 1, platform: 1 } }).toArray()),
   ]);
   const map: Record<string, unknown> = {};
   for (const s of saved) map[s._id] = s;
+  const seen = new Set<string>();
+  const shops = (shopDocs || [])
+    .filter((s) => s.shopname && !seen.has(`${s.platform}|${s.shopname}`) && seen.add(`${s.platform}|${s.shopname}`))
+    .map((s) => ({ name: s.shopname, platform: String(s.platform || "").toLowerCase() }))
+    .sort((a, b) => a.platform.localeCompare(b.platform) || String(a.name).localeCompare(String(b.name)));
   return json({
     files: manifest.files,
     mapping: map,
-    shops: (shops || []).filter(Boolean).sort(),
+    shops,
     types: [...CONTENT_TYPES],
   });
 }
