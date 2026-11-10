@@ -35,7 +35,7 @@ export default function ZaapiKbMappingPage() {
   const { user } = useAuth();
   const editable = canEditPage(user, "kb");
   const [files, setFiles] = useState<FileMeta[]>([]);
-  const [shops, setShops] = useState<string[]>([]);
+  const [shops, setShops] = useState<{ name: string; platform: string }[]>([]);
   const [saved, setSaved] = useState<Record<string, SavedMap>>({});
   const [draft, setDraft] = useState<Record<string, Partial<SavedMap>>>({});
   const [loading, setLoading] = useState(true);
@@ -82,6 +82,27 @@ export default function ZaapiKbMappingPage() {
     [files, filter, saved]
   );
   const mappedCount = files.filter(isMapped).length;
+
+  // platform id → label + shops — หัวข้อกลุ่มร้านตาม platform
+  const shopGroups = useMemo(() => {
+    const order = PLATFORMS.map((p) => p.v);
+    const byPlat = new Map<string, string[]>();
+    for (const s of shops) {
+      const k = s.platform || "other";
+      if (!byPlat.has(k)) byPlat.set(k, []);
+      byPlat.get(k)!.push(s.name);
+    }
+    return [...byPlat.entries()]
+      .sort((a, b) => {
+        const ia = order.indexOf(a[0]), ib = order.indexOf(b[0]);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a[0].localeCompare(b[0]);
+      })
+      .map(([plat, names]) => ({
+        plat,
+        label: PLATFORMS.find((p) => p.v === plat)?.l || plat || "other",
+        names,
+      }));
+  }, [shops]);
 
   const save = async (f: FileMeta) => {
     const d = draft[f.file] || {};
@@ -139,22 +160,40 @@ export default function ZaapiKbMappingPage() {
                     {mapped && <div className="text-emerald-500 text-[10px]">mapped by {saved[f.file].mapped_by}</div>}
                   </td>
                   <td className="pr-3 py-2">
-                    <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-                      {shops.map((s) => {
-                        const on = (d.accounts || []).includes(s);
-                        return (
-                          <button key={s} type="button" disabled={!editable}
-                            onClick={() => setField(f.file, {
-                              accounts: on
-                                ? (d.accounts || []).filter((x) => x !== s)
-                                : [...(d.accounts || []), s],
-                            })}
-                            className={`${CHIP} ${on ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted"}`}>
-                            {s}
-                          </button>
-                        );
-                      })}
-                    </div>
+                    {!d.platforms?.length ? (
+                      <div className="text-text-muted text-[10px]">เลือก platform ก่อน (ว่าง platform = ทุก platform)</div>
+                    ) : (
+                      <div className="max-h-40 overflow-y-auto space-y-2">
+                        {shopGroups
+                          .filter((g) => (d.platforms || []).includes(g.plat))
+                          .map((g) => (
+                            <div key={g.plat}>
+                              <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide mb-0.5">{g.label}</div>
+                              <div className="flex flex-col gap-0.5">
+                                {g.names.map((s) => {
+                                  const on = (d.accounts || []).includes(s);
+                                  return (
+                                    <label key={s}
+                                      className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 cursor-pointer ${on ? "bg-accent/10" : "hover:bg-surface-2"} ${!editable ? "opacity-60 cursor-not-allowed" : ""}`}>
+                                      <input type="checkbox" className="accent-accent" disabled={!editable}
+                                        checked={on}
+                                        onChange={() => setField(f.file, {
+                                          accounts: on
+                                            ? (d.accounts || []).filter((x) => x !== s)
+                                            : [...(d.accounts || []), s],
+                                        })} />
+                                      <span className="truncate">{s}</span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
+                        {!shopGroups.some((g) => (d.platforms || []).includes(g.plat)) && (
+                          <div className="text-text-muted text-[10px]">ไม่มีร้านใน platform ที่เลือก</div>
+                        )}
+                      </div>
+                    )}
                     {!d.accounts?.length && (
                       <div className="text-amber-500 text-[10px] mt-1">เสิร์ฟทุกร้าน — ระวังข้อมูลเฉพาะร้านรั่ว</div>
                     )}

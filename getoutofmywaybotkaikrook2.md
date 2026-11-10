@@ -12645,3 +12645,17 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - API: POST mapping รับ platforms:[] ได้จริง (empty=ทุก platform ตาม _scope_ok ของบอท) — default ["shopee"] เหลือเฉพาะกรณีไม่ส่ง field
 - ผลกระทบเคสอื่น: schema doc เดิม, saved docs เดิมอ่านได้ (platforms lowercase ตรง chip values); import path อื่นไม่แตะ; SRS ไม่ต้องแก้ (ไม่ใช่ shopeechat)
 - verify: npx tsc --noEmit --incremental false exit 0; UI manual test ยังไม่ได้ทำ
+
+## กำลังจะทำ — R4 historical recovery dry-run / 2026-11-10
+- R4 code fix committed b878acd in current worktree/branch as user requested; no push/deploy. User prioritizes completing R4, requests R1 status report.
+- Frozen checksum and active prefix 1..12634 match. Parallel user mapping changes and log 12635..12647 read/indexed; do not stage/modify their code.
+- Plan: read-only census + full-original-document recovery dry-run (strip only _archived_at/_archived_from/_dup_group_keep); detect identity collisions, pin source digest, present exact additive recovery count before DB write. Preserve all source archives; no dedup by text/inbound, no destructive cleanup.
+- Impact: restores accessible generation history and changes active-list/KPI counts, but keeps ratings/metadata and backup copies. Existing legacy worker repeats are retained rather than falsely classified without batch proof. No code mechanism additions.
+- R1 current files/process check: build process absent; unit and misnamed description npz remain, no description_embeddings.npz/product-level build/export snapshot/manifest in generation directory yet. Do not claim R1 complete or live.
+
+## 2026-11-10 — กำลังจะทำ+ผ่านแล้ว (รวม): kb-mapping เลือก platform ก่อน → ร้านตาม platform (checkbox list)
+- ปัญหา: rev ก่อนหน้า chips เลือกร้านรวมทุก platform ไม่แยกกลุ่ม
+- แก้: GET mapping คืน shops=[{name,platform}] (projection+dedupe) แทน distinct shopname; page มี shopGroups group-by-platform; shop cell เป็น checkbox list แยกหัวข้อ platform — โผล่เฉพาะ platform ที่เลือกใน chip ด้านขวา (platform ว่าง → ข้อความบอกให้เลือกก่อน); draft default platforms=["shopee"] เดิม
+- ผลกระทบเคสอื่น: accounts ยังเก็บ shopname เหมือนเดิม (scope_ok เช็คชื่อร้าน); saved docs อ่านได้; ไม่มี migration
+- verify: npx tsc --noEmit exit 0; UI manual test ยังไม่ได้ทำ
+- หมายเหตุ: entry นี้รวม pre/post (parallel session แทรก tail ระหว่างทำงาน — protocol exception)
