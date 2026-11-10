@@ -760,12 +760,6 @@ export function ZaapiKbPanel() {
                       {Object.keys(f.type_counts || {}).length > 0 &&
                         ` · ${Object.entries(f.type_counts || {}).map(([t, n]) => `${TYPE_LABEL[t] || t} ${n}`).join(" · ")}`}
                       {f.platforms.length ? ` · ${f.platforms.length} platform` : ""}
-                      {" · "}
-                      <button type="button"
-                        className="text-accent hover:underline"
-                        onClick={(e) => { e.stopPropagation(); setShopPeek(shopPeek === f.file ? null : f.file); }}>
-                        {f.accounts.length ? `${f.accounts.length} ร้าน` : "ทุกร้าน"}
-                      </button>
                       {f.updated_at ? ` · ${new Date(f.updated_at).toLocaleDateString("th-TH")}` : ""}
                     </div>
                     {shopPeek === f.file && f.accounts.length > 0 && (
@@ -782,6 +776,11 @@ export function ZaapiKbPanel() {
                       </div>
                     )}
                   </div>
+                </button>
+                <button type="button"
+                  className="text-[11px] text-accent hover:underline shrink-0"
+                  onClick={() => setShopPeek(shopPeek === f.file ? null : f.file)}>
+                  {f.accounts.length ? `${f.accounts.length} ร้าน` : "ทุกร้าน"}
                 </button>
                 {f.disabled && <Badge tone="warning">ปิดอยู่</Badge>}
                 {editable && (
