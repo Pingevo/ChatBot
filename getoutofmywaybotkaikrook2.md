@@ -12969,3 +12969,31 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ai_usage `conv_id` ของ generate path = `shadow:<conv>:<generation_batch_id>` → join shadow_replies.generation_batch_id ได้วันนี้โดยไม่ต้องรอ field ใหม่
 - พิสูจน์จริง: ai_usage req=`b3c286c8-c1f` conv_id=`shadow:shp_2052989613947223883:gen_shp_2052989613947223883_mwahjfe9_nynmja` → shadow `sr_xly5jx22mwahkgnq` FOUND (batch id ตรง)
 - request_id field ใหม่ทำให้ join ตรงขึ้น (ไม่ต้อง parse conv_id) — แต่ chain เดิม demonstrable อยู่แล้วสำหรับ generate path; worker path เดิม join ผ่าน conv_id ธรรมดา + ตอนนี้เพิ่ม request_id
+
+---
+
+## [UI/UX Phase 1 — Mobile] กำลังจะทำ (2026-11-10)
+
+- Session: UI/UX modernization incremental — mobile-first, คงสี/identity เดิม, ห้ามรื้อทั้งระบบ
+- Branch: `ui/mobile-ux-phase1` @ origin/main `8ef1d42` (รวม Bot Worker human review + zaapi-kb R5 ครบแล้ว)
+- Baseline ที่เก็บแล้ว: build ผ่าน 94 routes, initial assets ~730KB raw/page, chunks 2.97MB raw / ~0.83MB gz
+- Contract inventory เสร็จ: /tickets, /botworker, /shadow-inbox, MobileNav, Sidebar, AppShell
+- ปัญหาที่ยืนยันจาก code: ไม่มี viewport-fit=cover/interactive-widget, AppShell ใช้ h-screen(100vh)+overflow-hidden → keyboard บัง composer บนมือถือ, safe-area-pb ไม่ทำงาน, touch target <44px หลายจุด, Sidebar prefetch ทุก link
+- กำลัง present design direction + plan ขออนุมัติก่อนแก้โค้ด (AGENTS.md ข้อ 9) — ยังไม่แก้ไฟล์ UI ใดๆ
+
+---
+
+## [W0–W5 workflow audit] กำลังจะทำ (2026-11-10)
+
+- Session: audit review งาน W0–W5 (workflow group) จาก `docs/plans/active/2026-11-06-remaining-work-register.md` — เทียบ requirement vs สถานะจริงใน code/log
+- Ledger/integrity ตรวจแล้ว: frozen SHA ตรง, active prefix 12971 SHA ตรง; tail 12972–12982 (UI/UX Phase 1 Mobile — parallel session, ยังไม่มี closeout) จะสรุปเป็น A-164
+- Scope: audit/read-only เท่านั้น — ไม่แก้ production code, ไม่แตะ DB, ไม่มี provider call
+
+### ผ่านแล้ว — W0–W5 workflow audit (audit-only, ไม่แก้ production/test)
+
+- วิธี: อ่าน register `docs/plans/active/2026-11-06-remaining-work-register.md` + spec `docs/superpowers/specs/2026-10-27-zaapi-workflow-runtime-design.md` + planner V3 status + raw log R1/R2/R3 + code census + corpus census (`~/Downloads/zaapi/data/`)
+- ผล census จริง: all-flows.json = 21 flows/218 nodes/225 edges ตรง register; basic-automations.json = 4 รายการ (active 1 = "ขอคะแนนเมื่อปิดทิกเก็ต - iSUPER ทดลอง" id 6abf3f7c); scenario-handling 53; personality 11
+- R1–R3 commits ทั้งหมด verify เป็น ancestor ของ main HEAD (8451aab,193120d,ccec6e3,a7e92b5..7539dbd,91da248)
+- สรุปสถานะ: W0 ~เสร็จ (เหลือ browser canary evidence + register row update) · W1 flows ครบแต่ขาด Basic Automation + single-file handle gap · W2 runtime 31/31 types + e2e 18/18 chat flows — ขาด node_trace, marketplace adapter, binding จริงบน Mongo · W3 binding/editor/replay ทำแล้ว — ขาด scenario 53 + persona 11 migration + binding resolution จริง · W4 เปิด (version pinning + test_source sandbox เท่านั้น) · W5 ยังไม่เริ่ม
+- พบ contract drift: spec วาง `materializeExecutableWorkflow`/`ce/1` แต่ implement จริง = `workflowCanonicalEval.ts` runtime eval บน version docs (ไม่มี symbol เหล่านั้นใน code)
+- ไม่มีการแก้ production code/test/DB/provider; register ยังไม่แก้ (เสนอ status update ให้ user ตัดสิน)
