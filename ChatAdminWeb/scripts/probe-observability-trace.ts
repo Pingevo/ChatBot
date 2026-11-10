@@ -43,6 +43,24 @@ async function main() {
   const mockSent = await getCollection("mock_sent");
   const sent = await mockSent.find({ shadow_reply_id: s.shadow_reply_id }).toArray();
   console.log(`  mock_sent: ${sent.length} delivered=${JSON.stringify(sent.map((d) => (d as Record<string, unknown>).delivered))}`);
+
+  // 7) lifecycle reconcile — per-bubble: decided bubble ↔ review_op, mock_sent ↔ mock_send
+  //   review lifecycle อยู่ใน botworker_events (ไม่ใช่ admin_logs): reviewService เป็นคนเขียน
+  type Ev = { metadata?: { request?: { bubble_id?: string }; bubble_id?: string } };
+  const bubbles = Array.isArray(s.review_bubbles)
+    ? (s.review_bubbles as { bubble_id: string; decision?: string; delivery?: { state?: string } }[])
+    : [];
+  const ops = (await events.find({ type: "review_op", "metadata.request.reply_id": s.shadow_reply_id }).toArray()) as Ev[];
+  const sends = (await events.find({ type: "mock_send", "metadata.reply_id": s.shadow_reply_id }).toArray()) as Ev[];
+  const opBubbles = new Set(ops.map((e) => e.metadata?.request?.bubble_id).filter(Boolean));
+  const sendBubbles = new Set(sends.map((e) => e.metadata?.bubble_id).filter(Boolean));
+  let missingOp = 0, missingSend = 0;
+  for (const b of bubbles) {
+    if (b.decision && b.decision !== "pending" && !opBubbles.has(b.bubble_id)) missingOp++;
+    if (b.delivery?.state === "mock_sent" && !sendBubbles.has(b.bubble_id)) missingSend++;
+  }
+  console.log(`  lifecycle reconcile: bubbles=${bubbles.length} review_op=${ops.length} mock_send=${sends.length}`);
+  console.log(`    gaps: decided-no-op=${missingOp} mock_sent-no-event=${missingSend}`);
   process.exit(0);
 }
 main().catch((e) => { console.error("FAIL", e); process.exit(1); });
