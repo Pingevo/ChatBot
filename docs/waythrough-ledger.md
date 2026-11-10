@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12827 |
-| active_integrity_prefix_sha256 | `26f4a32ac56f4f2bae34893271057726a67d8861b0c272bc59c3f51def5ca76a` |
-| active_line_count_at_baseline | 12827 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R1 g20261110 published — closeout |
+| active_integrity_prefix_lines | 12840 |
+| active_integrity_prefix_sha256 | `8679963b58a1ed29ab111815d9a143da3e8c63e165bbfd272827740f047288af` |
+| active_line_count_at_baseline | 12840 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), S2 focused import isolation verified; full regression open |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -180,6 +180,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12680–12693 | read + indexed (A-129) |
 | 12694–12707 | read + indexed (A-130) |
 | 12708–12717 | read + indexed (A-131) |
+| 12828–12840 | read + indexed (A-146) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -379,3 +380,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-143 | 12806–12812 | R5/S8 workflow bot_products persist + dead fields / 2026-11-10 | passed behavior | Found: let_ai_respond set context.bot_products but DeliveredMessage had no products field → storeWorkflowDelivered wrote shadow docs with bot_products dropped (send_card identity verify unreadable). Fix: DeliveredMessage +products?: unknown[]; let_ai_respond pushes botResp.products; storeWorkflowDelivered writes bot_products (deterministic-id/idempotency unchanged). S8: removed dead fields DocLike.inbound_message_ids/batch_id (no reader in reviewService) + response review_admin_id (no consumer). | verified | test-botworker-boundary new E7b RED→GREEN 21/21 + tsc clean (stale tsconfig.tsbuildinfo caused phantom error — deleted). Non-product actions unaffected (field absent). Pending: numbers-vs-source reconciliation, end-to-end trace. |
 | A-144 | 12813–12820 | R5 numeric reconcile + end-to-end observability trace / 2026-11-10 | passed behavior | New read-only scripts: test-stats-reconcile.ts proves per-case naive countDocuments(bounds) == Mongo $group bucket sum == JS series.keyOf sum with lost=0 across both bucket paths — 10/10 on prod data (conv.created_at daily 148 / weekly 1637 / monthly 2397 / yearly 155682 / all 158747 / custom 1734; last_msg_ts weekly 2308 / daily 348; msg.created_ts weekly 17957 / monthly 25912). probe-observability-trace.ts walks latest real turn: inbound msg found, botworker_events=10, admin_logs=0 (correct — pending review), mock_sent=0. ai_usage schema coexist confirmed: 87 docs = 55 old + 32 enriched; provider/status/attempt fields appear after prod bot restart. admin_logs real fields = action_type/timestamp; 43-type vocabulary complete. Noted: bot.buffer_flush volume 35,813 — noisy for future dashboard feed. | verified | Reconcile PASS on production data; trace shows no missing links for pending turn. Pending: enriched ai_usage rollout post-deploy. |
 | A-145 | 12821–12827 | R1 g20261110 published via admin Accept / 2026-11-10 | passed behavior | Build g20261110-054801-c989b70a completed (7675.8s) → validated → pending → user pressed Accept → CAS sellable_units_meta.active flipped 07:59:12Z; bundle atomic — units/image_texts collections, unit/product npz, jsonl, manifest+sha all point to new gid; previous g20261109 retained with manifest for rollback. Note: both run docs show status "published" — pointer is the authority, status = last event only. R1 full closeout: daily build → pending → accept → atomic publish → rollback retained. | verified | Pointer doc inspected directly; all bundle fields match new gid. |
+| A-146 | 12828–12840 | R0/R5/S1/S2/S3/S7 approved closeout; S2 import isolation | passed behavior | User approved closeout plan and US$1 provider ceiling. Frozen and active integrity verified; clean same-direction branch. S2 reproduced focused failures: stale subprocess path after offline reorganization and alias assertion comparing globals after sibling collection mutated dotenv. Fix tests only: correct offline path and assert dotenv/app/KB restoration in clean subprocess with loader suppressed. Forward/reverse three-module batches each 191 passed exit 0. | verified | Production mechanisms delta 0. Full offline gate still fails: 23 failed/286 errors, many stale fixture paths; S2 full closure pending infrastructure regression. R0/R5/S1/S3/S7 remain open; no provider calls or customer sends. |

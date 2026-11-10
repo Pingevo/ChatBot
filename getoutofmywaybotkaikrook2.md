@@ -12825,3 +12825,16 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - previous = g20261109 retained พร้อม manifest → rollback พร้อม (ไม่มี partial rollback)
 - flow ครบตาม design: daily build 09:00 → pending → admin Accept → atomic publish → prev retained
 - note: run docs ทั้ง 2 gid แสดง status "published" — pointer คือ authority ของตัวจริง (status = last event เฉยๆ)
+
+## R0/R5/S1/S2/S3/S7 closeout — กำลังจะทำ
+- ผู้ใช้อนุมัติแผน closeout และงบ provider ไม่เกิน US$1; ห้ามส่งลูกค้าจริง/เปิด web search/อ่าน env files; R4 รอ external owner แยกไว้
+- baseline: branch codex/zaapi-kb-closeout clean; frozen SHA และ active prefix 1..12827 ตรง ledger; semantic coverage ยัง partial
+- ลำดับ: reproduce S2 dotenv ordering → S7 quota watcher → R5 lifecycle/route truth → R0 payload optimization+S1 bounded live QA → S3 historical coverage+review; test ก่อนแก้, commit แยก fix
+- S2 วิเคราะห์เบื้องต้น: test หลายไฟล์ patch dotenv ตอน collection; ต้องพิสูจน์ alias identity ใน forward/reverse batch ก่อนแก้ ไม่เปลี่ยน production env behavior
+- S7 ปัจจุบัน default quota file อยู่ exports แล้ว; ต้องตรวจ watcher จริงก่อนสรุปว่า churn ยังเกิด
+
+## S2 — dotenv import-test isolation (ผ่าน focused gate; full regression ยังเปิด)
+- RED: focused 3 modules 189 passed/2 failed — subprocess ใช้ docs/test แทน docs/test/offline; alias test เปรียบ global หลัง sibling collection เปลี่ยน dotenv ไปแล้ว
+- แก้ test owner เดิม: subprocess import path เป็น offline; ตรวจ provider+app+knowledge_base alias identity ใน subprocess สะอาดพร้อม no-op dotenv ก่อน import (ไม่เปิด env)
+- GREEN: focused forward/reverse 191/191 exit 0 ทั้งสองลำดับ; production behavior/helpers/guards/regex/keyword/decision owners delta=0
+- Full offline gate: 1666 passed/23 failed/286 errors/15 skipped/1 xfailed; หลายรายการ fixture paths เก่าหลังย้าย test directories — ต้องแก้ infrastructure ก่อนปิด S2 ทั้งหมด; ไม่อ้าง full regression ผ่าน

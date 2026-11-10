@@ -336,7 +336,7 @@ def test_module_import_never_reads_dotenv(tmp_path=None):
 
     code = (
         "import sys\n"
-        "sys.path.insert(0, 'docs/test')\n"
+        "sys.path.insert(0, 'docs/test/offline')\n"
         "sys.path.insert(0, 'chatbot')\n"
         "import os\n"
         "os.environ['HF_HUB_OFFLINE'] = '1'\n"
@@ -366,9 +366,24 @@ def test_load_dotenv_aliases_restored_after_import():
     leaves `app.load_dotenv`/`knowledge_base.load_dotenv` pointing at the
     dead stub forever (leaked fake state into the shared process).
     """
-    import dotenv
-    assert _app_mod.load_dotenv is dotenv.load_dotenv, (
-        "app.load_dotenv ยังชี้ stub ของ import trap — ไม่ได้ restore")
-    import shopeechat.knowledge_base as _kb
-    assert _kb.load_dotenv is dotenv.load_dotenv, (
-        "knowledge_base.load_dotenv ยังชี้ stub — ไม่ได้ restore")
+    import os
+    import subprocess
+
+    code = (
+        "import sys, dotenv\n"
+        "sys.path.insert(0, 'docs/test/offline')\n"
+        "sys.path.insert(0, 'chatbot')\n"
+        "def original(*a, **k): return False\n"
+        "dotenv.load_dotenv = original\n"
+        "import test_issue_5f_claim_flow\n"
+        "import shopeechat.app as app\n"
+        "import shopeechat.knowledge_base as kb\n"
+        "assert dotenv.load_dotenv is original\n"
+        "assert app.load_dotenv is original, 'app alias not restored'\n"
+        "assert kb.load_dotenv is original, 'knowledge_base alias not restored'\n"
+    )
+    env = dict(os.environ, HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1")
+    res = subprocess.run(
+        [sys.executable, "-c", code], cwd=str(ROOT), env=env,
+        capture_output=True, text=True, timeout=180)
+    assert res.returncode == 0, res.stderr[-3000:]
