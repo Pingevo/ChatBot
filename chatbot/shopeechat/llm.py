@@ -850,6 +850,7 @@ _QUOTA_FILE = Path(os.environ.get("GEMINI_QUOTA_FILE")
 import threading as _threading
 import time as _time
 import datetime as _dt
+import contextvars as _contextvars
 from collections import deque as _deque
 
 _q_lock = _threading.Lock()
@@ -916,7 +917,13 @@ def _acquire(model: str, est_tokens: int) -> str:
         _time.sleep(max(wait, 0.1))
 
 
-def _record_tokens(model: str, resp) -> None:
+_ai_call_ctx = _contextvars.ContextVar("ai_call_ctx", default=None)
+"""per-turn LLM call correlation — caller (chat/worker) set ครั้งเดียว
+{shop, conv_id, platform, request_id}; ai_usage doc ทุก call ใน turn รับค่า"""
+
+
+def _record_tokens(model: str, resp, path: str | None = None,
+                   elapsed_ms: int | None = None) -> None:
     usage = getattr(resp, "usage_metadata", None)
     if not usage:
         return
@@ -925,24 +932,36 @@ def _record_tokens(model: str, resp) -> None:
     n = pt + ct
     with _q_lock:
         _q_tok.setdefault(model, _deque()).append((_time.time(), n))
-    _persist_usage(model, pt, ct)
+    _persist_usage(model, pt, ct, path=path, elapsed_ms=elapsed_ms)
 
 
-def _persist_usage(model: str, prompt_t: int, output_t: int) -> None:
+def _persist_usage(model: str, prompt_t: int, output_t: int,
+                   path: str | None = None,
+                   elapsed_ms: int | None = None) -> None:
     """ai_usage log — fire-and-forget persist ของ token usage ทุก LLM call (R0).
     kill-switch: AI_USAGE_LOG=0. ห้าม throw — measurement ห้ามทำ request พัง"""
     if os.environ.get("AI_USAGE_LOG", "1") == "0":
         return
     try:
         from . import knowledge_base as _kb
-        _kb._admin_db()["ai_usage"].insert_one({
+        doc = {
             "ts": _dt.datetime.now(_dt.UTC),
             "model": model,
             "prompt_tokens": prompt_t,
             "output_tokens": output_t,
             "total_tokens": prompt_t + output_t,
             "est_cost_usd": _gemini_cost(prompt_t, output_t),
-        })
+        }
+        if path:
+            doc["path"] = path
+        if elapsed_ms is not None:
+            doc["elapsed_ms"] = elapsed_ms
+        ctx = _ai_call_ctx.get()
+        if isinstance(ctx, dict):
+            for k in ("shop", "conv_id", "platform", "request_id"):
+                if ctx.get(k):
+                    doc[k] = ctx[k]
+        _kb._admin_db()["ai_usage"].insert_one(doc)
     except Exception:
         pass
 
@@ -1028,10 +1047,11 @@ def _openrouter_generate(model: str, contents, config: dict):
 
 
 def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
-              role: str | None = None):
+              role: str | None = None, path: str | None = None):
     """generate_content ผ่าน quota manager: pace RPM/TPM → call → 429 → fallback model 1 ครั้ง.
     role + providers[role]=="openrouter" → route ผ่าน OpenRouter (model เดิม map google/{id})
-    openrouter พัง → fallback gemini path เดิมอัตโนมัติ"""
+    openrouter พัง → fallback gemini path เดิมอัตโนมัติ
+    path = ai_usage call-path label ("answer"|"typed"|"vision"|"kb"|"general"|"intent")"""
     if role and get_provider(role) == "openrouter":
         try:
             return _openrouter_generate(model, contents, config)
@@ -1050,8 +1070,10 @@ def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
         key = _next_api_key()   # ข้าม dead keys ใน owner เดียว — RuntimeError เมื่อ pool ว่าง/dead หมด
         client = _client(key)   # ต้องเก็บ reference — GC client กลาง call จะปิด shared httpx
         try:
+            _t0 = _time.time()
             resp = client.models.generate_content(model=m, contents=contents, config=config)
-            _record_tokens(m, resp)
+            _record_tokens(m, resp, path=path,
+                           elapsed_ms=round((_time.time() - _t0) * 1000))
             return resp
         except genai_errors.ClientError as exc:
             tried += 1
@@ -1071,12 +1093,14 @@ def _generate(model: str, contents, config: dict, est_tokens: int | None = None,
             key2 = _next_api_key()
             client = _client(key2)
             try:
+                _t0 = _time.time()
                 resp = client.models.generate_content(model=m2, contents=contents, config=config)
             except genai_errors.ClientError as exc2:
                 if getattr(exc2, "code", None) == 401 or "UNAUTHENTICATED" in str(exc2):
                     _DEAD_KEYS.add(key2)
                 raise
-            _record_tokens(m2, resp)
+            _record_tokens(m2, resp, path=path,
+                           elapsed_ms=round((_time.time() - _t0) * 1000))
             return resp
 
 
@@ -1349,7 +1373,7 @@ def describe_image(
             [prompt, part],
             {"temperature": 0.0, "max_output_tokens": 300},
             est_tokens=len(prompt) // 4 + 2000,   # รูป ~258-1290 tok — เผื่อไว้
-            role="vision",
+            role="vision", path="vision",
         )
         desc = (resp.text or "").strip()
         usage = getattr(resp, "usage_metadata", None)
@@ -1571,7 +1595,7 @@ def answer(
                 "temperature": 0.3,
                 "max_output_tokens": 4096,
             },
-            role="chat",
+            role="chat", path="answer",
         )
     except genai_errors.ClientError as exc:
         return _error_reply(exc, "answer"), usage_info
@@ -1614,7 +1638,11 @@ def answer_typed(
         return f"ขออภัย ระบบแชทบอทขัดข้องชั่วคราว ({exc}) กรุณาติดต่อแอดมินนะคะ", {"prompt": 0, "output": 0, "total": 0}
     model_name = (model or get_model("chat")).strip()
     task_text = context.task.render()
-    system_instruction = TYPED_SYSTEM_INSTRUCTION + persona_extra + _lang_instruction(task_text)
+    from . import prompt_sections as _ps
+    _task_kinds = {t.kind for t in context.task.tasks if isinstance(t.kind, str)}
+    _typed_core_b = _ps.build_core_b_typed(_SYS_CORE_B, _task_kinds)
+    system_instruction = (_SYS_CORE_A + _typed_core_b + _SYS_TYPED_CARD_NOTE
+                          + persona_extra + _lang_instruction(task_text))
     ctx_body = context.context_text(shop_hint=shop_hint)
     user_prompt = (
         f"{ctx_body}\n\n"
@@ -1646,7 +1674,7 @@ def answer_typed(
                 "temperature": 0.3,
                 "max_output_tokens": 4096,
             },
-            role="chat",
+            role="chat", path="typed",
         )
     except genai_errors.ClientError as exc:
         return _error_reply(exc, "answer_typed"), usage_info
@@ -1780,7 +1808,7 @@ def answer_with_kb(
                 "temperature": 0.3,
                 "max_output_tokens": 2048,
             },
-            role="chat",
+            role="chat", path="kb",
         )
     except genai_errors.ClientError as exc:
         return _error_reply(exc, "answer_with_kb")
@@ -1895,7 +1923,7 @@ def answer_general(
                 "temperature": 0.3,
                 "max_output_tokens": 2048,
             },
-            role="chat",
+            role="chat", path="general",
         )
     except genai_errors.ClientError as exc:
         return _error_reply(exc, "answer_general"), {}

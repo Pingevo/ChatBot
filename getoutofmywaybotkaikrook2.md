@@ -12764,3 +12764,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แก้: (1) driver +_PCT_RE `pct=NN` คู่ regex เดิม + lf.flush() ทุกบรรทัด (2) script emit pct monotonic — scan 0→35 (ทุก 1k docs, total จาก _count_export_docs binary count '  {'), cache_load 35, classify 38, loop 38→99 ทุก 50 ตัว, merge 99
 - verify: --max-calls 0 --limit 300 (zero-call, ไม่ยิง Gemini/ไม่ upsert) emit ครบ pct=3→99; worklist sellable=18,960 รูป, 300 ตัวแรก new=220 → run จริงมีงาน OCR จริงเยอะ (ไม่ใช่ reuse ล้วน)
 - ผลกระทบ: run ปัจจุบันโหลดโค้ดเก่าไปแล้ว → % ยัง 0 จนจบ step แล้วกระโดด 100 (monitor ผ่าน cache upsert count แทน); run ถัดไป (cron) % ขยับ real-time
+
+## R0 ต่อ — ai_usage enrich + modular เข้า answer_typed (path production หลัก)
+
+- พบ: modularization เดิม wire เฉพาะ legacy `answer()`; `prompt_modular=True` ใน main_config อยู่แล้ว (doc key = `config_key` ไม่ใช่ `_id`) → ขยายเข้า `answer_typed` ด้วย `build_core_b_typed` (kinds จาก `context.task.tasks`: compare→+compare section, product/compat→recommend+product_match, ว่าง→เต็ม; flag off = TYPED_SYSTEM_INSTRUCTION byte-identical)
+- ai_usage เติม fields ตาม plan เดิมที่ขาด: `path` (answer|typed|vision|kb|general|intent) + `elapsed_ms` (วัดรอบ generate_content ไม่รวม quota wait) + `_ai_call_ctx` contextvar {shop,conv_id,platform,request_id} — set ที่ `_chat_impl` entry ครอบทุก engine/nested call
+- verify: split ครบ 27,711 chars (sections รวมกันเท่า CORE_B — re-order ตาม design เดิม), modular off→byte-identical (flag เดิม), py_compile ผ่าน; measured CORE_B cut: product/compat 25.1k/27.7k (~9%), compare 27.2k (~98%) — ประหยัดจริงจำกัด เพราะ core_answer+recommend+product_match ส่งเสมอ
+- ต่อ: replay วัดจริง + QA gate ก่อนสรุป R0

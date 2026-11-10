@@ -862,6 +862,10 @@ def chat(req: ChatRequest) -> ChatResponse:
 def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
     import time as _time
     _total_start = _time.time()
+    import uuid as _uuid
+    llm._ai_call_ctx.set({"shop": req.shop, "conv_id": req.conversation_id,
+                          "platform": req.platform,
+                          "request_id": str(_uuid.uuid4())[:12]})
     # ⚡ 2B.5 — post-handoff ownership lock (production owner เดียวที่ /chat
     #   boundary): ticket_state = authority เดียว — handoff/open/pending →
     #   wait-admin response ทุกข้อความ ก่อน engine dispatch (v3/v2/legacy),

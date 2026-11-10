@@ -92,6 +92,31 @@ def select_sections(intent_result: dict | None, message: str) -> set[str]:
 _ALL = {"core_answer", "recommend", "product_match", "compare", "claim"}
 
 
+def select_sections_typed(task_kinds: set[str] | None) -> set[str]:
+    """typed NeedTask kinds (product|compare|compat) → section keys;
+    kinds ว่าง/None = ข้อมูลไม่พอ → ทุก section (พฤติกรรมเดิม ปลอดภัย)"""
+    if not task_kinds:
+        return set(_ALL)
+    keys = {"core_answer"}
+    if "compare" in task_kinds:
+        keys.update(("compare", "recommend", "product_match"))
+    else:
+        keys.update(("recommend", "product_match"))
+    return keys
+
+
+def build_core_b_typed(core_b: str, task_kinds: set[str] | None) -> str:
+    """build_core_b เวอร์ชัน typed path — input = NeedTask.kind set จาก AnswerContext"""
+    if not modular_enabled():
+        return core_b
+    secs = _split(core_b)
+    if set(secs) == {"core_answer"}:      # fallback path — marker หาย
+        return core_b
+    want = select_sections_typed(task_kinds)
+    order = ["core_answer", "recommend", "product_match", "compare", "claim"]
+    return "".join(secs.get(k, "") for k in order if k in want)
+
+
 def build_core_b(core_b: str, intent_result: dict | None, message: str) -> str:
     """คืน CORE_B เต็ม (flag ปิด) หรือเฉพาะ sections ที่เลือก (flag เปิด)"""
     if not modular_enabled():
