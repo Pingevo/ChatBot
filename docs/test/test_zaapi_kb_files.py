@@ -60,8 +60,8 @@ def _match(doc, filt):
 
 
 class _Cur(list):
-    def sort(self, keys):
-        ks = keys if isinstance(keys, list) else [keys]
+    def sort(self, keys, direction=1):
+        ks = keys if isinstance(keys, list) else [(keys, direction)]
         for f, d in reversed(ks):
             super().sort(key=lambda x: (x.get(f) is None, x.get(f)),
                          reverse=(d < 0))
@@ -293,6 +293,34 @@ def test_rollback_restores_prev(db):
     assert db[zkf._COLL].count_documents(
         {"source_file": F1, "file_rev": 2, "expire_at": {
             "$exists": True}}) == 1
+
+
+def test_toggle_file_enabled(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    # disable → visibility หาย แต่ rows คงอยู่
+    r = zkf.set_file_enabled(db, filename=F1, enabled=False, admin="t")
+    assert r["ok"] and r["rev"] == 1
+    reg = db[zkf._FILES_COLL].find_one({"_id": F1})
+    assert "active_rev" not in reg and reg["disabled_rev"] == 1
+    assert db[zkf._COLL].count_documents(
+        {"source_file": F1, "file_rev": 1}) == 2
+    lf = [f for f in zkf.list_files(db) if f["file"] == F1][0]
+    # disabled → active_rev=0 แต่ rows แสดงข้อมูล rev ที่ปิดอยู่ (2 แถว)
+    assert lf["disabled"] and lf["active_rev"] == 0 and lf["rows"] == 2
+    assert zkf._visible_pairs(db)[0] == []
+    # disable ซ้ำ → unchanged ไม่ log
+    r2 = zkf.set_file_enabled(db, filename=F1, enabled=False)
+    assert r2["ok"] and r2.get("unchanged")
+    # enable → visibility กลับ
+    r3 = zkf.set_file_enabled(db, filename=F1, enabled=True, admin="t")
+    assert r3["ok"] and r3["rev"] == 1
+    reg = db[zkf._FILES_COLL].find_one({"_id": F1})
+    assert reg["active_rev"] == 1 and "disabled_rev" not in reg
+    assert zkf._visible_pairs(db)[0][0]["file_rev"] == 1
+    # unknown file / enable ไฟล์ที่ไม่เคย disable → ValueError
+    with pytest.raises(ValueError):
+        zkf.set_file_enabled(db, filename="nope.xlsx", enabled=True)
+    assert db[zkf._LOG_COLL].count_documents({"op": "toggle"}) == 2
 
 
 def test_rollback_fails_after_sweep(db):

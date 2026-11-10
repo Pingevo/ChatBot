@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12674 |
-| active_integrity_prefix_sha256 | `d086e9147b4dbf927451744ec3dee31ffaa15e276d1e2b07dd6e69b96e2e73cc` |
-| active_line_count_at_baseline | 12674 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R4 approved additive recovery verified |
+| active_integrity_prefix_lines | 12693 |
+| active_integrity_prefix_sha256 | `ebaccee85da90369546dd33c08928db4cae97289383eb422aa6e7293f10d209f` |
+| active_line_count_at_baseline | 12693 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), zaapi-kb toggle + file stats + import UI |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -176,6 +176,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12648–12654 | read + indexed (A-125) |
 | 12655–12661 | read + indexed (A-126) |
 | 12662–12674 | read + indexed (A-127) |
+| 12675–12679 | read + indexed (A-128) |
+| 12680–12693 | read + indexed (A-129) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -357,3 +359,5 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-126 | 12655–12661 | kb-mapping platform-grouped shop checkboxes / 2026-11-10 | passed behavior | Rev A-123: GET mapping คืน shops=[{name,platform}] (projection+dedupe แทน distinct); shop cell = checkbox list แยกหัวข้อ platform โผล่เฉพาะ platform ที่เลือก (platform ว่าง → บอกให้เลือกก่อน); accounts เก็บ shopname เดิม; tsc exit 0 | verified | manual UI test ยังไม่ได้ทำ; protocol exception — entry รวม pre+post เพราะ parallel tail แทรก |
 | A-123 | 12635–12647 | zaapi-kb-mapping multi-select shop+platform / 2026-11-10 | passed behavior | Mapping page: shop จาก single-select → chip multi-select (ว่าง=ทุกร้าน warning เดิม) + คอลัมน์ platform chips ใหม่ (shopee/lazada/tiktok/facebook/line official, ว่าง=ทุก platform, draft default shopee); POST mapping รับ platforms:[] = ทุก platform ตาม `_scope_ok` — default `["shopee"]` เหลือเฉพาะ field ไม่ถูกส่ง; schema doc เดิม saved docs อ่านได้ | verified | tsc --noEmit exit 0; manual UI test ยังไม่ได้ทำ; ยังไม่ commit |
 | A-127 | 12662–12674 | R4 approved additive archive recovery / 2026-11-10 | passed behavior | User explicitly approved $merge of all 30,933 originals with keepExisting/insert, removing only 3 archive metadata fields from copies. Counts/range preconditions passed; active 8,057→38,990, archive unchanged 30,933. Server lookup/all-field comparison: found 30,933/30,933 and exact originals 30,933/30,933; shadow_reply_id duplicate groups=0. Code fix committed b878acd. | verified | Approved code+history recovery complete, not full legacy dedup. No delete/active overwrite/index/config/send/deploy. Archive retained as backup (not independent corpus); R1 still missing actual product build/artifact corrections/completeness validation/publish/cron. Bookkeeping initially held for review; parallel mapping commits now isolated, so recovery-only log/ledger diff can be committed separately. |
+| A-128 | 12675–12679 | parallel session: R1 generation prep steps 1-4 plan / 2026-11-10 | pending/deferred work | User approved R1 steps 1-4 only (rename mislabeled description npz, export snapshot → gen dir, import sellable_units/image_texts per-gid, OCR nonsellable); NOT approved: product_embeddings build, publish/CAS pointer, cron. Preconditions: live pointer g20261024 untouched, per-gid collections absent | historical-unverified | Parallel session owner must close out; no result recorded in this range |
+| A-129 | 12680–12693 | zaapi-kb per-file toggle + stats + import platform-first UI / 2026-11-10 | passed behavior | `set_file_enabled` swap active_*↔disabled_* + CAS + audit; `list_files` +disabled/sheets[]/type_counts (rev fallback disabled_*); `export_file` fallback disabled rev (แก้ 404); POST /zaapi-kb/files/toggle + Next proxy; UI badge ปิดอยู่ + ToggleSwitch + meta stats + จำนวนร้าน click-to-reveal; import modal platform chips → grouped shop checkboxes; toast แสดง error detail | verified | pytest test_zaapi_kb_files 52/52 (incl. test_toggle_file_enabled ใหม่), py_compile+tsc OK; manual UI + สาเหตุ import preview 400 จริงยังไม่ verify (toast จะแสดง detail) |

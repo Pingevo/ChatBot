@@ -47,14 +47,29 @@ type ZaapiDoc = {
 type ZaapiFile = {
   file: string;
   active_rev: number;
+  disabled?: boolean;
   prev_rev?: number | null;
   rows: number;
   accounts: string[];
   platforms: string[];
   content_type?: string | null;
   sheet_types?: Record<string, string>;
+  sheets?: string[];
+  type_counts?: Record<string, number>;
   imported_by?: string;
   updated_at?: string;
+};
+
+const IMPORT_PLATFORMS = [
+  { v: "shopee", l: "Shopee" },
+  { v: "lazada", l: "Lazada" },
+  { v: "tiktok", l: "TikTok" },
+  { v: "facebook", l: "Facebook" },
+  { v: "line official", l: "LINE Official" },
+];
+const TYPE_LABEL: Record<string, string> = {
+  product: "สินค้า", troubleshooting: "แก้ปัญหา", faq: "FAQ",
+  warranty: "ประกัน", untyped: "ไม่จัดชนิด",
 };
 
 type ImportPreview = {
@@ -184,6 +199,8 @@ export function ZaapiKbPanel() {
     _id: string; op: string; file?: string; rev_from?: number; rev_to?: number;
     status?: string; admin?: string; at?: string;
   }[]>([]);
+  const [kbShops, setKbShops] = useState<{ name: string; platform: string }[]>([]);
+  const [shopPeek, setShopPeek] = useState<string | null>(null);
 
   const loadSources = useCallback(() => {
     api()
@@ -201,6 +218,10 @@ export function ZaapiKbPanel() {
       .get("/zaapi-kb/import-log", { params: { limit: 10 } })
       .then((r) => setLog(r.data.log || []))
       .catch(() => setLog([]));
+    api()
+      .get("/zaapi-kb/mapping")
+      .then((r) => setKbShops(r.data.shops || []))
+      .catch(() => setKbShops([]));
   }, []);
   useEffect(() => { loadSources(); loadFiles(); }, [loadSources, loadFiles]);
 
@@ -236,10 +257,39 @@ export function ZaapiKbPanel() {
       } else {
         toast.error(r.data?.conflict ? "มีการนำเข้าพร้อมกัน — ลองใหม่" : "นำเข้าไม่สำเร็จ");
       }
-    } catch {
-      toast.error("นำเข้าไม่สำเร็จ");
+    } catch (e) {
+      const d = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      toast.error(`นำเข้าไม่สำเร็จ${d ? ` — ${d}` : ""}`);
     } finally {
       setImporting(false);
+    }
+  }
+
+  const [toggling, setToggling] = useState<string | null>(null);
+  async function doToggleFile(f: ZaapiFile) {
+    const next = !!f.disabled;
+    if (!(await confirm.ask({
+      title: next ? `เปิดใช้ ${f.file}?` : `ปิดใช้ ${f.file}?`,
+      message: next
+        ? "แถวของไฟล์จะกลับมาใช้ตอบตาม scope เดิมทันที"
+        : "แถวของไฟล์จะถูก hold ไม่ใช้ตอบ (ข้อมูลไม่หาย เปิดกลับได้)",
+      variant: next ? "primary" : "danger",
+    }))) return;
+    setToggling(f.file);
+    try {
+      const r = await api().post("/zaapi-kb/files", null, {
+        params: { file: f.file, enabled: next },
+      });
+      if (r.data?.ok) {
+        toast.success(next ? `เปิดใช้ ${f.file}` : `ปิดใช้ ${f.file}`);
+        loadFiles();
+      } else {
+        toast.error(r.data?.detail || r.data?.error || "เปลี่ยนสถานะไม่สำเร็จ");
+      }
+    } catch {
+      toast.error("เปลี่ยนสถานะไม่สำเร็จ");
+    } finally {
+      setToggling(null);
     }
   }
 
@@ -398,6 +448,27 @@ export function ZaapiKbPanel() {
     }
   }
 
+  // platform → shops group (import modal — เลือก platform ก่อนแล้วร้านตาม platform)
+  const impShopGroups = (() => {
+    const byPlat = new Map<string, string[]>();
+    for (const s of kbShops) {
+      const k = s.platform || "other";
+      if (!byPlat.has(k)) byPlat.set(k, []);
+      byPlat.get(k)!.push(s.name);
+    }
+    const order = IMPORT_PLATFORMS.map((p) => p.v);
+    return [...byPlat.entries()]
+      .sort((a, b) => {
+        const ia = order.indexOf(a[0]), ib = order.indexOf(b[0]);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a[0].localeCompare(b[0]);
+      })
+      .map(([plat, names]) => ({
+        plat,
+        label: IMPORT_PLATFORMS.find((p) => p.v === plat)?.l || plat || "other",
+        names,
+      }));
+  })();
+
   const filtered = sources
     .filter((s) => {
       if (platform !== "all" && !s.accounts.some((a) => a.platform === platform)) return false;
@@ -429,6 +500,25 @@ export function ZaapiKbPanel() {
                 <div className="font-mono text-text">{imp.file.name}</div>
               </div>
               <div>
+                <label className="text-text-muted block mb-1">Platform (ว่าง = ทุก platform)</label>
+                <div className="flex gap-1.5 flex-wrap">
+                  {IMPORT_PLATFORMS.map((p) => (
+                    <button
+                      key={p.v}
+                      onClick={() => setImp({
+                        ...imp,
+                        platforms: imp.platforms.includes(p.v)
+                          ? imp.platforms.filter((x) => x !== p.v)
+                          : [...imp.platforms, p.v],
+                      })}
+                      className={`px-2 py-1 rounded-lg border text-[11px] ${imp.platforms.includes(p.v) ? "border-brand bg-brand/10 text-brand" : "border-border text-text-muted"}`}
+                    >
+                      {p.l}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
                 <label className="text-text-muted block mb-1">ร้านที่ใช้ได้ (ว่าง = ทุกร้าน)</label>
                 <input
                   type="text"
@@ -441,40 +531,56 @@ export function ZaapiKbPanel() {
                   })}
                   className="w-full h-8 px-2 mb-1.5 rounded-lg border border-border bg-surface text-xs focus:outline-none focus:ring-2 focus:ring-brand/40"
                 />
-                <div className="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto">
-                  {[...new Set(sources.flatMap((s) => s.accounts.map((a) => a.name)))].map((n) => (
-                    <button
-                      key={n}
-                      onClick={() => setImp({
-                        ...imp,
-                        accounts: imp.accounts.includes(n)
-                          ? imp.accounts.filter((x) => x !== n)
-                          : [...imp.accounts, n],
-                      })}
-                      className={`px-2 py-1 rounded-lg border text-[11px] ${imp.accounts.includes(n) ? "border-brand bg-brand/10 text-brand" : "border-border text-text-muted"}`}
-                    >
-                      {n}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <label className="text-text-muted block mb-1">Platform (ว่าง = ทุก platform)</label>
-                <div className="flex gap-1.5">
-                  {["Shopee", "Lazada", "TikTok", "Facebook", "LINE Official"].map((p) => (
-                    <button
-                      key={p}
-                      onClick={() => setImp({
-                        ...imp,
-                        platforms: imp.platforms.includes(p)
-                          ? imp.platforms.filter((x) => x !== p)
-                          : [...imp.platforms, p],
-                      })}
-                      className={`px-2 py-1 rounded-lg border text-[11px] ${imp.platforms.includes(p) ? "border-brand bg-brand/10 text-brand" : "border-border text-text-muted"}`}
-                    >
-                      {p}
-                    </button>
-                  ))}
+                {!imp.platforms.length ? (
+                  <div className="text-text-subtle text-[11px]">เลือก platform ก่อนเพื่อดูรายชื่อร้าน (หรือพิมพ์ชื่อเองด้านบน)</div>
+                ) : (
+                  <div className="max-h-36 overflow-y-auto space-y-1.5">
+                    {impShopGroups
+                      .filter((g) => imp.platforms.includes(g.plat))
+                      .map((g) => (
+                        <div key={g.plat}>
+                          <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide">{g.label}</div>
+                          <div className="flex flex-col gap-0.5">
+                            {g.names.map((n) => {
+                              const on = imp.accounts.includes(n);
+                              return (
+                                <label key={n}
+                                  className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 cursor-pointer ${on ? "bg-brand/10" : "hover:bg-surface-2"}`}>
+                                  <input type="checkbox" className="accent-brand" checked={on}
+                                    onChange={() => setImp({
+                                      ...imp,
+                                      accounts: on
+                                        ? imp.accounts.filter((x) => x !== n)
+                                        : [...imp.accounts, n],
+                                    })} />
+                                  <span>{n}</span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))}
+                  </div>
+                )}
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {[...new Set(sources.flatMap((s) => s.accounts.map((a) => a.name)))].map((n) => {
+                    const inGroups = impShopGroups.some((g) => g.names.includes(n));
+                    if (inGroups) return null;
+                    return (
+                      <button
+                        key={n}
+                        onClick={() => setImp({
+                          ...imp,
+                          accounts: imp.accounts.includes(n)
+                            ? imp.accounts.filter((x) => x !== n)
+                            : [...imp.accounts, n],
+                        })}
+                        className={`px-2 py-1 rounded-lg border text-[11px] ${imp.accounts.includes(n) ? "border-brand bg-brand/10 text-brand" : "border-border text-text-muted"}`}
+                      >
+                        {n}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
               <div>
@@ -641,7 +747,7 @@ export function ZaapiKbPanel() {
             )}
           </div>
           {files.map((f) => (
-            <div key={f.file}>
+            <div key={f.file} className={f.disabled ? "opacity-60" : ""}>
               <div className="flex items-center gap-3 px-4 py-2.5">
                 <button onClick={() => toggleFileDoc(f)} className="flex items-center gap-2 flex-1 min-w-0 text-left">
                   <ChevronDown size={14} className={`text-text-subtle transition-transform ${openFile === f.file ? "" : "-rotate-90"}`} />
@@ -649,11 +755,26 @@ export function ZaapiKbPanel() {
                   <div className="flex-1 min-w-0">
                     <div className="text-xs font-medium text-text truncate">{f.file}</div>
                     <div className="text-[11px] text-text-subtle mt-0.5 truncate">
-                      rev {f.active_rev} · {f.rows} แถว
-                      {f.accounts.length ? ` · ${f.accounts.join(", ")}` : " · ทุกร้าน"}
-                      {f.platforms.length ? ` · ${f.platforms.join(", ")}` : ""}
+                      {f.disabled ? "ปิดอยู่ · " : ""}rev {f.active_rev} · {f.rows} แถว
+                      {f.sheets?.length ? ` · ${f.sheets.length} sheets` : ""}
+                      {Object.keys(f.type_counts || {}).length > 0 &&
+                        ` · ${Object.entries(f.type_counts || {}).map(([t, n]) => `${TYPE_LABEL[t] || t} ${n}`).join(" · ")}`}
+                      {f.platforms.length ? ` · ${f.platforms.length} platform` : ""}
+                      {" · "}
+                      <button type="button"
+                        className="text-accent hover:underline"
+                        onClick={(e) => { e.stopPropagation(); setShopPeek(shopPeek === f.file ? null : f.file); }}>
+                        {f.accounts.length ? `${f.accounts.length} ร้าน` : "ทุกร้าน"}
+                      </button>
                       {f.updated_at ? ` · ${new Date(f.updated_at).toLocaleDateString("th-TH")}` : ""}
                     </div>
+                    {shopPeek === f.file && f.accounts.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {f.accounts.map((a) => (
+                          <span key={a} className="text-[10px] px-1.5 py-0.5 rounded bg-surface-2 text-text-muted">{a}</span>
+                        ))}
+                      </div>
+                    )}
                     {(f.content_type || Object.keys(f.sheet_types || {}).length > 0) && (
                       <div className="text-[10px] text-text-subtle mt-0.5 truncate">
                         ชนิด: {f.content_type || "—"}
@@ -662,6 +783,14 @@ export function ZaapiKbPanel() {
                     )}
                   </div>
                 </button>
+                {f.disabled && <Badge tone="warning">ปิดอยู่</Badge>}
+                {editable && (
+                  <span title={f.disabled ? "เปิดใช้ไฟล์นี้" : "ปิดใช้ไฟล์นี้"}>
+                    <ToggleSwitch size="sm" enabled={!f.disabled}
+                      disabled={toggling === f.file}
+                      onChange={() => doToggleFile(f)} />
+                  </span>
+                )}
                 <button onClick={() => doExport(f)} className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center" title="Export xlsx" aria-label="Export">
                   <Download size={13} className="text-text-muted" />
                 </button>

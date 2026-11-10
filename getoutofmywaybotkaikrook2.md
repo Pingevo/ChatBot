@@ -12672,3 +12672,22 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Closed approved repair: code b878acd + restoration of inaccessible historical answers. Legacy repeated inbound/text rows remain intentionally preserved; full historical dedup/external-writer provenance not established and must not be claimed complete. Archive is backup, not a second independent history corpus.
 - R1 status only (latest user priority): no build process running, unit 28,044 and description 27,155 previously validated; description remains misnamed product_embeddings.npz; actual product-level build, generation export/manifest/completeness checks, publish and cron remain pending. No new embedding/build/rename/live switch performed.
 - User parallel mapping UI/API files untouched. Recovery bookkeeping spans user-owned tail entries; leave uncommitted for review rather than silently commit parallel work. Frozen integrity unchanged, historical semantic coverage remains partial; no credentials printed or persisted.
+
+## กำลังจะทำ — R1 generation prep steps 1-4 / 2026-11-10
+- User approved steps 1-4 only: rename mislabeled description npz, copy export snapshot into gen dir, import sellable_units/image_texts per-gid collections (new DB writes to new collections), run OCR scope nonsellable.
+- Explicitly NOT approved yet: product_embeddings build (heavy), publish/CAS pointer change, cron install.
+- Preconditions: pointer live g20261024-072533-2be3443e untouched; per-gid collections absent (no drop of existing data possible); description npz content already verified (27155,1024) finite/gid-matched.
+
+## กำลังจะทำ — zaapi-kb per-file enable/disable toggle + status / 2026-11-10
+- ปัญหา: 36 ไฟล์ถูก disable ผ่าน disabled_rev/disabled_apply (K5) แต่ UI แสดงเหมือนไฟล์ว่าง ไม่มี status/toggle
+- แผน: kb_zaapi_files.set_file_enabled (swap active_*↔disabled_* + audit log) · list_files คืน disabled flag · app.py POST /zaapi-kb/files/toggle · Next proxy POST ใน files/route.ts · UI badge "ปิดอยู่" + ปุ่ม toggle
+- ผลกระทบ: เฉพาะ registry doc ไฟล์นั้น; rows/ไฟล์อื่นไม่แตะ; SRS ต้องอัปเดต section 6
+
+## ผ่านแล้ว — zaapi-kb enable/disable toggle + file stats + import UI / 2026-11-10
+- kb_zaapi_files.set_file_enabled: swap active_*↔disabled_* + CAS บน rev + audit op=toggle — disable/enable ต่อไฟล์, rows ไม่แตะ
+- list_files: +disabled flag + sheets[] + type_counts{} (aggregate เดียว group (file,rev,apply,type)); rev fallback disabled_* → ไฟล์ปิดยังเห็นจำนวนแถวจริง
+- export_file: fallback disabled_rev เมื่อไม่มี active → export ไฟล์ปิดได้ (แก้ 404 ที่ user เจอ)
+- app.py POST /zaapi-kb/files/toggle · Next POST proxy files/route.ts · UI ZaapiKbPanel: badge ปิดอยู่ + ToggleSwitch ต่อไฟล์ + meta แสดง sheets/type counts/platforms/จำนวนร้าน (กดจำนวนร้านดูรายชื่อ)
+- Import modal: platform chips ก่อน → checkbox ร้านแยกหัวข้อ platform (จาก /zaapi-kb/mapping shops[{name,platform}]) เลือกได้หลายร้าน + text input สำหรับชื่อที่ไม่มีในระบบ; toast แสดง error detail จาก server
+- verify: pytest test_zaapi_kb_files 52/52 (incl. test_toggle_file_enabled ใหม่) · py_compile OK · tsc --noEmit OK · manual UI ยังไม่ได้
+- หมายเหตุ: import preview 400 — ตอนนี้ toast จะโชว์ detail จริง; น่าจะ "no data rows"/filename ไม่ผ่าน _valid_filename (.xlsx/.txt เท่านั้น)
