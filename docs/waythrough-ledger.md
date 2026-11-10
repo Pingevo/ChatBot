@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12781 |
-| active_integrity_prefix_sha256 | `c6b0fc37212a22350f610644a81bf3a1a2e574395aa20130fa485b72e5d5725e` |
-| active_line_count_at_baseline | 12781 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R0 ai_usage enrich + typed modular + A/B measurement |
+| active_integrity_prefix_lines | 12789 |
+| active_integrity_prefix_sha256 | `540c9f2c531710f17e7818c5a4a501a2c280d5bc6ab9cb08a237724e05476ccf` |
+| active_line_count_at_baseline | 12789 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), R4 census + dedupe tooling |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -373,3 +373,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-137 | 12759–12766 | R1 daily build — OCR step silent progress / 2026-11-10 | failed/rejected approach → fix | Symptom: UI stuck 11%, image_texts_sellable 0% for minutes — process alive but silent (sock_recv on image_texts coll.find 73k docs; cache upserts with last_generation_id growing = actually working). Cause: build_image_texts prints no N/total → driver percent stays 0; driver lf.write buffered → log empty. Fix: driver adds pct=NN regex (additive to N/total) + lf.flush per line; script emits monotonic pct (scan 0→35 via _count_export_docs, cache_load 35, classify 38, loop 38→99 per 50, merge 99). Verified --max-calls 0 --limit 300 (no Gemini, no upsert): pct=3→99 emitted; sellable worklist=18,960 (220/300 new → real OCR work). Current run unaffected (old code loaded); monitor via cache upsert count. | verified |
 | A-138 | 12767–12774 | R0: ai_usage enrich + modular into answer_typed / 2026-11-10 | passed behavior | ai_usage gains path label, elapsed_ms, _ai_call_ctx turn correlation (shop/conv_id/platform/request_id set at _chat_impl — covers all engines/nested). answer_typed uses build_core_b_typed (kinds from task.tasks; flag off = byte-identical TYPED_SYSTEM_INSTRUCTION). Found prompt_modular=True already live (config_key doc). Section split verified complete (27,711 chars = CORE_B). | verified |
 | A-139 | 12775–12781 | R0 A/B replay measurement / 2026-11-10 | verified measurement | 12 real customer messages ×2 modes via local /chat (24 real Gemini calls, disclosed). intent 4,692 tok med, typed 14-20k, general 1,720; latency 1.7s/3.4s/2.8s. Modular: system 27,299→25,191 est (-7.7%), typed call 20,804→17,106 (-17.8%). Context 4.9-9.7k = next biggest block (retrieval-bound, untouched). QA gate passed both modes; flag restored True. Pending: production traffic accumulation for cost/day + p95. | verified |
+| A-140 | 12782–12789 | R4 census update + dedupe tooling / 2026-11-10 | pending/deferred work | conversations_shp 883 dup groups/1,165 extra (grew from 731 — writer still inserting, 62 in Nov); messages_shp 1,318/1,323 (quiet since Oct); shadow_replies real dups only 366 same-batch groups (3,554 = designed regenerations). New chatbot/testscript/dedupe_conversations.py: dry-run default, freshness+_id canonical, archive-not-delete, CAS re-read, --token APPLY-DEDUPE gate. BLOCKED on external Sellcenter writer fix (plan Stage 0) then unique index. | verified (dry-run + unit check) |

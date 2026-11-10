@@ -12779,3 +12779,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ผล modular จริง: system est 27,299→25,191 (-7.7%); typed call เดียวกัน 20,804→17,106 (-17.8%); context est 4.9-9.7k = ตัวใหญ่ที่เหลือ (retrieval-bound — ยังไม่แตะ รอ answer-quality task)
 - QA gate: คำตอบสมเหตุทั้ง 2 โหมด deterministic replies เหมือนเดิม; prompt_modular กลับ True แล้ว (prod ไม่กระทบ — ON อยู่แล้วเดิม)
 - ค้าง: รอ production traffic ผ่าน ai_usage ใหม่สะสม → วัด cost/day + p50/p95 ต่อ path อีกครั้ง
+
+## R4 — census update + dedupe tooling พร้อม (blocked: external writer)
+
+- census ใหม่: conversations_shp 883 dup groups / 1,165 extra (โตจาก 731 ตอน plan เดิม — writer ยังสร้างซ้ำ 62 groups ใน Nov); messages_shp 1,318/1,323 (หยุดหลัง Oct); shadow_replies "dup" จริงแค่ 366 groups (batch เดียวกัน) — 3,554 เป็น regeneration ตาม design ไม่ใช่ขยะ
+- dup docs diverge (ต่าง last_message/unread/updated) — parallel snapshots ของ conv เดียวกัน
+- เขียน chatbot/testscript/dedupe_conversations.py — dry-run default, canonical=freshness+_id tiebreak, losers→conversations_shp_dup_archive (ไม่ลบ = rollback ได้), CAS re-read ก่อนเขียน, --apply ต้อง --token APPLY-DEDUPE; verify dry-run+ordering unit check ผ่าน
+- BLOCKED ตาม plan §Stage0: รอ external Sellcenter writer ระบุ repo/owner แก้ upsert ก่อน — cleanup เร็วกว่านั้นมีแต่เสี่ยง dup ใหม่เกิดซ้ำ
+- unique index conversation_id สร้างได้หลัง dedup เสร็จ (ตอนนี้ E11000)
