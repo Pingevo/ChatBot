@@ -12632,3 +12632,16 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - R1 artifact verified read-only: current product_embeddings.npz is description data, embeddings=(27155,1024) float32 finite, unique chunk_ids, matching generation; no rename/rebuild/publish. Unit artifact already verified (28044,1024).
 - Impact: fixes fresh-schema generation conflict only; does not remove preexisting global index on another DB or recover historical archive. R4 archive recovery and legacy cleanup remain open, protected by explicit DB-operation approval. Credentials not printed or saved; DB mutations/deploy/commit=0.
 - Files: mongoClient.ts (-1 production line), one new test file, active log + ledger. Working tree only; first commit/branch decision awaits user review.
+
+## 2026-11-10 — กำลังจะทำ: zaapi-kb-mapping เลือกร้าน/platform ได้หลายค่า
+
+- หน้า `ChatAdminWeb/src/app/(console)/zaapi-kb-mapping/page.tsx`: shop เป็น select เดี่ยว, ไม่มี platform selector — เปลี่ยนเป็น chip multi-select (reuse pattern ZaapiKbPanel)
+- API `mapping/route.ts` POST: ปรับ platforms — ส่ง `[]` ได้จริง (=ทุก platform ตาม _scope_ok ของบอท) แทนบังคับ ["shopee"]; คง default ["shopee"] เฉพาะกรณีไม่ส่ง field มา
+- ผลกระทบ: เฉพาะหน้า mapping; schema doc เดิม; import path อื่นไม่แตะ
+
+### ผ่านแล้ว: zaapi-kb-mapping multi-select shop + platform
+- ปัญหา: หน้า mapping เลือกร้านได้ทีละ 1 และไม่มี UI เลือก platform (บังคับ shopee)
+- แก้: page.tsx เปลี่ยน shop select → chip multi-select (ว่าง=ทุกร้าน warning เดิม) + เพิ่มคอลัมน์ platform chips (shopee/lazada/tiktok/facebook/line official, ว่าง=ทุก platform, default draft = shopee เหมือนเดิม); reuse CHIP pattern ของ ZaapiKbPanel
+- API: POST mapping รับ platforms:[] ได้จริง (empty=ทุก platform ตาม _scope_ok ของบอท) — default ["shopee"] เหลือเฉพาะกรณีไม่ส่ง field
+- ผลกระทบเคสอื่น: schema doc เดิม, saved docs เดิมอ่านได้ (platforms lowercase ตรง chip values); import path อื่นไม่แตะ; SRS ไม่ต้องแก้ (ไม่ใช่ shopeechat)
+- verify: npx tsc --noEmit --incremental false exit 0; UI manual test ยังไม่ได้ทำ

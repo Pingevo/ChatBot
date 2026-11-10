@@ -51,7 +51,7 @@ export async function POST(req: NextRequest) {
     if (!CONTENT_TYPES.has(String(v))) return error(`bad sheet_type for ${k}`, 422);
   }
   const accounts = Array.isArray(body.accounts) ? body.accounts.map(String).filter(Boolean) : [];
-  const platforms = Array.isArray(body.platforms) && body.platforms.length
+  const platforms = Array.isArray(body.platforms)
     ? body.platforms.map((p) => String(p).toLowerCase()).filter(Boolean) : ["shopee"];
   const actor = r.ctx.admin.admin_id;
   const doc = {

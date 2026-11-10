@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12634 |
-| active_integrity_prefix_sha256 | `fb5240e9c4b2292f2a3a0e248446b594892b9c93d997f5badfa5733f14fc97e9` |
-| active_line_count_at_baseline | 12634 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), R4 code-only index fix |
+| active_integrity_prefix_lines | 12647 |
+| active_integrity_prefix_sha256 | `b9b4997c16e7ccf4bebdfcbc343e0dc39f6678e2980b5961e25507286d87873c` |
+| active_line_count_at_baseline | 12647 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), zaapi-kb-mapping multi-select |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -172,6 +172,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12592–12606 | read + indexed (A-120) |
 | 12607–12618 | read + indexed (A-121) |
 | 12619–12634 | read + indexed (A-122) |
+| 12635–12647 | read + indexed (A-123) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -348,3 +349,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-120 | 12592–12606 | R4 read-only audit / 2026-11-10 | pending/deferred work | Fresh Mongo active 8,057 + archive 30,933 =38,990; no _id overlap, all keeper refs live/same conversation, but 11,329 archived texts differ from keeper. Active inbound duplicates 280 groups/2,644 excess; inbound unique index absent despite declaration. Buffer unique index exists. No DB writes/code change/restore; full R4 blocked on archive policy and writer/index remediation approval. | verified | Audit evidence only, not R4 acceptance or proven rollback. Protocol exception: pre-work log appended after read-only inspection began. Credentials process-local only; historical coverage partial. |
 | A-121 | 12607–12618 | R4 identity-contract investigation / 2026-11-10 | decision/approval | Manual regeneration intentionally retains distinct batches; global inbound unique index conflicts with writer contract. Worker retries use deterministic _id; scoped legacy worker repeats 215 groups/2,418 excess. Archive 9,528 refs point to different inbound; archive invisible to active readers. Proposed fix: retire global index declaration, preserve native worker idempotency and manual history, approve explicit recovery IDs separately. | verified | Code/DB reads verified; exact historical archive algorithm unknown. No production changes/DB writes; proposed fix and recovery not executed. R1 log done 27,155 but artifact validation pending. |
 | A-122 | 12619–12634 | R4 global-index code fix / 2026-11-10 | passed behavior | User approved code only: remove one global inbound unique declaration, preserving native deterministic worker _id. New actual-ensureIndexes/manual-generation regression RED E11000→GREEN 4 checks; worker idempotency 71, batch isolation 22, review 35 and tsc all exit 0. R1 description artifact validated (27155,1024), finite/unique chunks/gid matched, still misnamed. | verified | Working tree only, no commit/deploy/DB mutation. Archive recovery/legacy cleanup and R1 artifact correction/product build/publish remain pending. No runtime mechanisms/dependencies added. |
+| A-123 | 12635–12647 | zaapi-kb-mapping multi-select shop+platform / 2026-11-10 | passed behavior | Mapping page: shop จาก single-select → chip multi-select (ว่าง=ทุกร้าน warning เดิม) + คอลัมน์ platform chips ใหม่ (shopee/lazada/tiktok/facebook/line official, ว่าง=ทุก platform, draft default shopee); POST mapping รับ platforms:[] = ทุก platform ตาม `_scope_ok` — default `["shopee"]` เหลือเฉพาะ field ไม่ถูกส่ง; schema doc เดิม saved docs อ่านได้ | verified | tsc --noEmit exit 0; manual UI test ยังไม่ได้ทำ; ยังไม่ commit |
