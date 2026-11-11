@@ -13263,3 +13263,34 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - verify: py_compile, offline 11 tests GREEN, tsc clean; ยังไม่ได้ลองยิง API/UI จริง (ต้อง dev server + Mongo)
 - commits: 7018a7f driver, 9ca6a53 API+SRS, 35ece28 UI
 - ข้อควรรู้: active pointer ไม่ถูกแตะจาก start/stop/resume — publish เท่านั้นที่สลับ
+
+## [Fixed-answer and Zaapi KB audit] ผ่านแล้ว / ขอบเขตที่ยังค้าง (2026-11-11)
+
+- ตรวจ source owners และรัน representative owner suites; ประเภทคำตอบ: (1) static action replies: greeting/no_reply/clarify/handoff; (2) typed deterministic/template replies: policy, compat, unanswered, warranty/order/claim; (3) LLM-generated: product/general/order tracking/KB prose. `HANDOFF_FAILED_REPLY` เป็นข้อความกลางเมื่อ handoff ไม่มี authoritative success — ห้ามนับเป็นการส่งสำเร็จ
+- Trigger สำคัญ: `TurnPlan.primary_action` เลือก greeting/no_reply/clarify/human_wait/handoff ก่อน retrieval (`app.py`); return-policy typed eligible/ineligible render deterministic, unknown/mixed ต้อง handoff; warranty/order templates ขึ้นกับ claim/ticket/history/order state, missing order id, warranty dates/coverage และผล transport; guard rewrite เกิดเมื่อ output มี claim ที่ไม่มี typed/context evidence
+- Mongo (read-only): registry 118 files, active rows 7,101; runtime config `kb_source=zaapi`, grouped retrieval ON, shadow OFF, pool sources ทั้ง 4 ON. KingGadgets query รุ่น CUKTECH LPB200NL ดึง FAQ รับประกัน 1 ปีจากไฟล์จริงได้ (top score .8249), แต่ผลลำดับถัดไปมีรุ่นใกล้ LPB200NC. Query troubleshooting กว้างได้แถวถามชนิดสินค้าแทนวิธีแก้เฉพาะรุ่น ทั้งที่ row PB150S ใน Mongo มีวิธีตรวจสาย/หัวชาร์จ/พอร์ตและเกณฑ์ส่งต่อ. Query policy กว้างคืน registration warranty, address-change และ Xiaomi warranty ปะปน — เป็น retrieval precision/intent-query risk ที่ต้องตรวจต่อก่อนสรุปว่าคำตอบปลายทาง grounded ครบ
+- `zaapi_search` evidence: shop scope มี 823 docs/candidates ก่อน cosine rerank; code embeds query และทุก prefilter-admitted row แล้วค่อย top-K. Correct row หาเจอใน exact model query แต่ broad query noisy; latency/recall ยังไม่มี benchmark รอบนี้
+- Test evidence: 9-file owner battery **406 passed, 1 skipped, 1 xfailed**, มี test-fixture failure 1 ตัว (`get_general_faq` monkeypatch ไม่รับ `shop/platform` kwargs); rerun ตัดเฉพาะ test นั้น = 406 passed, 1 skipped, 1 xfailed, 1 deselected. Zaapi file-serving targeted = **22 passed, 30 deselected**. Full Zaapi suite ไม่ปิด: model/HF Hub path ค้างและถูก interrupt (รอบ offline อีกครั้งค้างหลัง 27 pass) — ไม่นับเป็น pass
+- Gemini live final-answer test **ไม่ได้เกิดขึ้น**: automatic approval review ปฏิเสธการเรียกที่ส่ง context จริงจาก Zaapi Mongo ไปยัง Gemini เพราะเป็นการส่งข้อมูลฐานข้อมูลไปบริการภายนอกที่ไม่ใช่ trusted destination. ไม่มี Gemini request จาก probe นี้, ไม่มี Mongo write, ไม่มี customer send. การอนุมัติ quota ของผู้ใช้ไม่ทำให้ข้ามข้อปฏิเสธนี้ได้
+- ข้อสรุป: มี template/deterministic owners หลายจุด แต่คำตอบลูกค้าจำนวนมากยังผ่าน LLM; ปัญหา “มีข้อมูลแต่บอกไม่มี/ตอบกว้าง” มีหลักฐาน retrieval noisy บาง query แต่ยังไม่มี Gemini final-answer A/B บนข้อมูลจริง จึงยังยืนยันไม่ได้ว่าต้นเหตุทั้งหมดอยู่ที่ KB หรือ answer composition. ไม่มี code/test/config change ใน audit นี้; unrelated dirty files คงเดิม; ไม่ stage/commit/push/PR/deploy
+- งานต่อ: ใช้ sanitized/redacted KB sample หรือ isolated fixture ที่ไม่ส่งข้อมูลร้านจริงเพื่อทดสอบ Gemini ได้; แยก retrieval miss/noisy hit, evidence attribution, final answer completeness, handoff success และ cost/latency. ก่อนหน้านั้นรายงาน Gemini/คำตอบจริงว่า pending ไม่ใช่ผ่าน
+
+## [Customer-answer audit addendum] ผ่านแล้ว / เพิ่มลง findings plan (2026-11-11)
+
+- เพิ่ม §7 ใน `docs/plans/active/2026-11-11-customer-answer-findings-and-correction-plan.md`: แยก static action replies, typed templates และ LLM-generated answers; บันทึก trigger สำคัญพร้อม source owners; เพิ่ม Mongo retrieval probes, test counts/ข้อจำกัด และเหตุผลที่ Gemini live probe ไม่ได้รัน
+- เพิ่มอาการผู้ใช้รายงานเรื่องไม่มีสเปกแล้วตอบกว้าง/ไม่ระบุรุ่นหรือ field ที่ขาด ในฐานะ `user-reported, not reproduced`; ต้องมี exact question/answer และ product/trace ก่อนวิเคราะห์ root cause
+- เอกสารเท่านั้น; ไม่เปลี่ยน production/test/config/Mongo; ไม่ rerun tests ใน doc-only update. SHA ก่อนหน้า 13276 lines คงตรวจได้ก่อน append; ledger จะ index range ใหม่และเลื่อน integrity prefix ไป EOF
+
+## [Customer-answer symptom clarification] ผ่านแล้ว / เติมรายละเอียด finding สเปกขาด (2026-11-11)
+
+- ผู้ใช้ชี้แจงว่าอาการคือ เมื่อไม่มีสเปก บอทตอบ “ไม่พบข้อมูล” แล้วส่งต่อแอดมิน; แก้ §7.4 ของ customer-answer findings plan ให้ตรงถ้อยคำและเพิ่ม source paths ที่อาจเกี่ยวข้องโดยติดป้ายว่าเป็นสมมติฐานจากโค้ด ไม่ใช่ repro
+- ระบุ `no_selection/no_evidence` renderer, constraint no-match handoff, guard escalation และ TurnPlan/policy handoff เป็น candidate paths; ต้องใช้ response routing/evidence/transport outcome ของเคสจริงแยกให้ได้ก่อนระบุ root cause. ยังไม่มี exact conversation/trace จึงคง `user-reported, not reproduced`
+- เอกสารเท่านั้น; ไม่มี source/test/config/Mongo/provider/customer change; test suite ไม่รันซ้ำ
+
+## [Mobile UI phase 1 — nav menu + chat header + shell viewport] ผ่านแล้ว (2026-11-11)
+
+- อาการ (ผู้ใช้ส่ง screenshot): drawer "เพิ่มเติม" ตัวเล็กไม่มี search/ไม่มี logout; ปุ่ม back ลอยทับ avatar, ปุ่ม info ลอยทับ "ปิดสนทนา" บน /tickets และ /botworker; แถบโลโก้ "ITSRC Panel" กิน 56px บนมือถือ; ไม่มี viewport-fit=cover ทำให้ safe-area dead + composer เสี่ยงโดน keyboard บัง
+- แก้: (1) `MobileNav.tsx` → full-screen menu: search sticky, กลุ่มพับได้ขยายเฉพาะกลุ่ม active, row ≥48px, user bar ล่างมี logout (เดิมมือถือออกจากระบบไม่ได้), Escape ปิด (2) `TicketChatPanel.tsx` + `tickets/page.tsx` + `botworker/page.tsx` → เอาปุ่มลอยออก เข้า flow header; header wrap เป็น 2 แถวบนมือถือ (nav / controls), touch target ≥40px, back อยู่ใน empty state ด้วย; botworker คง breakpoint `md:` ตาม convention เดิม (3) `AppShell.tsx` + `app/layout.tsx` → ลบแถบโลโก้มือถือ, viewport export (viewportFit=cover, interactiveWidget=resizes-content, themeColor), h-screen→h-dvh + visualViewport hook (--app-vh)
+- ไม่เปลี่ยน: action/permission/route/data path/confirm text/mock-send semantics — เฉพาะตำแหน่ง ขนาด และโครง layout mobile
+- verify: `tsc --noEmit` clean, `next build` ผ่าน 94 routes (warning filesystem tracing เดิมเท่านั้น); visual check บนเครื่องจริงยังรอผู้ใช้ดู preview — keyboard fix ต้องทดสอบ iOS/Android จริง
+- งานค้าง: mobile breakpoints ไม่เท่ากัน (botworker `md:` vs tickets/shadow `lg:`); shadow-inbox tabs `text-[10px]` ยังเล็ก; sidebar prefetch ~30 links ยังไม่ได้วัด; tablet ยังใช้ bottom-nav (ยังไม่มี icon rail); dead code InlineDropdown ใน TicketChatPanel ยังค้าง
