@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 13377 |
-| active_integrity_prefix_sha256 | `ebd53b36af7ea1726ad44477acf2bb38a5b6b4493fae21640e388dd77f7524fa` |
-| active_line_count_at_baseline | 13377 |
-| active_integrity_recorded_at | 2026-11-11 (+0700), mobile UX PR integration pre-work marker indexed (A-203); semantic coverage remains partial |
+| active_integrity_prefix_lines | 13384 |
+| active_integrity_prefix_sha256 | `efefd28e67d5a3d7482ecf964cbaa333b17d923727818168b8d82e66cd7bec58` |
+| active_line_count_at_baseline | 13384 |
+| active_integrity_recorded_at | 2026-11-11 (+0700), mobile UX PR #54 merge closeout indexed (A-204); semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -241,6 +241,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 13355–13363 | read + indexed (A-200) |
 | 13364–13370 | read + indexed (A-202) |
 | 13371–13377 | read + indexed (A-203) |
+| 13378–13384 | read + indexed (A-204) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -564,3 +565,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-201 | 13349–13354 | Customer Answer Raw Findings flow-comparison pre-work marker / 2026-11-11 | pending/deferred work | Announced addition of two diagrams to the raw findings report: current code path and target flow based on shop/platform scoping before pool, units-based product identity, ShpProducts stock/status join, Zaapi/Mongo facts, provenance and truthful handoff. | historical-unverified | Pre-work marker only; the following report addition is recorded in A-202. |
 | A-202 | 13364–13370 | Customer Answer Raw Findings current/target flow addition / 2026-11-11 | pending/deferred work | Added §12 with two Mermaid diagrams: current path branches by legacy/v2/v3 engine and flags and shows early responses, Units/ShpProducts, item-id fallback, Zaapi/general FAQ, pool selection, context composition and handoff; target path binds shop/platform first, resolves product identity, joins scoped ShpProducts for stock/status, retrieves scoped Zaapi/Mongo facts, preserves provenance and requires truthful handoff. Current paths are source-backed risks, not proof every request takes them; target is requirements only and explicitly not implemented. | verified | Document-only; no tests, code, config, Mongo/provider calls or customer sends. Source paths reviewed and `git diff --check` passed; stock-authority chronology remains stated. |
 | A-203 | 13371–13377 | Mobile UX PR integration pre-work / 2026-11-11 | pending/deferred work | Records explicit user authorization to commit, open a PR, and merge the current branch into main. At pre-work time, mobile UI implementation is still absent; branch also contains other completed documentation commits. Existing-PR search returned no matching PR. Temporary scripts are excluded from this integration scope. | historical-unverified | Pre-work marker only; remote integration result not recorded yet. |
+| A-204 | 13378–13384 | Mobile UX PR #54 integration closeout / 2026-11-11 | passed behavior | Created PR #54 `docs: specify mobile console UX redesign` from `ui/mobile-ux-phase1` to `main`; GitHub showed 7 commits/7 files, mergeable, Checks 0. PR contains documentation only, including the mobile UX design spec and project planning/Customer Answer records; no app source, dependency, or asset. GitHub confirmed PR #54 merged and closed into `main`. Before PR, `git diff --check origin/main...HEAD` passed and the design route matrix matched 40/40 routes. No application tests ran. Untracked temporary scripts were preserved. | verified | Merge verified in GitHub UI; semantic coverage remains partial. |
