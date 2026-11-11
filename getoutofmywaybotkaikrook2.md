@@ -13311,3 +13311,38 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Visual direction: retain the navy/maroon palette, make the dashboard charts data-faithful, use GSAP for restrained transitions and lazy-load a Three.js dashboard visualization with reduced-motion/WebGL fallback.
 - Earlier mobile phase-1 commits were merged to `origin/main` as `113cf06` during the audit. Other unrelated working-tree changes remain untouched and uncommitted.
 - Frozen and active integrity checks passed; ledger `git diff --check` passed. No application code was changed and no tests were run. Implementation awaits user approval under AGENTS.md §9.
+
+
+## Customer Answer Raw Findings Report — กำลังจะทำ (2026-11-11)
+
+- Scope: รวบรวมหลักฐานดิบจาก transcript ที่ผู้ใช้แนบ, source/owner paths, read-only Zaapi Mongo audit, test runs และอาการที่ผู้ใช้รายงาน ลง `docs/plans/active/2026-11-11-customer-answer-raw-findings.md` โดยแยก verified/code/Mongo/transcript/user-reported/unverified.
+- ไม่เขียนบทสรุปผู้บริหารหรือแผนแก้ในรายงานนี้; ไม่แก้ production/test/config/Mongo, ไม่เรียก provider, ไม่ส่งข้อความลูกค้า.
+- Shared ChatGPT URL เปิดได้แต่เนื้อหาแสดงเป็นหน้าว่าง จึงใช้ transcript แนบและหลักฐานใน session/repo เท่าที่เข้าถึงได้ พร้อมระบุข้อจำกัดนี้.
+
+
+## Mobile UI/UX design spec — กำลังจะทำ (2026-11-11)
+
+- User approved the dedicated mobile-presentation approach and asked for a highly usable, friendly design across the console phone screens.
+- Requirements to lock into the spec: phone portrait and landscape; keyboard-aware viewport and visible composers/form actions; page-level horizontal scrolling locked so screens move vertically only; fast initial download with heavy animation/3D lazy-loaded; same navy/maroon palette; optional original pixel-art cat anime-girl mascot at helpful, non-obstructive points.
+- This stage writes/reviews design documentation only; no application source changes before the written spec is approved.
+
+
+## Customer Answer Raw Findings Report — ผ่านแล้ว (2026-11-11)
+
+- สร้าง `docs/plans/active/2026-11-11-customer-answer-raw-findings.md` เป็นรายงานดิบ 418 บรรทัด: transcript pingevox Q1–Q5, storage/search/answer path, Mongo read evidence, test limits และ findings R-01–R-19 พร้อมป้ายระดับหลักฐานและสิ่งที่ยังพิสูจน์ไม่ได้.
+- Shared URL เปิดได้แต่หน้าไม่มีเนื้อหา; ใช้ attachment และ session/repo evidence. Mongo counts/results เป็นผล audit A-189 ที่บันทึกไว้ ไม่ได้ query ซ้ำในรอบเขียนรายงาน.
+- งานนี้เป็นเอกสารเท่านั้น: ไม่แก้ production/test/config, ไม่รัน test, ไม่เขียน Mongo/Product DB, ไม่เรียก Gemini/provider และไม่ส่งข้อความลูกค้า.
+
+
+## Customer Answer Raw Findings Report — Codex thread supplement ผ่านแล้ว (2026-11-11)
+
+- อ่าน Codex thread `สรุปงานที่ยังค้าง` ผ่าน history tool และเพิ่ม sections 10–11 ในรายงานดิบ; ระบุ thread source แยกจากข้อมูล transcript/Mongo ที่ตรวจในงานก่อนหน้า.
+- เติม T01 BP35S (stock 50/30, 120°, variant unknown/missing tier_index reproduction), T08 GS3 (stock snapshot, model_codes ว่าง/เลือก S3), shop/platform-before-pool requirement, API/QA12 timeouts, K3 selected=0, handoff 0/13, และ census Zaapi ที่ขัดกัน 75/118 vs 118/118 และ 7,101 vs 20,768 rows.
+- Thread เป็นหลักฐานที่อ่านย้อนหลัง ไม่ได้ส่งข้อความไป thread, query Mongo/provider, rerun API/tests หรือแก้ production. ความต่างของจำนวน Zaapi ยังไม่ reconcile; ตัวเลขทั้งหมดคง source/time/limitation ตามรายงาน.
+
+
+## Mobile Console UX Redesign design spec — ผ่านแล้ว (2026-11-11)
+
+- สร้าง `docs/superpowers/specs/2026-11-11-mobile-console-ux-design.md` ครอบคลุม UX มือถือ portrait/landscape, keyboard, vertical-only scrolling, navigation, cards/forms/alerts, dashboard graphs, pixel-art cat-girl, performance และ reduced motion.
+- เทียบ route file จริงกับตารางสเปกตรงกัน 40/40; กำหนด mobile workflow editor ให้แก้ ordinary/true-false/multi-branch edges โดยคง graph IDs/semantics; ระบุหน้า login และ shared loading/error states.
+- ตรวจ structure/whitespace, checksums frozen+active และ `git diff --check` ผ่าน. รอบนี้เปลี่ยนเอกสารเท่านั้น ไม่แตะ app source/dependency/asset และไม่รัน app tests; implementation รอผู้ใช้ review/approve written spec.
