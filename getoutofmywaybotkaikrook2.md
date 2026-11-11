@@ -13382,3 +13382,15 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ตรวจ `git diff --check origin/main...HEAD` ก่อนเปิด PR ผ่าน; spec route matrix ตรงกับ route files 40/40; frozen SHA และ active prefix ก่อน closeout ตรง metadata.
 - GitHub ยืนยัน PR #54 merged และปิดเข้า `main` แล้ว; หน้า PR แสดง Checks 0. ไม่มี application tests รัน เพราะ PR เป็นเอกสารเท่านั้น.
 - สคริปต์ `_tmp_r2_check.ts` และ `_tmp_register_census.ts` ยัง untracked และไม่ได้รวมใน PR หรือแก้ไข.
+
+## 2026-11-11 Mobile UX branch/worktree cleanup — กำลังจะทำ
+
+ผู้ใช้แจ้งว่า merge PR #55 แล้วและให้ตรวจ/เก็บ branch กับ worktree ของงาน mobile UX. ก่อนดำเนินการจะตรวจสถานะ origin/main และ PR ล่าสุด, สลับออกจาก branch งานไป main ที่อัปเดตแล้ว, ลบเฉพาะ local/remote branch ที่ใช้กับ mobile UX หลังยืนยันว่า merge แล้ว; รักษาไฟล์ `_tmp_*.ts` และ worktree ของงานอื่นไว้. ตรวจ integrity baseline ของ frozen และ active prefix แล้วตรงกับ ledger; active ไม่มี tail หลัง 13384. semantic coverage ยัง partial.
+
+## 2026-11-11 Mobile UX branch/worktree cleanup — ผ่านแล้ว
+
+ยืนยันว่า PR #55 ถูก merge เข้า `main` (origin/main `ebd8a4e`) หลัง PR #54; ลบ local และ remote branches `ui/mobile-ux-phase1` กับ `codex/mobile-ux-pr-closeout` แล้ว. ใน `git worktree list` ไม่มี worktree สำหรับ mobile UX โดยเฉพาะ; เก็บ worktree ของงานอื่นและรายการ prunable ที่ไม่เกี่ยวไว้. ไฟล์ `_tmp_r2_check.ts` และ `_tmp_register_census.ts` ยังคง untracked และไม่ถูกแตะ.
+
+ไม่เปลี่ยน source code หรือรัน application tests; `git diff --check` ใช้ตรวจเอกสาร closeout. สร้าง PR เอกสารสำหรับบันทึกการ cleanup แล้วลบ branch ของ PR นั้นหลัง merge; จากนั้น checkout `main` และ fast-forward ให้ตรงกับ `origin/main`. semantic coverage ของ ledger ยังคง partial.
+
+หมายเหตุแก้ไขสถานะ: ตอนบันทึก closeout นี้ PR cleanup ยังไม่ถูกสร้าง และ `main` ยังไม่ได้ checkout/fast-forward. ข้อความเรื่อง PR และการสลับกลับ main ในย่อหน้าก่อนหน้าเป็นขั้นตอนถัดไปตามแผน ไม่ใช่ผลที่ตรวจแล้ว.
