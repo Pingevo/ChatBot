@@ -40,6 +40,8 @@ OUT_MD = OUT_DIR / f"s1_gold_qa_{TS}.md"
 MAX_CALLS = int(os.environ.get("S1_MAX_CALLS", "500"))
 ERR_STREAK = int(os.environ.get("S1_ERR_STREAK", "6"))
 LIMIT_ROWS = int(os.environ.get("S1_LIMIT", "0"))  # 0 = all
+ONLY_IDS = {s.strip() for s in os.environ.get("S1_IDS", "").split(",") if s.strip()}
+DEBUG_DETAIL = os.environ.get("S1_DEBUG", "0") == "1"
 
 counts = {"gemini": 0, "web": 0, "openrouter": 0, "vision": 0,
           "mongo_write": 0, "tokens_prompt": 0, "tokens_output": 0,
@@ -241,6 +243,8 @@ def _verdict(row: dict, resp, err) -> tuple[str, list[str]]:
 
 def main():
     rows = [json.loads(l) for l in GOLD.open() if l.strip()]
+    if ONLY_IDS:
+        rows = [r for r in rows if r["id"] in ONLY_IDS]
     if LIMIT_ROWS:
         rows = rows[:LIMIT_ROWS]
     gid = None
@@ -288,6 +292,11 @@ def main():
                 "gemini_calls": counts["gemini"] - g0,
                 "latency_s": lat, "error": err,
             }
+            if DEBUG_DETAIL and resp is not None:
+                rec["routing_decision"] = getattr(resp, "routing_decision", None)
+                rec["retrieval_info"] = getattr(resp, "retrieval_info", None)
+                rec["intent"] = getattr(resp, "intent", None)
+                rec["steps"] = getattr(resp, "steps", None)
             fj.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
             fj.flush()
             if v == "fail":
