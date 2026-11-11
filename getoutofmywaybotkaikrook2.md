@@ -13375,3 +13375,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - User explicitly asks to commit, open a PR, and merge to main now if not already done; a mobile UX design-spec commit exists, but no application source implementation has been made.
 - Existing PR search for `ui/mobile-ux-phase1` returned none. Branch includes the mobile design spec plus completed project planning/docs commits; verify and describe that scope accurately before pushing and merging.
 - Preserve uncommitted temporary scripts; include only finished documentation and required waythrough records in the integration commit.
+
+## Mobile UX PR #54 integration — ผ่านแล้ว (2026-11-11)
+- เปิด PR #54 `docs: specify mobile console UX redesign` จาก `ui/mobile-ux-phase1` เข้า `main`; GitHub ระบุ mergeable และแสดง 7 commits / 7 files.
+- ตรวจ PR diff แล้วมีเอกสาร 7 ไฟล์ (design spec, waythrough records, remaining-work และ Customer Answer docs); ไม่มี mobile UI source, dependency หรือ asset ใน PR.
+- ตรวจ `git diff --check origin/main...HEAD` ก่อนเปิด PR ผ่าน; spec route matrix ตรงกับ route files 40/40; frozen SHA และ active prefix ก่อน closeout ตรง metadata.
+- GitHub ยืนยัน PR #54 merged และปิดเข้า `main` แล้ว; หน้า PR แสดง Checks 0. ไม่มี application tests รัน เพราะ PR เป็นเอกสารเท่านั้น.
+- สคริปต์ `_tmp_r2_check.ts` และ `_tmp_register_census.ts` ยัง untracked และไม่ได้รวมใน PR หรือแก้ไข.
