@@ -5872,15 +5872,24 @@ def admin_generation_publish(request: Request, gid: str,
 
 @app.post("/admin/generations/discard")
 def admin_generation_discard(request: Request, gid: str) -> dict:
-    """reject pending gen — mark discarded (ไม่ลบไฟล์; retention เป็นคนลบ)."""
+    """reject/ลบ run — mark discarded (ไม่ลบไฟล์; retention เป็นคนลบ);
+    รับ pending|failed|stopped + building ที่ process ตายแล้วเท่านั้น"""
     adb = knowledge_base._admin_db()
-    res = adb["generation_runs"].update_one(
-        {"_id": gid, "status": "pending"},
+    run = adb["generation_runs"].find_one({"_id": gid})
+    if not run:
+        raise HTTPException(status_code=404,
+                            detail=f"no generation_runs {gid}")
+    ok = run.get("status") in ("pending", "failed", "stopped") or (
+        run.get("status") == "building" and not _build_pid_alive(run))
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{gid} status={run.get('status')} — discard ไม่ได้")
+    adb["generation_runs"].update_one(
+        {"_id": gid, "status": run["status"]},
         {"$set": {"status": "discarded",
                   "discarded_by": _admin_name(request),
                   "updated_at": pg_now()}})
-    if not res.modified_count:
-        raise HTTPException(status_code=409, detail=f"{gid} not pending")
     return JSONResponse({"result": "discarded"})
 
 
@@ -6003,8 +6012,7 @@ def admin_generation_stop(request: Request, gid: str) -> dict:
 @app.post("/admin/generations/resume")
 def admin_generation_resume(request: Request, gid: str) -> dict:
     """resume build ที่ตาย/ถูก stop — driver ข้าม step ที่ done แล้วทำต่อ;
-    building run ที่ pid ยังมีชีวิต → 409 (stop ก่อน)"""
-    from .scripts import build_generation as _bg
+    building run ที่ process ยังมีชีวิต → 409 (stop ก่อน)"""
     adb = knowledge_base._admin_db()
     run = adb["generation_runs"].find_one({"_id": gid})
     if not run:
@@ -6015,7 +6023,9 @@ def admin_generation_resume(request: Request, gid: str) -> dict:
             status_code=409,
             detail=f"{gid} status={run.get('status')} — resume ได้เฉพาะ "
                    f"building(pid ตาย)/failed/stopped")
-    if run.get("status") == "building" and _bg._run_alive(run):
+    # เช็ค liveness ชุดเดียวกับ list/UI (no-pid → >10min stale = dead)
+    # — UI โชว์ "ทำต่อ" ก็ต้อง resume ได้ ไม่งั้นทางตัน
+    if run.get("status") == "building" and _build_pid_alive(run):
         raise HTTPException(
             status_code=409,
             detail=f"{gid} ยัง build อยู่ — stop ก่อน")
