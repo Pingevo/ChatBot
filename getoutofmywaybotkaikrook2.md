@@ -13361,3 +13361,17 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - commit `a6a9693` docs(plans): register rebaseline + findings plan + roadmap; เว้น raw-findings (in-flight) + `_tmp_*.ts` (temp) ไว้ untracked
 - merge origin/main `113cf06` → `a2afb33` (trivial, no file diff); branch ahead 4 / behind 0
 - code/DB/provider/customer changes = 0
+
+
+## Customer Answer Raw Findings — current/target flow added ผ่านแล้ว (2026-11-11)
+
+- เพิ่ม §12 ใน `docs/plans/active/2026-11-11-customer-answer-raw-findings.md`: Mermaid current code flow (engine/flags, early returns, Units/ShpProducts, item fallback, Zaapi/general FAQ, pool, selection, context, answer/handoff) และ target flow (scope ก่อน pool, units หา identity, exact Mongo stock join, scoped Zaapi/Mongo facts, provenance, truthful handoff).
+- Current flow อ้าง source lines ที่อ่าน; target ถูกระบุว่าเป็น requirement ไม่ใช่ implementation. บันทึกความขัดกันเรื่อง stock authority ว่าก่อนหน้าพูด units-only แต่ clarification ล่าสุดให้ join Mongo เพราะ freshness.
+- `git diff --check` ผ่าน; รายงานไม่มี trailing whitespace. เอกสารเท่านั้น ไม่แก้ source/test/config, ไม่รัน tests, ไม่ query Mongo/provider และไม่ส่งข้อความ.
+
+
+## Mobile UX PR integration — กำลังจะทำ (2026-11-11)
+
+- User explicitly asks to commit, open a PR, and merge to main now if not already done; a mobile UX design-spec commit exists, but no application source implementation has been made.
+- Existing PR search for `ui/mobile-ux-phase1` returned none. Branch includes the mobile design spec plus completed project planning/docs commits; verify and describe that scope accurately before pushing and merging.
+- Preserve uncommitted temporary scripts; include only finished documentation and required waythrough records in the integration commit.

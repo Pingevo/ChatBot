@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 13363 |
-| active_integrity_prefix_sha256 | `62b16c03fd155295d960f071616af54f3f8c0751df47818a021b0e0ea9381ddb` |
-| active_line_count_at_baseline | 13363 |
-| active_integrity_recorded_at | 2026-11-11 (+0700), session remaining-work summary + docs commit + main merge indexed (A-200); 13349–13354 in-flight parallel marker left unindexed; semantic coverage remains partial |
+| active_integrity_prefix_lines | 13377 |
+| active_integrity_prefix_sha256 | `ebd53b36af7ea1726ad44477acf2bb38a5b6b4493fae21640e388dd77f7524fa` |
+| active_line_count_at_baseline | 13377 |
+| active_integrity_recorded_at | 2026-11-11 (+0700), mobile UX PR integration pre-work marker indexed (A-203); semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -237,8 +237,11 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 13328–13334 | read + indexed (A-197) |
 | 13335–13341 | read + indexed (A-198) |
 | 13342–13348 | read + indexed (A-199) |
+| 13349–13354 | read + indexed (A-201) |
 | 13355–13363 | read + indexed (A-200) |
-| 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482, 13349–13354 | ไม่ได้ index (gap — ดูส่วน 7; 13349–13354 = in-flight parallel pre-work marker) |
+| 13364–13370 | read + indexed (A-202) |
+| 13371–13377 | read + indexed (A-203) |
+| 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
 
@@ -558,3 +561,6 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-198 | 13335–13341 | Customer Answer Raw Findings Report Codex thread supplement closeout / 2026-11-11 | pending/deferred work | Recorded reading a Codex thread and adding sections 10–11 to the raw findings report, with thread evidence distinct from prior transcript/Mongo evidence. Added T01/T08/K3 observations, policy and timing requirements, and unreconciled Zaapi census discrepancies with provenance/limitations. No provider/Mongo/test/product changes or customer message. | verified | Documentary supplement only; competing census counts remain unreconciled as stated; semantic coverage remains partial. |
 | A-199 | 13342–13348 | Mobile Console UX Redesign design spec / 2026-11-11 | pending/deferred work | Wrote the user-approved mobile-only design spec covering all console routes, keyboard/landscape behavior, vertical-only scrolling, mobile components and page patterns, workflow graph editing, dashboard charts, pixel-art cat-girl, accessibility, and lazy animation/3D. Exact route file census matched 40/40. No app source/dependency/asset changes or app tests; implementation awaits user review of the spec. | verified | Document-only design stage; user approval is required before implementation under AGENTS.md §9. |
 | A-200 | 13355–13363 | Session remaining-work summary + docs commit + origin/main merge / 2026-11-11 | decision/approval | Read full ledger + verified integrity (frozen SHA/lines/bytes + active prefix 13348 SHA all match; coverage partial). Active tail 13349–13354 = in-flight parallel-session pre-work marker editing customer-answer-raw-findings flowchart — left unindexed for owning session. Codebase scan for dormant/unfinished work: chatbotv3 opt-in only (USE_CHAT_V3/req.use_v3, live OR untested), chat_v2 flag-gated (USE_LEGACY_CHAT/req.use_v2), canonical zaapi chain dormant (file-backed kb_zaapi_files is serving owner; K4 decision open), retrieval_shadow flag, web_search_enabled strict-off, BOTWORKER_BACKENDS=["shopee"] only + lazadachat/tiktokchat/shop_link placeholders, 31 workflow node types runtimeExecutor=null, bot-handoff notification TODO, 2 ponytail ceilings. Committed a6a9693 docs(plans): register rebaseline + findings plan + roadmap; left raw-findings (in-flight) and _tmp_*.ts (temp) untracked. Merged origin/main 113cf06 → a2afb33 trivial no-diff merge; branch ahead 4/behind 0. | verified | Zero code/DB/provider/customer changes; commit+merge per user instruction; 13349–13354 remains a coverage gap until owning session closeout. |
+| A-201 | 13349–13354 | Customer Answer Raw Findings flow-comparison pre-work marker / 2026-11-11 | pending/deferred work | Announced addition of two diagrams to the raw findings report: current code path and target flow based on shop/platform scoping before pool, units-based product identity, ShpProducts stock/status join, Zaapi/Mongo facts, provenance and truthful handoff. | historical-unverified | Pre-work marker only; the following report addition is recorded in A-202. |
+| A-202 | 13364–13370 | Customer Answer Raw Findings current/target flow addition / 2026-11-11 | pending/deferred work | Added §12 with two Mermaid diagrams: current path branches by legacy/v2/v3 engine and flags and shows early responses, Units/ShpProducts, item-id fallback, Zaapi/general FAQ, pool selection, context composition and handoff; target path binds shop/platform first, resolves product identity, joins scoped ShpProducts for stock/status, retrieves scoped Zaapi/Mongo facts, preserves provenance and requires truthful handoff. Current paths are source-backed risks, not proof every request takes them; target is requirements only and explicitly not implemented. | verified | Document-only; no tests, code, config, Mongo/provider calls or customer sends. Source paths reviewed and `git diff --check` passed; stock-authority chronology remains stated. |
+| A-203 | 13371–13377 | Mobile UX PR integration pre-work / 2026-11-11 | pending/deferred work | Records explicit user authorization to commit, open a PR, and merge the current branch into main. At pre-work time, mobile UI implementation is still absent; branch also contains other completed documentation commits. Existing-PR search returned no matching PR. Temporary scripts are excluded from this integration scope. | historical-unverified | Pre-work marker only; remote integration result not recorded yet. |
