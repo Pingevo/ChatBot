@@ -1,6 +1,6 @@
 # Customer-answer root-cause findings and correction plan
 
-วันที่: 2026-11-11 (Asia/Bangkok)  
+วันที่: 2026-11-11 (Asia/Bangkok)
 สถานะ: **audit + proposed plan only** — ยังไม่อนุมัติให้แก้ production code หรือเปลี่ยน behavior
 
 ## 1. เป้าหมายและขอบเขต
