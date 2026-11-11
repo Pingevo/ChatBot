@@ -13294,3 +13294,84 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ไม่เปลี่ยน: action/permission/route/data path/confirm text/mock-send semantics — เฉพาะตำแหน่ง ขนาด และโครง layout mobile
 - verify: `tsc --noEmit` clean, `next build` ผ่าน 94 routes (warning filesystem tracing เดิมเท่านั้น); visual check บนเครื่องจริงยังรอผู้ใช้ดู preview — keyboard fix ต้องทดสอบ iOS/Android จริง
 - งานค้าง: mobile breakpoints ไม่เท่ากัน (botworker `md:` vs tickets/shadow `lg:`); shadow-inbox tabs `text-[10px]` ยังเล็ก; sidebar prefetch ~30 links ยังไม่ได้วัด; tablet ยังใช้ bottom-nav (ยังไม่มี icon rail); dead code InlineDropdown ใน TicketChatPanel ยังค้าง
+
+
+## Mobile UI/UX Rebuild — กำลังจะทำ (2026-11-11)
+
+- Scope: redesign ChatAdminWeb phone screens only; new mobile-only components, preserve current routes, permissions, data calls, handlers, and feature workflows; match the existing navy/maroon desktop palette.
+- Audit and design proposal first. No source-code changes before user approval under AGENTS.md §9.
+- Existing branch `ui/mobile-ux-phase1` has pre-existing modified and untracked files; preserve and audit their scope before any commit or merge.
+
+
+## Mobile UI/UX Rebuild — audit complete, waiting for design approval (2026-11-11)
+
+- Inventory: 40 console page routes plus login, root redirect and global loading/error/not-found states; areas include dashboard/analytics, inbox/chat, bot QA/results, processes/knowledge, management and settings.
+- Root UX finding: most routes still resize desktop markup with inconsistent `md`/`lg` phone breakpoints; controls/dialogs are shared desktop components, while dashboard metrics and graphs remain dense on narrow screens.
+- Recommended architecture: phone-only presentation components below 768px, composed per route from the existing page-owned data, permissions and action handlers; leave 768px+ screens and all APIs/business behavior unchanged. New mobile cards, alerts, buttons, sheets and form controls; keep every route and action reachable.
+- Visual direction: retain the navy/maroon palette, make the dashboard charts data-faithful, use GSAP for restrained transitions and lazy-load a Three.js dashboard visualization with reduced-motion/WebGL fallback.
+- Earlier mobile phase-1 commits were merged to `origin/main` as `113cf06` during the audit. Other unrelated working-tree changes remain untouched and uncommitted.
+- Frozen and active integrity checks passed; ledger `git diff --check` passed. No application code was changed and no tests were run. Implementation awaits user approval under AGENTS.md §9.
+
+
+## Customer Answer Raw Findings Report — กำลังจะทำ (2026-11-11)
+
+- Scope: รวบรวมหลักฐานดิบจาก transcript ที่ผู้ใช้แนบ, source/owner paths, read-only Zaapi Mongo audit, test runs และอาการที่ผู้ใช้รายงาน ลง `docs/plans/active/2026-11-11-customer-answer-raw-findings.md` โดยแยก verified/code/Mongo/transcript/user-reported/unverified.
+- ไม่เขียนบทสรุปผู้บริหารหรือแผนแก้ในรายงานนี้; ไม่แก้ production/test/config/Mongo, ไม่เรียก provider, ไม่ส่งข้อความลูกค้า.
+- Shared ChatGPT URL เปิดได้แต่เนื้อหาแสดงเป็นหน้าว่าง จึงใช้ transcript แนบและหลักฐานใน session/repo เท่าที่เข้าถึงได้ พร้อมระบุข้อจำกัดนี้.
+
+
+## Mobile UI/UX design spec — กำลังจะทำ (2026-11-11)
+
+- User approved the dedicated mobile-presentation approach and asked for a highly usable, friendly design across the console phone screens.
+- Requirements to lock into the spec: phone portrait and landscape; keyboard-aware viewport and visible composers/form actions; page-level horizontal scrolling locked so screens move vertically only; fast initial download with heavy animation/3D lazy-loaded; same navy/maroon palette; optional original pixel-art cat anime-girl mascot at helpful, non-obstructive points.
+- This stage writes/reviews design documentation only; no application source changes before the written spec is approved.
+
+
+## Customer Answer Raw Findings Report — ผ่านแล้ว (2026-11-11)
+
+- สร้าง `docs/plans/active/2026-11-11-customer-answer-raw-findings.md` เป็นรายงานดิบ 418 บรรทัด: transcript pingevox Q1–Q5, storage/search/answer path, Mongo read evidence, test limits และ findings R-01–R-19 พร้อมป้ายระดับหลักฐานและสิ่งที่ยังพิสูจน์ไม่ได้.
+- Shared URL เปิดได้แต่หน้าไม่มีเนื้อหา; ใช้ attachment และ session/repo evidence. Mongo counts/results เป็นผล audit A-189 ที่บันทึกไว้ ไม่ได้ query ซ้ำในรอบเขียนรายงาน.
+- งานนี้เป็นเอกสารเท่านั้น: ไม่แก้ production/test/config, ไม่รัน test, ไม่เขียน Mongo/Product DB, ไม่เรียก Gemini/provider และไม่ส่งข้อความลูกค้า.
+
+
+## Customer Answer Raw Findings Report — Codex thread supplement ผ่านแล้ว (2026-11-11)
+
+- อ่าน Codex thread `สรุปงานที่ยังค้าง` ผ่าน history tool และเพิ่ม sections 10–11 ในรายงานดิบ; ระบุ thread source แยกจากข้อมูล transcript/Mongo ที่ตรวจในงานก่อนหน้า.
+- เติม T01 BP35S (stock 50/30, 120°, variant unknown/missing tier_index reproduction), T08 GS3 (stock snapshot, model_codes ว่าง/เลือก S3), shop/platform-before-pool requirement, API/QA12 timeouts, K3 selected=0, handoff 0/13, และ census Zaapi ที่ขัดกัน 75/118 vs 118/118 และ 7,101 vs 20,768 rows.
+- Thread เป็นหลักฐานที่อ่านย้อนหลัง ไม่ได้ส่งข้อความไป thread, query Mongo/provider, rerun API/tests หรือแก้ production. ความต่างของจำนวน Zaapi ยังไม่ reconcile; ตัวเลขทั้งหมดคง source/time/limitation ตามรายงาน.
+
+
+## Mobile Console UX Redesign design spec — ผ่านแล้ว (2026-11-11)
+
+- สร้าง `docs/superpowers/specs/2026-11-11-mobile-console-ux-design.md` ครอบคลุม UX มือถือ portrait/landscape, keyboard, vertical-only scrolling, navigation, cards/forms/alerts, dashboard graphs, pixel-art cat-girl, performance และ reduced motion.
+- เทียบ route file จริงกับตารางสเปกตรงกัน 40/40; กำหนด mobile workflow editor ให้แก้ ordinary/true-false/multi-branch edges โดยคง graph IDs/semantics; ระบุหน้า login และ shared loading/error states.
+- ตรวจ structure/whitespace, checksums frozen+active และ `git diff --check` ผ่าน. รอบนี้เปลี่ยนเอกสารเท่านั้น ไม่แตะ app source/dependency/asset และไม่รัน app tests; implementation รอผู้ใช้ review/approve written spec.
+
+
+## Customer Answer Raw Findings — current vs target flow addition กำลังจะทำ (2026-11-11)
+
+- เพิ่ม flowchart ของระบบปัจจุบันจาก code owners ที่ตรวจ และ flow เป้าหมายตาม requirement ล่าสุดของผู้ใช้: shop/platform scope ก่อน pool, units ใช้หา identity, exact ShpProducts join ตรวจ stock/status, Zaapi/Mongo ใช้ facts, evidence provenance ถึงคำตอบ/handoff.
+- แยกเส้นทาง/ข้อจำกัดที่ยืนยันจาก source ออกจาก target contract; ระบุ unresolved stock-source wording หากหลักฐานใน session ขัดกัน. แก้เฉพาะรายงาน/log/ledger.
+
+## Session: remaining-work summary + docs commit + origin/main merge (2026-11-11)
+
+- อ่าน ledger ครบ + integrity: frozen 8624 lines/892284 bytes/SHA a67b91… ตรง; active prefix 13348 SHA cf7a31… ตรง; coverage partial
+- tail 13349–13354 = pre-work marker ของ parallel session (กำลังแก้ `2026-11-11-customer-answer-raw-findings.md` เพิ่ม flowchart) — in-flight ไม่มี closeout → ไม่ index ไว้ session เจ้าของปิดเอง
+- codebase scan หา dormant/unfinished: chatbotv3 opt-in (`USE_CHAT_V3`/`req.use_v3`, live OR ยังไม่เทส), chat_v2 (`USE_LEGACY_CHAT`/`req.use_v2`), canonical zaapi chain dormant — file-backed `kb_zaapi_files` เป็น serving owner (K4 decision ค้าง), `retrieval_shadow` flag, `web_search_enabled` strict-off, `BOTWORKER_BACKENDS=["shopee"]` + lazadachat/tiktokchat/shop_link placeholders, workflow nodeRegistry 31 types `runtimeExecutor=null`, bot-handoff notification TODO, ponytail ceilings ×2
+- commit `a6a9693` docs(plans): register rebaseline + findings plan + roadmap; เว้น raw-findings (in-flight) + `_tmp_*.ts` (temp) ไว้ untracked
+- merge origin/main `113cf06` → `a2afb33` (trivial, no file diff); branch ahead 4 / behind 0
+- code/DB/provider/customer changes = 0
+
+
+## Customer Answer Raw Findings — current/target flow added ผ่านแล้ว (2026-11-11)
+
+- เพิ่ม §12 ใน `docs/plans/active/2026-11-11-customer-answer-raw-findings.md`: Mermaid current code flow (engine/flags, early returns, Units/ShpProducts, item fallback, Zaapi/general FAQ, pool, selection, context, answer/handoff) และ target flow (scope ก่อน pool, units หา identity, exact Mongo stock join, scoped Zaapi/Mongo facts, provenance, truthful handoff).
+- Current flow อ้าง source lines ที่อ่าน; target ถูกระบุว่าเป็น requirement ไม่ใช่ implementation. บันทึกความขัดกันเรื่อง stock authority ว่าก่อนหน้าพูด units-only แต่ clarification ล่าสุดให้ join Mongo เพราะ freshness.
+- `git diff --check` ผ่าน; รายงานไม่มี trailing whitespace. เอกสารเท่านั้น ไม่แก้ source/test/config, ไม่รัน tests, ไม่ query Mongo/provider และไม่ส่งข้อความ.
+
+
+## Mobile UX PR integration — กำลังจะทำ (2026-11-11)
+
+- User explicitly asks to commit, open a PR, and merge to main now if not already done; a mobile UX design-spec commit exists, but no application source implementation has been made.
+- Existing PR search for `ui/mobile-ux-phase1` returned none. Branch includes the mobile design spec plus completed project planning/docs commits; verify and describe that scope accurately before pushing and merging.
+- Preserve uncommitted temporary scripts; include only finished documentation and required waythrough records in the integration commit.
