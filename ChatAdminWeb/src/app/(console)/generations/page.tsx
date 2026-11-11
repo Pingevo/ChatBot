@@ -3,6 +3,7 @@
 //   header: next scheduled build (daily 09:00 / จันทร์=weekly, Asia/Bangkok) + last build
 //   cards: pixel-cat progress + per-step bars + ETA; expand = files/manifest/log + rollback
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, Play, RotateCcw, Square, Trash2, Zap } from "lucide-react";
 import { PageShell } from "@/components/ui/PageShell";
 import { Loading } from "@/components/ui/Loading";
 import { Button } from "@/components/ui/Button";
@@ -155,6 +156,7 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
   const liveBuilding = run.status === "building" && run.pid_alive !== false;
   const canStop = liveBuilding;
   const canResume = dead || run.status === "failed" || run.status === "stopped";
+  const canDiscard = dead || ["pending", "failed", "stopped"].includes(run.status);
   return (
     <div className="border border-border rounded-xl p-4 bg-surface">
       <button type="button" onClick={onToggle}
@@ -198,35 +200,36 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
       {run.description_source_gid && (
         <div className="text-[11px] text-muted mt-1">description ยืมจาก {run.description_source_gid}</div>
       )}
-      {(run.status === "pending" || canRollback || canStop || canResume) && editable && (
-        <div className="flex gap-2 pt-3">
+      {(run.status === "pending" || canRollback || canStop || canResume || canDiscard) && editable && (
+        <div className="flex items-center gap-1.5 pt-3">
           {canStop && (
-            <Button size="sm" variant="danger" disabled={busy}
+            <Button size="sm" variant="danger" disabled={busy} title="หยุด build — ของที่เสร็จแล้วเก็บไว้ ทำต่อได้"
                     onClick={() => onAction("stop", gid)}>
-              Stop
+              <Square size={14} />
             </Button>
           )}
           {canResume && (
-            <Button size="sm" variant="outline" disabled={busy}
+            <Button size="sm" variant="outline" disabled={busy} title="ทำต่อจาก step ที่ตาย (step ที่เสร็จแล้วไม่ทำซ้ำ)"
                     onClick={() => onAction("resume", gid)}>
-              ทำต่อ
+              <Play size={14} />
             </Button>
           )}
           {run.status === "pending" && (
-            <>
-              <Button size="sm" disabled={busy} onClick={() => onAction("publish", gid)}>
-                Accept → Publish
-              </Button>
-              <Button size="sm" variant="ghost" disabled={busy}
-                      onClick={() => onAction("discard", gid)}>
-                Reject
-              </Button>
-            </>
+            <Button size="sm" disabled={busy} title="Accept → Publish (สลับ pointer ทันที)"
+                    onClick={() => onAction("publish", gid)}>
+              <Check size={14} />
+            </Button>
+          )}
+          {canDiscard && (
+            <Button size="sm" variant="ghost" disabled={busy} title="ทิ้ง/ลบ run นี้ (ไฟล์ยังอยู่)"
+                    onClick={() => onAction("discard", gid)}>
+              <Trash2 size={14} />
+            </Button>
           )}
           {canRollback && (
-            <Button size="sm" variant="outline" disabled={busy}
+            <Button size="sm" variant="outline" disabled={busy} title="Rollback ไป gen นี้ (สลับ pointer)"
                     onClick={() => onAction("rollback", gid)}>
-              Rollback ไป gen นี้
+              <RotateCcw size={14} />
             </Button>
           )}
         </div>
@@ -352,8 +355,9 @@ export default function GenerationsPage() {
                 <option value="daily">daily</option>
                 <option value="weekly">weekly</option>
               </select>
-              <Button size="sm" disabled={busy} onClick={onStart}>
-                Build เลย
+              <Button size="sm" disabled={busy} onClick={onStart}
+                      title="สร้าง generation ใหม่และเริ่ม build ทันที">
+                <Zap size={14} />
               </Button>
             </div>
           )}
