@@ -13024,3 +13024,242 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Replay ทุก turn ตั้งแต่ต้น ผ่าน direct chatbot API เท่านั้น; ใช้ synthetic conversation/session ID, `simulate_assignment` + sandbox `test_source`; ไม่ส่งข้อความลูกค้าจริง
 - ตรวจ customer/bot turn order, image/image_desc, item/order anchors, intent, evidence/KB, stock, answer quality, handoff result, เวลา/token/cost
 - ก่อนยิงต้องตรวจว่ามี complete transcript ที่พิสูจน์ได้ต่อร้าน; ถ้าข้อมูลไม่พอให้รายงาน gap แทนการแต่ง turn/รูป. Mongo ใช้อ่านเพื่อเลือก/verify; ไม่มี Product DB write; no code changes or commit.
+
+### ผ่านแล้ว — Zaapi readiness audit + partial full-conversation replay (2026-11-11)
+
+- แก้ความเข้าใจจาก audit เก่า: serving ปัจจุบันเป็น file-backed (`kb_zaapi_files.zaapi_search`) ไม่ใช่ canonical generation path; `zaapi_kb_records=0` จึงไม่แปลว่า file-backed KB ว่าง
+- Config จริง: `grouped_retrieval_selection_enabled=true`, `kb_source=zaapi`, `prompt_modular=true`, pool `kb/mongo_catalog/units/image_text` เปิดครบ
+- Mongo จริง: registry 118 files; active 75 files / 7,101 rows (product 5,780 · troubleshooting 221 · faq 237 · warranty 863). Visibility owner คืน active files ต่อ shop display-name: King 9, Kieslect 9, CukTech 12, BlackShark 5.
+- Planner + adapter owner probe จากข้อความและ item-card จริง 4 ร้าน: evidence คืน 20/2/3/2 แถว (`zaapi_files=...sup`) แต่ตัวอย่างอันดับต้นของหลาย query เป็นคนละสินค้า/รุ่น จึงยืนยันได้ว่า adapter ถูกเรียกและมี rows; ยังยืนยัน relevance/การถูกเลือกเข้า final LLM context ไม่ได้
+- Replay เลือกครบ 12 candidates (King 3 จากแชทจริงเพราะไม่มี shadow corpus; อีก 9 เป็น shadow-linked). เริ่ม API จริงแล้ว 5 cases: 4 first-turn request timeout ที่ client 180s (King 3 + Kieslect 1); CukTech case 2 ครบ 4 user turns แต่ handoff ตั้งแต่ “Tax invoice” แล้ว turn ต่อถูก human-wait — ไม่ได้เข้า KB. อีก 7 cases ไม่เริ่ม.
+- ก่อนหยุดมี `ai_usage` telemetry 17 รายการ (Gemini success 15/error 2; ไม่ใช่จำนวน API calls, usage/cost fields ที่อ่านได้ว่าง). `test_status_conversation` sandbox มี 1 doc จาก `test_source=shadowbot`; `messages_shp` synthetic sessions = 0. ไม่มี customer sends หรือ Product DB writes.
+- หยุด batch เพื่อจำกัดโหลด/ค่าใช้จ่ายหลังพบ timeout; ไม่สร้าง preview เพราะยังไม่ครบ 12. งาน replay เต็ม + per-turn captured trace/คำตอบ/token/cost ยัง pending. API 8010 เป็น process เดิมที่มีอยู่; launch attempt แบบ duplicate จบด้วย address-in-use และไม่ได้หยุด process เดิม.
+- ไม่มี production/test code edits, ไม่มี config/Mongo data change นอก telemetry และ test sandbox, ไม่มี stage/commit/push/PR/deploy.
+
+## [Shop QA — resume timeout diagnosis] กำลังจะทำ (2026-11-11)
+
+- ตรวจ checkpoint ที่มีอยู่และ API health ก่อนยิงซ้ำ; มี 4 timeout, 1 case จบด้วย human-wait, อีก 7 cases ยังไม่เริ่ม
+- 8010 ปัจจุบัน connection refused; ตามสิทธิ์ทดสอบเดิมจะเปิด service ที่พอร์ต 8010 แล้วตรวจ health ก่อนยิงคำถามเดี่ยว
+- จำกัดการยิงซ้ำและใช้ synthetic IDs ต่อ; ไม่ส่งให้ลูกค้า, ไม่แก้ production code/config, ไม่เขียน Product DB
+
+## [Remaining-work register rebaseline] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้อนุมัติอัปเดต register ตาม audit ในแชท; root cause คือ register ยังใช้ canonical import/generation contract และสถานะก่อน closeout ล่าสุด
+- Branch ui/mobile-ux-phase1 @ 8df0388; working tree มี log/ledger และ census scripts ของ session อื่นอยู่ก่อนแล้ว; งานนี้แก้เฉพาะ register + append active log + ledger ไม่มี commit
+- แผน: K1 superseded ด้วย file-backed snapshot contract, K2 แยก user-reported census จาก A-168 ที่ขัดกัน, K4 rebaseline เป็น dormant canonical scope; ปรับ R1/W0-W3/S2/S7/S8 และงาน QA ที่ค้าง พร้อม evidence links
+- Verify: ตรวจ diff/Markdown rows/relative links และ frozen+active-prefix integrity; production mechanisms/helpers/guards/regexes/keyword tables/decision owners เปลี่ยนสุทธิ 0; coverage partial ยังมี active gaps และ independent review ค้าง
+
+### ผ่านแล้ว — register rebaseline (2026-11-11)
+
+- อัปเดตครบ 32 task IDs เดิม: K1 superseded, K0/K4 contract rebaseline, K2 census conflict มีที่มา; ปรับ W/R/S และ current QA/session work ตาม A-143..A-169; H0–H3/R5 ยังปิดตามเดิม
+- Verify ผ่าน: Markdown 4 columns, 32 IDs/order ครบไม่ซ้ำ, relative links resolve (decode URL), git diff --check; ตรวจพบ checker สมมติจำนวน 31 ผิดและต้อง decode percent-encoded path จึงแก้ checker เป็นเทียบ IDs กับ HEAD/32 และ decode ก่อนตรวจ ไม่ใช่แก้ข้อมูลเพื่อให้ผ่าน
+- ข้อจำกัด: ไม่มี Mongo query/provider call/test suite ใหม่; K2 118/118 และ 20,768 rows เป็น user-reported ยังขัด A-168 (75 active/7,101 active rows), type subtotal 12,168 ยังขาด 8,600; S8 live multi-bubble, R1 scheduler/cleanup และ S3 active gaps/independent review ยังเปิด
+- Docs-only; production helper/guard/regex/keyword table/decision owner delta 0; ไม่ commit/push/deploy และไม่แตะ census scripts ของ session อื่น
+
+## [Remaining-work roadmap — units stock authority] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ขอจดแผนที่ตกลงแล้วเป็นไฟล์; งานนี้เอกสารเท่านั้นบน branch ui/mobile-ux-phase1 ไม่มี code/DB/provider/customer-send change
+- ขอบเขต: units เป็น authority ของ sellable/stock ต่อ unit; Zaapi KB + Shopee Mongo ให้ spec/description/FAQ/promotion และ facts อื่น; ผูก identity ด้วย item_id/model_id
+- สร้าง roadmap ใน docs/plans/active โดยรักษาลำดับ 0–6, dependency/acceptance, freshness decision, K1/K4 status และข้อจำกัดจาก QA/ledger; verify ความครบ/ลิงก์/Markdown และ append ledger closeout
+
+### ผ่านแล้ว — remaining-work roadmap file (2026-11-11)
+
+- สร้าง docs/plans/active/2026-11-11-remaining-work-roadmap.md: source contract units=stock/sellability, Zaapi KB+Shopee Mongo=spec/description/FAQ/promotion; phase 0–6 พร้อม why/how/done, freshness decision และจุดเริ่ม
+- ตรวจหัวข้อ 0–6 ครบ, relative links resolve, git diff --check ผ่าน; docs-only ไม่มี test suite/provider/DB call เพิ่ม, production mechanism delta 0
+- งานค้าง: timeout root cause, units authority audit, K3 relevance, S1/K5 QA, H4/R3/S8, K2 census reconcile, R1 scheduler/cleanup, R4 external writer, W/R2/R0 และ S3 coverage; แผนไม่ใช่ผล verify ของงานเหล่านี้
+- ไม่ commit/push/PR/deploy; branch เดิมมี modifications/census scripts ของ session อื่นก่อนงานนี้
+
+## [Units stock authority audit] กำลังจะทำต่อ (2026-11-11)
+
+- ผู้ใช้ขอให้ไล่ตรวจ stock/sellability จาก units ไปถึงคำตอบ; static trace พบ `units.py` join ShpProducts และเรียก `resolve_availability`, `app.py` เรียก resolver ซ้ำ และ product_store legacy path มี resolver ของตน
+- ตรวจต่อ: filter `sellable_only` ตาม snapshot, fallback ไป legacy, live card re-evaluation และ regression coverage; แยก architecture mismatch ที่พิสูจน์จาก code ออกจาก QA50 root cause ที่ยังต้องการ per-case trace
+- Read-only audit; ไม่แก้โค้ด ไม่ query/write Mongo ไม่เรียก provider
+
+### ตรวจพบ — units stock authority audit (2026-11-11)
+
+- Contract mismatch confirmed in code: `fetch_units(sellable_only=True)` filters units snapshot, then `attach_listing_fields` joins ShpProducts and `_live_availability`/`to_unit_card` derives final availability from joined listing; product_store legacy path and app `resolve_availability` recompute too. User target (units owner) is not current runtime contract.
+- QA50 T01 stored artifact: card `unit_id=9038538533:81390955286` had `_available_for_sale=true`, `total_stock=50`, but canonical `sellable=false`, `requested_variant_state=unknown`, `tier_index=null`, context note present; manual grade says BP35S Pink/Green available 50/30 while answer said unavailable and missed 120-degree fact. This is stored QA evidence, not a new live Mongo query.
+- Most specific failing boundary is `retrieval_policy._canonicalize` requiring requested variant state in {not_requested, available} to set sellable; unknown adds unavailable subject note. `attach_listing_fields` projection omits `model.tier_index` though `to_unit_card` reads it; this explains null tier index. Exact requested-option tuple was not captured, so multi-option conflict may also contribute; insufficient evidence to call this the sole cause of all QA50 stock misses.
+- Existing tests encode the old contract (live listing overrides stale unit snapshot; UNLIST defeats stale sellable), so adopting units authority changes business behavior and needs a focused approved plan/regression update. No fix/test run/Mongo query/provider call. Static callsites and stored QA checked; code/config/mechanism delta 0.
+
+## [Units/live Mongo stock contract clarification] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ชี้แจงว่า units อาจไม่ real-time จึง join Shopee Mongo เพื่อตรวจ stock/status ปัจจุบัน; การตีความก่อนหน้าว่า units เป็น stock authority เดียวใน roadmap และ audit ผิด
+- แก้ roadmap ให้ตรง contract ที่มีอยู่: units ใช้ค้นหา/ผูก item_id/model_id, ShpProducts ใช้ stock/status สด, Zaapi KB + Mongo ใช้ข้อเท็จจริงสินค้า; ระบุจุดเสี่ยง snapshot prefilter และ downstream variant state แยกกัน
+- งานเอกสารเท่านั้น ไม่แก้ code/Mongo/provider; รักษา raw history แบบ append-only และบันทึก correction ใน ledger
+
+### ผ่านแล้ว — units/live Mongo stock contract clarification (2026-11-11)
+
+- แก้ roadmap ให้ units เป็นดัชนี/ตัวตน unit และ ShpProducts ที่ join เป็นแหล่ง stock/status ปัจจุบัน; Zaapi KB ใช้ข้อมูลสินค้า ไม่ตัดสิน stock
+- ระบุความเสี่ยงสองจุดแยกกัน: snapshot `sellable_only` filter ก่อน live join อาจซ่อนรุ่น restock; QA50 T01 มี live availability true แต่ downstream variant state unknown ทำให้คำตอบบอกไม่พร้อมขาย; root cause รายเคสยังต้อง trace
+- `git diff --check` ผ่าน; docs/log เท่านั้น ไม่มี code/Mongo/provider/test run, helper/guard/regex/keyword/decision-owner delta = 0; ไม่ commit/push/PR
+- A-171 และถ้อยคำตีความใน A-172 เป็นหลักฐานประวัติ ไม่ rewrite; correction นี้ supersede เฉพาะ contract interpretation ไม่ใช่ code findings; semantic coverage ยัง partial
+
+## [Product-search failure case breakdown] กำลังจะทำต่อ (2026-11-11)
+
+- ผู้ใช้ขอแยกเคสปัญหาก่อนวางวิธีแก้ ตรวจจากโค้ด runtime ปัจจุบันและ QA50 artifact โดยตรง แยก observed failures ออกจาก code risks ที่ยังไม่ reproduce
+- ขอบเขต read-only: legacy/grouped/v2 candidate, live join, requested variant, evidence selection และ answer context; ไม่แก้ business behavior หรือเขียน Product DB
+
+### ตรวจพบ — product-search failure case breakdown (2026-11-11)
+
+- QA50 T01 actual: legacy engine with grouped selection; profile variant_terms=['สีชมพูกับสีเขียวมีสต็อกไหม']; selected pink unit has live total_stock=50, catalog_status=active, _available_for_sale=true but canonical sellable=false/requested_variant_state=unknown; answer says pink+green out of stock and misses 120° fact. Code has projection gap: attach_listing_fields omits model.tier_index while to_unit_card reads it. Cannot prove projection alone is sole cause; multi-color term also malformed for one-option resolver.
+- QA50 T08 actual: grouped selection model_codes=[] and variant_terms=['สีอะไรที่ยังมีสต็อกบ้าง']; selected 3 S3 relation-target cards, no GS3/GS3 Ultra card in response; answer says both sold out though audit cites positive variant stock. This is candidate/identity/selection failure, not evidence that live Mongo stock calculation was wrong.
+- T05/T07 missed product facts despite catalog evidence; T03/T04/T06 passed, so defect is case-specific. Code-only risks: grouped fetch_unit_evidence default sellable_only=false, so snapshot prefilter is not established for this grouped path; snapshot ranking/top limits may still affect recall. Runtime join failure falls back to snapshot. v2 filter reads stock/stocks while standard card supplies total_stock. None of these code risks has a new live reproduction in this task.
+- Read-only audit of current code and stored QA50 JSON; no DB/provider/test run or code change. No helper/guard/regex/keyword/decision-owner changes. Root causes and patch scope pending per-case reproduction; no commit/push/PR. Semantic coverage partial.
+
+## [Dual-source stock roadmap clarification] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ย้ำว่า units ไม่ควรเป็นหลักฐาน stock เพียงแหล่งเดียว เพราะ Shopee Mongo ก็มี stock; ปรับ roadmap ที่เขียนว่า ShpProducts เท่านั้นให้แสดงข้อมูลสองแหล่งและ provenance/freshness ตาม code จริง
+- ตรวจความแตกต่างของ grouped path กับ `sellable_only` ก่อนแก้ wording; docs-only ไม่เปลี่ยน runtime behavior หรือ Product DB
+
+### ผ่านแล้ว — dual-source stock roadmap clarification (2026-11-11)
+
+- Roadmap now states both units and ShpProducts can carry stock; code uses joined ShpProducts listing/model when available and falls back to unit build snapshot without `_listing`. Mongo value is only as fresh as its sync, so neither source alone proves live Shopee state.
+- Corrected grouped-path caveat: `fetch_unit_evidence` does not enable `sellable_only` by default; snapshot ranking/top limits remain a separate possible recall issue, not QA50 T01/T08 root cause. Phase 1 now separates T01 variant/output failure from T08 identity/selection failure, and requires provenance/freshness in trace.
+- `git diff --check` passed; docs/log only, no code/Mongo/provider/test run; helper/guard/regex/keyword/decision-owner delta 0. No commit/push/PR; coverage partial.
+
+## ผ่านแล้ว — dual-source stock roadmap clarification (2026-11-11)
+
+- Roadmap now states both units and ShpProducts can carry stock; code uses joined ShpProducts listing/model when available and falls back to unit build snapshot without `_listing`. Mongo value is only as fresh as its sync, so neither source alone proves live Shopee state.
+- Corrected grouped-path caveat: `fetch_unit_evidence` does not enable `sellable_only` by default; snapshot ranking/top limits remain a separate possible recall issue, not QA50 T01/T08 root cause. Phase 1 now separates T01 variant/output failure from T08 identity/selection failure, and requires provenance/freshness in trace.
+- `git diff --check` passed; docs/log only, no code/Mongo/provider/test run; helper/guard/regex/keyword/decision-owner delta 0. No commit/push/PR; coverage partial.
+
+## [Shop QA replay round 2 — preview and result] ผ่านแล้ว (2026-11-11)
+
+- Replay selected 12 shadowbot-linked conversations (KingGadgets, KieslectThailand, CukTechThailand, BlackShark — 3 each) through direct chatbot API with 2 workers. Result: 19 HTTP 200 answers, 8 product-card turns retained as history without standalone calls, 5 turns stopped by privacy filter, and 15 later turns not reached; case status 6 complete / 6 partial. All selected conversations had 0 image turns, so image handling was not exercised.
+- Config recorded `kb_source=zaapi`, grouped retrieval enabled, all configured pool sources enabled. Across all 9 answers with `GroupedRetrievalSelection` trace, each `ch:kb:*` selected count was 0. This establishes that no Zaapi evidence was selected into those answer contexts; the response trace does not distinguish retrieval-empty from pool/selection rejection. Do not claim the new KB answered this sample.
+- Read-only `ai_usage` query by `conv_id`: 29 successful model-call rows (intent 19, typed 7, general 3), 227,331 tokens, estimated cost USD 0.0785129. Runner summary (133,184 tokens/USD 0.042591) and per-step sums (222,486/USD 0.065102) disagree; replay artifact omitted `request_id`, so costs cannot be reconciled per turn. Mongo found one sandbox `test_status_conversation`, zero `messages_shp`, zero `test_chat`; no customer send observed.
+- Examples needing answer-quality/routing review: KingGadgets warranty reply says to contact admin while `handoff_to_admin=false`; BlackShark multi-question spec reply also uses admin-review wording with handoff false; follow-ups about “รุ่นนี้” returned subject-clarification prompts. Product facts were not independently validated for all 19 answers. Preview: `docs/test/results/qa12-round2-preview.html` (gitignored, sanitized).
+- This run corrects A-168's limited statement that KingGadgets had no shadow corpus: all three KingGadgets cases used here have shadowbot-linked history. No production code changed; no Product DB writes, stage, commit, push, PR, or deploy. Remaining: inspect retrieval fetch/admission counts to locate why Zaapi selected zero; reconcile per-turn usage; finish 15 unrun turns and exercise images before claiming full-conversation QA.
+
+## [T01/T08 bounded root-cause reproduction] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้อนุญาตให้ลองตรวจ T01/T08 จาก current code: เลือก test ที่ไม่ส่งลูกค้าและไม่เขียน Product DB, ตรวจ input/outputs ของ profile, retrieval, variant resolution, selection, context และ response
+- เริ่มด้วย existing offline tests และ artifact inspection; live API/Mongo เป็น read-only เฉพาะเมื่อ runner/endpoint ที่ปลอดภัยพร้อม ไม่เปลี่ยน business code ก่อน root cause และแผนย่อย
+
+### ตรวจพบ — T01/T08 bounded root-cause reproduction (2026-11-11)
+
+- T01 archived QA card fed through current `route_context._variant_terms` → `retrieval_policy.make_evidence_card` → `retrieval_executor._bucket` → `answer_context._scope_card`: stock=50/_available_for_sale=true becomes requested_variant_state=unknown, canonical sellable=false, bucket unavailable:requested_variant:unknown, then subject note says not ready. Production `_variant_terms` extracts the whole “สีชมพูกับสีเขียวมีสต็อกไหม” phrase. Current unit join projection omits model.tier_index, and archived unit card has tier_index=None. Synthetic tier-index exercise: pink alone becomes available when [2] supplied; whole phrase can resolve only one color, so projection restoration alone would not correctly answer both colors. No production data changed.
+- T08 archived QA profile has model_codes=[] and generic variant_terms=['สีอะไรที่ยังมีสต็อกบ้าง']; archived selection chose 3 S3 relation-targets and 0 subject cards, response products=0 while answer claimed GS3/Ultra out. Current `_extract_codes` returns [] for GS3/GS3 Ultra because code-shape regex requires 2+ digits. Synthetic GS3 card with positive stock fed through current canonicalize/bucket becomes not_offered and unavailable for generic color-question term. This demonstrates a deterministic failure mode but does not prove actual GS3 cards reached that bucket in the old run; raw fetch/admission trace missing.
+- Focused existing offline suites `test_canonical_evidence_card.py`, `test_availability_wiring.py`, `test_phase10b_named_product_selection.py`: 104 passed in 0.43s; these green tests do not cover the two question shapes. Local :8010 /health connection refused, so no fresh live API replay. No .env read, Product DB write, customer send, provider call or code edit. Root-cause evidence is strong for T01 boundary, partial for T08 candidate path; need raw fetch/admission counts before a T08 fix. Mechanism delta 0; no commit/push/PR; coverage partial.
+
+## [T01/T08 port 8010 live retry] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ขอเชื่อมต่อและทดสอบพอร์ต 8010 อีกครั้ง; health/readiness ก่อนแล้วค่อย bounded test-chat replay T01/T08 แบบ synthetic conversation และ sandbox flags หาก auth ผ่าน
+- ตรวจจาก runtime/code โดยตรง ไม่อ่าน .env/secret deploy ไม่เขียน Product DB ไม่ส่งข้อความลูกค้าจริง; หาก auth gate ปิด ให้หาช่องทางทดสอบที่มีสิทธิ์เดิมก่อนรายงานข้อจำกัด
+
+### ตรวจพบ — T01/T08 port 8010 live retry (2026-11-11)
+
+- `GET http://127.0.0.1:8010/health` returned HTTP 200 `{"ok":true,"shops":33,"categories":29}` after loopback sandbox escalation; direct `POST /chat` with empty body returned HTTP 401 `missing or invalid internal secret`. No secret file was read. Used authenticated local Next Test Chat `/test-chat/shopee`, whose dispatch route proxies to Python `/chat` with server-side credentials.
+- Fresh KingGadgets test chat, unanchored T01 question `พัดลม Zaiwan BP35S สีชมพูกับสีเขียวมีสต็อกไหม แล้วส่ายซ้ายขวาได้กี่องศา?`: bot said pink was unavailable and could not confirm swing angle. Trace showed `model_codes:["BP35S"]`, `variant_terms:["สีชมพูกับสีเขียวมีสต็อกไหม"]`, selected subject 1, unavailable 10, `ch:kb:1:0`, and product_count 1 (pink BP35S); 24.35 s. This reproduces an incorrect-looking live answer, but this fresh run had no item anchor and did not independently re-read current Mongo stock or swing specification.
+- Fresh BlackShark test chat, T08 question `GS3 กับ GS3 Ultra มีสีอะไรที่ยังมีสต็อกบ้าง?`: bot said both models were temporarily out of stock and offered S3 Special Edition instead. Trace showed `model_codes:[]`, `variant_terms:["สีอะไรที่ยังมีสต็อกบ้าง"]`, selected relation_target 3 / subject 0, `ch:kb:0:0`, product_count 1 (S3 Special Edition); 9.91 s. This confirms the current answer/selection failure shape, but raw candidate fetch/admission counts and current GS3 stock were not independently verified.
+- Test Chat created sandbox chat records and invoked the configured provider; no customer message was sent, no Product DB write or code change. No helper/guard/regex/keyword/decision-owner change; no commit/push/PR. Semantic coverage remains partial. Next root-cause step: capture full candidate/admission trace and inspect both source stock timestamps before changing retrieval/variant behavior.
+
+## [T01/T08 current Mongo stock truth check] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ขอพิสูจน์ว่าคำตอบสด BP35S และ GS3/GS3 Ultra ถูกต้องตามสต็อกปัจจุบันไหม; อ่าน ShpProducts และ generation-scoped units เฉพาะร้าน/รุ่นที่เกี่ยว พร้อม status, จำนวน stock ต่อสี/รุ่น และเวลา sync หากมี
+- ใช้ read-only path ที่มีสิทธิ์อยู่แล้ว, ไม่อ่าน .env/secret deploy, ไม่เขียน Product DB, ไม่ส่งลูกค้า, ไม่แก้ business code; แยกข้อเท็จจริง Mongo จากคำอ้างว่าสินค้าขายได้จริงบน Shopee ณ วินาทีนั้น
+
+### ตรวจพบ — T01/T08 current Mongo stock truth check (2026-11-11)
+
+- Read-only authenticated `GET /api/products?platform=shopee&shop_name=...&search=...` uses `productService.listProducts` → `getDbWalletCollection` → `ShpProducts`; local unauthenticated Mongo `127.0.0.1:27017` refused connection. Queried at about 11:37 +07. Did not read credentials or write DB.
+- KingGadgets BP35S item 9038538533: `item_status=NORMAL`, `update_time=2026-11-11T04:07:49+07:00`; models `MODEL_NORMAL`: สีชมพู summary `total_available_stock=50`, สีเขียว 30, สีขาว 0. Description explicitly says left-right oscillation 120°. Therefore the fresh bot answer saying pink unavailable and failing to give the angle contradicts the current product Mongo record. It also contradicts the previously archived QA50 stock evidence; this check now independently confirms current Mongo values.
+- BlackShark combined GS3/GS3 Ultra item 25064823709: `NORMAL`, updated 11:29:10 +07; GS3 Green 150, GS3 Black 499, GS3 Ultra Silver 200, GS3 Ultra Black 22 (all `MODEL_NORMAL`, summary availability). Separate GS3 item 27822949206 updated 11:29:12: Green 150, Black 2; separate Ultra item 26893612033 updated 11:29:11: Glacier Silver 201, Black 506. The T08 test message timestamp was 11:31:04 +07, after these Mongo updates. Bot's blanket claim that both models were out of stock contradicts active positive-stock listings in Mongo. Some seller_stock values exceed summary values; runtime `_shopee_stock` prioritizes summary, so this check reports summary only.
+- Conclusion is about the synchronized ShpProducts records, not a direct live Shopee storefront/API check; stock may change after the recorded sync. No active-generation units read in this check, but current product DB evidence alone refutes both blanket unavailability answers under the runtime `resolve_availability` contract (`NORMAL` + numeric stock > 0). No code/test/provider call/customer send in this check; mechanism delta 0, no commit/push/PR, semantic coverage partial. Retrieval/variant root cause remains separate investigation.
+
+## [Current product search filter walkthrough] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ถามว่าระบบกรอง query อะไรบ้างเมื่อได้รับคำถาม; ไล่ current `app.chat` → retrieval profile/slots → grouped executor → units/ShpProducts/KB → evidence selection/context และแยก legacy fallback
+- อธิบายจากโค้ดจริงและยก T01/T08 เป็นตัวอย่าง ไม่เปลี่ยน runtime/DB/provider และไม่อ้างว่า filter ใดมีผลหากเป็นเพียง optional branch
+
+### ตรวจพบ — Current product search filter walkthrough (2026-11-11)
+
+- Current `app.chat` builds one RetrievalProfile from message + intent + shop/platform + resolved item anchors/history, then flag-on `retrieval_runtime.run_grouped_selection` builds slots/requests, fetches units and legacy ShpProducts (subject/compat/history, Zaapi KB, description channels when applicable), builds pool, selects per request, and compiles answer context. Live T01/T08 traces confirmed grouped path enabled for those turns.
+- Physical units fetch: exact `shop`; optional build-time `sellable=True` only when caller passes `sellable_only`; exact model_codes and pinned item_id queries, vector search on unit search_text (top 50), product_type narrowing only if typed subset exists, then rank exact code/item before snapshot sellable/score. Grouped `fetch_unit_evidence` does not pass `sellable_only` by default, overfetches 2x, joins ShpProducts listing/model via item_id and re-sorts with live availability, then caps limit. Missing join falls back to snapshot. No universal hard stock prefilter in grouped path.
+- Legacy fetch may use unit index via flag or Mongo ShpProducts: shop, inferred category/type, brand, price and model-token paths depend on branch; `build_query` no longer hard-filters item_status so old listings can be used as answer evidence. Vector/listing search and model-token supplementation have bounded top/limit. Planner marks model_codes/type as hard metadata but executor `_bucket` concretely rejects hidden visibility, wrong type, proven subtype/device mismatch, then separates eligible vs unavailable by canonical publish/stock/variant state. Model code gives exact recall/score/subject role; alternatives can still be selected. Soft brand/model/target hints raise ranking, not hard exclusion. Selection narrows exact item_id refs, ranks per-request, caps 3 selected and 5 unavailable by default, then AnswerContext supplies LLM.
+- QA50 examples: BP35S profile extracted full `สีชมพูกับสีเขียวมีสต็อกไหม` as one variant term, making a positive-stock card unavailable at canonical requested-option stage; GS3 profile had model_codes=[] and generic `สีอะไรที่ยังมีสต็อกบ้าง` variant term, then selected S3 relation targets. Live Mongo stock confirmation is A-179. Read-only code trace only; no runtime change, DB/provider/customer operation, commit/push/PR; mechanism delta 0, semantic coverage partial.
+
+## [Shop/platform isolation boundary check] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ถามตรงว่าระบบปัจจุบันบังคับเฉพาะร้านและแพลตฟอร์มหรือยัง; ตรวจ current code ของ primary retrieval, item-id/order anchor, description/Zaapi channels และ request platform contract เพื่อแยก normal path จากช่องว่างจริง
+- Read-only audit ไม่แก้ code/DB/provider; รายงานเฉพาะที่พิสูจน์จาก call path ได้ และไม่อ้างว่าพบ cross-shop leak ใน live T01/T08 ถ้ายังไม่ได้ reproduce
+
+### ตรวจพบ — Shop/platform isolation boundary check (2026-11-11)
+
+- Main grouped path passes `req.shop`/`req.platform` into profile, executor, units, legacy and Zaapi; units exact shop filter, legacy ShpProducts queries generally scope `shopname`, description vectors mask shop, and Zaapi file registry checks accounts/platforms (empty scope entries are intentionally global). This supports normal-path isolation, not an end-to-end guarantee.
+- Concrete cross-shop gap: `product_store.fetch_product_by_id(db,item_id,shop_filter=...)` first queries item_id + exact shop, then if no doc runs `find_one({item_id:...})` without shop predicate and returns card. Production `app._chat_impl` calls it for shared/tagged item_id (app.py:1301) with `req.shop`; `order_flow` and v2 also call it. Thus a foreign-store item_id can be materialized in shop A context. No live foreign-item replay in this audit; code path alone proves missing boundary, not that T01/T08 leaked cross-shop.
+- `ChatRequest.shop` and `.platform` are optional; `platform` field description says for handoff, while Shopee product source is fixed `ShpProducts` in `product_store.fetch_products` regardless of request platform. No central `/chat` validation shown that binds nonempty shop + Shopee platform to product reads. This is an API-contract gap, but not evidence that correctly configured Shopee ingress supplies wrong platform.
+- Current T01/T08 trace showed same-shop products (BP35S KingGadgets, S3 alternative BlackShark); their proven problem is identity/variant selection rather than demonstrated cross-shop leakage. Read-only code audit, no code/DB/provider/customer call; mechanism delta 0, no commit/push/PR, semantic coverage partial. Root-cause plan and explicit approval required before any correction.
+
+## [Pre-pool shop/platform admission and quota] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ยืนยันว่าทุก source ควรจำกัดร้าน/แพลตฟอร์มก่อน pool และถามว่าผลข้ามร้านแย่งพื้นที่หรือไม่; ตรวจ bounded fetch, channel admission, pool merge, selector quota และ tagged-item path จาก current code
+- Read-only analysis; แยกผลกระทบที่พิสูจน์ได้จากโค้ดออกจากเหตุการณ์ live ที่ยังไม่ทดสอบ ไม่แก้ behavior/DB/provider ก่อน root-cause plan และ approval
+
+### ตรวจพบ — Pre-pool shop/platform admission and quota (2026-11-11)
+
+- Design invariant confirmed: scope each physical source by incoming shop+platform before result enters candidate pool; shared/global KB must be explicitly separate from shop-owned product facts. `retrieval_runtime` builds pre-resolved subjects/compat/history channels and units/legacy/KB/description, `execute_grouped_retrieval_requests` buckets them, and `build_candidate_pool` globally dedupes across all result rows. Pool has no fixed global cap in current runtime (`per_request_limit=None`), so foreign rows do not consume a single pool-wide slot, but source fetches are bounded and selector defaults to 3 selected/5 unavailable per request; wrong-scope candidates can consume those downstream positions if admitted.
+- Proven admission gap remains `fetch_product_by_id`: scoped miss retries unscoped by item_id and returns a foreign-store card; production shared-item call can persist it as a conversation subject, and subject channel is ordered first in selector. `_bucket` rejects hidden/type/subtype/device/availability but has no shop/platform membership test. Thus foreign-store card can enter pool and potentially be selected/answer context; no live cross-shop replay yet, so actual quota displacement on a real turn is unmeasured. T01/T08 same-shop errors are separate.
+- Normal units/legacy/description searches generally scope shop before vector/query top limits, avoiding cross-shop competition there when shop is supplied. `ChatRequest.shop`/`platform` remain optional; Shopee product collection is fixed regardless of `req.platform`. Zaapi file registry intentionally treats absent accounts/platforms as global; policy must distinguish authorized shared facts from shop-owned stock/spec/promo. No runtime change/test/DB/provider/customer action; mechanism delta 0, no commit/push/PR, semantic coverage partial.
+
+## [Shop/platform pre-pool isolation flow draft] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ขอร่าง flow เปรียบเทียบระบบเดิมกับแผนปรับ; ใช้ current-code findings A-180–A-182 จัด design ก่อนแก้จริง โดยขอบเขตเป้าหมายคือ request ร้าน+แพลตฟอร์มเดียวกันในทุก product source ก่อนเข้า pool
+- ครอบ exact item/order/conversation subject, units + live ShpProducts, legacy catalog, description และ Zaapi KB; แยก globally authorized KB policy ออกจาก product facts; ระบุ acceptance tests และสิ่งที่ไม่แก้ T01/T08 เอง
+
+### ร่างแล้ว — Shop/platform pre-pool isolation flow draft (2026-11-11)
+
+- Proposed contract: inbound chat carries required shop identity + platform; Shopee service accepts Shopee-scoped product retrieval only; missing/mismatch cannot start product fetch. Scope is immutable per turn and passed to existing source owners. Exact item/order/conversation subject must resolve within scope; scoped miss returns no product card, never retries unscoped. Every source applies scope before vector/topK/limit and before returning cards or KB evidence to executor. Explicit global KB is limited to shared non-product policy, with provenance; shop-owned stock/spec/promo remains scoped. Source results then canonicalize/pool/selector as today; pool does not become the primary scope repair mechanism.
+- Compare old: optional shop/platform, mostly scoped units/legacy/description, unscoped exact-item retry, global-by-empty KB registry, and no shop/platform bucket check. New: fail-closed ingress, scoped exact-ID path, per-source scoped bounded recall, explicit global KB contract, diagnostic source scope counts; no new semantic keyword/regex/decision owner intended. Scope enforcement belongs to existing typed source owners; optional boundary assertion only validates schema/invariant and is not a substitute for scoped source queries.
+- Implementation sequence proposed for later approval: (1) inventory ingress/source schema and regression locks; (2) failing behavioral tests for foreign item_id, source topK contamination, missing/wrong platform, authorized global KB; (3) narrow existing source owners; (4) offline tests plus Test Chat canary with positive same-shop examples and negative foreign-shop IDs. T01 multi-color and T08 GS3 identity defects remain separate and need own fixes; this scope plan alone does not correct their answers. Design only, no code/DB/provider/customer action, mechanism delta 0, no commit/push/PR, semantic coverage partial.
+
+## [Customer-answer root-cause audit + bounded live API probe] ตรวจพบ (2026-11-11)
+
+- ต่อเนื่องจาก code walkthrough ก่อนหน้า: ไล่ปัญหาคำตอบผิด/ข้อมูลร้านปน/คำว่าให้ทักแอดมินแต่ไม่มี handoff จาก request classification → retrieval/context → answer owner → routing; ใช้หลักฐาน QA50/QA12 และยิง `/chat` หนึ่งเคสสังเคราะห์เรื่องสินค้าไหม้ด้วย Gemini เพื่อแยก route จริง
+- ไม่แก้ source/test/config, ไม่เขียน Product DB, ไม่ส่งข้อความให้ลูกค้า; API ใช้ synthetic conversation และอ่าน usage telemetry แบบ read-only
+
+### ตรวจพบ — Customer-answer root-cause audit (2026-11-11)
+
+- Live `/chat` HTTP 200: ถาม “ถ้าสินค้าไหม้ประกันไหม” ได้คำตอบ “รบกวนทักแอดมินเพื่อตรวจสอบข้อมูลเพิ่มเติมเกี่ยวกับกรณีสินค้าไหม้ให้นะคะ” แต่ `source=general:warranty_policy`, routing=`bot_reply`, `handoff_to_admin=false`, `handoff_reason=null`; `grounding_text` มีเงื่อนไขรับประกันและข้อยกเว้นความเสียหายจากการใช้งานผิดวิธี/อุบัติเหตุ/ตกหล่นอยู่แล้ว จึงยืนยันได้ทั้งว่าคำตอบไม่ใช้ข้อมูลที่มีให้ตอบตรงคำถาม และข้อความชวนทักแอดมินไม่ได้ส่ง handoff จริง
+- Root path: `detect_claim_request` ตรวจอาการเสียเฉพาะภายใน question-pattern ที่ match; “ประกันไหม” ไม่อยู่ใน pattern นั้น จึงส่งเข้าทาง `general_qtype=warranty_policy`; general-answer branch เรียก `answer_general` แล้วคืน `bot_reply` โดยตรง ไม่เรียก handoff owner. การ classify `general_qtype` กับ claim เป็นคนละ decision ทำให้คำถามอาการเสีย+ถามสิทธิ์แยก route ได้ไม่ตรงกัน
+- Zaapi ไม่ได้ถูกข้ามทั้งหมด: product `zaapi_kb_evidence` รับเฉพาะ productish needs; general warranty ใช้ `get_general_faq`/`zaapi_search` แยก path. Product QA traces หลายเคสมี `ch:kb selected=0`, แต่ยังแยกไม่ครบว่า retrieval ว่างหรือถูกปฏิเสธภายหลัง; ห้ามสรุปว่า KB ทั้งระบบไม่ทำงาน
+- Product evidence: T01 BP35S ถามสองสี+มุมส่าย แต่คำตอบบอกสีชมพูไม่มีของและไม่ตอบองศา ทั้งที่ ShpProducts sync มีชมพู 50/เขียว 30 และ description 120°; profile รวมสองสีเป็น variant phrase เดียวและไม่แตก need มุมส่าย. T08 GS3/GS3 Ultra มี stock บวก แต่ profile ไม่มี model codes แล้วเลือก S3 alternatives. T07 CTC515N มีข้อมูลในชื่อ/ข้อความแต่ typed `spec_measured` ไม่รองรับ จึง guard rewrite เป็น cannot-confirm — เป็นช่องว่างระหว่าง raw text กับ FieldEvidence ไม่ใช่หลักฐานว่า retrieval ไม่เจอ
+- Provenance/scope: FAQ hits ถูก join เป็น answer string และ metadata ไม่ถูกส่งต่อเข้า general context; shipping description scan query ไม่มี shop filter และเคยพบคำตอบ KingGadgets ที่รวม policy ของ IMILab/Leravan. แยกจากนี้ `fetch_product_by_id` มี scoped lookup แล้ว retry item_id แบบไม่กรองร้าน — เป็น cross-shop risk ที่พิสูจน์จาก code แต่ยังไม่มี live foreign-item replay
+- Prompt/claim style: existing prompt สั่งทั้ง 1–2 ประโยคและให้เสริมอีก 2–3 ประโยค/60–120 คำ; generation cap 4096 tokens. QA มีคำตอบยาวและ CTA ซ้ำ; T05 เดิมตอบ 15W/55W ถูก แต่ขยายข้อมูล/ข้อเสนอเกินคำถาม. Troubleshoot fallback มี checklist สาย/หัวชาร์จแบบกว้าง จึงเสี่ยงไม่ตรงอุปกรณ์
+- API accounting: request ใช้เวลา 23.28s; answer response รายงาน 1,236 tokens/$0.000419 แต่ `ai_usage` มี intent+general รวม 6,107 tokens/estimated $0.0022809. ตัวเลข response usage จึงไม่ใช่ยอดรวม request. Image/context-memory root cause ยังไม่ยืนยัน: QA12 ไม่มี image turns และ replay harness ไม่ส่ง image/card context ได้ครบ
+- No code/test change; mechanism delta 0. Audit/test evidence is bounded to the cited cases; Mongo stock values reflect sync snapshot, not live Shopee storefront. No commit/push/PR/deploy. Next: owner-level correction plan with existing owners only; require approval before implementation under AGENTS.md §9.
+
+## [Customer-answer findings and correction plan document] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ขอไฟล์รวมปัญหาคำตอบที่พบ พร้อมเคสตัวอย่าง ต้นเหตุจากโค้ด หลักฐาน/ระดับความมั่นใจ และแนวแก้ที่เสนอ
+- สร้างเอกสารใน `docs/plans/active/` เชื่อม roadmap เดิม; แยก verified / code-proven risk / unresolved; ระบุลำดับงานและ acceptance tests
+- Documentation only; ห้ามแก้ source/test/config, ห้ามเพิ่ม helper/guard/regex/keyword/heuristic/decision owner ในแผน, ไม่ commit
+
+### ผ่านแล้ว — Customer-answer findings and correction plan document (2026-11-11)
+
+- สร้าง `docs/plans/active/2026-11-11-customer-answer-findings-and-correction-plan.md` ตามคำขอ; มี 9 findings พร้อมตัวอย่าง/ต้นเหตุ/ระดับหลักฐาน/ข้อเสนอ และแผน Stage 0–7 พร้อม acceptance gates
+- ยืนยัน live probe หนึ่งคำถามด้วย request `d4c9f4cd-6bc`: บอทชวนทักแอดมินแต่ `handoff_to_admin=false`; แยกจาก T01/T08/T07 และ QA ก่อนหน้าตามหลักฐาน ไม่อ้างว่า rerun 50 เคส
+- แยก image/history และ Zaapi duplicate census เป็น unresolved; แผนคง budget กลไกใหม่ +0 และใช้ typed owners เดิม; source/test/config ไม่เปลี่ยน
+- Self-review: ไม่มี TODO/TBD หรือข้ออ้างว่าปิด implementation; links ไป roadmap/register อยู่ใน `docs/plans/active/`; `git diff --check` ผ่าน
+- No stage/commit/push/PR/deploy; รอผู้ใช้ review แผนก่อน authorization สำหรับ code changes; semantic ledger coverage remains partial
+
+## [Generation manual controls] กำลังจะทำ (2026-11-11)
+
+- เป้าหมาย: ปุ่มบนหน้า /generations — Build เลย (เลือก daily/weekly), Stop, ทำต่อ (resume) — อนุมัติ plan แล้ว: driver `--gid`/`--resume`+pid tracking → bot API start/stop/resume → UI buttons; kill แข็งแล้ว resume step ที่ตาย
+- ห้ามเปลี่ยน behavior ตอบลูกค้า/schedule เดิม; build lock เดิมคงอยู่ (1 build ต่อครั้ง)
+
+## [Fixed-answer function and trigger audit] กำลังจะทำ (2026-11-11)
+
+- ผู้ใช้ขอไล่ functions ที่คืนข้อความรูปแบบคงที่/สำเร็จรูป แยกจากคำตอบ LLM; ระบุ trigger/input/state ที่ทำให้เกิดแต่ละคำตอบ และทดสอบตัวอย่าง
+- ตรวจ `app.py`, `warranty_flow.py`, `responses.py`, `guards.py`, `knowledge_base.py`, `order_store.py` และ test owners; ใช้ synthetic requests/owner tests เท่าที่จำเป็น
+- ไม่แก้ code/test/config/DB และไม่ส่งข้อความลูกค้า; แยกข้อความ fixed, template ตามข้อมูล, และ LLM-generated ให้ชัด
+- Scope update (ผู้ใช้อนุมัติ 2026-11-11): ขยาย audit ให้ probe คำถามสังเคราะห์ผ่านเส้นทางจริงโดยใช้ Gemini quota และอ่าน Zaapi KB จาก Mongo เพื่อเทียบคำตอบกับหลักฐาน; จำกัด Mongo เป็น read-only และห้ามส่งข้อความลูกค้าหรือเขียน DB
+
+## [Generation manual controls] ผ่านแล้ว (2026-11-11)
+
+- driver: `--gid`/`--resume` + pid tracking; `_run_alive` pid→stale fallback; `_resume_plan` ข้าม done (image_texts pair atomic, import_db+validate เสมอ) + `_clean_step_outputs`
+- API: `POST /admin/generations/start|stop|resume` — spawn session-leader subprocess, killpg SIGTERM, pid_alive ใน list; 409 semantics ครบ
+- UI: Build เลย (daily/weekly dropdown), Stop, ทำต่อ + badge "process ตายแล้ว"; confirm ทุกปุ่ม; canEditPage(kb) gate เดิม
+- verify: py_compile, offline 11 tests GREEN, tsc clean; ยังไม่ได้ลองยิง API/UI จริง (ต้อง dev server + Mongo)
+- commits: 7018a7f driver, 9ca6a53 API+SRS, 35ece28 UI
+- ข้อควรรู้: active pointer ไม่ถูกแตะจาก start/stop/resume — publish เท่านั้นที่สลับ
