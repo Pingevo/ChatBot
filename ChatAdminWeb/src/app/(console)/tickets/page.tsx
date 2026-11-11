@@ -392,26 +392,6 @@ export default function TicketsPage() {
 
       {/* ── Panel กลาง: Ticket fields + Chat ── */}
       <div className={`${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 h-full min-w-0 relative`}>
-        {/* Mobile back button */}
-        <button
-          onClick={handleBack}
-          className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
-          title="กลับ"
-          aria-label="กลับ"
-        >
-          <ArrowLeft size={16} className="text-text" />
-        </button>
-        {/* Mobile info button */}
-        {selected && (
-          <button
-            onClick={() => setMobileView("info")}
-            className="lg:hidden absolute top-3 right-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
-            title="รายละเอียด"
-            aria-label="รายละเอียด"
-          >
-            <Info size={16} className="text-text" />
-          </button>
-        )}
         <TicketChatPanel
           conversation={selected}
           messages={messages}
@@ -423,6 +403,8 @@ export default function TicketsPage() {
           onSuggestProduct={handleSuggestProduct}
           onTicketChange={handleTicketChange}
           sending={sending}
+          onBack={handleBack}
+          onInfo={selected ? () => setMobileView("info") : undefined}
         />
       </div>
 

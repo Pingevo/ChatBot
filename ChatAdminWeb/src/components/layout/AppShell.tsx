@@ -39,6 +39,22 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     if (initialized && !user && !isTestChatPage) router.replace("/login");
   }, [initialized, user, router, isTestChatPage]);
 
+  // ⚡ mobile keyboard — iOS Safari ไม่ resize layout viewport ตอน keyboard เปิด
+  //   ใช้ visualViewport.height เป็น --app-vh แทน 100vh/dvh → composer ไม่โดนกลบ
+  useEffect(() => {
+    const vv = window.visualViewport;
+    if (!vv) return;
+    const apply = () =>
+      document.documentElement.style.setProperty("--app-vh", `${vv.height}px`);
+    apply();
+    vv.addEventListener("resize", apply);
+    vv.addEventListener("scroll", apply);
+    return () => {
+      vv.removeEventListener("resize", apply);
+      vv.removeEventListener("scroll", apply);
+    };
+  }, []);
+
   // Close mobile drawer on route change
   useEffect(() => {
     setMobileOpen(false);
@@ -47,14 +63,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   // ⚡ test-chat pages — แสดงเลยไม่ต้องรอ login (แต่ถ้า login แล้วก็แสดง sidebar ปกติ)
   if (!initialized || (!user && !isTestChatPage)) {
     return (
-      <div className="h-screen flex flex-col items-center justify-center auth-gradient-bg gap-3">
+      <div className="h-dvh flex flex-col items-center justify-center auth-gradient-bg gap-3">
         <Loading size={32} />
       </div>
     );
   }
 
   return (
-    <div className="h-screen overflow-hidden">
+    <div className="h-dvh overflow-hidden" style={{ height: "var(--app-vh, 100dvh)" }}>
       {/* Sidebar — position:fixed, doesn't affect layout flow
           Desktop: full sidebar (256px or 60px collapsed)
           Tablet: icon rail (60px) — auto-collapsed
@@ -72,16 +88,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div
         className={`h-full flex flex-col min-w-0 transition-[margin] duration-200 ease-in-out ${collapsed ? "lg:ml-[60px]" : "lg:ml-64"}`}
       >
-        {/* Mobile/Tablet-only top strip with brand
-            (โทรศัพท์ + iPad: ใช้ bottom nav แทน sidebar) */}
-        <div className="lg:hidden h-14 flex items-center gap-2 px-4 border-b border-border bg-surface/95 backdrop-blur-sm shrink-0">
-          <div className="flex items-center gap-2">
-            <div className="w-7 h-7 rounded-lg bg-accent flex items-center justify-center font-bold text-white text-xs">
-              IT
-            </div>
-            <span className="font-bold text-sm text-text tracking-tight">ITSRC Panel</span>
-          </div>
-        </div>
         {/* Content area — pb-14 บนมือถือ/แท็บเล็ต เผื่อที่ให้ bottom nav */}
         <main className="flex-1 min-h-0 overflow-hidden pb-14 lg:pb-0">{children}</main>
       </div>

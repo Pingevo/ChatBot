@@ -3,6 +3,7 @@
 //   header: next scheduled build (daily 09:00 / จันทร์=weekly, Asia/Bangkok) + last build
 //   cards: pixel-cat progress + per-step bars + ETA; expand = files/manifest/log + rollback
 import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Check, Play, RotateCcw, Square, Trash2, Zap } from "lucide-react";
 import { PageShell } from "@/components/ui/PageShell";
 import { Loading } from "@/components/ui/Loading";
 import { Button } from "@/components/ui/Button";
@@ -36,6 +37,7 @@ type Run = {
   current_step?: string; steps?: Record<string, StepInfo>;
   duration_s?: number; error?: string; created_at?: string;
   updated_at?: string; description_source_gid?: string; published_by?: string;
+  pid_alive?: boolean;
 };
 type Detail = {
   run: Run; build_log_tail: { ts?: string; step?: string; status?: string }[];
@@ -47,6 +49,7 @@ type Detail = {
 const STATUS_COLOR: Record<string, string> = {
   building: "bg-blue-100 text-blue-700", pending: "bg-amber-100 text-amber-700",
   published: "bg-green-100 text-green-700", failed: "bg-red-100 text-red-700",
+  stopped: "bg-orange-100 text-orange-700",
   discarded: "bg-gray-100 text-gray-500",
 };
 
@@ -149,6 +152,11 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
     ? elapsed * (100 - overall) / overall : undefined;
   const canRollback = gid !== active &&
     (run.status === "published" || gid === previous);
+  const dead = run.status === "building" && run.pid_alive === false;
+  const liveBuilding = run.status === "building" && run.pid_alive !== false;
+  const canStop = liveBuilding;
+  const canResume = dead || run.status === "failed" || run.status === "stopped";
+  const canDiscard = dead || ["pending", "failed", "stopped"].includes(run.status);
   return (
     <div className="border border-border rounded-xl p-4 bg-surface">
       <button type="button" onClick={onToggle}
@@ -157,6 +165,7 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
         <span className={`text-[10px] px-2 py-0.5 rounded-full ${STATUS_COLOR[run.status] || ""}`}>
           {run.status}
         </span>
+        {dead && <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-100 text-red-700">process ตายแล้ว</span>}
         {run.build_kind && <Badge>{run.build_kind}</Badge>}
         {active === gid && <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">active</span>}
         {previous === gid && <span className="text-[10px] px-2 py-0.5 rounded-full bg-sky-100 text-sky-700">rollback target</span>}
@@ -166,7 +175,7 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
       </button>
       {run.status === "building" && (
         <>
-          <BuildProgressCat current={Math.max(curIdx, 0)} total={STEP_ORDER.length} walking />
+          <BuildProgressCat current={Math.max(curIdx, 0)} total={STEP_ORDER.length} walking={!dead} />
           <div className="space-y-1.5 mt-1">
             {STEP_ORDER.map((s) => (
               <div key={s} className="grid grid-cols-[150px_1fr_42px] items-center gap-2">
@@ -179,9 +188,11 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
               </div>
             ))}
           </div>
-          <div className="text-[11px] text-blue-600 mt-1">
-            กำลังทำ: {STEP_LABEL[run.current_step || ""] || run.current_step || "-"} · รวม {overall}%
-            {eta != null && ` · เหลือ ~${fmtDur(eta)}`}
+          <div className={`text-[11px] mt-1 ${dead ? "text-red-600" : "text-blue-600"}`}>
+            {dead
+              ? "build process ตายแล้ว — กด ทำต่อ เพื่อ resume จาก step ที่ตาย"
+              : <>กำลังทำ: {STEP_LABEL[run.current_step || ""] || run.current_step || "-"} · รวม {overall}%
+                {eta != null && ` · เหลือ ~${fmtDur(eta)}`}</>}
           </div>
         </>
       )}
@@ -189,23 +200,36 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
       {run.description_source_gid && (
         <div className="text-[11px] text-muted mt-1">description ยืมจาก {run.description_source_gid}</div>
       )}
-      {(run.status === "pending" || canRollback) && editable && (
-        <div className="flex gap-2 pt-3">
+      {(run.status === "pending" || canRollback || canStop || canResume || canDiscard) && editable && (
+        <div className="flex items-center gap-1.5 pt-3">
+          {canStop && (
+            <Button size="sm" variant="danger" disabled={busy} title="หยุด build — ของที่เสร็จแล้วเก็บไว้ ทำต่อได้"
+                    onClick={() => onAction("stop", gid)}>
+              <Square size={14} />
+            </Button>
+          )}
+          {canResume && (
+            <Button size="sm" variant="outline" disabled={busy} title="ทำต่อจาก step ที่ตาย (step ที่เสร็จแล้วไม่ทำซ้ำ)"
+                    onClick={() => onAction("resume", gid)}>
+              <Play size={14} />
+            </Button>
+          )}
           {run.status === "pending" && (
-            <>
-              <Button size="sm" disabled={busy} onClick={() => onAction("publish", gid)}>
-                Accept → Publish
-              </Button>
-              <Button size="sm" variant="ghost" disabled={busy}
-                      onClick={() => onAction("discard", gid)}>
-                Reject
-              </Button>
-            </>
+            <Button size="sm" disabled={busy} title="Accept → Publish (สลับ pointer ทันที)"
+                    onClick={() => onAction("publish", gid)}>
+              <Check size={14} />
+            </Button>
+          )}
+          {canDiscard && (
+            <Button size="sm" variant="ghost" disabled={busy} title="ทิ้ง/ลบ run นี้ (ไฟล์ยังอยู่)"
+                    onClick={() => onAction("discard", gid)}>
+              <Trash2 size={14} />
+            </Button>
           )}
           {canRollback && (
-            <Button size="sm" variant="outline" disabled={busy}
+            <Button size="sm" variant="outline" disabled={busy} title="Rollback ไป gen นี้ (สลับ pointer)"
                     onClick={() => onAction("rollback", gid)}>
-              Rollback ไป gen นี้
+              <RotateCcw size={14} />
             </Button>
           )}
         </div>
@@ -228,6 +252,7 @@ export default function GenerationsPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [startMode, setStartMode] = useState<"daily" | "weekly">("daily");
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -254,27 +279,56 @@ export default function GenerationsPage() {
     () => runs.find((r) => r.status === "published" || r.status === "pending"),
     [runs]);
   const building = runs.find((r) => r.status === "building");
+  const liveBuilding = runs.find(
+    (r) => r.status === "building" && r.pid_alive !== false);
 
   const onAction = async (action: string, gid: string) => {
-    const isPub = action === "publish";
+    const meta: Record<string, { title: string; msg: string; okText: string; danger?: boolean }> = {
+      publish: { title: "ยืนยัน Publish", okText: "Publish",
+        msg: `สลับ pointer ไป ${gid} — บอทจะใช้ข้อมูลชุดใหม่ทันที (rollback ได้)` },
+      discard: { title: "ยืนยัน Reject", okText: "ยืนยัน", danger: true,
+        msg: `ทิ้ง generation ${gid} (ไฟล์ยังอยู่ ไม่ถูกใช้)` },
+      rollback: { title: "ยืนยัน Rollback", okText: "ยืนยัน", danger: true,
+        msg: `สลับ pointer กลับไป ${gid} — artifact ทั้งชุดเปลี่ยนด้วยกัน (rollback แบบบางส่วนไม่มี)` },
+      stop: { title: "ยืนยัน Stop", okText: "Stop", danger: true,
+        msg: `หยุด build ${gid} — step ที่กำลังทำจะตาย ของที่เสร็จแล้วเก็บไว้ กด "ทำต่อ" resume ได้ภายหลัง` },
+      resume: { title: "ยืนยันทำต่อ", okText: "ทำต่อ",
+        msg: `ทำต่อ build ${gid} จาก step ที่ตาย — step ที่เสร็จแล้วจะไม่ทำซ้ำ` },
+    };
+    const m = meta[action];
+    if (!m) return;
     const ok = await confirm.ask({
-      title: isPub ? "ยืนยัน Publish" : action === "discard" ? "ยืนยัน Reject" : "ยืนยัน Rollback",
-      message: isPub
-        ? `สลับ pointer ไป ${gid} — บอทจะใช้ข้อมูลชุดใหม่ทันที (rollback ได้)`
-        : action === "discard"
-        ? `ทิ้ง generation ${gid} (ไฟล์ยังอยู่ ไม่ถูกใช้)`
-        : `สลับ pointer กลับไป ${gid} — artifact ทั้งชุดเปลี่ยนด้วยกัน (rollback แบบบางส่วนไม่มี)`,
-      confirmText: isPub ? "Publish" : "ยืนยัน",
-      variant: isPub ? "primary" : "danger",
+      title: m.title, message: m.msg, confirmText: m.okText,
+      variant: m.danger ? "danger" : "primary",
     });
     if (!ok) return;
     setBusy(true);
     try {
       await api().post(`${API}/${action}?gid=${encodeURIComponent(gid)}`);
-      toast.success(isPub ? "Publish แล้ว — pointer สลับ" : "บันทึกแล้ว");
+      toast.success(action === "publish" ? "Publish แล้ว — pointer สลับ" : "บันทึกแล้ว");
       await load();
     } catch (e) {
       catchError(e, `${action} ไม่สำเร็จ`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onStart = async () => {
+    const ok = await confirm.ask({
+      title: "ยืนยัน Build เลย",
+      message: `สร้าง generation ใหม่และเริ่ม build ${startMode} ทันที — live bot ยังใช้ gen เดิมจนกว่าจะกด Accept`,
+      confirmText: "Build",
+      variant: "primary",
+    });
+    if (!ok) return;
+    setBusy(true);
+    try {
+      const r = await api().post<{ gid?: string }>(`${API}/start?mode=${startMode}`);
+      toast.success(`เริ่ม build ${r.data.gid || ""} แล้ว`);
+      await load();
+    } catch (e) {
+      catchError(e, "เริ่ม build ไม่สำเร็จ");
     } finally {
       setBusy(false);
     }
@@ -293,6 +347,20 @@ export default function GenerationsPage() {
             {building ? "กำลัง build อยู่" :
               `${nxt.at.toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })} · ${nxt.kind}`}
           </div>
+          {editable && !liveBuilding && (
+            <div className="flex items-center gap-2 mt-2">
+              <select value={startMode}
+                      onChange={(e) => setStartMode(e.target.value as "daily" | "weekly")}
+                      className="text-[11px] border border-border rounded px-1.5 py-1 bg-surface">
+                <option value="daily">daily</option>
+                <option value="weekly">weekly</option>
+              </select>
+              <Button size="sm" disabled={busy} onClick={onStart}
+                      title="สร้าง generation ใหม่และเริ่ม build ทันที">
+                <Zap size={14} />
+              </Button>
+            </div>
+          )}
         </div>
         <div className="border border-border rounded-lg p-3 bg-surface">
           <div className="text-muted">build ล่าสุด</div>

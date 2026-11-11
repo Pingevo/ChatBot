@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -15,6 +15,16 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "ITSRC PANEL — ระบบจัดการห้องแชทอัจฉริยะ",
   description: "Multi-platform customer support & chatbot management console",
+};
+
+// ⚡ mobile — viewport-fit=cover เปิดใช้ safe-area env() + resizes-content ให้
+//   keyboard ดัน layout บน Chromium (iOS จัดการด้วย visualViewport ใน AppShell)
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  interactiveWidget: "resizes-content",
+  themeColor: "#0b2340",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

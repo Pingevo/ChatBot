@@ -16,6 +16,8 @@ import {
   Zap,
   Lock,
   UserCog,
+  ArrowLeft,
+  Info,
 } from "lucide-react";
 import { Avatar } from "@/components/ui/Avatar";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
@@ -340,6 +342,9 @@ interface Props {
   onTicketChange: (patch: Partial<Conversation>) => void;
   sending: boolean;
   reopening?: boolean;
+  // ⚡ mobile nav — back/info เข้า header แทนปุ่มลอย (เดิมทับ avatar/ปุ่มปิดสนทนา)
+  onBack?: () => void;
+  onInfo?: () => void;
 }
 
 export function TicketChatPanel({
@@ -354,6 +359,8 @@ export function TicketChatPanel({
   onTicketChange,
   sending,
   reopening,
+  onBack,
+  onInfo,
 }: Props) {
   const [text, setText] = useState("");
   const [quickReplies, setQuickReplies] = useState<QuickReplyRow[]>([]);
@@ -446,7 +453,17 @@ export function TicketChatPanel({
 
   if (!conversation) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-text-muted bg-bg">
+      <div className="flex-1 flex flex-col items-center justify-center text-text-muted bg-bg relative">
+        {onBack && (
+          <button
+            onClick={onBack}
+            title="กลับ"
+            aria-label="กลับ"
+            className="lg:hidden absolute top-3 left-3 w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center text-text hover:bg-surface-2 transition-colors"
+          >
+            <ArrowLeft size={17} />
+          </button>
+        )}
         <div className="w-16 h-16 rounded-full bg-surface-2 flex items-center justify-center mb-3">
           <User size={32} className="text-text-subtle" />
         </div>
@@ -458,10 +475,21 @@ export function TicketChatPanel({
 
   return (
     <div className="flex-1 flex flex-col min-w-0 bg-bg">
-      {/* ── Header (topbar) — สะอาด, เหลือแค่สิ่งจำเป็น ── */}
-      <div className="px-4 py-2.5 border-b border-border bg-surface shrink-0">
-        <div className="flex items-center gap-3">
-          <Avatar name={conversation.customer_name} src={conversation.customer_avatar} size={34} />
+      {/* ── Header (topbar) — มือถือแยกเป็น 2 แถว (nav+identity / actions) desktop แถวเดียว ── */}
+      <div className="px-3 lg:px-4 py-2.5 border-b border-border bg-surface shrink-0">
+        <div className="flex flex-wrap lg:flex-nowrap items-center gap-x-2 lg:gap-x-3 gap-y-2">
+          {/* Mobile back — เข้า flow header ไม่ทับ avatar */}
+          {onBack && (
+            <button
+              onClick={onBack}
+              title="กลับ"
+              aria-label="กลับ"
+              className="lg:hidden -ml-1 w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text hover:bg-surface-2 transition-colors"
+            >
+              <ArrowLeft size={17} />
+            </button>
+          )}
+          <Avatar name={conversation.customer_name} src={conversation.customer_avatar} size={34} className="shrink-0" />
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <span className="font-semibold text-text truncate">{conversation.customer_name}</span>
@@ -470,42 +498,57 @@ export function TicketChatPanel({
             <div className="text-[11px] text-text-muted truncate">{conversation.shop_name}</div>
           </div>
 
-          {/* Admin responsible — แสดงว่าใครรับผิดชอบ (หรือ "บอท") */}
-          <div className="flex items-center gap-1.5 text-xs text-text-muted shrink-0">
-            <Headset size={12} />
-            <span>
-              {conversation.status === "bot"
-                ? "บอทตอบ"
-                : conversation.assigned_to
-                  ? (conversation.assigned_to_name || conversation.assigned_to.slice(0, 8))
-                  : "—"}
-            </span>
-          </div>
-
-          {/* Transfer dropdown — โยนแชทให้ admin คนอื่น */}
-          {onTransfer && conversation.status !== "bot" && (
-            <TransferDropdown
-              currentAdminId={conversation.assigned_to}
-              onSelect={onTransfer}
-            />
+          {/* Mobile info — เข้า flow header ไม่ทับปุ่ม action */}
+          {onInfo && (
+            <button
+              onClick={onInfo}
+              title="รายละเอียด"
+              aria-label="รายละเอียด"
+              className="lg:hidden w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text-muted hover:bg-surface-2 transition-colors"
+            >
+              <Info size={17} />
+            </button>
           )}
 
-          {conversation.status === "bot" && (
-            <Button size="sm" variant="outline" onClick={onHandoff} className="shrink-0">
-              <Headset size={14} /> รับเรื่อง
-            </Button>
-          )}
-          {conversation.status === "closed" ? (
-            onReopen && (
-              <Button size="sm" variant="outline" onClick={onReopen} disabled={reopening} className="shrink-0">
-                <RotateCcw size={14} /> {reopening ? "กำลังประมวลผล..." : "เปิดแชทใหม่"}
+          {/* Controls — มือถือขึ้นแถวใหม่เต็มกว้าง (basis-full) / desktop ต่อท้ายแถวเดียว */}
+          <div className="flex items-center gap-2 lg:gap-3 basis-full lg:basis-auto shrink-0">
+            {/* Admin responsible — แสดงว่าใครรับผิดชอบ (หรือ "บอท") */}
+            <div className="flex items-center gap-1.5 text-xs text-text-muted shrink-0">
+              <Headset size={12} />
+              <span>
+                {conversation.status === "bot"
+                  ? "บอทตอบ"
+                  : conversation.assigned_to
+                    ? (conversation.assigned_to_name || conversation.assigned_to.slice(0, 8))
+                    : "—"}
+              </span>
+            </div>
+
+            {/* Transfer dropdown — โยนแชทให้ admin คนอื่น */}
+            {onTransfer && conversation.status !== "bot" && (
+              <TransferDropdown
+                currentAdminId={conversation.assigned_to}
+                onSelect={onTransfer}
+              />
+            )}
+
+            {conversation.status === "bot" && (
+              <Button size="sm" variant="outline" onClick={onHandoff} className="shrink-0 ml-auto lg:ml-0">
+                <Headset size={14} /> รับเรื่อง
               </Button>
-            )
-          ) : (
-            <Button size="sm" onClick={onResolve} className="shrink-0">
-              <Lock size={14} /> ปิดสนทนา
-            </Button>
-          )}
+            )}
+            {conversation.status === "closed" ? (
+              onReopen && (
+                <Button size="sm" variant="outline" onClick={onReopen} disabled={reopening} className="shrink-0 ml-auto lg:ml-0">
+                  <RotateCcw size={14} /> {reopening ? "กำลังประมวลผล..." : "เปิดแชทใหม่"}
+                </Button>
+              )
+            ) : (
+              <Button size="sm" onClick={onResolve} className="shrink-0 ml-auto lg:ml-0">
+                <Lock size={14} /> ปิดสนทนา
+              </Button>
+            )}
+          </div>
         </div>
       </div>
 
