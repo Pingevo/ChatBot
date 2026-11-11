@@ -13294,3 +13294,20 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ไม่เปลี่ยน: action/permission/route/data path/confirm text/mock-send semantics — เฉพาะตำแหน่ง ขนาด และโครง layout mobile
 - verify: `tsc --noEmit` clean, `next build` ผ่าน 94 routes (warning filesystem tracing เดิมเท่านั้น); visual check บนเครื่องจริงยังรอผู้ใช้ดู preview — keyboard fix ต้องทดสอบ iOS/Android จริง
 - งานค้าง: mobile breakpoints ไม่เท่ากัน (botworker `md:` vs tickets/shadow `lg:`); shadow-inbox tabs `text-[10px]` ยังเล็ก; sidebar prefetch ~30 links ยังไม่ได้วัด; tablet ยังใช้ bottom-nav (ยังไม่มี icon rail); dead code InlineDropdown ใน TicketChatPanel ยังค้าง
+
+
+## Mobile UI/UX Rebuild — กำลังจะทำ (2026-11-11)
+
+- Scope: redesign ChatAdminWeb phone screens only; new mobile-only components, preserve current routes, permissions, data calls, handlers, and feature workflows; match the existing navy/maroon desktop palette.
+- Audit and design proposal first. No source-code changes before user approval under AGENTS.md §9.
+- Existing branch `ui/mobile-ux-phase1` has pre-existing modified and untracked files; preserve and audit their scope before any commit or merge.
+
+
+## Mobile UI/UX Rebuild — audit complete, waiting for design approval (2026-11-11)
+
+- Inventory: 40 console page routes plus login, root redirect and global loading/error/not-found states; areas include dashboard/analytics, inbox/chat, bot QA/results, processes/knowledge, management and settings.
+- Root UX finding: most routes still resize desktop markup with inconsistent `md`/`lg` phone breakpoints; controls/dialogs are shared desktop components, while dashboard metrics and graphs remain dense on narrow screens.
+- Recommended architecture: phone-only presentation components below 768px, composed per route from the existing page-owned data, permissions and action handlers; leave 768px+ screens and all APIs/business behavior unchanged. New mobile cards, alerts, buttons, sheets and form controls; keep every route and action reachable.
+- Visual direction: retain the navy/maroon palette, make the dashboard charts data-faithful, use GSAP for restrained transitions and lazy-load a Three.js dashboard visualization with reduced-motion/WebGL fallback.
+- Earlier mobile phase-1 commits were merged to `origin/main` as `113cf06` during the audit. Other unrelated working-tree changes remain untouched and uncommitted.
+- Frozen and active integrity checks passed; ledger `git diff --check` passed. No application code was changed and no tests were run. Implementation awaits user approval under AGENTS.md §9.

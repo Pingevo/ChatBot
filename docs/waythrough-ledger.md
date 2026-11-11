@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 13296 |
-| active_integrity_prefix_sha256 | `e1df546c202cfd173d8af393436901a0812d6684aa5d596c6ab98b0159b8bb8c` |
-| active_line_count_at_baseline | 13296 |
-| active_integrity_recorded_at | 2026-11-11 (+0700), mobile UI phase-1 fixes indexed (A-192); semantic coverage remains partial |
+| active_integrity_prefix_lines | 13313 |
+| active_integrity_prefix_sha256 | `78ecdc56b827ab912ecdc1aebfd0fbf9fff415fc44e684334fd18759cb2c08aa` |
+| active_line_count_at_baseline | 13313 |
+| active_integrity_recorded_at | 2026-11-11 (+0700), mobile UI/UX audit closeout indexed (A-194); semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -230,6 +230,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 13277–13282 | read + indexed (A-190) |
 | 13283–13288 | read + indexed (A-191) |
 | 13289–13296 | read + indexed (A-192) |
+| 13297–13303 | read + indexed (A-193) |
+| 13304–13313 | read + indexed (A-194) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -542,3 +544,5 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-190 | 13277–13282 | Customer-answer audit addendum to findings plan / 2026-11-11 | pending/deferred work | Added §7 to `docs/plans/active/2026-11-11-customer-answer-findings-and-correction-plan.md`: static/template/LLM response-path classification and triggers, read-only Mongo retrieval evidence, actual test limits, Gemini review rejection, and a new user-reported symptom where missing product specs may yield an overly broad answer. The new symptom is explicitly not reproduced; exact question/answer/product trace is still needed. Document-only; no source/test/config/DB change. | verified | User requested adding the audit findings; semantic coverage remains partial. |
 | A-191 | 13283–13288 | Customer-answer missing-spec symptom clarification / 2026-11-11 | pending/deferred work | User clarified the symptom as: missing product specs → reply says “ไม่พบข้อมูล” and hands off to admin. Updated findings plan §7.4 with this wording and candidate source paths: no_selection/no_evidence renderer, typed constraint no-match handoff, guard escalation, and TurnPlan/policy handoff. These are code paths to inspect, not a reproduced root cause; exact conversation/response trace is still required. Document-only; no source/test/config/DB/provider/customer changes. | verified | Addendum to A-190; semantic coverage remains partial. |
 | A-192 | 13289–13296 | Mobile UI phase 1 — nav menu, chat header, shell viewport / 2026-11-11 | passed behavior | User screenshots showed floating mobile back/info buttons overlapping ticket/botworker chat header content, a cramped bottom-sheet "เพิ่มเติม" menu with no search/logout, a mobile logo strip wasting 56px, and missing viewport-fit/safe-area/keyboard handling. Fixed: `MobileNav.tsx` full-screen searchable grouped menu with ≥48px rows, active-group expansion, bottom user bar with logout, Escape close; `TicketChatPanel.tsx`/`tickets/page.tsx`/`botworker/page.tsx` moved back+info into header flow (≥40px targets), header wraps to two mobile rows, back preserved in empty state; `AppShell.tsx`/`app/layout.tsx` removed mobile logo strip, added viewport export (viewportFit=cover, interactiveWidget=resizes-content, themeColor), h-dvh + visualViewport `--app-vh` keyboard hook. No action/permission/route/data/mock-send semantics changed. Verified: tsc clean, next build 94 routes. | verified | Real-device keyboard/visual check still pending; known leftovers: botworker `md:` vs `lg:` breakpoint inconsistency, shadow-inbox 10px tabs, unmeasured sidebar prefetch, no tablet icon rail, dead InlineDropdown code. |
+| A-193 | 13297–13303 | Mobile UI/UX Rebuild pre-work marker / 2026-11-11 | pending/deferred work | User expanded scope from prior mobile phase 1: redesign phone screens only as a new mobile-only presentation, keep all routes, permissions, data calls, handlers and feature workflows, and match the existing navy/maroon palette. Audit/design must precede code changes under AGENTS.md §9. The marker notes the then-dirty branch state; during the audit, mobile phase-1 commits and A-192 were merged to main. | historical-unverified | Audit/design and user approval still pending; no source-code change in this range. |
+| A-194 | 13304–13313 | Mobile UI/UX Rebuild audit closeout / 2026-11-11 | pending/deferred work | Read-only inventory: 40 console routes plus login, root redirect and global loading/error/not-found states. Most routes resize desktop markup with uneven phone breakpoints; shared controls/dialogs and dense dashboard metrics/charts leave no consistent phone presentation layer. Proposed `<768px` route-specific mobile views using existing page-owned handlers/data/permissions, navy/maroon tokens, new phone cards/alerts/buttons/sheets/forms, GSAP transitions and a lazy Three.js dashboard visualization with reduced-motion/WebGL fallback; all 768px+ screens and backend behavior stay unchanged. Prior mobile phase-1 commits were merged to `origin/main` as 113cf06 during audit; unrelated dirty files remain untouched. Checksums and ledger diff-check passed; no app code or tests changed; implementation awaits user approval. | historical-unverified | Design proposal only; user review/approval required under AGENTS.md §9. |
