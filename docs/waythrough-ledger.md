@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 13348 |
-| active_integrity_prefix_sha256 | `cf7a311ec898affba2e9ea568bcae1ba2964ab3266558181b98bfff198527bae` |
-| active_line_count_at_baseline | 13348 |
-| active_integrity_recorded_at | 2026-11-11 (+0700), mobile console UX design spec closeout indexed (A-199); semantic coverage remains partial |
+| active_integrity_prefix_lines | 13363 |
+| active_integrity_prefix_sha256 | `62b16c03fd155295d960f071616af54f3f8c0751df47818a021b0e0ea9381ddb` |
+| active_line_count_at_baseline | 13363 |
+| active_integrity_recorded_at | 2026-11-11 (+0700), session remaining-work summary + docs commit + main merge indexed (A-200); 13349–13354 in-flight parallel marker left unindexed; semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -237,7 +237,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 13328–13334 | read + indexed (A-197) |
 | 13335–13341 | read + indexed (A-198) |
 | 13342–13348 | read + indexed (A-199) |
-| 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
+| 13355–13363 | read + indexed (A-200) |
+| 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482, 13349–13354 | ไม่ได้ index (gap — ดูส่วน 7; 13349–13354 = in-flight parallel pre-work marker) |
 
 ## 6. Ledger entries
 
@@ -441,7 +442,7 @@ F-xxx = frozen `getoutofmywaybotkaikrook.md` (อ่านจริง 1–3976)
 
 ## 7. Known semantic coverage gaps
 
-- frozen 1–8624 อ่านและสรุปครบเป็น F-001..F-079 แล้ว (ไม่ได้ rerun historical tests); active gap ที่ยังไม่ได้ index: 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 — targeted coverage เท่านั้น ห้ามอ้าง full audit
+- frozen 1–8624 อ่านและสรุปครบเป็น F-001..F-079 แล้ว (ไม่ได้ rerun historical tests); active gap ที่ยังไม่ได้ index: 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482, 13349–13354 (in-flight parallel pre-work marker) — targeted coverage เท่านั้น ห้ามอ้าง full audit
 - Q14 / order (F-006, F-007) ระดับ answer ไม่ verify เพราะ provider 429
 - ไม่ใช้ `/tmp/p4ledger/ledger.md` (ไม่ได้ตรวจ checksum/ต้นฉบับ)
 
@@ -556,3 +557,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-197 | 13328–13334 | Customer Answer Raw Findings Report closeout / 2026-11-11 | pending/deferred work | Created `docs/plans/active/2026-11-11-customer-answer-raw-findings.md`, a 418-line raw evidence report: attached pingevox Q1–Q5 transcript, storage/retrieval/answer paths, previously recorded read-only Mongo findings, test limits and R-01–R-19 with evidence grades and unknowns. Shared ChatGPT link rendered blank. No production/test/config/Mongo/provider/customer actions; no tests run in this documentation task. | verified | Report is documentary evidence, not a root-cause fix or production-readiness claim; Mongo values remain from A-189 and were not re-queried; semantic coverage remains partial. |
 | A-198 | 13335–13341 | Customer Answer Raw Findings Report Codex thread supplement closeout / 2026-11-11 | pending/deferred work | Recorded reading a Codex thread and adding sections 10–11 to the raw findings report, with thread evidence distinct from prior transcript/Mongo evidence. Added T01/T08/K3 observations, policy and timing requirements, and unreconciled Zaapi census discrepancies with provenance/limitations. No provider/Mongo/test/product changes or customer message. | verified | Documentary supplement only; competing census counts remain unreconciled as stated; semantic coverage remains partial. |
 | A-199 | 13342–13348 | Mobile Console UX Redesign design spec / 2026-11-11 | pending/deferred work | Wrote the user-approved mobile-only design spec covering all console routes, keyboard/landscape behavior, vertical-only scrolling, mobile components and page patterns, workflow graph editing, dashboard charts, pixel-art cat-girl, accessibility, and lazy animation/3D. Exact route file census matched 40/40. No app source/dependency/asset changes or app tests; implementation awaits user review of the spec. | verified | Document-only design stage; user approval is required before implementation under AGENTS.md §9. |
+| A-200 | 13355–13363 | Session remaining-work summary + docs commit + origin/main merge / 2026-11-11 | decision/approval | Read full ledger + verified integrity (frozen SHA/lines/bytes + active prefix 13348 SHA all match; coverage partial). Active tail 13349–13354 = in-flight parallel-session pre-work marker editing customer-answer-raw-findings flowchart — left unindexed for owning session. Codebase scan for dormant/unfinished work: chatbotv3 opt-in only (USE_CHAT_V3/req.use_v3, live OR untested), chat_v2 flag-gated (USE_LEGACY_CHAT/req.use_v2), canonical zaapi chain dormant (file-backed kb_zaapi_files is serving owner; K4 decision open), retrieval_shadow flag, web_search_enabled strict-off, BOTWORKER_BACKENDS=["shopee"] only + lazadachat/tiktokchat/shop_link placeholders, 31 workflow node types runtimeExecutor=null, bot-handoff notification TODO, 2 ponytail ceilings. Committed a6a9693 docs(plans): register rebaseline + findings plan + roadmap; left raw-findings (in-flight) and _tmp_*.ts (temp) untracked. Merged origin/main 113cf06 → a2afb33 trivial no-diff merge; branch ahead 4/behind 0. | verified | Zero code/DB/provider/customer changes; commit+merge per user instruction; 13349–13354 remains a coverage gap until owning session closeout. |
