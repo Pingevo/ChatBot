@@ -12997,3 +12997,30 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - สรุปสถานะ: W0 ~เสร็จ (เหลือ browser canary evidence + register row update) · W1 flows ครบแต่ขาด Basic Automation + single-file handle gap · W2 runtime 31/31 types + e2e 18/18 chat flows — ขาด node_trace, marketplace adapter, binding จริงบน Mongo · W3 binding/editor/replay ทำแล้ว — ขาด scenario 53 + persona 11 migration + binding resolution จริง · W4 เปิด (version pinning + test_source sandbox เท่านั้น) · W5 ยังไม่เริ่ม
 - พบ contract drift: spec วาง `materializeExecutableWorkflow`/`ce/1` แต่ implement จริง = `workflowCanonicalEval.ts` runtime eval บน version docs (ไม่มี symbol เหล่านั้นใน code)
 - ไม่มีการแก้ production code/test/DB/provider; register ยังไม่แก้ (เสนอ status update ให้ user ตัดสิน)
+
+## [Shop QA — 50 chat API evaluation] กำลังจะทำ (2026-11-10)
+
+- Scope: 10 คำถามควบคุมผ่าน test-chat API path และ 40 ข้อความจาก shadow replies ของ KingGadgets, KieslectThailand, CukTechThailand, BlackShark; ยิง API แบบ parallel ด้วย conversation/session แยก
+- ตรวจ: intent, answer coverage/relevance/correctness against returned source evidence, Zaapi evidence use, inventory on recommendations, truthful handoff, latency, token/cost, verbosity/repetition/errors
+- ห้ามใช้หน้าเว็บ UI, ห้ามส่งข้อความลูกค้าจริง, ห้ามเขียน Product DB; Mongo reads เพื่อเลือก shadow samples เท่านั้น; Chat API usage/cost ตามการเรียกจริง
+- Deliverable: raw result JSON + local HTML preview แบบ static; ไม่มี production/test-code edits, ไม่มี stage/commit/push/PR/deploy
+
+### ผ่านแล้ว — QA 50 คำถามผ่าน direct chatbot API (audit only, 2026-11-10)
+
+- ยิง `http://127.0.0.1:8010/chat` แบบ parallel 10 workers: Test Chat 10 เคส + shadow replies 40 เคส; **HTTP 200 = 50/50, errors = 0**. ไม่ใช้หน้าเว็บ, ทุก call ใช้ conversation/session ใหม่และ `simulate_assignment` + `test_source`; ไม่มีข้อความส่งให้ลูกค้าจริง.
+- Test Chat แยกต่อร้าน: KingGadgets 2, KieslectThailand 2, CukTechThailand 3, BlackShark 3. Mongo test collection ยืนยัน session 10/10 และ user/model messages 10/10. Shadow corpus ที่มีจริง: Kieslect 14, CukTech 13, BlackShark 13; ไม่พบ shadow records ของ KingGadgets.
+- ตรวจคำตอบกับข้อมูลจริงและ trace แบบ manual (ไม่ใช้ LLM judge): ทั้ง 50 = ผ่านหลัก 9, บางส่วน 15, ผิด/ไม่ตอบ 19, บริบทที่ส่งไม่พอให้ตัดสิน 7. ใน 10 controlled tests: ผ่าน 4, บางส่วน 2, ผิด/ไม่ตอบ 4. พบ T01 แจ้ง BP35S สีชมพู/เขียวหมดทั้งที่ stock 50/30 และไม่ตอบมุมส่าย; T05 ไม่ตอบ 15W/55W; T07 ไม่ตอบ C-to-C/100W ทั้งที่ catalog ระบุ; T08 แจ้ง GS3/Ultra หมดทั้งที่มี stock. คำตอบ Strava/5ATM มีข้อกล่าวอ้างเสริมที่ต้องตรวจ source เพิ่ม.
+- Shadow findings หลัก: intent หลุดเรื่องเปลี่ยนสาย→คืนสินค้า, การเทียบ AD1204U ไม่ตอบความต่างและแนบหลายรุ่น, คำถาม compatibility/Google Maps/promo/การจัดส่งบางข้อไม่ตรงประเด็น, บางคำถามปัญหาสินค้าได้ข้อความ “ทักแอดมิน” แต่ไม่มี handoff. ตรวจการ์ดที่ส่ง: 7 item IDs ใน shadow มีอย่างน้อยหนึ่ง variant stock; bundle CUKTECH มี variant stock 0 จึงยังสรุปไม่ได้ว่า default variant ขายได้.
+- Handoff: response ระบุ handoff 13 เคส; read-only ตรวจ `test_status_conversation` พบ sandbox docs 13/13, **assigned admin 0/13** — อยู่คิว/unassigned ไม่ใช่ยืนยันว่ามีแอดมินรับแล้ว. ไม่มี production conversation/status เขียน.
+- เวลา client-to-response: median 10.84s, p95 78.78s, max 107.50s; Test Chat median 54.15s. Cost จาก response fields รวม $0.092521 แต่ step logs รวม $0.124283; token top-level 286,241 เทียบ step logs 411,485 — telemetry ไม่ reconcile จึงไม่อ้างเป็นยอดบิลจริง.
+- KB: config ที่อ่านก่อนทดสอบ = grouped retrieval on, `kb_source=zaapi`, pool sources เปิดครบ; 24 traces มี GroupedRetrievalSelection, 21 trace มี `ch:kb:*` และทั้ง 21 เลือก 0. Mongo census ก่อนทดสอบพบ raw `zaapi_kb` 20,768 docs แต่ไม่มี active v2 generation และ canonical `zaapi_kb_records` = 0. สรุปเฉพาะหลักฐานนี้: Zaapi KB ไม่ได้ส่ง evidence เข้า trace ที่ตรวจ.
+- ข้อจำกัด shadow replay: history ที่ได้มีแต่ customer-role turns ไม่มี assistant turns และ item/variation/order card เป็น placeholder โดยไม่ส่ง item_id; 7 เคสจึงติด context-limited และบาง follow-up วัดได้เฉพาะพฤติกรรมเมื่อส่ง context เท่านี้. Email/phone scan ของคำถาม/history ที่บันทึกพบ 0.
+- Artifacts (ignored local results): `docs/test/results/qa50_shop_audit_2026-11-10.json` และ `docs/test/results/qa50-shop-audit-preview.html` — preview มี filter ร้าน/แหล่ง/เกรดและเปิด trace รายเคส. ไม่มี production/test code change, ไม่มี product DB write, ไม่ stage/commit/push/PR/deploy.
+- งานค้างจาก QA: แก้/สืบ root cause stock false-negative, KB generation/record pipeline, intent/query coverage และ handoff outcome/queue assignment; แก้ shadow-history/card anchor สำหรับ replay ให้เทียบ conversation ได้ครบ; reconcile token/cost logs. รอบนี้รายงานเท่านั้น ยังไม่แก้ behavior.
+
+## [Shop QA — 12 full shadow conversations] กำลังจะทำ (2026-11-11)
+
+- เลือก Shadowbot conversation จริง 3 บทสนทนาต่อร้าน: KingGadgets, KieslectThailand, CukTechThailand, BlackShark; เลือกเฉพาะชุดที่มี transcript ตามลำดับและส่ง history/รูปหรือ image text ที่มีจริง
+- Replay ทุก turn ตั้งแต่ต้น ผ่าน direct chatbot API เท่านั้น; ใช้ synthetic conversation/session ID, `simulate_assignment` + sandbox `test_source`; ไม่ส่งข้อความลูกค้าจริง
+- ตรวจ customer/bot turn order, image/image_desc, item/order anchors, intent, evidence/KB, stock, answer quality, handoff result, เวลา/token/cost
+- ก่อนยิงต้องตรวจว่ามี complete transcript ที่พิสูจน์ได้ต่อร้าน; ถ้าข้อมูลไม่พอให้รายงาน gap แทนการแต่ง turn/รูป. Mongo ใช้อ่านเพื่อเลือก/verify; ไม่มี Product DB write; no code changes or commit.

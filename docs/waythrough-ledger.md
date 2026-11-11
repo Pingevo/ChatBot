@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 12999 |
-| active_integrity_prefix_sha256 | `1c93f0e7e533501396c93119dd60989d569751b48cc1a86be5ca00d42d18446b` |
-| active_line_count_at_baseline | 12999 |
-| active_integrity_recorded_at | 2026-11-10 (+0700), W0–W5 workflow audit (A-164/A-165); semantic coverage remains partial |
+| active_integrity_prefix_lines | 13026 |
+| active_integrity_prefix_sha256 | `cf2c5e5b8aa607da3708370befcdc8046330bdb06205408c0f5d3f43406807ba` |
+| active_line_count_at_baseline | 13026 |
+| active_integrity_recorded_at | 2026-11-10 (+0700), Shop QA 12 announce indexed (A-167); semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -203,6 +203,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 12937–12971 | read + indexed (A-161, A-162, A-163) |
 | 12972–12982 | read + indexed (A-164) |
 | 12983–12999 | read + indexed (A-165) |
+| 13000–13019 | read + indexed (A-166) |
+| 13020–13026 | read + indexed (A-167) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -487,3 +489,5 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-163 | 12967–12971 | R5 real E2E join proof / 2026-11-10 | passed behavior | Read-only live check: `ai_usage.conv_id` on generate path = `shadow:<conv>:<generation_batch_id>` → joins `shadow_replies.generation_batch_id` today without waiting for the new request_id field. Proven: `ai_usage` req `b3c286c8-c1f` (conv `shadow:shp_2052989613947223883:gen_shp_2052989613947223883_mwahjfe9_nynmja`) → shadow `sr_xly5jx22mwahkgnq` FOUND via batch id. New `request_id` field makes the join direct going forward; worker path joins via conv_id + request_id. | verified | 2 sibling batches returned none (docs likely deleted post-generation — not a chain break). |
 | A-164 | 12972–12982 | UI/UX Phase 1 Mobile pre-work (parallel session) / 2026-11-10 | pending/deferred work | กำลังจะทำ marker only: branch `ui/mobile-ux-phase1` @ `8ef1d42`; baseline build 94 routes/~730KB raw per page; contract inventory /tickets, /botworker, /shadow-inbox, MobileNav, Sidebar, AppShell; confirmed issues — no viewport-fit/interactive-widget, 100vh+overflow-hidden keyboard covers composer, safe-area-pb broken, touch targets <44px, Sidebar prefetches all links; design direction + plan pending user approval; no UI code changed. | historical-unverified | Parallel session owner must close out; whether approval/implementation happened is not recorded in this range. |
 | A-165 | 12983–12999 | W0–W5 workflow audit / 2026-11-10 | passed behavior | Read-only audit of register W-rows vs spec/planner/raw log/code/corpus: corpus verified 21 flows/218 nodes/225 edges, 4 basic automations (1 active "ขอคะแนนเมื่อปิดทิกเก็ต"), 53 scenario, 11 personality; all R1–R3 commits confirmed ancestors of main; status — W0 ~done (browser canary evidence + register row update outstanding), W1 flows imported but Basic Automation not imported + single-file handle gap, W2 runtime 31/31 types + 18/18 chat-flow e2e (node_trace, marketplace adapter, real-Mongo bindings pending), W3 binding/editor/replay done but scenario/persona migration untouched + real binding resolution pending, W4 open (only version pinning + test_source sandbox), W5 not started; contract drift — spec `materializeExecutableWorkflow`/`ce/1` absent, actual impl = `workflowCanonicalEval.ts` runtime eval. | verified | Audit findings only; register rows not edited (status update proposed to user); no production/test/DB/provider changes. |
+| A-166 | 13000–13019 | Shop QA 50 direct chatbot API / 2026-11-10 | pending/deferred work | Parallel direct API audit: Test Chat 10 + shadow 40, HTTP 200/50; manual grades pass 9, partial 15, fail 19, context-limited 7. Catalog-backed stock defects in controlled cases; 13/13 simulated handoffs persisted to test sandbox but assigned admin 0; grouped traces show Zaapi `ch:kb` selected 0, no active v2 generation/canonical records in prior Mongo census. Median wall 10.84s, max 107.50s; token/cost aggregates disagree between response and step logs. Preview/JSON in ignored docs/test/results. No product writes or code changes. | verified | Shadow history lacked assistant turns/item ids (7 context-limited); no customer sends; follow-up work: stock/intent/KB/handoff/telemetry and replay-context fixes. |
+| A-167 | 13020–13026 | Shop QA 12 full shadow conversations — pre-work announce / 2026-11-11 | pending/deferred work | กำลังจะทำ marker only: replay 3 real shadow conversations per shop (KingGadgets, KieslectThailand, CukTechThailand, BlackShark) through direct chatbot API; synthetic conversation/session ids + simulate_assignment + test_source; verify complete transcript exists before firing; Mongo read-only, no customer sends, no code changes/commits. | historical-unverified | Announce-only, no closeout appended yet — parallel session in progress. |
