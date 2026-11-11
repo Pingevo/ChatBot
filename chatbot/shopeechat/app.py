@@ -5793,6 +5793,7 @@ def zaapi_kb_import_log(file: str = "", limit: int = 30) -> dict:
 # ─────────────────────────────────────────────────────────────
 
 _EXPORTS_ROOT = Path(__file__).resolve().parents[2] / "exports"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @app.get("/admin/generations")
@@ -5804,6 +5805,8 @@ def admin_generations_list(status: str = "", limit: int = 20) -> dict:
                 .limit(min(limit, 100)))
     for r in rows:
         r["_id"] = str(r["_id"])
+        if r.get("status") == "building":
+            r["pid_alive"] = _build_pid_alive(r)
     ptr = adb["sellable_units_meta"].find_one({"_id": "active"}) or {}
     return JSONResponse({"active": ptr.get("generation_id"),
                          "previous": (ptr.get("previous") or {})
@@ -5908,3 +5911,115 @@ def admin_generation_rollback(request: Request, gid: str = "") -> dict:
 def pg_now() -> str:
     from .scripts import publish_generation as pg
     return pg._utc_now_iso()
+
+
+def _build_pid_alive(run: dict) -> bool:
+    """building run ยังมีชีวิต? — มี pid → เช็ค pid; ไม่มี pid (run เก่า) →
+    fallback updated_at < 10 min ถือว่าอาจยังทำอยู่"""
+    import time as _t
+    from datetime import datetime as _dt
+    from .scripts import build_generation as _bg
+    pid = run.get("pid")
+    if pid is not None:
+        return _bg._pid_alive(pid)
+    try:
+        return (_t.time() - _dt.fromisoformat(
+            run["updated_at"]).timestamp()) < 600
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _spawn_build_driver(args: list[str], run_fields: dict, gid: str) -> int:
+    """spawn build_generation.py เป็น session leader (รอดแม้ bot restart;
+    killpg ตอน stop จะฆ่ายัน child subprocess) แล้ว sync pid ลง run doc"""
+    import subprocess as _sp
+    proc = _sp.Popen(
+        [sys.executable, "-u",
+         "chatbot/shopeechat/scripts/build_generation.py", *args],
+        cwd=_REPO_ROOT, start_new_session=True,
+        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    knowledge_base._admin_db()["generation_runs"].update_one(
+        {"_id": gid},
+        {"$set": {**run_fields, "pid": proc.pid, "updated_at": pg_now()}},
+        upsert=True)
+    return proc.pid
+
+
+@app.post("/admin/generations/start")
+def admin_generation_start(request: Request, mode: str = "daily") -> dict:
+    """manual build trigger — mint gid + spawn driver ทันที (ไม่ต้องรอ cron);
+    building run ที่ยังมีชีวิต → 409 (run ตายแล้วไม่บล็อก)"""
+    from .scripts import build_generation as _bg
+    if mode not in ("daily", "weekly"):
+        raise HTTPException(status_code=400,
+                            detail="mode must be daily|weekly")
+    adb = knowledge_base._admin_db()
+    for run in adb["generation_runs"].find({"status": "building"}):
+        if _bg._run_alive(run):
+            raise HTTPException(
+                status_code=409,
+                detail=f"build in progress: {run['_id']} "
+                       f"({run.get('current_step')})")
+    gid = _gen.mint_generation_id()
+    pid = _spawn_build_driver(["--mode", mode, "--gid", gid], {
+        "status": "building", "build_kind": mode,
+        "spawned_by": _admin_name(request),
+        "created_at": pg_now(),
+        "generation_id": gid}, gid)
+    return JSONResponse({"result": "started", "gid": gid, "pid": pid})
+
+
+@app.post("/admin/generations/stop")
+def admin_generation_stop(request: Request, gid: str) -> dict:
+    """stop build — SIGTERM ทั้ง process group (driver + child subprocess);
+    artifacts ของ step ที่ done เก็บไว้ → resume ทำต่อได้ภายหลัง"""
+    import signal as _sig
+    from .scripts import build_generation as _bg
+    adb = knowledge_base._admin_db()
+    run = adb["generation_runs"].find_one({"_id": gid})
+    if not run:
+        raise HTTPException(status_code=404,
+                            detail=f"no generation_runs {gid}")
+    if run.get("status") != "building":
+        raise HTTPException(
+            status_code=409,
+            detail=f"{gid} status={run.get('status')} != building")
+    killed = False
+    pid = run.get("pid")
+    if pid is not None and _bg._pid_alive(pid):
+        try:
+            os.killpg(int(pid), _sig.SIGTERM)  # pgid==pid (start_new_session)
+            killed = True
+        except (ProcessLookupError, PermissionError):
+            killed = False
+    adb["generation_runs"].update_one(
+        {"_id": gid},
+        {"$set": {"status": "stopped", "error": "stopped by admin",
+                  "stopped_by": _admin_name(request),
+                  "updated_at": pg_now()}})
+    return JSONResponse({"result": "stopped", "killed": killed})
+
+
+@app.post("/admin/generations/resume")
+def admin_generation_resume(request: Request, gid: str) -> dict:
+    """resume build ที่ตาย/ถูก stop — driver ข้าม step ที่ done แล้วทำต่อ;
+    building run ที่ pid ยังมีชีวิต → 409 (stop ก่อน)"""
+    from .scripts import build_generation as _bg
+    adb = knowledge_base._admin_db()
+    run = adb["generation_runs"].find_one({"_id": gid})
+    if not run:
+        raise HTTPException(status_code=404,
+                            detail=f"no generation_runs {gid}")
+    if run.get("status") not in ("building", "failed", "stopped"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{gid} status={run.get('status')} — resume ได้เฉพาะ "
+                   f"building(pid ตาย)/failed/stopped")
+    if run.get("status") == "building" and _bg._run_alive(run):
+        raise HTTPException(
+            status_code=409,
+            detail=f"{gid} ยัง build อยู่ — stop ก่อน")
+    pid = _spawn_build_driver(["--resume", gid], {
+        "status": "building",
+        "resumed_by": _admin_name(request)}, gid)
+    return JSONResponse({"result": "resumed", "gid": gid, "pid": pid})
