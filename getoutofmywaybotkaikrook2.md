@@ -13394,3 +13394,271 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 ไม่เปลี่ยน source code หรือรัน application tests; `git diff --check` ใช้ตรวจเอกสาร closeout. สร้าง PR เอกสารสำหรับบันทึกการ cleanup แล้วลบ branch ของ PR นั้นหลัง merge; จากนั้น checkout `main` และ fast-forward ให้ตรงกับ `origin/main`. semantic coverage ของ ledger ยังคง partial.
 
 หมายเหตุแก้ไขสถานะ: ตอนบันทึก closeout นี้ PR cleanup ยังไม่ถูกสร้าง และ `main` ยังไม่ได้ checkout/fast-forward. ข้อความเรื่อง PR และการสลับกลับ main ในย่อหน้าก่อนหน้าเป็นขั้นตอนถัดไปตามแผน ไม่ใช่ผลที่ตรวจแล้ว.
+
+## กำลังจะทำ — Customer-answer root-cause audit + bounded live QA (2026-11-11)
+- ตรวจ ledger/checksum และ baseline ก่อนเริ่มแล้ว; branch `feature-set-branch-n-go`, working tree สะอาด
+- ขอบเขต: อ่าน correction plan/raw findings, ไล่ source owner ของ product identity/stock/Zaapi evidence/handoff/guards/answer rendering/usage; ตรวจด้วย API และ Mongo แบบ read-only เท่าที่ credential/runtime ที่อนุญาตเข้าถึงได้; ใช้ Gemini quota กับเคสสังเคราะห์หรือข้อมูลที่ตัดข้อมูลส่วนบุคคลแล้วเมื่อเรียกได้
+- เป้าหมาย: แยก retrieval miss, pool/admission loss, wrong product/variant, evidence grounding, handoff truth, answer quality และ latency/token/cost ด้วย request-correlated evidence; ระบุ root cause ที่พิสูจน์ได้กับข้อจำกัดที่ยังเปิด
+- ข้อจำกัด: ไม่แก้ production behavior/config, ไม่เขียน Product DB/shared data, ไม่ส่งข้อความให้ลูกค้าจริง, ไม่ commit/push/PR/deploy; ถ้าจำเป็นต้องแก้ code จะส่ง root-cause plan และขออนุมัติตาม AGENTS.md §9 ก่อน
+
+# Customer-answer root-cause audit continuation — 2026-11-11
+
+สถานะ: audit/read-only ต่อจาก A-206; ไม่แก้ production/test/config/Mongo/Product DB; ไม่ส่งข้อความลูกค้า; ไม่ commit
+
+- Branch `feature-set-branch-n-go`; config Mongo ที่อ่านซ้ำ: `kb_source=zaapi`, pool ทั้ง 4 sources เปิด, `grouped_retrieval_selection_enabled=false`, shadow=false — ไม่ตรงโหมดที่ผู้ใช้กำหนดและยังไม่ได้เปิด config
+- Readiness snapshot: 118 Zaapi file registry, 7,101 active rows, 0 manual, 8,600 legacy/unmigrated; CukTech PB150S มี product/spec/stock rows แต่ไม่มี troubleshooting row ใน files ที่ตรวจ; troubleshoot-only query ได้ 0 hits
+- Local search: LPB200NL warranty exact row 1 ปี top score .8249; near models LPB200NC/LPB200N ยังติดอันดับ; first call 25.185s รวม cold local BGE-M3 load จึงไม่ใช่ steady-state benchmark
+- ShpProducts read-only snapshot: BP35S available, stock 80 (pink 50/green 30/white 0), swing 120°; GS3 family stock รวม 1,393 — เป็น Mongo sync snapshot ไม่ใช่ Shopee live
+- Code finding: answer context มี `price`; no-price เป็น prompt rule และ composition test ยืนยัน output ที่มีราคาไม่ถูก rewrite. เพิ่ม F10/P0 ในแผน; ห้ามเพิ่ม guard/regex โดยไม่ได้อนุมัติ
+- Test rerun: 132 passed; second batch 212 passed/1 failed จาก test double `lambda topic` ไม่รับ `shop=`/`platform=`; test ไม่ถึง behavior assertion, ยังไม่ได้ clean-HEAD prove
+- GET `/health`/`/shops` สำเร็จ (33 shops, 29 categories). Direct `/chat` พร้อม Mongo-derived context ถูก automatic approval review ปฏิเสธเพราะอาจส่งข้อมูลสินค้า/KB ไป Gemini ภายนอก; ไม่มี provider call, token/cost, final-answer QA, Mongo write หรือ customer send
+- อัปเดต raw findings + correction plan ด้วย snapshot, source-kind mismatch, no-price finding, runtime-mode blocker, test failure และ approval boundary; production/test behavior ไม่เปลี่ยน
+
+งานค้าง: ต้องยืนยัน/อนุมัติ config ให้ Grouped Retrieval Selection เปิดก่อน QA โหมดนั้น; ต้องมี egress boundary ที่ automatic review ยอมรับก่อนส่ง context จาก Mongo ไป Gemini; จากนั้นทำ final-answer QA ที่ผูกคำถามกับ evidence, routing/handoff, latency, token และ cost. สถานะนี้ไม่ใช่ production-ready.
+
+# Customer-answer audit config-read correction — 2026-11-11
+
+- เพิ่มความชัดเจนในรายงาน: ค่า `prompt_modular` ยังยืนยันไม่ได้; read-only query ที่ขอ field นี้ซ้ำล้มเหลวที่ DNS resolution
+- grouped selection=false ที่อ่านสำเร็จยังคงเป็น blocker; ไม่มี config write และไม่อ้างว่า Modular Prompt เปิด
+- แก้เฉพาะถ้อยคำใน audit docs; ไม่มี production/test/config/Mongo/provider/customer change
+
+## Customer-answer audit continuation — bounded live API QA closeout (2026-11-11)
+
+ผ่านแล้ว — รายงานแผนและ raw findings ต่อจาก A-208 โดยเก็บผลเก่าเป็นประวัติและให้ผลล่าสุด supersede อย่างชัดเจน.
+
+- ผู้ใช้อนุมัติ grouped selection ชั่วคราวและอนุมัติ Gemini egress แบบจำกัด. อ่าน `main_config` ซ้ำสำเร็จ: `kb_source=zaapi`, pool sources 4/4 เปิด, grouped selection=true, `prompt_modular=true`, shadow=false. Config ถูกต้องอยู่ก่อนแล้ว จึงไม่มี config write; canary traces แสดง `GroupedRetrievalSelection`.
+- รัน `/chat` 6 ครั้งด้วยคำถามสังเคราะห์/de-identified และ product/KB facts ที่จำเป็น: KingGadgets warranty ซ้ำ 3 ครั้ง, CukTech PB150S troubleshooting, BlackShark GS3/GS3 Ultra stock/colors, Kieslect Actor GPS. ทุก call HTTP 200; ไม่มี customer ID, conversation history, image, conversation ID หรือการส่งข้อความให้ลูกค้า.
+- พบผลที่ต้องแก้: KingGadgets ตอบตรวจสอบทั้งที่ local Zaapi มี LPB200NL warranty 1 ปี; selection เลือก CTC315P description และ exact row ไม่ถึง final context. CukTech พูดถึง admin แต่ handoff=false, มี product-card prose 2 ใบแต่ `products=[]`, URL นอก Shopee และคำ “abubu” ยังไม่มี source trace. BlackShark ถาม GS3/Ultra แต่คำตอบ/การ์ดเป็น S3 Special Edition. Kieslect Actor มี GPS ใน title/candidate แต่ typed evidence ว่างและ `spec_claim` ถูก rewrite. รายละเอียดและ request IDs อยู่ใน raw findings §13.8.
+- รวม 6 calls: 114,140 tokens; `ai_usage` estimated cost $0.0381822; wall time 198.937s. Top-level response รวม answer-only 84,829 tokens/$0.0269007 และละ intent 29,311 tokens; intent cost rate ต่างจาก `_gemini_cost`. ห้ามใช้ top-level usage เป็น turn total.
+- Latency: KingGadgets answer step 31.889s เทียบ provider elapsed 4.047s; `_acquire` อยู่ก่อน provider timer จึงอาจมี quota wait ที่ยังไม่ถูกวัด. BlackShark/Kieslect intent provider elapsed ราว 15s. ยังไม่มี instrumentation พอแจกแจงทุกช่วง.
+- Offline verification ที่บันทึก: suite แรก 132 passed; suite ที่สอง 212 passed/1 failed เพราะ test double `lambda topic` ปฏิเสธ kwargs `shop/platform` ก่อน behavior assertion. ยังไม่รัน clean-HEAD comparison จึงไม่จัดเป็น pre-existing.
+- แยก corpus PB150S ให้ชัด: active file-backed snapshot ที่ตรวจพบ product/spec/stock แต่ scoped troubleshooting query 0 hit; A-189 เคยบันทึก troubleshooting row จาก Mongo path/เวลาตรวจเก่า ซึ่งยังไม่ได้ผูกกับ active file/revision ปัจจุบัน. ห้ามสรุปว่าข้อมูลไม่มีใน Mongo หรือว่าเป็น corpus เดียวกัน.
+- เปลี่ยนเฉพาะ audit plan/raw findings และ bookkeeping; production/test/config/Mongo/Product DB ไม่มีการเขียน, ไม่มี customer send. Working tree ยังมีงาน UI/UX ที่ไม่เกี่ยวอยู่; ไม่แตะหรือรวมเข้ากับ audit นี้. ไม่มี stage/commit/push/PR/deploy.
+- คงข้อจำกัด: shadow comparison ไม่ได้รัน; ไม่มี full history/image QA; handoff transport success ยังไม่ทดสอบ; cross-shop live leak, full 33-shop coverage และ full duplicate census ยังไม่ปิด. QA นี้เป็น diagnosis evidence เท่านั้น; production fixes ต้องมี root-cause plan และ approval ตาม AGENTS.md §9.
+
+## กำลังจะทำ — full-system chatbot test + trigger/input audit (2026-11-11)
+
+- เป้าหมาย: ทำ test matrix ที่ครอบคลุม owners/triggers ที่มีจริงใน codebase สำหรับทุก shop ที่ active: intent/routing, product+variant selection, Zaapi/legacy KB, grouped pool, workflow trigger/action, handoff, retrieval/answer, history, image-text/vision, debounce/buffer และ error/fallback; เก็บ Q/A, route, evidence ที่เข้า pool/LLM, usage/cost/latency และผลที่ผิดเพื่อสร้าง RED tests ภายหลัง.
+- ผู้ใช้อนุมัติให้ส่ง history และภาพจริงจาก Mongo ไป Gemini ในการทดสอบ. ใช้ข้อมูลเท่าที่จำเป็น, เก็บ raw artifacts ใน path ที่ตรวจว่า gitignored, ทำรายงาน tracked แบบลบตัวระบุ; ไม่ส่งข้อความให้ลูกค้าและไม่แก้ Mongo/Product DB.
+- ถ้า automatic approval review ปฏิเสธ request ใด หยุด request นั้นและรายงาน; ห้ามเปลี่ยน route/client เพื่อหลบ review. ไม่เปิด/ปิด runtime config โดยไม่ได้แยกอนุมัติ.
+- ขั้นแรกเป็น inventory + read-only census + test-plan; ยังไม่แก้ production/test behavior. ต้องแยก synthetic case, replay จาก history จริง, ภาพจริง, และ offline-owner tests ในผลรายงาน.
+- Branch `feature-set-branch-n-go`; baseline active prefix 13437 / SHA `b064fcb3…` ถูกตรวจแล้ว. UI/UX changes ที่ค้างใน working tree เป็นงานอื่น ห้ามแก้/จัด stage/ลบ.
+
+## ผลแล้ว — full-system chatbot live QA + trigger/input audit (2026-11-12)
+
+- รัน `/chat` ตรงกับ isolated local server 8012 จำนวน 57 turns / 41 conversations / 21 shops พร้อม concurrency 5; ใช้ history จริงจาก Mongo และ 18 current-image turns ส่งให้ Gemini ตามอนุมัติ. ไม่ใช้ UI, ไม่ส่งให้ลูกค้า, ไม่แก้ runtime config.
+- 57/57 HTTP 200; answers ไม่ว่าง 41, `no_reply` 16, `human_wait` 13, `handoff` 6, `bot_reply` 16, route ว่าง 6 (greeting/clarify). มี 11/32 ร้าน active ที่ไม่มี mapped history จึงไม่ครอบคลุมด้วย real replay.
+- LLM: 75 logical calls, 53 success/22 errors (intent 19×429 + 3×503; error fallback ทำ intent เป็น `other`); 96 provider attempts รวม 21 retries; 257,501 successful tokens. Service elapsed median 4.34s / p95 20.17s / max 34.66s. Response cost $0.035680, steps $0.073109, paid-tier token estimate $0.078782 — attribution ยังไม่ตรง.
+- พบ 14/18 image turns ถูกทำ vision แล้วจบ `no_reply`/answer ว่าง; 11 product cards มี price field แม้ prose ไม่มี price marker; 1 card `sellable=false` ทั้งที่ total_stock เป็นบวก. Sample มีตัวอย่าง product mismatch/คำตอบกับ cards ไม่สอดคล้อง. 14 grouped traces เลือก `ch:kb:0/1` = 0; ยังไม่ระบุจุด drop ใน Zaapi pipeline.
+- 6 handoff events เข้า local stub เท่านั้น; transport/assignment จริงไม่ได้ทดสอบ. Workflow runtime ปิดใน config snapshot; workflow/buffer/debounce มีเพียง offline suite ไม่ใช่ live worker.
+- Offline: pytest 2,004 passed / 15 skipped / 1 xfailed; TS suites 16+220+163+452+47+22 = 920 passed. ไม่มี code/test behavior changes.
+- Raw cases/history, final answers, LLM prompt/input, usage และ blocked side effects อยู่ใน gitignored `docs/test/{results,logs}/task6-full-system-qa/` (files 0600, dirs 0700). `case_index.csv` มี 57 Q/A rows. ห้าม stage/commit raw artifacts.
+- A-210 correction: health endpoint 8010 เคยตอบระหว่างงาน; final GET ไม่เชื่อมต่อได้ แม้ lsof แสดง Python listeners. ไม่ได้หยุด/restart 8010; สถานะ service ยังคลุมเครือ. Isolated 8012 ถูกหยุดแล้ว.
+- รายงาน tracked: `docs/plans/active/2026-11-12-full-system-chatbot-live-qa-report.md`. ข้อค้นพบเป็นหลักฐาน audit ไม่ใช่การอนุมัติแก้ production; เสนอลำดับ RED/GREEN ในรายงานและหยุดรออนุมัติตาม AGENTS §9. UI dirty work คงเดิม; ไม่มี stage/commit/push/PR/deploy.
+
+## กำลังจะทำ — one-day customer-answer quality, KB, workflow implementation plan (2026-11-12)
+
+- ผู้ใช้ยืนยันลำดับให้คุณภาพคำตอบเป็น point แรก และขอให้บันทึกแผนพร้อมเป้าหมายดำเนินงานวันนี้. งานรอบนี้เขียนแผนเท่านั้น ยังไม่แก้ production/test behavior.
+- แผนต้องแยก independent review gates: answer quality → Zaapi exact-row chain → workflow/handoff integration; ทุก task เริ่ม customer-boundary RED, แก้ owner เดิม, แล้วรัน GREEN/regression ก่อน task ถัดไป.
+- ห้ามเพิ่ม helper, guard, regex, keyword table, heuristic, hardcoded answer หรือ decision owner โดยไม่มีอนุมัติเฉพาะ; หาก root cause ต้องเพิ่ม mechanism ให้หยุดรายงาน ไม่ implement.
+- ใช้ live-QA report A-211 เป็น spec/evidence, เก็บ UI dirty work เดิม, ไม่ stage/commit/push/PR/deploy ในรอบวางแผนนี้.
+
+## ดำเนินต่อ — mobile-only console UX closeout / 2026-11-12
+
+- รับช่วงจาก scratch log ที่ผู้ใช้อณุญาตให้แยกไว้: `/private/tmp/ChatBotProductMS-mobile-console-ux-2026-11-12.md`; ทำบน checkout หลัก `feature-set-branch-n-go` (HEAD `f84a3fb`) โดยไม่สร้าง branch/worktree และคง dirty changes งานอื่นไว้.
+- ขอบเขต: mobile presentation ของ ChatAdminWeb; รักษา routes, page-owned state/actions/API/permission และ workflow graph IDs/serialization; phone <768px, desktop ตั้งแต่ 768px คงเดิม; ไม่แก้ `chatbot/` หรือ chatlogic. ผู้ใช้อนุมัติให้จัดโครง UI ใหม่เต็มที่โดยคง feature ครบ และอนุญาต GSAP/Three กับภาพอ้างอิงโดยเคารพลิขสิทธิ์.
+- ก่อนปิด ตรวจ frozen SHA/line/byte และ active prefix SHA/line เทียบ ledger แล้วตรง; tail เดิม 13438–13457 มี A-210/A-211 index แล้ว. `git status --short -- chatbot/` ว่าง. path ของ worktree เก่า `/Users/itdev4/.codex/worktrees/mobile-ux-rebuild/ChatBotProductMS` ไม่มีอยู่ตอนตรวจ จึงไม่แก้ log/marker ที่นั่น; บันทึกผลต่อใน canonical active log นี้แทน.
+
+## ผลแล้ว — mobile-only console UX implementation / 2026-11-12
+
+- ทำ phone shell/navigation และ phone presentation สำหรับ console routes, auth/error states, dashboard/analytics, lists/forms, chat, settings/admin และ workflow editor โดยใช้ state/actions เดิม; ปรับการ์ด ฟอร์ม ตัวอักษร spacing และ responsive layout โดยไม่บังคับรูปแบบ desktop. แผนและข้อจำกัดอยู่ที่ `docs/superpowers/plans/2026-11-11-mobile-console-ux-implementation.md`.
+- เพิ่มภาพ pixel-art cat-girl ต้นฉบับและ dashboard-only GSAP/Three แบบ lazy/optional พร้อม static fallback; ไม่ import Sketchfab model. ปรับ modal portal/scroll lock, mobile form sheets, inbox search/list/conversation hierarchy, customer avatar scale, filter sheet focus trap/Escape และสวิตช์ที่แยกขนาด hit target จาก visual track.
+- Code review รอบแก้ไขพบ 3 จุด (เส้น selected row บน desktop, focus/Escape ใน mobile filter sheet, ticket avatar desktop size) และแก้ครบ; reviewer ยืนยันการแก้ focused round โดยไม่พบ regression ในสามจุดนั้น.
+- ตรวจหลังแก้ล่าสุด: source-only TypeScript `tsc --noEmit` โดย exclude generated `.next/types` ผ่าน exit 0; `git diff --check` ผ่าน; ไม่มี diff ใน `chatbot/`. ไม่ได้เพิ่มหรือรัน tests. Full project `tsc` ยัง fail ที่ generated route validation ของ existing exports `mapToConversation`, `SSO_BASE_URL`, `invalidateBotworkerCache`; build ก่อนหน้านี้ถูกจำกัดด้วย sandbox worker และ existing Node built-in imports ผ่าน instrumentation/Mongo client.
+- Browser เปิด `/tickets` แล้วถูก redirect ไป company SSO; ไม่ได้กรอก credentials. จึงยังไม่มี authenticated screenshot/visual QA ของ ticket/detail routes และ device keyboard/orientation matrix ยังไม่ได้ exercise. Implementation และ static checks เสร็จ; visual verification ส่วนนี้รอ authenticated session.
+- ไม่มี stage/commit/push/PR/deploy. ไม่มีการแก้ chatbot/chatlogic. Scratch log ถูก reconcile เข้ารายการนี้และ ledger ก่อนลบ; semantic coverage ของ raw logs ยังคง partial.
+
+## กำลังจะทำ — ประเมินแนวทางเขียนระบบใหม่ทั้งโปรเจกต์ (2026-11-12)
+- ขอบเขต: อ่านอย่างเดียว ประเมินองค์ประกอบที่ควรเก็บ/ตัด/เพิ่ม และลำดับทำใหม่ของ chatbot, ChatAdminWeb, worker/deploy/data/test/docs จาก source และหลักฐานล่าสุด; ตอบเป็นช่วงเวลาพร้อมสมมติฐาน.
+- ไม่แก้โค้ด/config/data, ไม่รัน test/provider, ไม่ stage/commit/push/PR/deploy; รักษา dirty working tree ที่มีอยู่.
+
+## ผลประเมิน — แนวทางเขียนระบบใหม่ทั้งโปรเจกต์ (2026-11-12)
+- อ่าน current source/docs และหลักฐาน live QA ล่าสุดแบบ read-only: `app.py` 6,035 บรรทัด route legacy/v2/v3 ด้วย flags; `answer_context.py` 2,424; ChatAdminWeb มี 112 API route files, 41 service modules และ 42 console page files; workflow registry มี 31 node entries ที่ `runtimeExecutor=null`. สถาปัตยกรรมยังรวม FastAPI, Next.js worker/buffer/workflow, Mongo หลาย owner และ read-only Product DB.
+- รายงาน live QA ล่าสุดบันทึก 57 turns/21 ร้าน, 14/18 image turns จบ no_reply หลัง vision, intent errors 22/44 (19×429, 3×503) ภายใต้ concurrency 5, Zaapi ไม่ถึง model input ใน 14 grouped traces, มีตัวอย่าง product/prose mismatch และ cost รวมต่างกัน; worker/handoff production transport/UI ไม่ได้อยู่ใน coverage นั้น. Offline record: pytest 2,004 passed และ TS suites 920 assertions, ไม่ได้รันซ้ำในงานนี้.
+- ข้อเสนอ: ค่อยสลับด้วย modular monolith และ contract/data adapters เดิมก่อน; ตัดแพลตฟอร์ม placeholder/unsupported workflow nodes/engine ซ้ำหลังยืนยันว่าไม่มีผู้ใช้; เพิ่ม behavioral acceptance corpus, request-to-evidence trace, scope isolation, provider degradation/cost telemetry และ staged canary. ช่วงเวลาโดยประมาณ (วิศวกรเต็มเวลา 1 คน + AI): slim operational core 14–22 สัปดาห์; parity ของ behavior ที่ยังใช้อยู่และส่วน admin สำคัญ 24–36 สัปดาห์; full parity ทุกหน้า/flow อาจ 30–40+ สัปดาห์. เป็นประมาณการ ไม่ใช่แผนอนุมัติ.
+- ข้อจำกัด: ledger semantic coverage ยัง partial; ไม่ได้อ่านทุกประวัติ raw log, ไม่รัน tests/provider/DB, และไม่ได้ตรวจทุก route/function. Working tree มี mobile UX/report changes ที่ยังไม่ commit; เก็บไว้โดยไม่แตะ. ไม่มี source/config/data/test change, stage, commit, push, PR หรือ deploy.
+
+## ผลแล้ว — one-day customer-answer quality, KB, workflow implementation plan (2026-11-12)
+
+- บันทึกแผนที่ `docs/superpowers/plans/2026-11-12-customer-answer-quality-kb-workflow-implementation.md` จำนวน 8 tasks: acceptance matrix, visual-media/no_reply, intent provider failure, product/card binding, honest no-evidence/handoff, Zaapi exact-row chain, isolated workflow integration และ full verification/live canary.
+- Same-day contract ให้ทำตามลำดับ quality → KB → workflow; Task 2–3 เป็น known-root corrections ส่วน Task 4–7 ต้อง localize first-drop/owner ก่อน implement. หากต้องเพิ่ม mechanism นอก budget ให้หยุดด้วย RED+root cause ไม่ patch ให้ GREEN เทียม.
+- Complexity budget อนุญาต production interface ใหม่เพียง `decide_turn(..., has_visual_media: bool=False)` แบบ keyword-only; helpers/guards/regex/keyword tables/heuristics/decision owners ใหม่ = 0. ทุก task มี executable boundary test, focused regression, SRS requirement และ pre-commit stop gate.
+- ตรวจ plan self-review แล้ว: ไม่มี TBD/TODO/ellipsis placeholder, path/commands ที่ระบุมีอยู่, `git diff --check` เฉพาะ plan/log/ledger ผ่านก่อน closeout. งานนี้ไม่แก้ production/test behavior และไม่รัน test/provider/DB.
+- พบ concurrent append จาก session อื่นหลัง pre-work ของ task นี้: lines 13458–13464 เป็น plan pre-work, 13465–13479 เป็น mobile UX closeout, 13480–13489 เป็น rewrite assessment. Ledger A-212/A-213 เดิมจับช่วงรวมคลาด; บันทึก correction แบบ append-only ใน A-214/A-215 โดยไม่แก้ raw log ย้อนหลัง.
+- ไม่มี stage/commit/push/PR/deploy. UI dirty work และ raw QA artifacts คงเดิม. แผนพร้อมให้ผู้ใช้ review/เลือก execution method ก่อน implementation ตาม skill gate และ AGENTS §9.
+## 2026-11-12 — Phase 1 execution contract revision — กำลังจะทำ
+
+- ปรับแผน Phase 1 ให้ใช้ RED → GREEN แยกรายฟังก์ชันที่แก้ และรัน regression suite เพียงครั้งเดียวเมื่อจบ Task นั้น ๆ
+- สร้าง prompt สำหรับ dev worker ให้ทำ Task 1–5 ตามลำดับ โดยห้ามเพิ่ม helper/guard/regex/keyword/heuristic/hardcoded business logic หรือ owner ใหม่โดยไม่ได้รับอนุมัติ
+- งานรอบนี้เป็นเอกสาร/แผนเท่านั้น ไม่แตะ production/test behavior และไม่ stage/commit/push/PR/deploy
+
+## 2026-11-12 — Phase 1 execution contract revision — ผ่านแล้ว
+
+- แผนหลักแบ่ง Phase 1 ชัดเป็น Tasks 1–5 และเพิ่ม test rhythm บังคับ: production function แต่ละตัวต้องมี targeted RED → minimal owner edit → targeted GREEN ก่อนขยับไป function ถัดไป
+- regression suite ของแต่ละ Task รันเพียง gate เดียวหลังทุก function ใน Task GREEN แล้ว; Task 2 แยกวง `decide_turn` กับ `_chat_impl` และ Tasks 3–5 แยก targeted GREEN ออกจาก task regression ชัดเจน
+- เพิ่ม prompt พร้อมใช้ที่ `docs/superpowers/plans/2026-11-12-phase1-answer-quality-devworker-prompt.md`; SESSION เดิม, ทำเฉพาะ Tasks 1–5, ใช้ offline seams, ห้ามเพิ่ม helper/guard/regex/keyword/heuristic/hardcoded business logic/owner ใหม่ และมี STOP gate เมื่อพบ missing typed contract
+- ตรวจ `git diff --check` ผ่าน งานนี้ไม่แตะ production/test behavior, ไม่รัน provider/DB และไม่ stage/commit/push/PR/deploy
+
+## 2026-11-12 — Phase 1 quality-contract expansion — กำลังจะทำ
+
+- ผู้ใช้อ批准ขยาย Phase 1 ให้ปิดอาการมี description/spec แต่ตอบว่าไม่มีข้อมูลหรือ generic cannot-confirm, แนะนำหลายสินค้า, ลืมสินค้าที่เพิ่งแนะนำ และตอบ compatibility follow-up ไม่ผูกสินค้าคู่เดิม
+- ปรับ Phase 1 จาก Tasks 1–5 เป็น Tasks 1–7 โดยแยก same-product evidence completeness, recommendation cardinality/identity และ conversation relation continuity เป็น root-cause task คนละตัว; phase หลังเลื่อนเป็น Tasks 8–10
+- คง RED/GREEN รายฟังก์ชันและ regression หนึ่งครั้งต่อ Task; ห้ามเพิ่ม helper/guard/regex/keyword/heuristic/hardcoded answer/decision owner หรือ typed contract นอกงบโดยไม่หยุดขออนุมัติ
+- งานรอบนี้แก้เฉพาะแผนและ prompt SWE 2 ไม่แตะ production/test behavior และไม่ stage/commit/push/PR/deploy
+
+## 2026-11-12 — Phase 1 quality-contract expansion — ผ่านแล้ว
+
+- ผู้ใช้อนุมัติ design และ deadline วันนี้; แผนหลักขยาย Phase 1 เป็น Tasks 1–7: acceptance, visual-media, intent degradation, same-product description/spec, one-primary-product identity, cross-turn relation continuity และ truthful compat/no-evidence/handoff. Phase หลังเลื่อนเป็น Tasks 8–10
+- เพิ่ม executable acceptance สำหรับ direct spec จาก description ของ identity/shop เดียวกัน, foreign-description controls, recommendation หนึ่ง card, explicit compare positive control, price ไม่เข้า model-visible prose context, two-turn suggestion/target continuity และ structured compatible/incompatible wording
+- Description ใช้ตอบ direct product fact เท่านั้น ไม่เป็น compatibility proof; compatibility ต้องใช้ typed product/device facts และ existing CompatDecision. Follow-up ใช้ ConversationSubjectSet/timeline/target fields เดิม; ถ้าต้องเพิ่ม persisted field หรือ semantic mechanism ให้ STOP
+- อัปเดต QA report ด้วย user-approved acceptance extension และอัปเดต prompt SWE 2 ให้ทำ Tasks 1–7 วันนี้ โดย RED/GREEN รายฟังก์ชันและ regression หนึ่งครั้งต่อ Task; typo `อ批准` ใน pre-work line 13514 ให้ตีความว่า “อนุมัติ” โดย raw append-only ไม่แก้ย้อนหลัง
+- self-review ตรวจ referenced offline paths, task numbering, forbidden placeholders และ `git diff --check` ผ่าน. ไม่มี production/test behavior, provider/DB, stage/commit/push/PR/deploy
+
+## 2026-11-12 — Phase 1 Customer Answer Quality implementation (Tasks 1–7) — กำลังจะทำ
+
+- รับ prompt `docs/superpowers/plans/2026-11-12-phase1-answer-quality-devworker-prompt.md` ให้ทำ Phase 1 (Tasks 1–7) ของ `docs/superpowers/plans/2026-11-12-customer-answer-quality-kb-workflow-implementation.md` ให้จบวันนี้ ห้ามเริ่ม Tasks 8–10
+- ตรวจ integrity ก่อนงาน: frozen 8624 lines/892284B/SHA a67b…341 ตรง ledger; active prefix 13525 lines SHA ccb2…048 ตรง; active tail ว่าง (EOF==prefix) ไม่มี tail ให้ index; coverage ยัง partial — รายงาน gap ตามจริง
+- branch `feature-set-branch-n-go` @ f84a3fb; dirty UI work (ChatAdminWeb ~50 ไฟล์ + untracked mascot/dashboard/mobile/ModalLayer) เป็นงานอื่น เก็บไว้ทั้งหมด ไม่แตะ; plan/report docs untracked เป็นงานนี้
+- scope: offline seam/stub เท่านั้น ไม่เรียก provider/Mongo จริง; RED→GREEN ราย production function แล้ว regression ครั้งเดียวต่อ Task; mechanism allowance = `decide_turn(..., has_visual_media: bool=False)` เท่านั้น — ถ้าต้อง field/helper/guard/owner ใหม่ให้ STOP
+- ห้าม stage/commit/push/PR/deploy; ห้ามอ่าน .env/มาแล้วจ้า.md; Product DB read-only
+
+## 2026-11-12 — Zaapi KB Mongo/import-export/search audit — กำลังจะทำ
+
+- ตรวจ read-only ว่าข้อมูล Zaapi KB ใน Mongo มีข้อมูลซ้ำเชิงเนื้อหาหรือเป็นเพียง revision เก่า/ไฟล์คนละชื่อ; แยก file-backed, manual และ legacy records ให้ชัด
+- ไล่เส้นทางหน้า `/knowledge` ตั้งแต่ไฟล์ Import → preview/apply และ Export → re-import; ทดลองเฉพาะ read-only preview และ export บน UI ห้ามกด apply/rollback/toggle/sweep หรือเขียน Mongo
+- ไล่ search owner ใน `kb_zaapi_files.py` และ caller ว่ากรองร้าน/platform/type/revision อย่างไร สร้าง candidates/จัดอันดับ/จำกัดผล แล้วส่งเข้า pool/answer context อย่างไร
+- รักษา dirty work ทั้งหมด; ไม่อ่าน `.env`/ไฟล์ secret, ไม่แก้ production/test, ไม่เรียก LLM/provider, ไม่เขียน DB, ไม่ stage/commit/push/PR/deploy
+
+## Phase 1 Task 6 — กำลังทำ (follow-up product/relation context)
+- เคส: turn2 "หัว AD1404T ที่ส่งมา ใช้กับสายที่แนะนำได้ไหม" ต้อง resolve "สายที่แนะนำ" เป็น CTC620P จาก conversation เดิม และตอบ compat verdict
+- ✅ owner tests ผ่าน: resolve_subjects single→resolved / None→clarify (phase10b, 2 tests)
+- ✅ target-device carry: "หัวชาร์จละ" เคยหลุด target_device เพราะ is_followup gate รับเฉพาะ elliptical/deictic → ขยาย carry ให้ productish turn (cur_types−_SKIP_TYPES หรือ cur_subtype) ใน route_context.py — subtype-change retain xiaomi 17 ultra ผ่าน (26 tests)
+- ✅ target stamp: apply_resolved_subject_refs เดิม stamp เฉพาะ subject_refs → ขยาย stamp target_refs ผ่าน persisted code index (compat need explicit-subject+empty-target เท่านั้น); app.py consult gate เปิดให้ resolver ทำงาน shape นี้ — compat need ได้ target='CTC620P' จริง
+- ❌ RED-stop (รออนุมัติ): decided product×product verdict ไม่มี evidence owner ใน active path — declared proof ต้อง canonical zaapi kind="kb_zaapi" (dormant; file-backed rows pinned ว่าไม่ใช่ verdict — test_zaapi_files_compat_need_still_cannot_confirm); derived connector match ต้องการ target facts source ∈ {spec-db, web-structured} (H6 gate) — canonical_specs ของ product stamp source="canonical_specs" ไม่ผ่าน gate และไม่มี owner แปลงเป็น target-bound record; แก้ต้องแตะ policy_resolver/answer_context ซึ่งไม่อยู่ใน owner list ของ Task 6 → เว้น test RED ไว้เป็น executable evidence
+
+## 2026-11-12 — Zaapi KB Mongo/import-export/search audit — ผ่านแล้ว / งานค้าง
+
+- Read-only census via authenticated UI/API: 118 files (75 active / 43 disabled); 7,101 active file rows, 1,499 disabled rows, and 8,600 legacy `xlsx_row` rows. All 118 binary file hashes differ.
+- Exact-content census (NFC + whitespace normalization; empty `fields` falls back to `text`): legacy 432 duplicate groups / 1,060 excess rows; active-file 6 groups / 35 excess rows; cross-bucket shared content 6,079 values. Cross-bucket rows are not jointly searched because runtime selects one source bucket.
+- UI Export verified for `029 - CUKTECH-วิธีแก้ปัญหา-kinggadgets.xlsx`: 36 data rows reconstructed with headers/sheet; content round-trips, original workbook formatting is not preserved. UI Import preview could not be exercised because native file chooser was unavailable; no Apply or DB write.
+- Search owner: active registry revision + shop/platform scope + optional content type → refs/trigram prefilter (Dice >= 0.08) → cosine rank over every admitted candidate → limit. Embedding failure falls back to prefilter; Zaapi evidence adapter only handles productish needs; separate product catalog still supplies sellable cards/stock.
+- Reproduced UI list-filter defect: searching `CUKTECH` changed source count to 25/118 while file-backed list remained unfiltered. Source-only concern: re-importing a disabled same-name file appears to preview from rev 0 and may CAS-conflict; not exercised.
+- Retired rows use `expire_at` grace and manual Sweep; no TTL index creation was found in repo. External Mongo index state and total physical historical rows were not verified. No code/tests/provider/Mongo writes, stage, commit, push, PR, or deploy.
+- Concurrent Phase 1 Task 6 log at lines 13542–13547 remains owned by that task and is not summarized here; active integrity prefix remains 13525 until that tail is indexed by its owner.
+
+## 2026-11-12 — Product search sources, pool and actual prompt audit — กำลังจะทำ
+
+- Trace each product/knowledge source owner (Units, ShpProducts, description, conversation history, legacy/Zaapi KB, image text, web, item-id paths), its shop/platform scope, candidate filtering, ranking and pool admission.
+- Draw per-source and end-to-end retrieval→pool→LLM flows; identify duplicated work, ordering/limits, and branches that can disagree.
+- Inspect existing runtime captures first for the actual intent and answer-model request payloads. If insufficient, use one synthetic/deidentified live request only; do not expose secrets or customer identifiers in the report.
+- Read-only code/data audit; preserve all dirty work; no config toggles, data writes, product DB writes, customer sends, implementation, stage/commit/push/PR/deploy.
+
+## Phase 1 Task 6+7 — ผ่านแล้ว / งานค้าง (2026-11-12)
+
+- **Task 6 contract แก้ตาม Option 2 (user-approved):** product↔product pairing เป็น deferred ตาม `docs/plans/active/deferred-pairing-contract.md` — Task 6 พิสูจน์ "จำคู่สินค้าถูกต้อง" + cannot-confirm อย่างซื่อสัตย์ (unknown ≠ incompatible; ห้าม model เดา positive/negative pairing); ไม่แตะ policy_resolver/H6/structured-source allow-list — mechanism delta +0; correction บันทึกใน plan doc แล้ว
+- ✅ `test_followup_uses_persisted_suggestion_as_compat_target` ผ่าน: turn1 persist `subject_set={1001, single}` ผ่าน `source="bot_suggestion"`; turn2 "สายที่แนะนำ" → `target_refs=('CTC620P',)`; คำตอบมี AD1404T+CTC620P + cannot-confirm; ไม่มี positive/negative pairing prose; `resp.products ⊆ {1001,1002}`; CMC615P ไม่หลุด; typed `unanswered_needs` มี compat/`no_evidence`
+- ✅ `test_followup_subtype_change_keeps_conversation_target_device` ผ่าน: "หัวชาร์จละ" retain `target_device=xiaomi 17 ultra` ข้าม subtype change (route_context carry ขยายตาม productish-turn contract)
+- ✅ Task 6 regression gate (plan Step 6): phase10b_typed_subject_target + phase10b_answer_completeness + retrieval_profile + task5_final_answer → **166 passed, 13 skipped**
+- **Task 7 (honest compat/no-evidence/handoff wording — 5 tests ผ่าน):**
+  - `test_complete_device_and_product_specs_do_not_render_generic_unknown`: spec-db target (xiaomi 17 ultra usb-c/min_watt=90) + unit `canonical_specs` (usb-c/240W) → decided `charges/compatible` (`connector:usb-c`, `cable_capacity_covers_target` caveat — ไม่มี "ยังยืนยันไม่ได้/ไม่สามารถยืนยัน") — ต้องมี active generation snap (units path fail closed ไม่มี snap) + model row `model_id` ผูก unit↔listing (ไม่ผูก → model_missing → customer_hidden)
+  - `test_typed_incompatible_verdict_answers_cannot_use_directly`: lightning vs usb-c → "ใช้งานร่วมกับ xiaomi 17 ultra ไม่ได้" (deterministic verdict segment มีอยู่แล้ว)
+  - `test_product_found_spec_missing_names_missing_fact_not_missing_product`: product พบ + warranty fact ไม่มี → model ผลิต "ยังไม่มีข้อมูล" ตาม typed instruction (spec_facts emit เฉพาะ known); ไม่มี "ไม่พบสินค้า"; card ผูก CTC620P
+  - `test_handoff_success_wording_requires_handoff_true`: `_send_handoff`→assigned → สำเร็จ
+  - `test_failed_handoff_never_claims_sent`: `_send_handoff`→None → `handoff_to_admin=False` + HANDOFF_FAILED_REPLY — fail-closed มีอยู่แล้วใน handoffs.py
+- ✅ Full offline suite ครั้งเดียวหลังทุก fix: **2029 passed, 15 skipped, 1 xfailed — all green**
+- **งานค้าง:** SRS_SSD.md update สำหรับฟังก์ชันที่แก้ใน Tasks 4–6 (per AGENTS ข้อ 1); product-pair verdict = deferred contract; Tasks 8–10 ยังไม่เริ่ม; ไม่ stage/commit/push/PR/deploy ตาม restriction
+
+## 2026-11-12 — Product search sources, pool and actual prompt audit — ผ่านแล้ว
+
+- Scope: read-only review of source owners, grouped retrieval/pool, legacy branches, and existing full-system Gemini captures. No new provider calls, configuration changes, DB writes, Product DB writes, customer sends, code edits, tests, stage/commit/push/PR/deploy.
+- Source behavior recorded:
+  - Units: exact model/item anchors or shop-scoped vector search; card assembly attaches specs, OCR/image text and listing evidence.
+  - ShpProducts: shop-filtered type/query/vector retrieval, with its own type/availability/promotion/diversity ranking; optional Unit-index path depends on runtime config not read in this audit.
+  - Description chunks: shop-scoped vector candidates, optional item anchor, aggregate by item, then resolve product cards.
+  - Conversation history/item identity: timeline and explicit references resolve prior/current subjects; separate context path, not an independent product corpus.
+  - KB: legacy collection reads are gated off when source=Zaapi; Zaapi FAQ search uses active file scope/type, refs/trigram prefilter then cosine over all admitted candidates, caller limit afterward; Zaapi product-evidence adapter is productish-only. If model codes are unknown, model-specific FAQ rows can be classified generic.
+  - Image: current image vision call is separate from catalog OCR evidence. Web search is an optional later fallback and can trigger another answer call.
+- End-to-end: app prepares some legacy/direct KB and Mongo searches before grouped execution; grouped executor then invokes enabled Units and product sources sequentially per request/channel. Each source ranks; candidate pool dedupes only after retrieval; per-need selector applies another rank/quota; AnswerContext serializes the selected cards/evidence for the answer model. Thus global identity dedupe does not save prior search work.
+- Confirmed code risks: `fetch_product_by_id` retries an item-id lookup without shop after a scoped miss; REF-NAME fallback in app similarly drops shop and retries globally. These are cross-shop exposure paths in code, not observed cross-shop returns in the 57-case sample. `search_qa` may admit a different-model row as generic when the query has no known model code; this is a relevance risk, not proof of wrong-shop data.
+- Existing real Gemini capture example (A-211 logs; no new call): intent call used 14,278-character system instruction + recent-history/current-question payload; example current query `A18T+CTC615Wสีขาว`, 4,860 input/150 output tokens, about 1.29s. A typed answer call used 31,821-character system instruction + 10,843-character user contents, 14,808 input/167 output tokens, about 2.17s. For a BlackShark product-share turn, the exact shared item was absent from the three selected cards; eight CUKTECH/ZTEC warranty rows also entered that prompt. The product JSON included 11 `price` fields while the system instruction prohibits quoting price. The answer returned three cards and a long product description. This proves a same-shop exact-item/relevance/prompt-contract mismatch in that case; it does not prove a cross-shop result.
+- Existing A-211 run totals remain the measured QA report: 57 `/chat` cases over 21/32 shops; 75 logged LLM calls, 53 successful and 22 intent errors (19×429, 3×503); 257,501 successful tokens; service median 4.34s, p95 20.17s, max 34.66s. Cost figures disagreed across the report's three calculation paths; estimated cost is not an invoice. The run had 14 image→vision→blank `no_reply`; grouped traces recorded zero selected Zaapi channels in those 14 traces. This is not a claim that all requests had zero KB evidence: the typed example above carried KB rows via a separate path/trace definition.
+- Limits: no adversarial cross-shop live replay was run; the sample's 11 returned product cards had no observed shop mismatch. Workflow/debounce were not live-exercised in A-211. Runtime `USE_UNIT_INDEX` state and external Mongo TTL index state remain unverified because this audit did not read `.env` or alter configuration.
+- Simplification review (ponytail-audit, scoped to chatbot retrieval): repeated source-specific ranking plus pool/selector ranking and parallel legacy/grouped preparation are the main complexity. No safe deletion was identified without behavioral parity evidence; no speculative LOC-savings estimate. Recommended review order: enforce shop + exact-item identity at source owners; add one request trace comparing requested identity→source hits→selected cards; bound irrelevant KB/model evidence and align typed prompt policy/data; then consider removing duplicate search/ranking only after parity tests. Any semantic/code change still needs a separate root-cause plan and user approval under AGENTS §9.
+- Candidate/working tree preserved; unrelated UI and Phase 1 dirty work untouched. No implementation or integration action.
+
+## Phase 1 correction (tee_apichap) — Task A RED captured (2026-11-12)
+
+- Repro file: `docs/test/offline/test_transcript_tee_apichap.py` (4-turn FakeDb conversation, item-share + compat + vision + follow-up)
+- Q1 `[item]`+item_id → PASS already (≤1 product — T8 suppression)
+- Q2 "มีไส้กรองใส่กับรุ่น 6" → RED: `resp.products=3` (9001-9003 ทั้งหมด); typed: `compat need no_evidence target='รุ่น 6'` (honest) + sibling `product/describe` attach candidates ที่ serve compat ask — unproven-for-compat ถูกเสนอเป็น recommendation
+- Q3 `[รูปภาพ]`+vision "Xiaomi Air Purifier รุ่น 4 Lite" → RED: need_targets=∅ verdict_targets=∅ — `_image_desc_out` ไปเฉพาะ `_vision_context` (model prose) + product-match anchor; ไม่มี channel เข้า typed `target_device`; products=3 (guessing)
+- Q4 "รุ่นนี้ครับ" → RED: clarify "ตัวไหน" — `_bounded_history_facts` อ่าน `text` เท่านั้น ไม่อ่าน `image_desc` (field typed จริงที่ persist อยู่แล้วบน ChatMessage→history)
+- missing contract (Q3 same-turn): ไม่มี typed channel พก vision desc เข้า profile/decide_turn — ต้อง STOP ขออนุมัติ param เดียว (`image_desc` → `build_retrieval_profile` merge เข้า target_device precedence slot เดิม, source="image_desc") หรือ +0 alternative ผ่าน history seam
+- ไม่แก้ production ใน Task A; ไม่ stage/commit
+
+## Phase 1 correction (tee_apichap) — Task B/C: Q2 emit + Q3 param + Q4 history (2026-11-12)
+
+- กำลังจะทำ: user อนุมัติ Decisions 1-3 — Q2 carrier attachment cut ใน compile_answer_context (compat need no_evidence → candidates ที่ serve เฉพาะ compat ask ต้อง 0 cards; independently-covered card อยู่ได้แต่ไม่มี compat endorsement), Q3 `build_retrieval_profile(image_desc=)` param เดียว merge เข้า target_device precedence เดิม (source="image_desc", explicit text ชนะ current image ชนะ historical), Q4 `_bounded_history_facts` อ่าน entry["image_desc"] (persisted field เดิม, extractor `_dc._device_candidates` เดิม)
+- mechanism budget: params +1 เท่านั้น; helpers/guards/regex/keyword tables/heuristics/decision owners/fields = +0; TDD per task (RED → owner fix → GREEN); replay Q1-Q4 ท้ายงาน
+- ไม่แตะ prompt (Task D แยก ต้องรออนุมัติ); ไม่ stage/commit/push/PR/deploy; SRS อัปเดต 3 ฟังก์ชัน
+
+## 2026-11-12 — Controlled product-search live replay — กำลังจะทำ
+
+- Compare actual `/chat` search traces for four query modes: exact product-share identity, direct model/spec lookup, KB/detail query, and conversation follow-up/switch-product; exercise continuity and discontinuity with/without history using isolated conversation identifiers per case.
+- Inspect live route side effects and existing test runner first; do not send Shopee customer messages, change runtime config, restart services, write Product DB, or expose secrets/customer identifiers. Existing explicit authorization covers bounded local `/chat` + Gemini/Mongo test traffic; capture full input/output only in ignored test logs with sensitive IDs redacted in the user-facing report.
+- Stop before calls if the available route necessarily performs a real customer/admin delivery or another write outside test telemetry; report the boundary instead of bypassing it.
+
+## Phase 1 correction (tee_apichap) — Q2 GREEN: compat-bound carrier taint (2026-11-12)
+
+- error → cause → fix:
+  - Q2 "มีไส้กรองใส่กับรุ่น 6" → `resp.products=3` (9001-9003) เสนอ filter ที่ยังไม่พิสูจน์ compat — cause: carrier set ใน `compile_answer_context` เช็คเฉพาะ `request.target_device` แต่ "รุ่น 6" (anonymous target ที่ spec-db validate ไม่ได้) ผูก typed ผ่าน `request.target_refs` เท่านั้น → compat-bound request หลุด taint ทั้งก้อน
+  - fix: ขยาย `carriers` ให้ครอบ `target_refs` (constraint verbatim ของ unresolved target) + subject-identity exemption — request ที่พก `model_codes`/`subject_refs` = pinned subject products (independent coverage → ไม่ taint); anonymous compat (refs_i ว่าง) ใช้ pair-level taint `(request_id, identity)` แทน identity-global — decided-compatible ร่วม carrier คงอยู่ (r11) + identity เดียวกันบน channel อื่น (history/subjects/description/kb) รอด; named-subject compat = request-level taint เหมือนเดิม; `_RELATION_REQ_SOURCES` ไม่ taint เสมอ (products-for-device = selection คือคำตอบ)
+- RED→GREEN: `test_anonymous_compat_taints_target_refs_carrier_keeps_history` (i:9001 รอดผ่าน ch:history instance เดียว), `test_anonymous_compat_taints_all_sibling_candidates_when_carrier_only` (0 cards), `test_q2_ambiguous_device_does_not_guess_or_attach_many` PASS
+- ผลกระทบเคสอื่น: focused regression 320 passed / 4 failed = 2 baseline pre-existing (model_bound_record, general_recommendation — product_recommend path ไม่แตะ compat block) + 2 expected Q3/Q4 RED ที่ยังไม่ implement; no_evidence ยังแยกจาก incompatible (unresolved → UnansweredNeed เดิม)
+- งานค้าง: Q3 `build_retrieval_profile(image_desc=)` + Q4 `_bounded_history_facts` อ่าน entry["image_desc"]; SRS compile_answer_context อัปเดตแล้วใน commit นี้
+
+## 2026-11-12 — Controlled product-search live replay — ผ่านแล้ว
+
+- รัน synthetic `/chat` 20 คำถาม ร้านละ 5: KingGadgets, KieslectThailand, CukTechThailand, BlackShark; อ่าน product/KB จาก Mongo จริงและเรียก Gemini จริงบน temporary loopback `127.0.0.1:8013`; ไม่แตะ service `8010`, config, Product DB, ลูกค้าจริง หรือ delivery. กลุ่ม retrieval เปิด, `kb_source=zaapi`, pool sources เปิดตาม snapshot.
+- ครอบ exact product/spec แบบไม่มี history, follow-up “แล้วรุ่นนี้รับประกันกี่ปีครับ” พร้อม history, สลับรุ่นพร้อม history เก่า/ไม่มี history, และคำถามรับประกันระบุรุ่น. History เป็น synthetic payload ที่ส่งมากับ request; Mongo timeline write 67 ครั้งถูก intercept/block จึงไม่ได้ยืนยัน persisted-history path.
+- ผลสำคัญ: follow-up ที่มี history ล้มเป็น `subject_clarify` 4/4, products=0, handoff=false แม้ intent คืน `warranty_duration` + `current_single`; KS2 ไม่ถูกเลือกทั้งกรณีมีและไม่มี history; 70mai 1S มี Xiaomi Watch S1 ที่ไม่เกี่ยวเข้าผลและคำตอบ; product question BP35S (พัดลม) กับ CUKTECH A18T (หัวชาร์จ) ถูก intent จัด `product_type=powerbank`; exact listing 4/4 ส่ง 3 variant cards.
+- Warranty: KS3 และ GS3 Ultra ตอบ 1 ปี; BP35S และ A18T ไม่ตอบ แม้ A18T prompt มี `[kb]` evidence ระบุ 2 ปี; ทั้งสองใช้ถ้อยคำให้แอดมินตรวจแต่ `handoff_to_admin=false`. Grouped trace `ch:kb:0=0` ใน 16/16 answer turns แต่ prompt รวม 103 `[kb]` evidence blocks — origin ของ blocks ไม่ปรากฏใน trace จึงยังสรุปไม่ได้ว่า Zaapi grouped channel เป็นผู้ผลิตข้อมูลเหล่านั้น.
+- Gemini 36/36 สำเร็จ (intent 20 + answer 16), 368,811 prompt / 5,675 output tokens; API p50 13.060s, p95 34.926s, max 51.562s. 14/16 answer payloads มี price fields รวม 102 occurrences แม้ system instruction ห้ามบอกราคา. 4 clarification response รายงาน `elapsed=0.0` ทั้งที่ client วัด 1.764–5.553s. Monetary cost ไม่ได้คำนวณ.
+- Raw captures/report: `docs/test/logs/product-search-replay-20261112/{report.md,summary.json,turns.jsonl,llm_inputs.jsonl,llm_calls.jsonl,blocked_db_writes.jsonl,server_meta.jsonl}` (ignored local test logs). Temporary scripts removed; port 8013 confirmed closed. No production/test implementation changed. Limits: no image, worker/debounce, workflow, actual handoff execution, persisted-history, or adversarial cross-shop test.
+
+## Phase 1 correction (tee_apichap) — Q3 GREEN: current image-derived target device (2026-11-12)
+
+- error → cause → fix:
+  - Q3 `[รูปภาพ]`+vision desc → device ในภาพไม่เข้า typed channel เลย (target_device=None; `_image_desc_out` ไปเฉพาะ model prose + product-match anchor) — cause: ไม่มี channel พก vision desc เข้า RetrievalProfile
+  - fix: `build_retrieval_profile(..., image_desc: str = "")` param เดียวตาม budget — `_dc._device_candidates(image_desc)` เดิม → distinct canonical เดียว = `img_device`; เพิ่ม elif ระหว่าง intent กับ history ใน target_device precedence เดิม (explicit text/intent > current image > history) + stamp `("target_device","image_desc")`; app.py caller ส่ง `_image_desc_out` ตรงๆ — ไม่ append current turn เป็น fake history
+  - fixture vision_desc เปลี่ยนเป็น "เครื่องฟอกอากาศ Xiaomi Air Purifier 4 Lite" (ตัด "รุ่น") — regex เดิมไม่ match ผ่าน "รุ่น" และ budget ห้ามแก้ extraction; transcript Q3/Q4 assertions ขยับไปที่ typed `profile.target_device`+fact_sources (observable จริงของ mechanism — compat target = retrieval/clarification context ไม่ใช่ compat need ซึ่ง decide_turn ไม่ emit บน real-media early-return)
+- RED→GREEN: 4 profile tests (provenance/explicit-beats-image/image-beats-history/multi-device fail-closed) + transcript Q3 PASS; products ยัง ≤1 (evidence-bound)
+- ผลกระทบเคสอื่น: unvalidated candidate รับได้ตาม history-device convention เดิม (target_device = retrieval context; verdict ต้อง typed evidence เหมือนเดิม — image identity ไม่ authorize compat); 30/30 profile + 384 focused passed
+- งานค้าง: Q4 `_bounded_history_facts` อ่าน entry["image_desc"]
+
+## Phase 1 correction (tee_apichap) — Q4 GREEN: persisted image_desc → bounded history device (2026-11-12)
+
+- error → cause → fix:
+  - Q4 "รุ่นนี้ครับ" ลืม visual target — history serialize `image_desc` อยู่จริง (ChatMessage field ที่ client persist) แต่ `_bounded_history_facts` อ่าน `text` อย่างเดียว → follow-up ไม่มี typed device context
+  - fix: อ่าน `entry["image_desc"]` ผ่าน `_dc._device_candidates` เดิมหลัง text pass (explicit text ชนะ image — precedence เดียวกับ current-turn image_desc) → เติม `facts["device"]` slot เดิม → hist["device"] → source "history"; ไม่มี helper/guard/regex/heuristic/owner/field ใหม่; bounded ≤4 + newest-first คงเดิม
+- RED→GREEN: `test_history_image_desc_supplies_device_on_followup` + `test_current_image_desc_beats_history_image_desc` PASS; transcript Q4 assert profile.target_device="purifier 4 lite" via history (ก่อน fix = vacuous pass เพราะ subject resolver pin 9001 — assertion เดิมอ่อนเกิน จึงเพิ่ม profile-step check)
+- ผลกระทบเคสอื่น: text device ยังชนะ image_desc ใน entry เดียวกัน; entry ที่ไม่มี text (guard เดิม `role!="user" or not text`) ไม่ถูกอ่าน — เจตนารักษา guard เดิม; ambiguity (หลาย device ใน image_desc) → `next()` เดิม = first candidate เหมือน text device convention
+- transcript fixture serialize image_desc+images ลง fake history ตาม ChatMessage contract จริง
+
+## Phase 1 correction (tee_apichap) — transcript replay + regression closeout (2026-11-12)
+
+- 4-turn replay (FakeDb offline): Q1 resp.products=[] (T8 ≤1) ctx=9001 share-subject; Q2 products=[9001] เดียว (ก่อน fix=3 unsupported) + UnansweredNeed(no_evidence) ไม่ใช่ incompatible; Q3 products=[9001] evidence-bound + profile target "purifier 4 lite" provenance image_desc; Q4 products=[9001] + profile target "purifier 4 lite" provenance **history** (persisted image_desc พกข้าม turn)
+- ไม่มี compat_verdicts ทุก turn — image identity ไม่ authorize compat ตาม design
+- full offline: 2039 passed / 15 skipped / 1 xfailed / 2 failed — ทั้งสอง baseline เดิม (test_model_bound_record_never_reaches_sibling_llm_input + test_general_recommendation_returns_one_primary_product_and_card = took_primary/candidate_names งานค้างก่อน session นี้ ไม่เกี่ยว Q2–Q4); pingevox anchor (เดิม FAIL) หายไป — pair-level taint Q2 ให้ identity ที่ covered ช่องอื่นรอด
+- commits: 65c36da (Q2) / e5e0da4 (Q3) / e5c887e (Q4) — 1 commit = 1 fix
+- งานค้าง: SRS ครบใน 3 commits แล้ว; ledger+integrity closeout รอบนี้; baseline 2 failures = prior-session unfinished work ไม่ใช่ของงานนี้
