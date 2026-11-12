@@ -430,3 +430,35 @@ def test_multiple_image_desc_devices_fail_closed():
         image_desc="เคส iphone 15 กับเคส iphone 16",
     )
     assert got.target_device is None
+
+
+# ── Phase 1 Q4 (tee_apichap): historical image_desc → bounded history device ─
+# persisted entry["image_desc"] (vision cache ที่ client เก็บบน user message —
+#   field จริงของ ChatMessage→history serialization) ผ่าน extractor เดิม
+#   `_dc._device_candidates` → facts["device"] → target_device source="history"
+#   เดิม; current image (Q3 seam) ยังชนะ historical เสมอ
+
+def test_history_image_desc_supplies_device_on_followup():
+    got = build_retrieval_profile(
+        "รุ่นนี้ครับ",
+        history=[{"role": "user", "text": "[รูปภาพ]",
+                  "image_desc": "เครื่องฟอกอากาศ Xiaomi Air Purifier 4 Lite"}],
+        intent_result={"intent": "product_question", "confidence": 0.9},
+        shop="AnyShop",
+    )
+    assert got.target_device == "purifier 4 lite"
+    assert ("target_device", "history") in got.fact_sources
+
+
+def test_current_image_desc_beats_history_image_desc():
+    got = build_retrieval_profile(
+        "ใช้ได้ไหมครับ",
+        history=[{"role": "user", "text": "[รูปภาพ]",
+                  "image_desc": "iphone 15"}],
+        intent_result={"intent": "compatibility_check", "confidence": 0.9},
+        shop="AnyShop",
+        image_desc="xiaomi air purifier 4 lite",
+    )
+    assert got.target_device == "purifier 4 lite"
+    assert ("target_device", "image_desc") in got.fact_sources
+    assert ("target_device", "history") not in got.fact_sources

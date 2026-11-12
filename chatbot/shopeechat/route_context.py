@@ -387,6 +387,14 @@ def _bounded_history_facts(history: list[dict] | None) -> dict:
         if not facts["device"]:
             facts["device"] = next((cn or rw for rw, cn in
                                     _dc._device_candidates(text)), None)
+        if not facts["device"]:
+            # persisted vision cache ของ entry นี้ (image_desc = typed
+            #   field ที่ client serialize บน user message — extractor
+            #   เดียวกับ text device; explicit text ชนะ image เสมอ)
+            _desc = (entry.get("image_desc") if isinstance(entry, dict)
+                     else getattr(entry, "image_desc", None)) or ""
+            facts["device"] = next((cn or rw for rw, cn in
+                                    _dc._device_candidates(_desc)), None)
         if not facts["codes"]:
             facts["codes"] = tuple(_extract_codes(text))
     return facts
