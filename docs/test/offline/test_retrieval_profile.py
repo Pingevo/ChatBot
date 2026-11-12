@@ -372,3 +372,61 @@ def test_low_confidence_intent_scope_not_applied():
     assert got.product_types == frozenset()
     assert got.subtype is None
     assert ("product_types", "intent") not in got.fact_sources
+
+
+# ── Phase 1 Q3 (tee_apichap): current image-derived target device ─────────
+# `image_desc` = vision description ของ turn นี้ (ผ่าน param เดียว) — merge
+# เข้า target_device precedence เดิม: explicit text > intent > current image
+# > historical — stamp ("target_device", "image_desc") เมื่อ image เป็น
+# source; หลาย distinct device ในภาพ → fail-closed (None → clarify ข้างล่าง
+# ไม่เดา arbitrary); image-derived device = retrieval/clarification context
+# เท่านั้น ไม่ authorize compat verdict (typed evidence เท่านั้นที่ตัดสิน)
+
+def test_image_desc_supplies_target_device_with_provenance():
+    got = build_retrieval_profile(
+        "[รูปภาพ]",
+        history=[],
+        intent_result={"intent": "compatibility_check", "confidence": 0.9},
+        shop="AnyShop",
+        image_desc="เครื่องฟอกอากาศ Xiaomi Air Purifier 4 Lite",
+    )
+    assert got.target_device == "purifier 4 lite"
+    assert ("target_device", "image_desc") in got.fact_sources
+
+
+def test_explicit_message_device_beats_image_desc():
+    got = build_retrieval_profile(
+        "มีเคสใช้กับ iphone 15 ไหม",
+        history=[],
+        intent_result={"intent": "compatibility_check", "confidence": 0.9},
+        shop="AnyShop",
+        image_desc="iphone 16 pro max",
+    )
+    assert got.target_device == "iphone 15"
+    assert ("target_device", "message") in got.fact_sources
+    assert ("target_device", "image_desc") not in got.fact_sources
+
+
+def test_image_desc_beats_history_device():
+    got = build_retrieval_profile(
+        "ใช้ได้ไหมครับ",
+        history=[{"role": "user", "text": "มีสายสำหรับ iphone 15 ไหม"}],
+        intent_result={"intent": "compatibility_check", "confidence": 0.9},
+        shop="AnyShop",
+        image_desc="xiaomi air purifier 4 lite",
+    )
+    assert got.target_device == "purifier 4 lite"
+    assert ("target_device", "image_desc") in got.fact_sources
+    assert ("target_device", "history") not in got.fact_sources
+
+
+def test_multiple_image_desc_devices_fail_closed():
+    # vision เห็นเคสสองรุ่น — device กำกวม → ไม่เดา; downstream clarify owner
+    got = build_retrieval_profile(
+        "[รูปภาพ]",
+        history=[],
+        intent_result={"intent": "compatibility_check", "confidence": 0.9},
+        shop="AnyShop",
+        image_desc="เคส iphone 15 กับเคส iphone 16",
+    )
+    assert got.target_device is None

@@ -2329,6 +2329,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 platform=req.platform or "shopee",
                 anchor_cards=_resolved_anchor_cards,
                 history_cards=_history_cards,
+                image_desc=_image_desc_out,
             )
         except Exception as _e:
             print(f"[PROFILE] build error: {_e}", file=sys.stderr)
