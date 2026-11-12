@@ -1182,7 +1182,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     decided: dict[int, tuple[CompatVerdict, ...]] = {}
     partial_refs: dict[int, tuple[str, ...]] = {}
     tainted_reqs: set[str] = set()
-    tainted_idents: set[str] = set()
+    tainted_pairs: set[tuple[str, str]] = set()
     no_emit: set[int] = set()   # cands ไม่ว่างแต่ emitted card = 0
     for i, n in enumerate(needs):
         if n.kind != "compat" or i not in prodish_idx:
@@ -1192,7 +1192,9 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             continue
         reqs_n = _need_requests(n, requests, req_needs)
         carriers = [r for r in reqs_n
-                    if _norm_target(r.target_device) == tn]
+                    if _norm_target(r.target_device) == tn
+                    or tn in {_norm_target(t)
+                              for t in (r.target_refs or ())}]
         verdict = (not carriers) or any(
             r.source not in _RELATION_REQ_SOURCES for r in carriers)
         if not verdict:
@@ -1214,10 +1216,24 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 continue  # ทุก subject decided
             partial_refs[i] = unres
         uncovered.add(i)
+        # taint = carrier ของ claim ที่พิสูจน์ไม่ได้ — request ที่ serve
+        #   need นี้และ carry unresolved target tn เพียงอย่างเดียว:
+        #   `target_device` (validated device view) หรือ `target_refs`
+        #   (typed relation constraint verbatim — slot/kb request ที่
+        #   ถูก scope ด้วย compat target แต่ไม่ผ่าน device validation
+        #   เช่น "รุ่น 6"/app label) — โดยไม่มี subject identity ของ
+        #   ตัวเอง (model_codes/subject_refs = pinned subject products =
+        #   independent coverage ของ sibling needs ไม่ใช่ compat context
+        #   เพียวๆ → ไม่ taint)
+        #   candidates ของ carrier = compat context ของ claim ที่
+        #   พิสูจน์ไม่ได้ → drop จากทุก need ที่มันถูก attribute เข้า
+        #   (coverage-aware: identity เดียวกันที่มี coverage ผ่าน channel
+        #   ที่ไม่ใช่ carrier — history/subjects/description/kb — ยังรอด;
+        #   coverage ไม่ใช่ exclusive ownership)
+        #   products-for-device channel (_RELATION_REQ_SOURCES) เท่านั้น
+        #   ที่เป็น selection คำตอบ → ไม่ taint เสมอ
         refs_i = {_norm_ref(x) for x in (n.subject_refs or ())}
         unres_refs = {_norm_ref(x) for x in unres}
-        # taint scope = unresolved subject refs เท่านั้น (need ไม่มี refs →
-        # {} → carrier ทุกตัว tainted เหมือนเดิม — sid ไม่ใช่ ref space)
         scope_refs = unres_refs & refs_i
         for r in carriers:
             if r.source in _RELATION_REQ_SOURCES:
@@ -1225,18 +1241,22 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             codes = {_norm_ref(x) for x in (r.model_codes or ())}
             if codes and scope_refs and not (codes & scope_refs):
                 continue  # request นี้เป็น context ของ subject อื่น
+            if codes or r.subject_refs:
+                continue  # pinned subject request — independent coverage
             if refs_i:
                 tainted_reqs.add(r.request_id)
             else:
                 # ไม่มี declared subject — unres คือ anonymous candidates ที่
                 #   verdict ไม่ได้ (missing connector evidence ฯลฯ): drop
-                #   เฉพาะ card เหล่านั้น ไม่ poison request ทั้งก้อน —
-                #   decided-compatible cards ยังเป็นคำตอบของ turn ได้
+                #   เฉพาะ instance ของ card เหล่านั้น บน carrier นี้ —
+                #   decided-compatible cards ยังเป็นคำตอบของ turn ได้ และ
+                #   identity เดียวกันบน channel อื่น (independent coverage)
+                #   ไม่ถูกแตะ
                 for _s in by_req.get(r.request_id, ()):
                     if (_cand_keys(_s.identity, _s.card.get("item_id"),
                                    _s.card.get("model_id"), _s.card)
                             & unres_refs):
-                        tainted_idents.add(_s.identity)
+                        tainted_pairs.add((r.request_id, _s.identity))
         trace.append(f"need[{i}] verdict target={tn!r} "
                      + (f"unresolved={list(unres)} → partial "
                         if verdicts else "")
@@ -1468,10 +1488,10 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             #   ไม่มี card เลย → alternative = substitute answer เจตนา
             #   (มี WPB100L ไหม → เสนอ AC65B แทน — ห้าม filter)
             cands = [s for s in cands if s.role != "alternative"]
-        if tainted_reqs or tainted_idents:
+        if tainted_reqs or tainted_pairs:
             kept = [s for s in cands
                     if s.request_id not in tainted_reqs
-                    and s.identity not in tainted_idents]
+                    and (s.request_id, s.identity) not in tainted_pairs]
             tainted = len(kept) < len(cands)
             cands = kept
         # ── current-need type/subtype eligibility — card ต้องเข้ากับ

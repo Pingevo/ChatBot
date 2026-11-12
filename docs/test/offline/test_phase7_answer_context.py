@@ -20,6 +20,7 @@ import inspect
 import json
 import sys
 from copy import deepcopy
+from dataclasses import replace as _dcreplace
 from pathlib import Path
 
 import pytest
@@ -832,6 +833,77 @@ def test_no_drop_baseline_ordinals_unchanged():
     body = ctx.context_text()
     products, _ = json.JSONDecoder().raw_decode(body.split("\n\n", 1)[1])
     assert {p["item_id"]: p["need_indices"] for p in products} == {"9": [1], "8": [2]}
+
+
+# ── Phase 1 Q2 (tee_apichap): compat no_evidence → compat-bound carriers ────
+# anonymous compat need (subject_refs=()) ที่ external target ผูก typed ผ่าน
+# `request.target_refs` เท่านั้น (ไม่ผ่าน target_device — device ที่ spec-db
+# validate ไม่ได้ / target label อื่น) ต้องถือ request นั้นเป็น carrier เช่น
+# เดียวกับ target_device carrier: candidates ที่ถูกเลือกผ่าน carrier เพื่อ
+# serve claim ที่พิสูจน์ไม่ได้ → drop จากทุก need; coverage-aware —
+# identity เดียวกันที่มี coverage ผ่าน channel อื่นที่ไม่ใช่ carrier ยังรอด
+
+def _anon_compat_setup():
+    """compat need anonymous + sibling product need + carrier slot request
+    (target ผูกผ่าน target_refs ไม่ใช่ target_device) เลือก 3 cards"""
+    need_c = TurnNeed(kind="compat", operation="compat",
+                      target_refs=("รุ่น 6",))
+    need_d = TurnNeed(kind="product", operation="describe",
+                      target_refs=("รุ่น 6",),
+                      product_types=frozenset({"filter"}))
+    req_slot = _dcreplace(_req(rid="req-0", types=("filter",)),
+                          target_refs=("รุ่น 6",))
+    return (need_c, need_d), req_slot
+
+
+def test_anonymous_compat_taints_target_refs_carrier_keeps_history():
+    """identity ที่ carrier เลือก + history channel เลือกซ้ำ → รอดผ่าน
+    history instance เดียว (independent coverage — card ไม่ใช่ compat
+    endorsement); 2 identity ที่ carrier เลือกเพียวๆ → drop"""
+    (need_c, need_d), req_slot = _anon_compat_setup()
+    req_hist = _req(rid="ch:history", source="history", types=())
+    sel = _selection(
+        (_sel_card("i:9001", "slot", "req-0", "F 4 Lite"), "req-0"),
+        (_sel_card("i:9002", "slot", "req-0", "F 2S"), "req-0"),
+        (_sel_card("i:9003", "slot", "req-0", "F 4L H13"), "req-0"),
+        (_sel_card("i:9001", "historical_evidence", "ch:history",
+                   "F 4 Lite"), "ch:history"),
+    )
+    pool = _pool(eligible=[
+        _pooled("i:9001", item_id="9001",
+                request_ids=("req-0", "ch:history"), name="F 4 Lite"),
+        _pooled("i:9002", item_id="9002", request_ids=("req-0",),
+                name="F 2S"),
+        _pooled("i:9003", item_id="9003", request_ids=("req-0",),
+                name="F 4L H13"),
+    ])
+    ctx = _compile((need_c, need_d), sel, pool,
+                   (req_slot, req_hist), _profile())
+    assert {p.get("item_id") for p in ctx.products} == {"9001"}, (
+        "compat-only coverage ต้องหาย; history-covered identity รอด")
+    assert not ctx.compat_verdicts, "no_evidence ห้ามมี decided verdict"
+    assert any(u.need_index == 0 and u.reason == "no_evidence"
+               for u in ctx.unanswered_needs)
+
+
+def test_anonymous_compat_taints_all_sibling_candidates_when_carrier_only():
+    """sibling product need ที่ candidates ทั้งหมดมาจาก compat carrier
+    เท่านั้น → 0 cards (claim ที่พิสูจน์ไม่ได้ไม่สร้าง product answer)"""
+    (need_c, need_d), req_slot = _anon_compat_setup()
+    sel = _selection(
+        (_sel_card("i:9001", "slot", "req-0", "F 4 Lite"), "req-0"),
+        (_sel_card("i:9002", "slot", "req-0", "F 2S"), "req-0"),
+    )
+    pool = _pool(eligible=[
+        _pooled("i:9001", item_id="9001", request_ids=("req-0",),
+                name="F 4 Lite"),
+        _pooled("i:9002", item_id="9002", request_ids=("req-0",),
+                name="F 2S"),
+    ])
+    ctx = _compile((need_c, need_d), sel, pool, (req_slot,), _profile())
+    assert ctx.products == ()
+    assert any(u.need_index == 0 and u.reason == "no_evidence"
+               for u in ctx.unanswered_needs)
 
 
 # ── Phase 10B Round 4: charger-family scope membership ─────────────────────
