@@ -138,10 +138,10 @@ export default function BacklogPage() {
   }
 
   return (
-    <div className="h-full overflow-y-auto p-6 max-w-4xl mx-auto space-y-5">
-      <div className="flex items-center gap-3">
+    <div className="backlog-page phone-page-shell h-full overflow-y-auto p-6 max-w-4xl mx-auto space-y-5">
+      <div className="backlog-header flex items-center gap-3">
         <Inbox size={20} className="text-brand" />
-        <h1 className="text-lg font-semibold text-text">งานค้างรอจ่าย (Pending Assignment)</h1>
+        <h1 className="phone-page-title text-lg font-semibold text-text">งานค้างรอจ่าย (Pending Assignment)</h1>
         <Badge tone="neutral">superadmin/dev</Badge>
       </div>
 
@@ -170,7 +170,7 @@ export default function BacklogPage() {
       {items.length > 0 && (
         <div className="rounded-lg border border-border bg-surface max-h-48 overflow-y-auto">
           {items.slice(0, 50).map((it) => (
-            <div key={it.conversation_id} className="flex items-center gap-3 px-3 py-1.5 text-xs border-b border-border/50 last:border-0">
+            <div key={it.conversation_id} className="backlog-item flex items-center gap-3 px-3 py-1.5 text-xs border-b border-border/50 last:border-0">
               <span className="font-mono text-text-muted">{it.conversation_id.slice(0, 12)}…</span>
               <span className="text-text-subtle">{it.platform}</span>
               <span className="text-text-subtle ml-auto">{it.assignment_reason || "—"}</span>
@@ -211,7 +211,7 @@ export default function BacklogPage() {
       </div>
 
       {/* Mode + limit */}
-      <div className="flex items-center gap-3 flex-wrap">
+      <div className="backlog-mode-row flex items-center gap-3 flex-wrap">
         <select
           value={mode}
           onChange={(e) => { setMode(e.target.value as BacklogMode); setPlan(null); }}

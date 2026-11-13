@@ -11,6 +11,7 @@ import { InfoTab } from "@/components/chat/InfoTab";
 import { ChatLogTab } from "@/components/chat/ChatLogTab";
 import { ProductsTab } from "@/components/chat/ProductsTab";
 import { CloseChatModal } from "@/components/chat/CloseChatModal";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import { Button } from "@/components/ui/Button";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { api } from "@/lib/apiClient";
@@ -862,8 +863,8 @@ export default function LiveAssignmentPage() {
 
       {/* ── Conflict popup (เหมือน tickets) ── */}
       {conflictPopup && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
-          <div role="dialog" aria-modal="true" aria-labelledby="live-assign-modal-title" className="bg-surface rounded-xl border border-border p-5 max-w-md w-full shadow-xl">
+        <ModalLayer presentation="center" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="live-assign-modal-title" className="mobile-confirm-dialog bg-surface rounded-xl border border-border p-5 max-w-md w-full shadow-xl">
             <div className="flex items-center gap-2 mb-3">
               <div className="w-8 h-8 rounded-full bg-warning/15 flex items-center justify-center flex-shrink-0">
                 <Info size={16} className="text-warning" />
@@ -878,7 +879,7 @@ export default function LiveAssignmentPage() {
               <Button size="sm" onClick={() => setConflictPopup(null)}>ตอบทับ</Button>
             </div>
           </div>
-        </div>
+        </ModalLayer>
       )}
     </div>
   );

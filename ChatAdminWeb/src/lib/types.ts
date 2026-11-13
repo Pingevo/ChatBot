@@ -168,6 +168,7 @@ export interface AdminUser {
   active?: boolean;
   is_accepting_chats?: boolean; // Phase 7.9 — เปิด/ปิดรับแชท
   bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex) — ใช้ใน ChatWindow/TicketChatPanel
+  theme_preference?: "light" | "dark";
   last_login_at?: string | null;
   created_at?: string;
 }

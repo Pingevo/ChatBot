@@ -1,4 +1,4 @@
-// PATCH /api/profile — update own profile (name, channels_access)
+// PATCH /api/profile — update own profile and per-admin appearance preference
 // POST  /api/profile/password — change own password (requires OTP verification)
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
@@ -9,10 +9,20 @@ export async function PATCH(req: NextRequest) {
   const r = await requireAuth(req);
   if (!r.ok) return r.response;
 
-  const body = await readJson<{ name?: string; channels_access?: string[]; bubble_color?: string }>(req).catch(() => null);
+  const body = await readJson<{
+    name?: string;
+    channels_access?: string[];
+    bubble_color?: string;
+    theme_preference?: "light" | "dark";
+  }>(req).catch(() => null);
   if (!body) return error("invalid body", 400);
 
-  const updates: { name?: string; channels_access?: string[]; bubble_color?: string } = {};
+  const updates: {
+    name?: string;
+    channels_access?: string[];
+    bubble_color?: string;
+    theme_preference?: "light" | "dark";
+  } = {};
   if (typeof body.name === "string" && body.name.trim()) updates.name = body.name.trim();
   if (Array.isArray(body.channels_access)) updates.channels_access = body.channels_access;
   // ⚡ สี bubble — validate เป็น hex 7 ตัว (#RRGGBB)
@@ -23,6 +33,12 @@ export async function PATCH(req: NextRequest) {
     } else if (hex === "") {
       updates.bubble_color = ""; // เคลียร์กลับเป็น default
     }
+  }
+  if (body.theme_preference !== undefined) {
+    if (body.theme_preference !== "light" && body.theme_preference !== "dark") {
+      return error("invalid theme_preference", 400);
+    }
+    updates.theme_preference = body.theme_preference;
   }
 
   if (Object.keys(updates).length === 0) return error("no fields to update", 400);

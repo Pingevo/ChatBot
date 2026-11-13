@@ -6,6 +6,7 @@ import { Loading } from "@/components/ui/Loading";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { FilterChips } from "@/components/ui/FilterChips";
 import { FormField } from "@/components/ui/FormField";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import { PageShell } from "@/components/ui/PageShell";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import {
@@ -131,16 +132,17 @@ export default function QuickRepliesPage() {
   const closeForm = async () => {
     const current = JSON.stringify({ category: form.category, title: form.title, body: form.body, platforms: form.platforms, shop_ids: form.shop_ids, sort_order: form.sort_order });
     const isDirty = current !== formSnapshot.current;
-    if (!isDirty) { setEditing(null); setShowForm(false); return; }
+    if (!isDirty) { setEditing(null); setShowForm(false); return true; }
     const ok = await confirm.ask({
       title: "ปิดฟอร์มโดยไม่บันทึก?",
       message: "การเปลี่ยนแปลงที่ยังไม่บันทึกจะหายไป",
       confirmText: "ปิด",
       variant: "primary",
     });
-    if (!ok) return;
+    if (!ok) return false;
     setEditing(null);
     setShowForm(false);
+    return true;
   };
 
   // ESC to close form modal (closeForm มี dirty-check อยู่แล้ว)
@@ -410,6 +412,9 @@ export default function QuickRepliesPage() {
           </Button>
         )
       }
+      mobileAddActions={editable ? [
+        { label: "เพิ่มคำตอบเร็ว", icon: <Plus size={17} />, onSelect: openCreate },
+      ] : undefined}
       filterBarBelow
       filterBar={
         <>
@@ -772,9 +777,11 @@ export default function QuickRepliesPage() {
 
       {/* Form Modal */}
       {showForm && (
-        <div
+        <ModalLayer
+          presentation="workspace"
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
           onClick={() => closeForm()}
+          onBack={closeForm}
         >
           <div
             className="bg-surface rounded-2xl shadow-xl w-full max-w-lg max-h-[85vh] overflow-y-auto"
@@ -797,8 +804,8 @@ export default function QuickRepliesPage() {
                 <X size={16} className="text-text-muted" />
               </button>
             </div>
-            <form onSubmit={(e) => { e.preventDefault(); handleSave(); }}>
-            <div className="p-4 space-y-3">
+            <form className="mobile-workspace-form" onSubmit={(e) => { e.preventDefault(); handleSave(); }}>
+            <div className="mobile-workspace-body p-4 space-y-3">
               <div>
                 <label htmlFor="qr-form-category" className="text-xs text-text-muted">หมวดหมู่</label>
                 <input
@@ -919,7 +926,8 @@ export default function QuickRepliesPage() {
                 </div>
               )}
 
-              <div className="flex justify-end gap-2 pt-2">
+            </div>
+              <div className="mobile-workspace-actions flex justify-end gap-2 pt-2">
                 <Button variant="ghost" onClick={() => closeForm()}>ยกเลิก</Button>
                 <Button
                   type="submit"
@@ -928,10 +936,9 @@ export default function QuickRepliesPage() {
                   บันทึก
                 </Button>
               </div>
-            </div>
             </form>
           </div>
-        </div>
+        </ModalLayer>
       )}
     </PageShell>
   );

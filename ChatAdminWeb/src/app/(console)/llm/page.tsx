@@ -210,6 +210,47 @@ function OptionRow({ label, sub, active, accent, onClick }: {
   );
 }
 
+function LLMPageSkeleton() {
+  return (
+    <div className="grid gap-3 animate-pulse" role="status" aria-label="กำลังโหลดการตั้งค่า LLM">
+      <div className="flex min-h-[4.25rem] items-center justify-between gap-4 rounded-xl border border-border bg-surface px-4 py-3">
+        <div className="min-w-0 flex-1 space-y-2">
+          <div className="h-3 w-28 rounded bg-surface-3" />
+          <div className="h-2.5 w-4/5 rounded bg-surface-2" />
+        </div>
+        <div className="h-8 w-20 shrink-0 rounded-full bg-surface-2" />
+      </div>
+      <div className="grid gap-3 lg:grid-cols-2">
+        {[0, 1].map((pool) => (
+          <div key={pool} className="min-w-0 space-y-3 rounded-xl border border-border bg-surface p-4">
+            <div className="flex items-center justify-between gap-3">
+              <div className="h-3 w-28 rounded bg-surface-3" />
+              <div className="h-7 w-36 rounded bg-surface-2" />
+            </div>
+            <div className="h-9 rounded-lg bg-surface-2" />
+            {[0, 1, 2].map((row) => (
+              <div key={row} className="flex items-center gap-3 border-t border-border-subtle pt-3">
+                <div className="h-5 w-9 rounded-full bg-surface-3" />
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="h-3 w-40 max-w-full rounded bg-surface-2" />
+                  <div className="h-2.5 w-28 rounded bg-surface-2" />
+                </div>
+                <div className="h-8 w-8 rounded-lg bg-surface-2" />
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+      <div className="space-y-3 rounded-xl border border-border bg-surface p-4">
+        <div className="h-3 w-32 rounded bg-surface-3" />
+        <div className="h-2.5 w-4/5 rounded bg-surface-2" />
+        {[0, 1].map((row) => <div key={row} className="h-12 rounded-lg bg-surface-2" />)}
+      </div>
+      <span className="sr-only">กำลังโหลด config และ models</span>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /* Page                                                               */
 /* ------------------------------------------------------------------ */
@@ -227,6 +268,7 @@ export default function LlmConfigPage() {
   const [roles, setRoles] = useState<string[]>([]);
   const [meta, setMeta] = useState<{ updated_by?: string; updated_at?: string }>({});
   const [saving, setSaving] = useState(false);
+  const [addingPool, setAddingPool] = useState<KeyPool | null>(null);
   const [avail, setAvail] = useState<ModelsResponse>({ ok: false, gemini: [], openrouter: [], live: false });
 
   const allowed = canEditPage(user, "llm");
@@ -334,19 +376,40 @@ export default function LlmConfigPage() {
   return (
     <PageShell
       title="LLM & API Keys"
-      subtitle="สลับ provider/key/model สด — bot อ่าน config ทุก ~10 วินาที"
+      subtitle={
+        <>
+          ตั้งค่า provider, key และ model
+          <span className="hidden md:inline"> · มีผลทันที — bot อ่าน config ทุก ~10 วินาที</span>
+        </>
+      }
       actions={
         <Button variant="secondary" size="sm" onClick={load} disabled={loading}>
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
         </Button>
       }
+      mobileHeaderActions={
+        <Button variant="secondary" size="icon" onClick={load} disabled={loading} aria-label="รีเฟรช" title="รีเฟรช">
+          <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
+        </Button>
+      }
+      mobileAddActions={[
+        ...(!loading && keySource.gemini === "db" ? [
+          { label: "เพิ่ม Gemini key", icon: <KeyRound size={17} />, onSelect: () => setAddingPool("gemini") },
+        ] : []),
+        ...(!loading && keySource.openrouter === "db" ? [
+          { label: "เพิ่ม OpenRouter key", icon: <Globe size={17} />, onSelect: () => setAddingPool("openrouter") },
+        ] : []),
+      ]}
     >
       {loading ? (
-        <div className="flex justify-center py-16"><Loading size={28} /></div>
+        <>
+          <div className="md:hidden"><LLMPageSkeleton /></div>
+          <div className="hidden justify-center py-16 md:flex"><Loading size={28} /></div>
+        </>
       ) : (
         <div className="grid gap-3">
           {/* ---- master provider strip ---- */}
-          <Card className="flex flex-wrap items-center justify-between gap-2 px-4 py-3">
+          <Card className="flex min-w-0 flex-wrap items-center justify-between gap-2 px-4 py-3">
             <div className="flex items-center gap-2 text-sm">
               <Cpu size={15} className="text-accent" />
               <span className="font-medium text-text">Provider หลัก</span>
@@ -371,6 +434,8 @@ export default function LlmConfigPage() {
               title="Gemini keys"
               icon={KeyRound}
               pool="gemini"
+              adding={addingPool === "gemini"}
+              onAddingChange={(adding) => setAddingPool(adding ? "gemini" : null)}
               prefix="GEMINI_API_KEY"
               keys={keys}
               source={keySource.gemini}
@@ -384,6 +449,8 @@ export default function LlmConfigPage() {
               title="OpenRouter keys"
               icon={Globe}
               pool="openrouter"
+              adding={addingPool === "openrouter"}
+              onAddingChange={(adding) => setAddingPool(adding ? "openrouter" : null)}
               prefix="OPENROUTER_API_KEY"
               keys={orKeys}
               source={keySource.openrouter}
@@ -489,7 +556,7 @@ const SOURCE_LABEL: Record<KeySource, string> = {
 };
 
 function KeyPoolCard({
-  title, icon: Icon, pool, prefix, keys, source, single, saving, mutate, envHint, keyPlaceholder,
+  title, icon: Icon, pool, prefix, keys, source, single, saving, mutate, envHint, keyPlaceholder, adding, onAddingChange,
 }: {
   title: string;
   icon: typeof KeyRound;
@@ -502,8 +569,9 @@ function KeyPoolCard({
   mutate: (body: Record<string, unknown>, okMsg: string) => Promise<void>;
   envHint: string;
   keyPlaceholder: string;
+  adding: boolean;
+  onAddingChange: (adding: boolean) => void;
 }) {
-  const [adding, setAdding] = useState(false);
   const [newKey, setNewKey] = useState("");
   const [newName, setNewName] = useState("");
   const [editingSha, setEditingSha] = useState<string | null>(null);
@@ -513,6 +581,10 @@ function KeyPoolCard({
   const [keyQuery, setKeyQuery] = useState("");
   const [sortDesc, setSortDesc] = useState(false);
   const [statusFilter, setStatusFilter] = useState<"all" | "on" | "off">("all");
+
+  useEffect(() => {
+    if (adding) setNewName(`${prefix}_${keys.length + 1}`);
+  }, [adding, keys.length, prefix]);
 
   const activeCount = keys.filter((k) => k.enabled).length;
   const visibleKeys = keys
@@ -542,7 +614,7 @@ function KeyPoolCard({
       { pool, add_keys: [{ name: newName.trim() || undefined, value: v }] },
       "เพิ่ม key แล้ว — bot จะหยิบไปใช้ใน ~10 วินาที"
     );
-    setNewKey(""); setNewName(""); setAdding(false);
+    setNewKey(""); setNewName(""); onAddingChange(false);
   }
 
   async function toggleKey(k: MaskedKey) {
@@ -594,9 +666,9 @@ function KeyPoolCard({
   }
 
   return (
-    <Card className="p-4">
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2 min-w-0">
+    <Card className="llm-key-pool min-w-0 p-4">
+      <div className="llm-key-pool-header mb-2 flex items-center justify-between gap-2">
+        <div className="llm-key-title-row flex items-center gap-2 min-w-0">
           <Icon size={15} className="shrink-0 text-accent" />
           <h2 className="truncate text-sm font-semibold text-text">{title}</h2>
           {source === "db" && (
@@ -606,7 +678,7 @@ function KeyPoolCard({
           )}
         </div>
         {/* source segmented: env | MongoDB | key เดียว */}
-        <div className="inline-flex overflow-hidden rounded-md border border-border text-[10px] font-semibold">
+        <div className="llm-source-selector inline-flex overflow-hidden rounded-md border border-border text-[10px] font-semibold">
           {(["env", "db", "single"] as KeySource[]).map((s) => (
             <button
               key={s}
@@ -661,8 +733,8 @@ function KeyPoolCard({
       {source === "db" && (
         <>
           {/* toolbar: search + sort + filter + add */}
-          <div className="mb-2 flex flex-wrap items-center gap-1.5">
-            <div className="relative min-w-[130px] flex-1">
+          <div className="llm-key-toolbar mb-2 flex flex-wrap items-center gap-1.5">
+            <div className="llm-key-search relative min-w-[130px] flex-1">
               <Search size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
               <Input
                 value={keyQuery}
@@ -682,16 +754,14 @@ function KeyPoolCard({
             <FilterSelect
               value={statusFilter}
               onChange={(v) => setStatusFilter(v as "all" | "on" | "off")}
+              className="llm-key-status"
               options={[
                 { value: "all", label: "ทั้งหมด" },
                 { value: "on", label: "เปิด" },
                 { value: "off", label: "ปิด" },
               ]}
             />
-            <Button variant="secondary" size="sm" onClick={() => {
-              setAdding((a) => !a);
-              setNewName(`${prefix}_${keys.length + 1}`);
-            }}>
+            <Button variant="secondary" size="sm" className="phone-mobile-add-hidden" onClick={() => onAddingChange(!adding)}>
               <Plus size={13} /> เพิ่ม key
             </Button>
           </div>
@@ -714,7 +784,7 @@ function KeyPoolCard({
               />
               <div className="flex gap-1.5">
                 <Button size="sm" onClick={addKey} disabled={saving || !newKey.trim()}>เพิ่ม</Button>
-                <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>ยกเลิก</Button>
+                <Button size="sm" variant="ghost" onClick={() => onAddingChange(false)}>ยกเลิก</Button>
               </div>
             </div>
           )}

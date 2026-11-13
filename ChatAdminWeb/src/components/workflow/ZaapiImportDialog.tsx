@@ -6,6 +6,7 @@
 import { useState } from "react";
 import { X } from "lucide-react";
 import { toast } from "@/components/ui/Toast";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import { parseZaapiImportInputs, type ImportPreviewReport } from "@/lib/workflow/zaapiImport";
 
 export interface ZaapiImportDialogProps {
@@ -63,14 +64,15 @@ export function ZaapiImportDialog({ open, onClose, onLoadReportToCanvas, onAppli
 
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-surface border border-border rounded-xl shadow-xl w-full max-w-xl max-h-[85vh] overflow-y-auto p-4">
-        <div className="flex items-center justify-between mb-3">
+    <ModalLayer presentation="workspace" className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" onBack={close}>
+      <div role="dialog" aria-modal="true" aria-label="นำเข้า workflow จาก Zaapi" className="bg-surface border border-border rounded-xl shadow-xl w-full max-w-xl max-h-[85vh] overflow-y-auto p-4">
+        <div className="flex items-center justify-between p-4 mb-3">
           <div className="text-sm font-bold">Zaapi Import Preview (dry-run)</div>
           <button onClick={close} aria-label="ปิด import preview" title="ปิด" className="w-8 h-8 rounded-lg hover:bg-surface-2 flex items-center justify-center">
             <X size={16} className="text-text-muted" />
           </button>
         </div>
+        <div className="mobile-workspace-body p-4">
         <div className="text-[11px] text-text-muted mb-2">
           เลือก 2 ไฟล์: <b>all-flows.json</b> (หรือ flow file เดี่ยว) + <b>_index_data.json</b> (ชื่อ flow จริง — ไม่ส่ง = ชื่อ generic + warning)
         </div>
@@ -94,17 +96,6 @@ export function ZaapiImportDialog({ open, onClose, onLoadReportToCanvas, onAppli
           className="w-full text-xs"
         />
         {indexFileName && <div className="text-[10px] text-text-subtle mt-1">เลือกแล้ว: {indexFileName}</div>}
-        <button onClick={doPreview} className="mt-2 px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90">
-          Preview import
-        </button>
-        {batch.length > 0 && (
-          <button
-            onClick={doApply} disabled={applying}
-            className="mt-2 ml-2 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:opacity-90 disabled:opacity-50"
-          >
-            {applying ? "กำลัง apply…" : "Apply as disabled drafts"}
-          </button>
-        )}
         {batch.length > 0 && (
           <div className="mt-3 border border-border rounded-lg divide-y divide-border">
             {batch.map((r) => (
@@ -136,6 +127,20 @@ export function ZaapiImportDialog({ open, onClose, onLoadReportToCanvas, onAppli
           </div>
         )}
       </div>
-    </div>
+        <div className="mobile-workspace-actions flex flex-wrap gap-2 border-t border-border">
+          <button onClick={doPreview} className="min-h-11 px-3 py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90">
+            Preview import
+          </button>
+          {batch.length > 0 && (
+            <button
+              onClick={doApply} disabled={applying}
+              className="min-h-11 px-3 py-1.5 text-xs font-semibold rounded-lg bg-emerald-600 text-white hover:opacity-90 disabled:opacity-50"
+            >
+              {applying ? "กำลัง apply…" : "Apply as disabled drafts"}
+            </button>
+          )}
+        </div>
+      </div>
+    </ModalLayer>
   );
 }

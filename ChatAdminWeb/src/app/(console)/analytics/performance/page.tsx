@@ -2,6 +2,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { statsService, type PerformanceStats } from "@/lib/services";
+import { TrendingUp } from "lucide-react";
 import {
   ConnectedChannelsHeader,
   KpiCard,
@@ -10,8 +11,9 @@ import {
   MultiLineChart,
   Heatmap,
 } from "@/components/charts/ZaapiStats";
-import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
+import { rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
 import { AnalyticsSkeleton } from "@/components/ui/StatsSkeleton";
+import { AnalyticsPageHeading } from "@/components/charts/AnalyticsPageHeading";
 
 function fmtDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -46,18 +48,25 @@ export default function PerformanceStatsPage() {
       .finally(() => setLoading(false));
   }, [params]);
 
-  if (loading && !data) return <AnalyticsSkeleton />;
-  if (error && !data) return <EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} />;
+  const pageHeading = (
+    <AnalyticsPageHeading
+      icon={TrendingUp}
+      title="ภาพรวม Performance"
+      description="แนวโน้มการตอบกลับและปริมาณบทสนทนา"
+      value={dateRange}
+      onChange={setDateRange}
+    />
+  );
+
+  if (loading && !data) return <div className="analytics-page-body space-y-6">{pageHeading}<AnalyticsSkeleton hideHeading /></div>;
+  if (error && !data) return <div className="analytics-page-body space-y-6">{pageHeading}<EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} /></div>;
   if (!data) return null;
 
   const maxHeat = Math.max(...data.heatmap.values.flat(), 1);
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <h2 className="text-lg font-bold text-text">ภาพรวม Performance</h2>
-        <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
-      </div>
+    <div className="analytics-page-body space-y-6">
+      {pageHeading}
 
       <ConnectedChannelsHeader connectedCount={data.connected_shops} />
       {!data.has_real_data && <p className="text-xs text-text-subtle -mt-2">ยังไม่มีข้อมูลจริง — แสดงค่า 0</p>}
@@ -66,7 +75,7 @@ export default function PerformanceStatsPage() {
       {/* ---- Overview KPI grid ---- */}
       <div>
         <h3 className="text-sm font-semibold text-text mb-3">ภาพรวม</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="analytics-performance-kpi-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
           <div className="bg-surface rounded-xl border border-border p-4">
             <div className="flex items-center gap-1 mb-2">
               <span className="text-xs text-text-muted">จำนวนลูกค้าใหม่ vs ลูกค้าปัจจุบัน</span>

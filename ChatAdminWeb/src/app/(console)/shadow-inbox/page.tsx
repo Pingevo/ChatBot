@@ -21,6 +21,7 @@ import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { AnnotationDot, type Annotation } from "@/components/ui/AnnotationDot";
 import { ShadowInboxList, type ShadowReplyListItem } from "@/components/shadow/ShadowInboxList";
+import { MobileRollGeneratePanel } from "@/components/shadow/MobileRollGeneratePanel";
 import { ShadowReplyPanel, type ShadowReplyDetail } from "@/components/shadow/ShadowReplyPanel";
 import { ShadowStatPanel, type ShadowStats } from "@/components/shadow/ShadowStatPanel";
 import { ShadowConversationPanel } from "@/components/shadow/ShadowConversationPanel";
@@ -736,7 +737,7 @@ export default function ShadowInboxPage() {
       {/* ── Panel ซ้าย: Shadow Inbox List ── */}
       <div className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-72 min-w-0 shrink-0 border-r border-border overflow-hidden relative`}>
         {/* Origin filter tabs — ทั้งหมด / Message / History / ถังขยะ */}
-        <div className="grid grid-cols-4 gap-0 border-b border-border bg-surface-2 shrink-0">
+        <div className="grid grid-cols-4 gap-1 px-3 py-2 bg-transparent shrink-0 md:gap-0 md:px-0 md:py-0 md:border-b md:border-border md:bg-surface-2">
           {([
             { key: "all", label: "ทั้งหมด" },
             { key: "roll", label: "Roll" },
@@ -754,10 +755,10 @@ export default function ShadowInboxPage() {
                   setChatMessages([]);
                   setLoading(true);
                 }}
-                className={`flex items-center justify-center px-1 py-2 text-[10px] font-medium transition-colors border-b-2 whitespace-nowrap ${
+                className={`flex min-h-11 items-center justify-center rounded-xl border border-border px-2 py-2.5 text-xs font-medium transition-colors whitespace-nowrap md:min-h-0 md:rounded-none md:border-x-0 md:border-t-0 md:border-b-2 md:px-1 md:py-2 md:text-[10px] ${
                   active
-                    ? "border-brand text-brand bg-surface"
-                    : "border-transparent text-text-muted hover:text-text hover:bg-surface"
+                    ? "border-brand/35 bg-brand/5 text-brand md:border-b-brand md:bg-surface"
+                    : "bg-surface text-text-muted hover:text-text hover:bg-surface-2 md:border-b-transparent md:bg-transparent md:hover:bg-surface"
                 }`}
               >
                 {t.label}
@@ -821,106 +822,121 @@ export default function ShadowInboxPage() {
           </div>
         ) : originFilter === "roll" ? (
           /* ⚡ Phase 3B-3 — tab "Roll" — config panel สำหรับ batch generate ทั้งแชท */
-          <div className="flex-1 flex flex-col min-h-0 overflow-y-auto p-4 space-y-4">
-            <div className="flex items-center gap-2">
-              <Zap size={16} className="text-brand" />
-              <h2 className="text-sm font-bold text-text">Roll — Batch Generate</h2>
-            </div>
-            <p className="text-[11px] text-text-muted leading-relaxed">
-              Generate shadow reply ทั้งแชทแบบ batch — เลือกจำนวนแชทที่ต้องการ,
-              เลือกเรียงเก่า/ใหม่ก่อน, เลือกทับของเดิมหรือข้ามที่มีคนทำแล้ว
-            </p>
-
-            {/* Count */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-text-muted font-medium">จำนวนแชท</label>
-              <input
-                type="number"
-                min={1}
-                max={1000}
-                value={rollCount}
-                onChange={(e) => setRollCount(e.target.value)}
-                className="w-full px-2 py-1.5 rounded-md bg-surface-2 border border-border text-text text-xs focus:outline-none focus:border-brand"
-                placeholder="10"
-              />
-            </div>
-
-            {/* Order */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-text-muted font-medium">เรียงตาม</label>
-              <div className="flex items-center gap-1">
-                <button onClick={() => setRollOrder("recent")}
-                  className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors ${
-                    rollOrder === "recent" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
-                  }`}>
-                  ใหม่สุดก่อน
-                </button>
-                <button onClick={() => setRollOrder("oldest")}
-                  className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors ${
-                    rollOrder === "oldest" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
-                  }`}>
-                  เก่าสุดก่อน
-                </button>
+          <>
+            <MobileRollGeneratePanel
+              count={rollCount}
+              onCountChange={setRollCount}
+              order={rollOrder}
+              onOrderChange={setRollOrder}
+              mode={rollMode}
+              onModeChange={setRollMode}
+              platform={rollPlatform}
+              onPlatformChange={setRollPlatform}
+              progress={rollProgress}
+              rolling={rolling}
+              onStart={handleRoll}
+            />
+            <div className="hidden md:flex flex-1 flex-col min-h-0 overflow-y-auto p-4 space-y-4">
+              <div className="flex items-center gap-2">
+                <Zap size={16} className="text-brand" />
+                <h2 className="text-sm font-bold text-text">Roll — Batch Generate</h2>
               </div>
-            </div>
+              <p className="text-[11px] text-text-muted leading-relaxed">
+                Generate shadow reply ทั้งแชทแบบ batch — เลือกจำนวนแชทที่ต้องการ,
+                เลือกเรียงเก่า/ใหม่ก่อน, เลือกทับของเดิมหรือข้ามที่มีคนทำแล้ว
+              </p>
 
-            {/* Mode */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-text-muted font-medium">โหมด</label>
-              <div className="flex items-center gap-1">
-                <button onClick={() => setRollMode("overwrite")}
-                  className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors ${
-                    rollMode === "overwrite" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
-                  }`}>
-                  ทำใหม่ทับ
-                </button>
-                <button onClick={() => setRollMode("resume")}
-                  className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors ${
-                    rollMode === "resume" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
-                  }`}>
-                  ข้ามที่มีคนทำแล้ว
-                </button>
+              {/* Count */}
+              <div className="space-y-1">
+                <label className="text-[10px] text-text-muted font-medium">จำนวนแชท</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={1000}
+                  value={rollCount}
+                  onChange={(e) => setRollCount(e.target.value)}
+                  className="w-full px-2 py-1.5 rounded-md bg-surface-2 border border-border text-text text-xs focus:outline-none focus:border-brand"
+                  placeholder="10"
+                />
               </div>
-            </div>
 
-            {/* Platform */}
-            <div className="space-y-1">
-              <label className="text-[10px] text-text-muted font-medium">แพลตฟอร์ม</label>
-              <div className="flex items-center gap-1">
-                {(["all", "shopee", "tiktok", "lazada"] as const).map((p) => (
-                  <button key={p} onClick={() => setRollPlatform(p)}
+              {/* Order */}
+              <div className="space-y-1">
+                <label className="text-[10px] text-text-muted font-medium">เรียงตาม</label>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => setRollOrder("recent")}
                     className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors ${
-                      rollPlatform === p ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                      rollOrder === "recent" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
                     }`}>
-                    {p === "all" ? "ทั้งหมด" : p}
+                    ใหม่สุดก่อน
                   </button>
-                ))}
+                  <button onClick={() => setRollOrder("oldest")}
+                    className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors ${
+                      rollOrder === "oldest" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                    }`}>
+                    เก่าสุดก่อน
+                  </button>
+                </div>
+              </div>
+
+              {/* Mode */}
+              <div className="space-y-1">
+                <label className="text-[10px] text-text-muted font-medium">โหมด</label>
+                <div className="flex items-center gap-1">
+                  <button onClick={() => setRollMode("overwrite")}
+                    className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors ${
+                      rollMode === "overwrite" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                    }`}>
+                    ทำใหม่ทับ
+                  </button>
+                  <button onClick={() => setRollMode("resume")}
+                    className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors ${
+                      rollMode === "resume" ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                    }`}>
+                    ข้ามที่มีคนทำแล้ว
+                  </button>
+                </div>
+              </div>
+
+              {/* Platform */}
+              <div className="space-y-1">
+                <label className="text-[10px] text-text-muted font-medium">แพลตฟอร์ม</label>
+                <div className="flex items-center gap-1">
+                  {(["all", "shopee", "tiktok", "lazada"] as const).map((p) => (
+                    <button key={p} onClick={() => setRollPlatform(p)}
+                      className={`flex-1 px-2 py-1 rounded-md text-[10px] font-medium transition-colors ${
+                        rollPlatform === p ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:text-text"
+                      }`}>
+                      {p === "all" ? "ทั้งหมด" : p}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Roll button */}
+              <button onClick={handleRoll} disabled={rolling}
+                className="w-full flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg bg-brand text-white text-xs font-medium hover:bg-brand-dark disabled:opacity-50 transition-colors">
+                {rolling ? <Loading size={12} /> : <Zap size={12} />}
+                {rollProgress
+                  ? `Roll... ${rollProgress.done}/${rollProgress.total} (✓${rollProgress.success} ⏭${rollProgress.skipped} ✗${rollProgress.errors})`
+                  : `Roll Generate (${rollCount} แชท)`}
+              </button>
+
+              {/* Progress bar */}
+              {rollProgress && (
+                <div className="w-full h-1.5 bg-surface-2 rounded-full overflow-hidden">
+                  <div className="h-full bg-brand transition-all" style={{ width: `${(rollProgress.done / rollProgress.total) * 100}%` }} />
+                </div>
+              )}
+
+              {/* Info */}
+              <div className="text-[10px] text-text-subtle space-y-1 pt-2 border-t border-border">
+                <p>• "ทำใหม่ทับ" = generate ใหม่ทั้งหมด ไม่สนว่าเคยมีคนทำไหม</p>
+                <p>• "ข้ามที่มีคนทำแล้ว" = ข้ามแชทที่มี shadow reply (origin=manual_conversation) แล้ว ไปทำอันถัดไปจนครบจำนวน</p>
+                <p>• ประวัติการ roll จะเก็บรวมใน tab History</p>
               </div>
             </div>
-
-            {/* Roll button */}
-            <button onClick={handleRoll} disabled={rolling}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-2.5 rounded-lg bg-brand text-white text-xs font-medium hover:bg-brand-dark disabled:opacity-50 transition-colors">
-              {rolling ? <Loading size={12} /> : <Zap size={12} />}
-              {rollProgress
-                ? `Roll... ${rollProgress.done}/${rollProgress.total} (✓${rollProgress.success} ⏭${rollProgress.skipped} ✗${rollProgress.errors})`
-                : `Roll Generate (${rollCount} แชท)`}
-            </button>
-
-            {/* Progress bar */}
-            {rollProgress && (
-              <div className="w-full h-1.5 bg-surface-2 rounded-full overflow-hidden">
-                <div className="h-full bg-brand transition-all" style={{ width: `${(rollProgress.done / rollProgress.total) * 100}%` }} />
-              </div>
-            )}
-
-            {/* Info */}
-            <div className="text-[10px] text-text-subtle space-y-1 pt-2 border-t border-border">
-              <p>• "ทำใหม่ทับ" = generate ใหม่ทั้งหมด ไม่สนว่าเคยมีคนทำไหม</p>
-              <p>• "ข้ามที่มีคนทำแล้ว" = ข้ามแชทที่มี shadow reply (origin=manual_conversation) แล้ว ไปทำอันถัดไปจนครบจำนวน</p>
-              <p>• ประวัติการ roll จะเก็บรวมใน tab History</p>
-            </div>
-          </div>
+          </>
         ) : (
           /* fallback — ไม่ควรถึง */
           <div className="flex-1 flex items-center justify-center text-xs text-text-muted">—</div>
