@@ -2526,23 +2526,31 @@ class TestSelectionCanonicalOrder:
         """by_req order deliberately inverts form-tier preference —
         a second ordering owner in ctx would re-sort field-composite
         ahead; consuming canonical order must preserve selection's
-        pick sequence verbatim."""
+        pick sequence verbatim.
+
+        A-261 one-primary contract: recommend need emits exactly one
+        primary — ordering proof = first emitted card follows
+        selection's pick order in BOTH directions (a hidden rerank
+        would collapse both runs to the same identity)."""
         det = _sel_card("i:1", "slot", "req-0", "detect adapter",
                         canonical_roles=["adapter"],
                         roles_source="detect")
         fld = _sel_card("i:2", "slot", "req-0", "field set",
                         canonical_roles=["adapter", "cable"],
                         roles_source="field")
-        sel = _selection((det, "req-0"), (fld, "req-0"))
-        ctx = _compile(self._need_adapter(), sel,
-                       _pool(eligible=[_pooled("i:1", "1"),
-                                       _pooled("i:2", "2")]),
-                       (_req("req-0", subs=("adapter",)),),
-                       _profile("หัวชาร์จละ"))
-        ids = [str(p.get("item_id")) for p in ctx.products]
-        assert ids[:2] == ["1", "2"], (
+        need = self._need_adapter()
+        pool = _pool(eligible=[_pooled("i:1", "1"), _pooled("i:2", "2")])
+        reqs = (_req("req-0", subs=("adapter",)),)
+        prof = _profile("หัวชาร์จละ")
+        fwd = _compile(need, _selection((det, "req-0"), (fld, "req-0")),
+                       pool, reqs, prof)
+        rev = _compile(need, _selection((fld, "req-0"), (det, "req-0")),
+                       pool, reqs, prof)
+        fwd_ids = [str(p.get("item_id")) for p in fwd.products]
+        rev_ids = [str(p.get("item_id")) for p in rev.products]
+        assert fwd_ids[0] == "1" and rev_ids[0] == "2", (
             "ctx re-ordered candidates — selection is the sole "
-            f"ordering owner: {ids}")
+            f"ordering owner: fwd={fwd_ids} rev={rev_ids}")
 
     def test_form_tier_api_deleted_single_owner(self):
         """form_tier must not exist as a shared/consumer API — ordering

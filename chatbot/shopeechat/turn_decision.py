@@ -284,6 +284,7 @@ def decide_turn(
     intent_result: object | None = None,
     active_anchor: dict | None = None,
     tag_item_ids: tuple = (),
+    has_visual_media: bool = False,
 ) -> TurnPlan:
     """สร้าง TurnPlan ของ turn — pure, deterministic (ยกเว้น intent_result ที่ caller ส่งมา)."""
     intent: dict = intent_result if isinstance(intent_result, dict) else {}
@@ -308,7 +309,11 @@ def decide_turn(
         item_ids = tuple(dict.fromkeys(
             list(item_ids) + [_rc._id_str(i) for i in tag_item_ids]))
         flags.add("has_item_tag")
-    has_visual_media = "visual_media_placeholder" in flags
+    # _real_media = typed turn input (caller: real media resolved this turn);
+    #   has_visual_media = typed input OR visual placeholder ใน text —
+    #   evidence เดียวกัน ต่าง source (claim-resume / product-ctx ใช้ merged)
+    _real_media = has_visual_media
+    has_visual_media = _real_media or "visual_media_placeholder" in flags
     flags.discard("visual_media_placeholder")
     ownership = _resolve_ownership(ticket_state)
     claim = _wf._claim_lifecycle(claim_state)
@@ -340,6 +345,27 @@ def decide_turn(
                     subject_refs=(),
                     confidence=1.0,
                     provenance=("claim_state", "media_placeholder"),
+                ),),
+                ownership=ownership,
+                claim=claim,
+                requires_clarification=False,
+                normalized_message="",
+                flags=frozenset(flags),
+                intent_confidence=intent_conf,
+            )
+        if _real_media:
+            # real visual media turn — placeholder-only text แต่ลูกค้าส่ง
+            #   รูป/วิดีโอจริง = subject evidence → ให้ pipeline ตอบ
+            #   (sticker/placeholder เปล่าที่ไม่มี media → no_reply ด้านล่าง)
+            flags.add("real_visual_media")
+            return TurnPlan(
+                primary_action="execute_needs",
+                needs=(TurnNeed(
+                    kind="product",
+                    operation="describe",
+                    subject_refs=(),
+                    confidence=0.8,
+                    provenance=("real_visual_media",),
                 ),),
                 ownership=ownership,
                 claim=claim,
@@ -754,7 +780,16 @@ def decide_turn(
         _add_need("compat", "compat", refs=_compat_subject,
                   trefs=_compat_target, conf=intent_conf,
                   prov=("intent=compatibility_check",))
-    elif _has_compat_conn and (_has_target_dev or _has_explicit_product):
+    elif _has_compat_conn and (_has_target_dev or _tgt_refs
+                               or (_has_explicit_product and _route_types)):
+        # compat need เกิดเมื่อ typed relation owner มี counterpart/
+        #   target evidence เท่านั้น: device/code/relation_target ฝั่ง
+        #   target, หรือ named entity + product-type ที่ถูกถามคนละฝั่ง
+        #   connector ("หัวชาร์จ AD1404T ใช้กับสายชาร์จไหน" — ลูกค้าถาม
+        #   relation ระหว่าง code กับ type) — "X รองรับกี่วัตต์" ไม่มี
+        #   product type ถูกถามและไม่มี counterpart → spec ask ไม่ใช่
+        #   relation ask; "X รองรับ strava" ไม่มี typed counterpart
+        #   evidence → ไม่สร้าง compat need (ตาม contract)
         _add_need("compat", "compat", refs=_compat_subject,
                   trefs=_compat_target, conf=0.85,
                   prov=("route_context._REL_CONN_RE",))
@@ -860,11 +895,13 @@ def decide_turn(
         #   clarify; needs=() แต่เป็นข้อความปกติ (greeting/claim-resume text/
         #   คำถามเปิด) → execute_needs ให้ pipeline ปกติตอบ
         primary_action = "clarify"
-    elif (intent_name == "greeting" and intent_conf >= 0.7
-          and not needs):
-        # typed social turn (intent Pass-1 boundary เท่านั้น — ไม่มี kw/regex
-        #   ตรวจข้อความที่นี่): ไม่มี need → caller ตอบ greeting ตรง ไม่เข้า
-        #   retrieval/subject resolver (set เดิมไม่ถูกแตะ)
+    elif ((intent_name == "greeting" and intent_conf >= 0.7)
+          or _detectors.detect_social_turn(norm)) and not needs:
+        # typed social turn: intent Pass-1 boundary หรือ deterministic
+        #   social detector (canonical pure owner — message_detectors;
+        #   provider down ก็ตัดสินได้ ไม่ต้อง handoff) — ไม่มี need →
+        #   caller ตอบ greeting ตรง ไม่เข้า retrieval/subject resolver
+        #   (set เดิมไม่ถูกแตะ)
         primary_action = "greeting"
     else:
         primary_action = "execute_needs"
@@ -882,9 +919,10 @@ def decide_turn(
 
 
 def apply_resolved_subject_refs(needs, subject_ids, *,
-                                plan_scope: str | None):
-    """resolved persisted subject → typed need.subject_refs (ownership
-    boundary เดียวของ deictic scope — caller: app.py หลัง resolver resolved).
+                                plan_scope: str | None,
+                                persisted_code_index: dict | None = None):
+    """resolved persisted subject → typed need refs (ownership boundary
+    เดียวของ deictic scope — caller: app.py หลัง resolver resolved).
 
     subject_scope=current_single + resolver คืน canonical id เดียว → id
     นั้น stamp เป็น subject_refs (exact-item authority ต่อใน slot/request/
@@ -900,14 +938,30 @@ def apply_resolved_subject_refs(needs, subject_ids, *,
     plan_scope ไม่ใช่ explicit → คงเดิม (explicit typed refs เป็น
     authority เสมอ — ไม่ substitute กับ item ที่ไม่ได้พิสูจน์).
 
+    counterpart stamping — compat need ที่ subject slot ถูก explicit
+    identity ครองแล้วและ target_refs ว่าง (deictic resolution ผ่าน
+    canonical language path เท่านั้น — plan_scope != "explicit": explicit
+    scope resolve ได้ก็ต่อเมื่อ code-equivalence พิสูจน์ subject identity
+    → ห้ามตีเป็น counterpart): resolved item = typed counterpart ของ
+    relation → stamp code-level refs เข้า target_refs (name-level match
+    กับ evidence target_id; persisted_code_index = ตาราง item→codes
+    ที่ caller สร้างจาก timeline cards — ไม่มี code → item id verbatim).
+
     Input: needs = TurnNeed tuple; subject_ids = resolver output ids;
     plan_scope = scope ที่ resolver ถูกเรียก (ค่าเดียวกับที่ส่งให้
-    resolve_subjects — caller เป็น authority ไม่ re-derive จาก needs).
+    resolve_subjects — caller เป็น authority ไม่ re-derive จาก needs);
+    persisted_code_index = dict {item_id: (codes,)} จาก caller (optional
+    — ใช้เฉพาะ counterpart stamping).
     Output: TurnNeed tuple (frozen — replace สร้าง instance ใหม่เฉพาะ need
     ที่ stamp; caller ตัดสินใจ replace ใน TurnPlan)."""
     ids = tuple(str(i) for i in (subject_ids or ()))
     if len(ids) != 1:
         return tuple(needs)
+
+    # code-level counterpart refs ของ resolved item — dedupe ตามลำดับ
+    _idx = persisted_code_index or {}
+    _trefs = tuple(dict.fromkeys(
+        c for sid in ids for c in (_idx.get(sid) or (sid,))))
 
     def _stamp(n):
         if n.kind not in PRODUCTISH_NEED_KINDS:
@@ -921,6 +975,9 @@ def apply_resolved_subject_refs(needs, subject_ids, *,
                         for r in n.subject_refs)):
             return _dc_replace(
                 n, subject_refs=ids + tuple(n.subject_refs))
+        if (n.kind == "compat" and plan_scope != "explicit"
+                and n.subject_refs and not n.target_refs):
+            return _dc_replace(n, target_refs=_trefs)
         return n
 
     return tuple(_stamp(n) for n in needs)

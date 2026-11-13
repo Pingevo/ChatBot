@@ -151,7 +151,8 @@ def _claim_transition(req, claim_state: dict, to: str,
         term.update(fields)
         return _cp.merge_claim_fields(
             req.conversation_id, episode_id=view.episode_id,
-            expected_stage=view.stage, fields=term) or cs
+            expected_stage=view.stage, fields=term,
+            platform=req.platform, shop=req.shop) or cs
 
     merge = dict(fields)
     merge["stage"] = to
@@ -160,7 +161,8 @@ def _claim_transition(req, claim_state: dict, to: str,
         merge["episode_id"] = str(_uuid.uuid4())
     return _cp.merge_claim_fields(
         req.conversation_id, episode_id=view.episode_id,
-        expected_stage=view.stage, fields=merge) or cs
+        expected_stage=view.stage, fields=merge,
+        platform=req.platform, shop=req.shop) or cs
 
 
 def _consume_claim_outcome(req, claim_state: dict | None) -> dict:
@@ -278,7 +280,9 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
     if req.conversation_id:
         try:
             from . import conversation_products as _cp_claim
-            _claim_state = _cp_claim.load_claim_state(req.conversation_id) or {}
+            _claim_state = _cp_claim.load_claim_state(
+                req.conversation_id,
+                platform=req.platform, shop=req.shop) or {}
         except Exception:
             pass
     # ⚡ 2B.6 — explicit admin outcome ก่อน lifecycle evaluate (authoritative turn)
@@ -1108,7 +1112,9 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
     if req.conversation_id:
         try:
             from . import conversation_products as _cp_claim
-            _claim_state = _cp_claim.load_claim_state(req.conversation_id) or {}
+            _claim_state = _cp_claim.load_claim_state(
+                req.conversation_id,
+                platform=req.platform, shop=req.shop) or {}
         except Exception:
             pass
     # ⚡ 2B.6 — explicit admin outcome ก่อน lifecycle evaluate (authoritative turn)

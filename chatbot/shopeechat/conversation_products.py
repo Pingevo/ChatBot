@@ -102,8 +102,14 @@ def _to_serializable(obj: Any) -> Any:
     return obj
 
 
-def load_timeline(conversation_id: str) -> dict | None:
+def load_timeline(conversation_id: str, *, platform: str | None = None,
+                  shop: str | None = None) -> dict | None:
     """โหลด product timeline ของแชท.
+
+    tenant boundary: dim ที่ request ให้ → exact match เท่านั้น; dim
+    ที่ไม่ให้ → doc ต้อง unscoped เช่นกัน — foreign/legacy doc fail
+    closed (None); legacy unscoped doc ไม่ serve scoped request
+    (รอ migration/backfill แยกงาน ไม่ claim/stamp/ลบ)
 
     Returns:
         doc ที่มี products list + active_item_id หรือ None ถ้าไม่มี
@@ -111,15 +117,46 @@ def load_timeline(conversation_id: str) -> dict | None:
     if not conversation_id:
         return None
     try:
-        doc = _coll().find_one({"conversation_id": conversation_id})
+        filt = {"conversation_id": conversation_id}
+        # tenant: dim ที่ request ให้ → exact; ไม่ให้ → doc ต้อง
+        # unscoped เช่นกัน (scoped doc ห้ามไหลเข้า unscoped req;
+        # legacy doc ห้าม serve scoped req) — fail closed ทั้งสองทิศ
+        filt["platform"] = (platform if platform
+                             else {"$in": [None, ""]})
+        filt["shop"] = (shop if shop
+                         else {"$in": [None, ""]})
+        doc = _coll().find_one(filt)
         return doc
     except Exception:
         return None
 
 
+def _log_tl_write_fail(op: str, platform: str | None, shop: str | None,
+                       conversation_id: str | None, exc: Exception) -> None:
+    """sanitized write-failure log — operational signal ครั้งเดียว.
+
+    ไม่มี customer message / name / phone / address / secret —
+    conversation_id → hash prefix เท่านั้น (log pattern เดิมของ repo:
+    print → stderr พร้อม tag)"""
+    import hashlib
+    import sys as _sys
+    _h = (hashlib.sha256(str(conversation_id).encode("utf-8"))
+          .hexdigest()[:10] if conversation_id else "-")
+    print(f"[CONV-PRODUCTS] {op} write failed: "
+          f"platform={platform or '-'} shop={shop or '-'} "
+          f"conv={_h} err={type(exc).__name__}", file=_sys.stderr)
+
+
 def save_timeline(conversation_id: str, platform: str | None, shop: str | None,
-                  products: list[dict], active_item_id: str | int | None) -> None:
+                  products: list[dict], active_item_id: str | int | None) -> bool:
     """บันทึก product timeline.
+
+    tenant boundary: platform/shop ที่ส่งมาอยู่ใน update filter ด้วย —
+    doc ที่ scope ต่างออกไป (รวม legacy doc ที่ไม่มี scope field เมื่อ
+    request scoped) ไม่ match → upsert พยายาม insert doc ใหม่ (real Mongo:
+    unique index {conversation_id:1} → insert แพ้ E11000 → write ล้ม
+    fail-closed ไม่ทับ doc ของร้านอื่น/legacy — ไม่มีการ stamp scope ลง
+    doc เดิม)
 
     Args:
         conversation_id: ID ของแชท
@@ -127,13 +164,25 @@ def save_timeline(conversation_id: str, platform: str | None, shop: str | None,
         shop: ชื่อร้าน
         products: list ของ {item_id, name, source, mentioned_at, is_anchor, card}
         active_item_id: item_id ของ active product
+
+    Returns:
+        True เมื่อ write persist (matched/upserted) — False เมื่อ write
+        exception/fence miss (caller ห้าม report ว่า persist แล้ว)
     """
     if not conversation_id:
-        return
+        return False
     try:
         now = datetime.now(timezone.utc)
-        _coll().update_one(
-            {"conversation_id": conversation_id},
+        filt = {"conversation_id": conversation_id}
+        # tenant: dim ที่ request ให้ → exact; ไม่ให้ → doc ต้อง
+        # unscoped เช่นกัน (scoped doc ห้ามไหลเข้า unscoped req;
+        # legacy doc ห้าม serve scoped req) — fail closed ทั้งสองทิศ
+        filt["platform"] = (platform if platform
+                             else {"$in": [None, ""]})
+        filt["shop"] = (shop if shop
+                         else {"$in": [None, ""]})
+        res = _coll().update_one(
+            filt,
             {
                 "$set": {
                     "conversation_id": conversation_id,
@@ -146,8 +195,18 @@ def save_timeline(conversation_id: str, platform: str | None, shop: str | None,
             },
             upsert=True,
         )
-    except Exception:
-        pass
+        if (getattr(res, "matched_count", 0) == 0
+                and getattr(res, "upserted_id", None) is None):
+            # driver ตอบ 0/None = ไม่มี doc ถูกเขียน — ห้าม report success
+            _log_tl_write_fail(
+                "save_timeline", platform, shop, conversation_id,
+                RuntimeError("write matched 0 / upserted none"))
+            return False
+        return True
+    except Exception as _e:
+        _log_tl_write_fail("save_timeline", platform, shop,
+                           conversation_id, _e)
+        return False
 
 
 def add_product(
@@ -173,7 +232,7 @@ def add_product(
     if not conversation_id or not item_id:
         return None
     try:
-        doc = load_timeline(conversation_id) or {
+        doc = load_timeline(conversation_id, platform=platform, shop=shop) or {
             "conversation_id": conversation_id,
             "platform": platform,
             "shop": shop,
@@ -221,11 +280,17 @@ def add_product(
 
         # คำนวณ active: anchor ล่าสุด (ถ้ามี) ไม่ใช่ suggestion ล่าสุด
         active_item_id = _compute_active(products)
-        save_timeline(conversation_id, platform, shop, products, active_item_id)
+        if not save_timeline(conversation_id, platform, shop, products,
+                             active_item_id):
+            # write ล้ม (เช่น unique collision กับ legacy/foreign doc) —
+            #   ห้ามคืน mutated doc เหมือน persist สำเร็จ
+            return None
         doc["products"] = products
         doc["active_item_id"] = active_item_id
         return doc
-    except Exception:
+    except Exception as _e:
+        _log_tl_write_fail("add_product", platform, shop,
+                           conversation_id, _e)
         return None
 
 
@@ -292,13 +357,18 @@ def _rebuild_card(p: dict, message: str = "", snap=_gen.SNAP_UNSET) -> dict | No
     item_id = _to_serializable(p.get("item_id"))
     if item_id is None:
         return None
+    card = p.get("card") or {}
+    shop = str(card.get("shop") or "").strip()
+    if not shop:
+        return None  # ไม่มี shop scope → fail-closed (caller fallback = stored card)
     from . import product_store as _ps
     db_name = os.environ.get("MONGO_DB", "").strip()
     coll_name = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() or "ShpProducts"
-    doc = _ps.get_client()[db_name][coll_name].find_one({"item_id": item_id})
+    doc = _ps.get_client()[db_name][coll_name].find_one(
+        {"item_id": item_id,
+         "shopname": {"$regex": f"^{re.escape(shop)}$", "$options": "i"}})
     if not doc:
         return None
-    card = p.get("card") or {}
     vlist = card.get("variants") or []
     model_name = p.get("model_name") or (
         vlist[0].get("name") if len(vlist) == 1 else None)
@@ -307,7 +377,8 @@ def _rebuild_card(p: dict, message: str = "", snap=_gen.SNAP_UNSET) -> dict | No
             from . import units as _units
             snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
             u = _units._units_coll(snap).find_one(
-                {"item_id": item_id, "model_name": model_name})
+                {"item_id": item_id, "model_name": model_name,
+                 "shop": shop})
             if u:
                 # helper chain เดียวกับ fetch_unit_cards — unit card สดครบทุก field
                 u = _units.attach_image_texts(
@@ -319,15 +390,29 @@ def _rebuild_card(p: dict, message: str = "", snap=_gen.SNAP_UNSET) -> dict | No
     return _ps.to_product_card(doc, message)
 
 
-def _materialize_card(p: dict, message: str = "", snap=_gen.SNAP_UNSET) -> dict:
-    """คืน card ของ timeline entry — rebuild สดจาก DB ถ้าทำได้, fallback = stored card."""
+def _materialize_card(p: dict, message: str = "", snap=_gen.SNAP_UNSET,
+                      *, platform: str | None = None,
+                      shop: str | None = None) -> dict:
+    """คืน card ของ timeline entry — rebuild สดจาก DB ถ้าทำได้, fallback = stored card.
+
+    tenant boundary: cache identity และ stored fallback ผูกกับ shop —
+    scope = shop param (request) หรือ stored card shop (provenance);
+    scope param กับ stored shop ชนกัน → entry คนละ tenant → ห้าม materialize
+    """
+    card_shop = str((p.get("card") or {}).get("shop") or "").strip()
+    scope_shop = str(shop or "").strip() or card_shop
+    if (shop and card_shop
+            and card_shop.casefold() != str(shop).strip().casefold()):
+        return {}  # entry card เป็น tenant อื่น — ห้าม rebuild/reuse
     stored = p.get("card") or {"item_id": p.get("item_id"), "name": p.get("name")}
     try:
-        # cache identity รวม captured generation — card ที่สร้างจาก gen A
-        # ห้ามถูก reuse โดย request ที่ capture gen B/None (SNAP_UNSET =
-        # standalone → resolve ครั้งเดียวที่ entry นี้ ก่อนสร้าง key)
+        # cache identity รวม tenant + captured generation — card ที่สร้างจาก
+        # shop/gen อื่นห้ามถูก reuse (SNAP_UNSET = standalone → resolve
+        # ครั้งเดียวที่ entry นี้ ก่อนสร้าง key)
         snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
-        key = (str(_to_serializable(p.get("item_id"))),
+        key = (str(platform or "").strip().casefold(),
+               scope_shop.casefold(),
+               str(_to_serializable(p.get("item_id"))),
                str(p.get("model_name") or ""),
                snap.generation_id if snap is not None else None)
         hit = _LIVE_CARD_CACHE.get(key)
@@ -353,13 +438,15 @@ def _normalize_dt(dt: Any) -> datetime:
     return dt
 
 
-def get_active_product(conversation_id: str, snap=_gen.SNAP_UNSET) -> dict | None:
+def get_active_product(conversation_id: str, snap=_gen.SNAP_UNSET,
+                       *, platform: str | None = None,
+                       shop: str | None = None) -> dict | None:
     """ดึง active product card ของแชท.
 
     Returns:
         product card (dict) หรือ None ถ้าไม่มี
     """
-    doc = load_timeline(conversation_id)
+    doc = load_timeline(conversation_id, platform=platform, shop=shop)
     if not doc:
         return None
     active_id = doc.get("active_item_id")
@@ -368,7 +455,8 @@ def get_active_product(conversation_id: str, snap=_gen.SNAP_UNSET) -> dict | Non
     active_id_ser = _to_serializable(active_id)
     for p in doc.get("products", []):
         if _to_serializable(p.get("item_id")) == active_id_ser:
-            return _materialize_card(p, snap=snap)
+            return _materialize_card(p, snap=snap,
+                                     platform=platform, shop=shop)
     return None
 
 
@@ -427,7 +515,7 @@ def add_order_anchor(
     if not conversation_id or not order_sn:
         return None
     try:
-        doc = load_timeline(conversation_id) or {
+        doc = load_timeline(conversation_id, platform=platform, shop=shop) or {
             "conversation_id": conversation_id,
             "platform": platform,
             "shop": shop,
@@ -468,9 +556,19 @@ def add_order_anchor(
         # active_order_sn = order ล่าสุด (เสมอ — เพราะ order anchor ใหม่ = ลูกค้าส่งมาใหม่)
         active_order_sn = order_sn
 
-        # บันทึก
-        _coll().update_one(
-            {"conversation_id": conversation_id},
+        # บันทึก — filter ผูก tenant scope: doc ร้านอื่นไม่ match → upsert
+        # สร้าง doc ของ scope นี้ (real Mongo unique {conversation_id:1}
+        # → insert แพ้ E11000 → write ล้ม fail-closed ไม่ทับร้านอื่น)
+        filt = {"conversation_id": conversation_id}
+        # tenant: dim ที่ request ให้ → exact; ไม่ให้ → doc ต้อง
+        # unscoped เช่นกัน (scoped doc ห้ามไหลเข้า unscoped req;
+        # legacy doc ห้าม serve scoped req) — fail closed ทั้งสองทิศ
+        filt["platform"] = (platform if platform
+                             else {"$in": [None, ""]})
+        filt["shop"] = (shop if shop
+                         else {"$in": [None, ""]})
+        res = _coll().update_one(
+            filt,
             {
                 "$set": {
                     "conversation_id": conversation_id,
@@ -483,20 +581,32 @@ def add_order_anchor(
             },
             upsert=True,
         )
+        if (getattr(res, "matched_count", 0) == 0
+                and getattr(res, "upserted_id", None) is None):
+            _log_tl_write_fail(
+                "add_order_anchor", platform, shop, conversation_id,
+                RuntimeError("write matched 0 / upserted none"))
+            return None
         doc["order_anchors"] = order_anchors
         doc["active_order_sn"] = active_order_sn
         return doc
-    except Exception:
+    except Exception as _e:
+        # write ล้ม (เช่น unique collision) — ห้ามคืน doc เหมือน persist;
+        #   log ครั้งเดียวเพื่อ operational observability
+        _log_tl_write_fail("add_order_anchor", platform, shop,
+                           conversation_id, _e)
         return None
 
 
-def get_active_order_sn(conversation_id: str) -> str | None:
+def get_active_order_sn(conversation_id: str, *,
+                        platform: str | None = None,
+                        shop: str | None = None) -> str | None:
     """ดึง active order_sn ของแชท (order ล่าสุดที่ลูกค้าส่งมา).
 
     Returns:
         order_sn หรือ None ถ้าไม่มี
     """
-    doc = load_timeline(conversation_id)
+    doc = load_timeline(conversation_id, platform=platform, shop=shop)
     if not doc:
         return None
     return doc.get("active_order_sn")
@@ -506,6 +616,9 @@ def resolve_active_order_sn(
     conversation_id: str,
     message: str,
     order_sn_in_message: str | None = None,
+    *,
+    platform: str | None = None,
+    shop: str | None = None,
 ) -> str | None:
     """resolve active order_sn ตามกฎ:
 
@@ -532,11 +645,13 @@ def resolve_active_order_sn(
 
     # 2. "order เดิม/คำสั่งซื้อเดิม" → active order
     if any(kw in msg_lower for kw in _SAME_ORDER_KWS):
-        return get_active_order_sn(conversation_id)
+        return get_active_order_sn(
+            conversation_id, platform=platform, shop=shop)
 
     # 3. order generic question → active order
     if any(kw in msg_lower for kw in _ORDER_GENERIC_KWS):
-        return get_active_order_sn(conversation_id)
+        return get_active_order_sn(
+            conversation_id, platform=platform, shop=shop)
 
     # 4. ไม่ใช่คำถามเรื่อง order
     return None
@@ -569,6 +684,9 @@ def is_order_question(message: str) -> bool:
 def get_anchor_history(
     conversation_id: str,
     limit: int = 10,
+    *,
+    platform: str | None = None,
+    shop: str | None = None,
 ) -> list[dict]:
     """ดึง anchor products ของแชท เรียงจากใหม่→เก่าตาม mentioned_at.
 
@@ -580,7 +698,7 @@ def get_anchor_history(
         list ของ {item_id, name, source, mentioned_at, is_anchor, card}
         เรียงจากใหม่→เก่า ถ้าไม่มี timeline หรือไม่มี anchor → คืน []
     """
-    doc = load_timeline(conversation_id)
+    doc = load_timeline(conversation_id, platform=platform, shop=shop)
     if not doc:
         return []
     products = doc.get("products", [])
@@ -595,6 +713,9 @@ def get_anchor_history(
 def get_previous_anchor(
     conversation_id: str,
     exclude_item_id: str | int | None = None,
+    *,
+    platform: str | None = None,
+    shop: str | None = None,
 ) -> dict | None:
     """ดึง anchor อันดับ 2 ล่าสุด (anchor ก่อนหน้า).
 
@@ -610,7 +731,8 @@ def get_previous_anchor(
         product card (dict) ของ anchor อันดับ 2 หรือ None ถ้ามี anchor แค่ 1 ตัว
         (หรือไม่มีเลย หรือมีแค่ตัวเดียวที่ตรง exclude_item_id)
     """
-    anchors = get_anchor_history(conversation_id, limit=20)
+    anchors = get_anchor_history(
+        conversation_id, limit=20, platform=platform, shop=shop)
     if len(anchors) < 2:
         return None
     # กรอง exclude_item_id ออก (ถ้าระบุ)
@@ -635,8 +757,14 @@ def get_previous_anchor(
 # Storage: field `claim_state` ใน conversation_products document (เดียวกับ timeline)
 
 
-def load_claim_state(conversation_id: str) -> dict | None:
+def load_claim_state(conversation_id: str, *,
+                     platform: str | None = None,
+                     shop: str | None = None) -> dict | None:
     """โหลด persisted `claim_state` dict ของแชท (canonical schema ใน docs/schema.md).
+
+    tenant boundary: exact match ทุก dim ที่ request ให้ + doc ต้อง
+    unscoped บน dim ที่ request ไม่ให้ — foreign/legacy/scoped-doc ที่
+    scope ไม่ตรง → fail closed
 
     Returns:
         dict ของ episode ล่าสุด — lifecycle (`episode_id`, `stage`,
@@ -648,7 +776,15 @@ def load_claim_state(conversation_id: str) -> dict | None:
     if not conversation_id:
         return None
     try:
-        doc = _coll().find_one({"conversation_id": conversation_id})
+        filt = {"conversation_id": conversation_id}
+        # tenant: dim ที่ request ให้ → exact; ไม่ให้ → doc ต้อง
+        # unscoped เช่นกัน (scoped doc ห้ามไหลเข้า unscoped req;
+        # legacy doc ห้าม serve scoped req) — fail closed ทั้งสองทิศ
+        filt["platform"] = (platform if platform
+                             else {"$in": [None, ""]})
+        filt["shop"] = (shop if shop
+                         else {"$in": [None, ""]})
+        doc = _coll().find_one(filt)
         if not doc:
             return None
         return doc.get("claim_state")
@@ -686,6 +822,15 @@ def transition_claim_state(
         "claim_state.episode_id": expected_episode_id,
         "claim_state.stage": expected_stage,
     }
+    # tenant boundary — exact scope อยู่ใน CAS filter ด้วย: doc ที่
+    # scope ต่าง/legacy ไม่ match → fence miss → reread/insert ภายใต้
+    # scope เดียวกัน (ห้าม claim legacy doc)
+    scope = {
+        "platform": (platform if platform
+                      else {"$in": [None, ""]}),
+        "shop": (shop if shop else {"$in": [None, ""]}),
+    }
+    filt.update(scope)
     try:
         res = _coll().update_one(
             filt,
@@ -697,7 +842,7 @@ def transition_claim_state(
         )
         if getattr(res, "matched_count", 0):
             return claim_state
-        doc = _coll().find_one({"conversation_id": conversation_id})
+        doc = _coll().find_one({"conversation_id": conversation_id, **scope})
         if doc is not None:
             return doc.get("claim_state")
         # doc ยังไม่มีจริง → insert (ไม่ใช่ upsert — upsert จะ match doc ของ
@@ -716,9 +861,12 @@ def transition_claim_state(
             if not isinstance(e, DuplicateKeyError):
                 raise
             # E11000 — writer อื่นชนะ insert race → reread ครั้งเดียว
-            doc = _coll().find_one({"conversation_id": conversation_id})
+            doc = _coll().find_one(
+                {"conversation_id": conversation_id, **scope})
             return doc.get("claim_state") if doc else None
-    except Exception:
+    except Exception as _e:
+        _log_tl_write_fail("transition_claim_state", platform, shop,
+                           conversation_id, _e)
         return None
 
 
@@ -728,6 +876,8 @@ def merge_claim_fields(
     episode_id: str | None,
     expected_stage: str | None,
     fields: dict | None,
+    platform: str | None = None,
+    shop: str | None = None,
 ) -> dict | None:
     """same-episode partial update — dotted $set เท่านั้น (storage primitive).
 
@@ -737,6 +887,8 @@ def merge_claim_fields(
     ใช้สำหรับ field merge และ same-episode stage transition (รวม terminal:
     stage/resolved_at/resolution_reason) — ห้าม $set claim_state ทั้งก้อน.
     miss → reread ครั้งเดียว คืน state ปัจจุบัน (authoritative).
+    tenant boundary: platform/shop ที่ส่งมาอยู่ใน fence+reread — doc ร้าน
+    อื่น/legacy ไม่ match → fail closed ไม่เขียนทับ
 
     Returns:
         claim_state หลังเขียน (หรือของผู้ชนะถ้า fence miss) หรือ None ถ้า error
@@ -749,6 +901,13 @@ def merge_claim_fields(
         "claim_state.episode_id": episode_id,
         "claim_state.stage": expected_stage,
     }
+    # tenant: dim ที่ request ให้ → exact; ไม่ให้ → doc ต้อง
+    # unscoped เช่นกัน (scoped doc ห้ามไหลเข้า unscoped req;
+    # legacy doc ห้าม serve scoped req) — fail closed ทั้งสองทิศ
+    filt["platform"] = (platform if platform
+                         else {"$in": [None, ""]})
+    filt["shop"] = (shop if shop
+                     else {"$in": [None, ""]})
     try:
         from datetime import datetime, timezone
         sets = {
@@ -758,9 +917,13 @@ def merge_claim_fields(
         }
         sets["claim_state.updated_at"] = datetime.now(timezone.utc).isoformat()
         _coll().update_one(filt, {"$set": sets})
-        doc = _coll().find_one({"conversation_id": conversation_id})
+        doc = _coll().find_one({"conversation_id": conversation_id,
+                                **({k: filt[k] for k in ("platform", "shop")
+                                    if k in filt})})
         return doc.get("claim_state") if doc else None
-    except Exception:
+    except Exception as _e:
+        _log_tl_write_fail("merge_claim_fields", platform, shop,
+                           conversation_id, _e)
         return None
 
 
@@ -916,7 +1079,9 @@ def _parse_subject_set(raw: Any) -> ConversationSubjectSet | None:
     )
 
 
-def get_subject_set(conversation_id: str) -> SubjectSetView:
+def get_subject_set(conversation_id: str, *,
+                    platform: str | None = None,
+                    shop: str | None = None) -> SubjectSetView:
     """โหลด subject view — DB read owner (≤1 call/turn).
 
     effective = stored subject_set ถ้า parse ได้; ถ้าไม่มี field ให้ derive
@@ -924,12 +1089,23 @@ def get_subject_set(conversation_id: str) -> SubjectSetView:
     subject_set; suggestion ไม่ derive) เพื่อให้ deictic resolve บน
     conversation เก่าที่ยังไม่มี subject_set — 1 anchor → single,
     หลาย anchor → alternatives (co-mentioned, relation ไม่ชัด)
+
+    tenant boundary: caller ที่มี request scope ต้องส่ง platform/shop —
+    doc ร้านอื่น/legacy (ไม่มี scope field) → empty view (fail closed)
     """
     empty = SubjectSetView(None, None, ())
     if not conversation_id:
         return empty
     try:
-        doc = _coll().find_one({"conversation_id": conversation_id})
+        filt = {"conversation_id": conversation_id}
+        # tenant: dim ที่ request ให้ → exact; ไม่ให้ → doc ต้อง
+        # unscoped เช่นกัน (scoped doc ห้ามไหลเข้า unscoped req;
+        # legacy doc ห้าม serve scoped req) — fail closed ทั้งสองทิศ
+        filt["platform"] = (platform if platform
+                             else {"$in": [None, ""]})
+        filt["shop"] = (shop if shop
+                         else {"$in": [None, ""]})
+        doc = _coll().find_one(filt)
     except Exception:
         return empty
     if not doc:
@@ -1182,12 +1358,21 @@ def record_subject_set(
     else:
         filt = {"conversation_id": conversation_id,
                 "subject_set": None}
+    # tenant boundary — exact scope อยู่ใน CAS filter: doc ที่ scope
+    # ต่าง/legacy ไม่ match → fence miss → reread/insert ภายใต้ scope
+    # เดียวกัน (ห้ามเขียนทับ/claim doc ร้านอื่นหรือ legacy)
+    scope = {
+        "platform": (platform if platform
+                      else {"$in": [None, ""]}),
+        "shop": (shop if shop else {"$in": [None, ""]}),
+    }
+    filt.update(scope)
     try:
         res = _coll().update_one(
             filt, {"$set": {"subject_set": sdoc, "last_updated": now}})
         if getattr(res, "matched_count", 0):
             return committed
-        doc = _coll().find_one({"conversation_id": conversation_id})
+        doc = _coll().find_one({"conversation_id": conversation_id, **scope})
         if doc is not None:
             return _parse_subject_set(doc.get("subject_set"))
         try:
@@ -1203,9 +1388,12 @@ def record_subject_set(
             from pymongo.errors import DuplicateKeyError
             if not isinstance(e, DuplicateKeyError):
                 raise
-            doc = _coll().find_one({"conversation_id": conversation_id})
+            doc = _coll().find_one(
+                {"conversation_id": conversation_id, **scope})
             return _parse_subject_set(doc.get("subject_set")) if doc else None
-    except Exception:
+    except Exception as _e:
+        _log_tl_write_fail("record_subject_set", platform, shop,
+                           conversation_id, _e)
         return None
 
 
@@ -1215,6 +1403,7 @@ def materialize_subject_cards(
     *,
     products,
     shop_filter: str | None = None,
+    platform: str | None = None,
     message: str = "",
     snap=_gen.SNAP_UNSET,
 ) -> list[dict]:
@@ -1235,10 +1424,13 @@ def materialize_subject_cards(
     ids = _norm_subject_ids(subject_ids)
     if not ids:
         return []
-    # cache identity รวม captured generation (resolve ครั้งเดียวที่ entry —
-    # card ที่ cache จาก gen อื่นห้าม reuse; captured None = identity ของมันเอง)
+    # cache identity รวม tenant + captured generation (resolve ครั้งเดียวที่
+    # entry — card ที่ cache จาก shop/gen อื่นห้าม reuse; captured None =
+    # identity ของมันเอง)
     snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
     _gen_id = snap.generation_id if snap is not None else None
+    _plat_key = str(platform or "").strip().casefold()
+    _shop_key = str(shop_filter or "").strip().casefold()
     entries: dict[str, dict] = {}
     for p in products or ():
         pid = p.get("item_id")
@@ -1278,8 +1470,10 @@ def materialize_subject_cards(
             if model_name:
                 wanted_iids.append(doc.get("item_id"))
         if wanted_iids:
-            udocs = list(_units._units_coll(snap).find(
-                {"item_id": {"$in": wanted_iids}}).limit(50))
+            uq = {"item_id": {"$in": wanted_iids}}
+            if shop_filter:
+                uq["shop"] = shop_filter
+            udocs = list(_units._units_coll(snap).find(uq).limit(50))
             udocs = _units.attach_image_texts(
                 _units.attach_kb_specs(udocs), snap)
             for u in udocs:
@@ -1293,7 +1487,13 @@ def materialize_subject_cards(
         card = None
         entry = entries.get(sid)
         doc = docs_by_id.get(sid)
-        ckey = (sid, str((entry or {}).get("model_name") or ""), _gen_id)
+        # tenant identity = request scope (มีเสมอเมื่อ caller scope) หรือ
+        #   stored card shop (provenance) — live doc resolve ผ่าน shop_filter
+        #   แล้วจึง materialize ได้ปกติ; stored snapshot ต่าง tenant ห้าม reuse
+        entry_shop = str(((entry or {}).get("card") or {}).get("shop")
+                         or "").strip()
+        ckey = (_plat_key, _shop_key or entry_shop.casefold(),
+                sid, str((entry or {}).get("model_name") or ""), _gen_id)
         hit = _LIVE_CARD_CACHE.get(ckey)
         if hit and (time.monotonic() - hit[0]) < _LIVE_CARD_TTL:
             card = hit[1]
@@ -1318,7 +1518,10 @@ def materialize_subject_cards(
         if card is None:
             # live หาย/พัง → stored snapshot เท่านั้น: identity+history —
             # ห้าม claim live state, ขายไม่ได้, ไม่มีลิงก์ขาย
-            if entry is not None:
+            # tenant: stored card ที่ shop ไม่ตรง request scope ห้าม reuse
+            if (entry is not None
+                    and not (shop_filter and entry_shop
+                             and entry_shop.casefold() != _shop_key)):
                 stored = dict(entry.get("card") or {
                     "item_id": entry.get("item_id"),
                     "name": entry.get("name")})

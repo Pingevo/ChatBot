@@ -276,9 +276,33 @@ def select_for_llm_context(
                 bucket.setdefault(rid, []).append(c)
     for req in requests:
         cands = elig_by_req.get(req.request_id, [])
+        # type-scope verified tie-break: canonical type ที่พิสูจน์เข้า
+        #   request scope → เหนือ type-unknown ต่อเมื่อ hits/score เท่ากัน
+        #   (unknown ≠ wrong — reject เฉพาะ proven-mismatch ที่
+        #   executor._bucket; เหลือเชื่อ score เป็น primary evidence)
+        _eff_types = set(req.product_types or ())
+        if _eff_types or req.subtypes:
+            from .units import (_SUBTYPE_TO_TYPES,
+                                _CHARGER_MEMBER_TYPES)
+            for _sub in (req.subtypes or ()):
+                _eff_types |= _SUBTYPE_TO_TYPES.get(_sub, set())
+            if "charger" in req.product_types:
+                _eff_types |= _CHARGER_MEMBER_TYPES
+        _ver_ids: set[str] = set()
+        if _eff_types:
+            for _pc in cands:
+                _c0 = _pc.card or {}
+                _canon = ((_c0.get("_evidence") or {}).get("facts")
+                          or {}).get("canonical") or {}
+                _ct = set(_canon.get("type_candidates") or ())
+                if _c0.get("canonical_type"):
+                    _ct.add(_c0["canonical_type"])
+                if _ct & _eff_types:
+                    _ver_ids.add(_pc.identity)
         ranked = sorted(
             (_select_one(c, req, text_cache) for c in cands),
-            key=lambda s: (len(s.constraint_hits), s.score), reverse=True)
+            key=lambda s: (len(s.constraint_hits), s.score,
+                           s.identity in _ver_ids), reverse=True)
         # form-exact preference: request (หรือ need ที่ map — compat channel
         #   ไม่มี subs ของตัวเอง) ถาม form subtype เดียว → stable partition
         #   ด้วย typed facts เท่านั้น (ordering owner เดียว — ไม่มี tier

@@ -161,17 +161,23 @@ def _desc_vectors(snap) -> dict | None:
     return vec
 
 
-def _desc_item_docs(item_ids: list) -> dict:
+def _desc_item_docs(item_ids: list, *, shop: str | None = None) -> dict:
     """ShpProducts docs ของ hit item ids — read-only (item_id เป็น int ทั้งสอง
-    ฝั่ง); item ที่ listing หายไป → ไม่มี key → fetcher ข้าม (fail closed)"""
+    ฝั่ง); item ที่ listing หายไป → ไม่มี key → fetcher ข้าม (fail closed)
+
+    tenant boundary: shop ที่ส่งมาอยู่ใน query — item_id ชนกันข้ามร้านต้อง
+    rehydrate เฉพาะ doc ของร้านนั้น (strict shopname ตาม convention
+    fetch_product_docs_by_ids — doc ของร้านอื่นห้ามไหลเข้า card)"""
     if not item_ids:
         return {}
     db_name = os.environ.get("MONGO_DB", "").strip()
     coll = os.environ.get("MONGO_COLLECTION", "ShpProducts").strip() \
         or "ShpProducts"
+    q = {"item_id": {"$in": list(item_ids)}}
+    if shop:
+        q["shopname"] = {"$regex": f"^{re.escape(shop)}$", "$options": "i"}
     out: dict = {}
-    for d in get_client()[db_name][coll].find(
-            {"item_id": {"$in": list(item_ids)}}):
+    for d in get_client()[db_name][coll].find(q):
         out[d["item_id"]] = d
     return out
 
@@ -253,7 +259,7 @@ def fetch_description_evidence(
         top_items = sorted(best.items(), key=lambda kv: -kv[1][0])[:limit]
         if not top_items:
             return empty
-        docs = _desc_item_docs([int(i) for i, _ in top_items])
+        docs = _desc_item_docs([int(i) for i, _ in top_items], shop=shop)
         cards = []
         for iid, (score, row) in top_items:
             doc = docs.get(int(iid))
@@ -1133,7 +1139,8 @@ PRODUCT_TYPES: tuple[tuple[str, tuple[str, ...], str], ...] = (
      r"|หุ่นยนต์กวาด))"
      r"(?:smart\s*phone|สมาร์ทโฟน|smarphone|โทรศัพท์มือถือ"
      r"|redmi\s+(?:note\s+)?\d|"
-     r"xiaomi\s+(?:mi\s+)?(?:note\s+|lite\s+)?(?:1[0-4]|9|8)\b|"
+     r"xiaomi\s*(?:mi\s*)?(?:note\s*|lite\s*)?(?:1[0-4]|9|8)"
+     r"(?:t(?:\s*pro)?|pro|ultra|lite)?(?![a-z0-9_])|"
      r"\bmi\s+(?:note\s+)?\d+(?!\d*[wW]\b)|black\s*shark\s*\d|\bpoco\b|iphone\s*\d|"
      r"galaxy\s+(?:s\d|note\s*\d|a\d|z\s*flip)|realme\s+\d|"
      r"oppo\s+(?:reno|find|a\s*\d|f\d)|vivo\s+(?:y\d|v\d|x\d)|reno\s*\d)"),
@@ -1801,9 +1808,14 @@ def _detect_product_types(message: str) -> set[str]:
     """ตรวจว่าลูกค้าอ้างถึง product type ใดบ้าง (เพื่อกรอง item_name แบบละเอียด).
 
     ตรวจ 2 ขั้น:
-    1. exact match กับ user_kws (เช่น "โทรศัพท์", "มือถือ", "phone")
-    2. ถ้าไม่ match ในขั้น 1 ให้ลอง regex (เช่น "redmi 8a" match phone regex)
-       เพื่อจับกรณีลูกค้าพิมพ์แค่ชื่อรุ่นโดยไม่ระบุประเภท
+    1. token match กับ user_kws — kw ต้องเป็น lexical token หรือ contiguous
+       token run ใน message (PyThaiNLP newmm; fallback = whitespace split)
+       เช่น "โทรศัพท์", "มือถือ", "phone" — ห้าม substring ข้าม boundary
+       ("เคส" ใน "โอเค|ส่ง" ไม่ใช่ case)
+    2. ถ้าไม่ match ในขั้น 1 ให้ลอง regex บนข้อความต้นฉบับ low —
+       accept เฉพาะ match ที่เริ่มตรง token boundary ("เคส" ที่เริ่ม
+       กลาง "โอเค" → reject) — regex ยิงบน low เดิมทำให้ model code
+       ที่ tokenizer แยก letter+digit ("galaxy s24") ยังจับได้
 
     กรณีพิเศษ: compatibility question
     - "สายชาร์จที่ใช้กับ iphone" → สินค้าคือ charger ไม่ใช่ phone
@@ -1812,11 +1824,53 @@ def _detect_product_types(message: str) -> set[str]:
     """
     low = _fix_product_type_typos(message)
     found: set[str] = set()
+    _seg: list[str] | None = None
+    _bounds: set[int] | None = None
+    if _TOKENIZE_AVAILABLE:
+        try:
+            _raw = word_tokenize(low, engine="newmm")
+            if "".join(_raw) == low:
+                _seg = [t for t in _raw if t.strip()]
+                _pos = 0
+                _bounds = {0}
+                for _t in _raw:
+                    _pos += len(_t)
+                    _bounds.add(_pos)
+        except Exception:
+            _seg = None
+    _tokenized = _seg is not None
+    if not _tokenized:
+        # tokenizer ไม่มี/ล้ม/คืน offset ที่ reconstruct ไม่ได้ →
+        #   whitespace token เท่านั้น + regex ปิด (conservative —
+        #   อาจ miss kw ไทยที่ฝังในคำยาว แต่ห้าม false-positive กลางประโยค)
+        _seg = low.split()
+    _seg_set = set(_seg)
+    # kw ต้อง match เป็น lexical token หรือ contiguous token run เท่านั้น —
+    #   ห้าม raw substring ข้าม token boundary ("เคส" ใน "โอเค|ส่ง" = false
+    #   case); regex ยิงบน low — accept เฉพาะ match.start() ตรง boundary
+    #   (start กลาง token = glued head → reject; end กลาง token เมื่อ
+    #   start ตรง = matched prefix ของ token สุดท้าย เช่น "s24"→"s2" → accept)
     for type_name, user_kws, _regex in PRODUCT_TYPES:
-        if any(kw in low for kw in user_kws):
+        _hit = False
+        for kw in user_kws:
+            _kwt = ([t for t in word_tokenize(kw, engine="newmm")
+                     if t.strip()]
+                    if _tokenized else kw.split())
+            if len(_kwt) == 1:
+                _hit = _kwt[0] in _seg_set
+            elif _kwt:
+                _hit = any(
+                    _seg[i:i + len(_kwt)] == _kwt
+                    for i in range(len(_seg) - len(_kwt) + 1))
+            if _hit:
+                break
+        if _hit:
             found.add(type_name)
-        elif _regex and re.search(_regex, low):
-            found.add(type_name)
+        elif _regex and _bounds is not None:
+            for _m in re.finditer(_regex, low):
+                if _m.start() in _bounds:
+                    found.add(type_name)
+                    break
 
     # ── compatibility question: ลบ phone เมื่อมี "ใช้กับ/รองรับ" ──
     # เช่น "สายชาร์จที่ใช้กับ iphone 17" → ลบ phone เหลือ charger
@@ -3807,14 +3861,16 @@ def fetch_product_by_id(
     except (ValueError, TypeError):
         id_values.append(item_id)
 
-    query: dict[str, Any] = {"item_id": {"$in": id_values}}
-    if shop_filter:
-        query["shopname"] = {"$regex": f"^{re.escape(shop_filter)}$", "$options": "i"}
-
-    doc = collection.find_one(query, PRODUCT_PROJECTION)
-    if doc is None and shop_filter:
-        # ถ้าไม่เจอในร้านที่ระบุ ลองหาไม่จำกัดร้าน (เผื่อ shop_filter ไม่ตรง/สินค้าย้ายร้าน)
-        doc = collection.find_one({"item_id": {"$in": id_values}}, PRODUCT_PROJECTION)
+    # shop = tenant boundary — ไม่มี scope ต้อง fail-closed; scoped miss
+    #   ต้อง missing จริง ห้าม retry unscoped ไปเอา doc ร้านอื่น
+    #   (contract เดียวกับ fetch_product_docs_by_ids)
+    if not shop_filter:
+        return None
+    doc = collection.find_one(
+        {"item_id": {"$in": id_values},
+         "shopname": {"$regex": f"^{re.escape(shop_filter)}$",
+                      "$options": "i"}},
+        PRODUCT_PROJECTION)
     if doc is None:
         return None
 

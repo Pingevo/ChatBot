@@ -522,7 +522,9 @@ def test_claim_handoff_dominates_product_need(monkeypatch):
         f"expected confirmed handoff, got {resp.answer!r}")
     assert len(handoffs) == 1, f"exactly one handoff transport: {handoffs}"
     # claim lifecycle persisted by its owner
-    claim = cp.load_claim_state(fx["conversation_id"])
+    claim = cp.load_claim_state(
+        fx["conversation_id"], platform=fx.get("platform", "shopee"),
+        shop=fx.get("shop"))
     assert claim, "claim need not processed — no claim_state persisted"
     # zero product work after the confirmed handoff
     answer_calls = [c for c in captured.calls
@@ -569,7 +571,9 @@ def test_bot_owned_claim_plus_product_canonical_path(monkeypatch):
     assert handoffs == [], f"no handoff may fire: {handoffs}"
     assert not getattr(resp, "handoff_to_admin", False)
     # claim episode remains owned/persisted (unchanged collecting episode)
-    claim = cp.load_claim_state(fx["conversation_id"])
+    claim = cp.load_claim_state(
+        fx["conversation_id"], platform=fx.get("platform", "shopee"),
+        shop=fx.get("shop"))
     assert claim and claim.get("episode_id") == "ep-carry1", claim
     # canonical product pipeline executed exactly once
     answer_calls = [c for c in captured.calls

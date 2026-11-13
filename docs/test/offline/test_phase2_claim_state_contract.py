@@ -213,9 +213,10 @@ def test_merge_claim_fields_skips_none_and_empty(coll):
         claim_state={"episode_id": "e1", "stage": "collecting",
                      "customer_name": "สมชาย ใจดี"})
     conversation_products.merge_claim_fields(
-        "c1", episode_id="e1", expected_stage="collecting",
+        "c1", platform="shopee", shop="Shop",
+        episode_id="e1", expected_stage="collecting",
         fields={"customer_name": None, "customer_phone": "0812345678"})
-    state = conversation_products.load_claim_state("c1")
+    state = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert state["customer_name"] == "สมชาย ใจดี"  # not overwritten by None
     assert state["customer_phone"] == "0812345678"
     assert state["stage"] == "collecting"
@@ -252,7 +253,8 @@ def _req(cid: str = "c1"):
 
 
 def _seed(coll, cid: str, claim_state: dict):
-    coll.doc = {"conversation_id": cid, "claim_state": dict(claim_state)}
+    coll.doc = {"conversation_id": cid, "platform": "shopee",
+                "shop": "Shop", "claim_state": dict(claim_state)}
 
 
 # A. terminal precedence — resolved/cancelled never open; slots never activate
@@ -309,7 +311,7 @@ def test_fresh_claim_after_terminal_mints_new_episode(coll, terminal):
         assert k not in state, k
     # new episode gets its own started_at, not the old terminal record's
     assert state["started_at"] != "2026-01-01"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["episode_id"] == state["episode_id"]
 
 
@@ -344,7 +346,7 @@ def test_continuation_merges_same_episode(coll):
         fields={"customer_phone": "0812345678"})
     assert state["episode_id"] == "e-live"
     assert state["customer_phone"] == "0812345678"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["customer_name"] == "สมชาย ใจดี"
     assert stored["customer_phone"] == "0812345678"
 
@@ -372,7 +374,7 @@ def test_terminal_refuses_continuation_evidence(coll, terminal):
     # stale marker / bare field after terminal must not reopen or write
     assert state["stage"] == terminal
     assert state["episode_id"] == "e-old"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["stage"] == terminal
     assert "customer_phone" not in stored or stored["customer_phone"] != "0812345678"
 
@@ -386,7 +388,7 @@ def test_absent_plus_fields_mints_episode_via_owner(coll):
     assert state["stage"] == "collecting"
     assert state["episode_id"]
     assert state["customer_phone"] == "0812345678"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["episode_id"] == state["episode_id"]
 
 
@@ -402,7 +404,7 @@ def test_resolved_transition_preserves_evidence_as_terminal_record(coll):
     assert state["customer_order_id"] == "2508088B5T4W1D"
     assert state["has_image"] is True
     assert state["resolved_at"]
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["stage"] == "resolved"
 
 
@@ -419,7 +421,7 @@ def test_concurrent_fresh_claim_single_winner(coll):
     loser = warranty_flow._claim_transition(
         _req(), old, "collecting", fresh_claim=True)
     assert loser["episode_id"] == winner["episode_id"]
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["episode_id"] == winner["episode_id"]
 
 
@@ -432,7 +434,7 @@ def test_stale_episode_writer_cannot_overwrite_newer(coll):
         _req(), stale, "collecting",
         fields={"customer_phone": "0812345678"})
     assert state["episode_id"] == "e-2"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["episode_id"] == "e-2"
     assert "customer_phone" not in stored
 
@@ -456,7 +458,8 @@ def test_r1_stale_same_episode_merge_cannot_reopen_terminal(coll):
 
     def _terminal_wins():
         conversation_products.merge_claim_fields(
-            "c1", episode_id="e-1", expected_stage="collecting",
+            "c1", platform="shopee", shop="Shop",
+            episode_id="e-1", expected_stage="collecting",
             fields={"stage": "resolved", "resolved_at": "t0",
                     "resolution_reason": "troubleshoot_confirmed"})
 
@@ -466,7 +469,7 @@ def test_r1_stale_same_episode_merge_cannot_reopen_terminal(coll):
         fields={"customer_phone": "0812345678"})
     # stale merge must surface the authoritative terminal state, not reopen it
     assert state["stage"] == "resolved"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["stage"] == "resolved"
     assert stored.get("customer_phone") != "0812345678"
 
@@ -480,14 +483,15 @@ def test_r2_terminal_transition_preserves_concurrent_evidence(coll):
 
     def _evidence_lands_first():
         conversation_products.merge_claim_fields(
-            "c1", episode_id="e-1", expected_stage="collecting",
+            "c1", platform="shopee", shop="Shop",
+            episode_id="e-1", expected_stage="collecting",
             fields={"customer_phone": "0812345678",
                     "customer_order_id": "ORD-9"})
 
     coll.interleave.append(_evidence_lands_first)
     state = warranty_flow._claim_transition(_req(), cur, "resolved")
     assert state["stage"] == "resolved"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["stage"] == "resolved"
     assert stored["customer_phone"] == "0812345678"
     assert stored["customer_order_id"] == "ORD-9"
@@ -498,7 +502,8 @@ def test_r3_expected_stage_cas_loss_bounded_reread(coll):
     cur = {"episode_id": "e-1", "stage": "collecting"}
     _seed(coll, "c1", cur)
     # winner advances the episode first; stale caller still expects collecting
-    coll.doc = {"conversation_id": "c1",
+    coll.doc = {"conversation_id": "c1", "platform": "shopee",
+                "shop": "Shop",
                 "claim_state": {"episode_id": "e-1", "stage": "resolved",
                                 "resolved_at": "t0"}}
     state = warranty_flow._claim_transition(
@@ -508,7 +513,7 @@ def test_r3_expected_stage_cas_loss_bounded_reread(coll):
     assert writes == [("update_one", 0)]  # stale CAS matched nothing
     reads = [c for c in coll.calls if c[0] == "find_one"]
     assert len(reads) == 1  # one bounded reread — no retry loop
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["stage"] == "resolved"
 
 
@@ -518,6 +523,7 @@ def test_r4_concurrent_absent_create_single_document(coll):
     # the loser must reread the winner's episode (E11000 → reconcile)
     def _rival_inserts():
         coll.docs.append({"conversation_id": "c1",
+                          "platform": "shopee", "shop": "Shop",
                           "claim_state": {"episode_id": "e-A",
                                           "stage": "collecting"}})
 
@@ -598,7 +604,7 @@ def test_admin_outcome_resolved_applies_to_matching_episode(coll):
     # evidence of the episode survives the terminal transition
     assert state["customer_name"] == "สมชาย ใจดี"
     assert state["customer_phone"] == "0812345678"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["stage"] == "resolved" and stored["episode_id"] == "e-live"
 
 
@@ -610,7 +616,7 @@ def test_admin_outcome_cancelled_applies(coll):
         _outcome_req(outcome="cancelled"), dict(cur))
     assert state["stage"] == "cancelled" and state["episode_id"] == "e-live"
     assert state["resolution_reason"] == "admin_cancelled"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["stage"] == "cancelled"
 
 
@@ -621,7 +627,7 @@ def test_admin_outcome_stale_episode_cannot_terminate(coll):
     state = warranty_flow._consume_claim_outcome(
         _outcome_req(episode_id="e-old"), dict(cur))
     assert state["stage"] == "collecting" and state["episode_id"] == "e-new"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["stage"] == "collecting" and stored["episode_id"] == "e-new"
 
 
@@ -676,7 +682,7 @@ def test_admin_outcome_malformed_is_noop(coll, bad):
                           shop="Shop", claim_outcome=bad)
     state = warranty_flow._consume_claim_outcome(req, dict(cur))
     assert state["stage"] == "collecting"
-    stored = conversation_products.load_claim_state("c1")
+    stored = conversation_products.load_claim_state("c1", platform="shopee", shop="Shop")
     assert stored["stage"] == "collecting"
 
 

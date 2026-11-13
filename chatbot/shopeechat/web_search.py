@@ -270,13 +270,11 @@ def should_use_web_search(
         "สนใจ", "อยากได้", "จอง", "สั่ง", "ซื้อ", "มีไหม", "มีไหมคะ",
     )
     _is_ordinary_product_q = any(kw in _msg_lower for kw in _ordinary_product_kws)
-    # greeting/thanks = ข้อความสั้นๆ ที่ไม่ใช่คำถาม
-    _greeting_kws = (
-        "ขอบคุณ", "ขอบคุณค่ะ", "ขอบคุณครับ", "โอเค", " ok ", "รับทราบ",
-        "สวัสดี", "หวัดดี", "ดีค่ะ", "ดีครับ", "hi ", "hello",
-    )
-    _is_greeting = any(kw in _msg_lower for kw in _greeting_kws) and len(message.split()) <= 4
-    if _is_greeting:
+    # greeting/thanks = ข้อความสั้นๆ ที่ไม่ใช่คำถาม — owner เดียว:
+    #   message_detectors.detect_social_turn (canonical pure detector,
+    #   vocabulary เดิมย้ายมา — mixed social+ask ไม่นับเป็น social)
+    from . import message_detectors as _detectors
+    if _detectors.detect_social_turn(message):
         return False, "greeting_or_thanks"
     # ⚡ 5F-F — placeholder/sticker-only message (ไม่มีคำถามจริง) → ไม่ search
     #   ครอบ [สติกเกอร์]/[sticker]/[รูปภาพ]/[item]/[สินค้า: id] + ข้อความว่าง

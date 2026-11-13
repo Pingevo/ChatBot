@@ -100,6 +100,81 @@ def detect_general_question(message: str) -> str | None:
     return None
 
 
+# ---- social/ack turn detection (canonical pure owner) ----
+
+# vocabulary ย้าย verbatim จาก web_search.should_use_web_search._greeting_kws
+# — ห้ามเพิ่มคำใหม่ (budget ตารางคำ: net 0)
+_SOCIAL_TURN_KWS = (
+    "ขอบคุณ", "ขอบคุณค่ะ", "ขอบคุณครับ", "โอเค", " ok ", "รับทราบ",
+    "สวัสดี", "หวัดดี", "ดีค่ะ", "ดีครับ", "hi ", "hello",
+)
+
+_WORD_TOKENIZER = None
+
+
+def _get_word_tokenizer():
+    """lazy-load pythainlp word_tokenize (pattern เดียวกับ warranty._get_ner) —
+    คืน callable หรือ None ถ้าไม่มี lib. (owner ย้ายมาจาก handoffs.py —
+    handoffs/message_detectors share singleton เดียว)"""
+    global _WORD_TOKENIZER
+    if _WORD_TOKENIZER is None:
+        try:
+            from pythainlp import word_tokenize
+            _WORD_TOKENIZER = word_tokenize
+        except Exception:
+            _WORD_TOKENIZER = False
+    return _WORD_TOKENIZER if _WORD_TOKENIZER is not False else None
+
+
+# vocative/particle tail — moved verbatim จาก handoffs.py (lexical owner
+#   เดียวกัน; handoffs ยังใช้ใน _is_question_message ผ่าน import กลับ)
+_VOCATIVE_TAIL_RE = re.compile(
+    r"(?:ครับ|ค่ะ|คะ|จ้า|จ๊ะ|นะ|น๊า|งับ|งั้บ|ฮะ|หะ|เอย|คร้าบ|คับ|ค่า"
+    r"|แอดมิน|แอด|admin)+[\s\?\.!~]*$")
+
+
+def detect_social_turn(message: str) -> bool:
+    """ตรวจว่าข้อความเป็น social/acknowledgment turn เต็มข้อความหรือไม่.
+
+    pure detector — ไม่แตะ DB/LLM/network. เงื่อนไข:
+      - ข้อความสั้นเท่านั้น (≤4 whitespace tokens — constraint เดิม)
+      - lexical token ทุกตัว (Thai word segmentation — tokenizer เดียวกับ
+        handoffs; ตัด non-word segment เช่นเครื่องหมายออก) ต้องเป็น
+        social word หรือ vocative/particle tail —
+        "สวัสดีค่ะ"/"ขอบคุณนะคะ"/"โอเค รับทราบ" = social;
+        "โอเคเช็คออเดอร์ให้หน่อย"/"รับทราบยกเลิกให้ด้วย" ไม่ใช่
+        (มี lexical token ที่ไม่ใช่ social — ห้าม substring กลาง token)
+      - vocab = _SOCIAL_TURN_KWS เดิมเท่านั้น (ห้ามเพิ่มคำ) แบ่งเป็น lexical
+        token ด้วย tokenizer ตัวเดียวกัน → match ที่ lexical token
+      - tokenizer unavailable/fail → fallback: whitespace token ==
+        vocab entry (conservative — อาจ miss social แต่ห้ามตี
+        actionable text เป็น social)
+
+    Called by: web_search.should_use_web_search, turn_decision.decide_turn
+    """
+    msg = (message or "").lower().strip()
+    if not msg:
+        return False
+    _runs = msg.split()
+    if not _runs or len(_runs) > 4:
+        return False
+    _kws = tuple(k.strip() for k in _SOCIAL_TURN_KWS if k.strip())
+    _wt = _get_word_tokenizer()
+    if _wt is not None:
+        try:
+            _vocab = {t for k in _kws for t in _wt(k) if t.strip()}
+            _toks = [t for t in _wt(msg) if t.strip()]
+        except Exception:
+            _wt = None
+    if _wt is None:
+        _vocab = set(_kws)
+        _toks = _runs
+    # non-word segment (punctuation ล้วน) ไม่ใช่คำ — ข้าม
+    _toks = [t for t in _toks if any(ch.isalnum() for ch in t)]
+    return bool(_toks) and all(
+        t in _vocab or _VOCATIVE_TAIL_RE.fullmatch(t) for t in _toks)
+
+
 # ---- model detection (จากข้อความลูกค้า) ----
 
 

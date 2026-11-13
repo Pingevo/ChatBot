@@ -190,15 +190,16 @@ def test_describe_need_admits_exact_subject_only():
     assert not ctx.unanswered_needs
 
 
-def test_recommend_need_still_admits_alternatives():
-    """กัน over-correction: recommend = alternatives-asking op เดียว."""
+def test_recommend_need_admits_one_primary():
+    """Task 5 contract — normal recommend = หนึ่ง primary product/card;
+    role=alternative คือ typed fallback ไม่ใช่ unlimited admission."""
     needs = (TurnNeed(kind="product", operation="recommend",
                       product_types=frozenset({"smartwatch"})),)
     req0 = _req("req-0", types=("smartwatch",), codes=("W01",))
     ctx = _compile(needs, _w01_sel(), _w01_pool(), (req0,), _profile())
-    ids = {p.get("item_id") for p in ctx.products}
-    assert {"18408364022", "20069873881"} <= ids, (
-        f"recommend turn ต้องเห็น alternatives — got {ids}")
+    ids = [p.get("item_id") for p in ctx.products]
+    assert ids == ["18408364022"], (
+        f"recommend turn ต้อง emit primary หนึ่งใบเท่านั้น — got {ids}")
 
 
 def test_alternative_substitute_when_subject_absent():
@@ -1907,3 +1908,259 @@ def test_cable_without_typed_capacity_keeps_cannot_confirm_caveat():
     _ctx, v = _cable_verdict({})
     assert v and "missing_wattage_evidence" in v[0].decision.reason_codes
     assert "ยืนยันไม่ได้" in acx._compat_segment(v[0])
+
+
+# ── one-primary recommendation contract (A-260 P1 / Task 5) ──
+# cap เดิมยกเว้น alternative ทุกตัว + subtype recommend ทุกตัว → W01 fixture
+#   คืน 2 cards ขัด approved contract; fix = cap เดียวใน owner:
+#   first eligible primary → 1 ใบ · ไม่มี → first eligible alternative 1 ใบ
+
+
+def test_recommend_subtype_need_admits_one_primary():
+    """subtype recommend ("หัวชาร์จละ" shape) จำกัดประเภท ไม่ใช่
+    cardinality license — sellable candidates 2 ใบ → emit 1 เท่านั้น."""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      product_types=frozenset({"smartwatch"}),
+                      subtypes=frozenset({"fitness_band"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"],
+                   canonical_roles=["fitness_band"]), "req-0"),
+        (_sel_card(_W2, "subject", "req-0", "Generic Watch B",
+                   model_codes=["W02"],
+                   canonical_roles=["fitness_band"]), "req-0"))
+    req0 = _req("req-0", types=("smartwatch",), subs=("fitness_band",))
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    ids = [p.get("item_id") for p in ctx.products]
+    assert ids == ["18408364022"], (
+        f"subtype recommend ต้องหนึ่ง card — got {ids}")
+
+
+def test_recommend_without_primary_emits_one_alternative():
+    """ไม่มี primary ใน pool → first eligible alternative เป็น typed
+    fallback หนึ่งใบ (ไม่ใช่ทุก alternative ที่มี)."""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W2, "alternative", "req-0", "Generic Watch B",
+                   model_codes=["W02"]), "req-0"),
+        (_sel_card("i:3", "alternative", "req-0", "Generic Watch C",
+                   model_codes=["W03"]), "req-0"))
+    pool = _pool((
+        _pooled(_W2, "20069873881", codes=("W02",), name="Generic Watch B"),
+        _pooled("i:3", "33333333", codes=("W03",), name="Generic Watch C"),
+    ))
+    req0 = _req("req-0", types=("smartwatch",))
+    ctx = _compile(needs, sel, pool, (req0,), _profile())
+    ids = [p.get("item_id") for p in ctx.products]
+    assert ids == ["20069873881"], (
+        f"fallback ต้อง exactly 1 alternative — got {ids}")
+
+
+def test_recommend_dead_subject_yields_sellable_alternative():
+    """primary ขายไม่ได้ (sellable=False) + alternative ขายได้ →
+    emit alternative หนึ่งใบ ไม่ใช่ dead primary."""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"], sellable=False), "req-0"),
+        (_sel_card(_W2, "alternative", "req-0", "Generic Watch B",
+                   model_codes=["W02"]), "req-0"))
+    req0 = _req("req-0", types=("smartwatch",), codes=("W01",))
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    ids = [p.get("item_id") for p in ctx.products]
+    assert ids == ["20069873881"], (
+        f"dead primary + sellable alternative → ต้อง alternative: {ids}")
+
+
+def test_recommend_context_excludes_unselected_identity():
+    """selected set เดียวกันใน context + products — alternative ที่ไม่
+    ถูกเลือกห้ามมี item_id/name/card ใน answer context."""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      product_types=frozenset({"smartwatch"})),)
+    req0 = _req("req-0", types=("smartwatch",), codes=("W01",))
+    ctx = _compile(needs, _w01_sel(), _w01_pool(), (req0,), _profile())
+    names = " ".join(str(p.get("name") or "") for p in ctx.products)
+    assert "Generic Watch B" not in names, (
+        f"unselected alternative ห้ามอยู่ใน context products: {names}")
+    assert "20069873881" not in ctx.context_text(), (
+        "unselected item_id ห้ามไหลเข้า model-visible context")
+
+
+# ── B1/B2 root-cause admission (A-261 independent review) ─────────────
+# B1: `_ok_ids` ว่างแล้ว eligibility กลับเป็น optional → candidate ที่ไม่
+#   sellable/scopable หลุดเข้า products — contract: ไม่มีตัวผ่าน = products=[]
+# B2: `_prim_cap` ต้องนับเฉพาะ typed multiplicity ที่ provenance พิสูจน์
+#   ได้ — `subject_count` เฉพาะ current_set (intent contract) + distinct
+#   identities ที่ refs resolve ผ่าน _cand_keys; resolver stamp (เติม id
+#   ของ item เดียวกัน) / unresolvable refs ไม่ขยาย cap
+
+
+def test_recommend_all_unsellable_emits_empty():
+    """B1-1: primary+alternative ต่าง unsellable → products == []"""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"], sellable=False), "req-0"),
+        (_sel_card(_W2, "alternative", "req-0", "Generic Watch B",
+                   model_codes=["W02"], sellable=False), "req-0"))
+    req0 = _req("req-0", types=("smartwatch",))
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    assert not ctx.products, (
+        f"ไม่มี eligible candidate → products ต้องว่าง — got {ctx.products}")
+
+
+def test_recommend_hidden_primary_unsellable_alt_emits_empty():
+    """B1-2: primary ถูกซ่อน + alternative unsellable → products == []"""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"], customer_visibility="hidden"),
+                "req-0"),
+        (_sel_card(_W2, "alternative", "req-0", "Generic Watch B",
+                   model_codes=["W02"], sellable=False), "req-0"))
+    req0 = _req("req-0", types=("smartwatch",))
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    assert not ctx.products, (
+        f"ไม่มี eligible candidate → products ต้องว่าง — got {ctx.products}")
+
+
+def test_recommend_no_scopable_sellable_emits_empty():
+    """B1-3: ไม่มี candidate ที่ทั้ง sellable และ scopable → products == []"""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"], sellable=False), "req-0"),
+        (_sel_card(_W2, "alternative", "req-0", "Generic Watch B",
+                   model_codes=["W02"], customer_visibility="hidden"),
+                "req-0"))
+    req0 = _req("req-0", types=("smartwatch",))
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    assert not ctx.products, (
+        f"ไม่มี eligible candidate → products ต้องว่าง — got {ctx.products}")
+
+
+def test_recommend_count_without_set_scope_stays_one():
+    """A-263: subject_count มีความหมายเฉพาะ current_set ตาม intent
+    contract — scope="none" + count=2 ไม่ใช่ typed multiplicity →
+    หนึ่ง card (decide_turn ส่ง scope/count แยกกันมาถึงได้)."""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      subject_scope="none", subject_count=2,
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"]), "req-0"),
+        (_sel_card(_W2, "subject", "req-0", "Generic Watch B",
+                   model_codes=["W02"]), "req-0"))
+    req0 = _req("req-0", types=("smartwatch",))
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    ids = [p.get("item_id") for p in ctx.products]
+    assert ids == ["18408364022"], (
+        f"count นอก current_set ต้องไม่ขยาย cap — got {ids}")
+
+
+def test_recommend_unresolvable_refs_stay_one_card():
+    """A-263: refs ที่ resolve เป็น product identity ไม่ได้เลย ไม่ใช่
+    proven multiplicity → cap ไม่ขยาย — หนึ่ง card."""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      subject_refs=("ZZZ99", "QQQ88"),
+                      subject_scope="explicit",
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"]), "req-0"),
+        (_sel_card(_W2, "subject", "req-0", "Generic Watch B",
+                   model_codes=["W02"]), "req-0"))
+    req0 = _req("req-0", types=("smartwatch",))
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    ids = [p.get("item_id") for p in ctx.products]
+    assert ids == ["18408364022"], (
+        f"unresolvable refs ต้องไม่ขยาย cap — got {ids}")
+
+
+def test_recommend_customer_distinct_refs_admit_two():
+    """A-263: ลูกค้าระบุสอง products จริง — refs resolve เป็น two
+    distinct identities (mixed digit/code ที่ลูกค้าพิมพ์เอง ไม่ใช่
+    resolver alias) → admit ตาม proven asked count."""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      subject_refs=("18408364022", "W02"),
+                      subject_scope="explicit",
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"]), "req-0"),
+        (_sel_card(_W2, "subject", "req-0", "Generic Watch B",
+                   model_codes=["W02"]), "req-0"))
+    req0 = _req("req-0", types=("smartwatch",),
+                subj=("18408364022", "W02"))
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    ids = {p.get("item_id") for p in ctx.products}
+    assert {"18408364022", "20069873881"} <= ids, (
+        f"customer-named distinct products ต้อง admit ทั้งคู่ — got {ids}")
+
+
+def test_recommend_resolver_stamped_refs_stay_one_card():
+    """B2-5: explicit ask หนึ่ง code — resolver stamp เติม item_id →
+    subject_refs (id + code) resolve เป็น identity เดียวกันผ่าน
+    _cand_keys (apply_resolved_subject_refs proved refs ทั้งหมด = item
+    เดียว); asked products = 1 → หนึ่ง card ตรงสินค้าที่ถาม แม้มี
+    eligible candidate เพิ่ม."""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      subject_refs=("18408364022", "W01"),
+                      subject_scope="explicit",
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"]), "req-0"),
+        (_sel_card("i:3", "subject", "req-0", "Generic Watch C",
+                   model_codes=["W03"]), "req-0"))
+    pool = _pool((
+        _pooled(_W1, "18408364022", codes=("W01",), name="Generic Watch A"),
+        _pooled("i:3", "33333333", codes=("W03",), name="Generic Watch C"),
+    ))
+    req0 = _req("req-0", types=("smartwatch",),
+                subj=("18408364022", "W01"))
+    ctx = _compile(needs, sel, pool, (req0,), _profile())
+    ids = [p.get("item_id") for p in ctx.products]
+    assert ids == ["18408364022"], (
+        f"resolver-stamped single ask ต้องหนึ่ง card — got {ids}")
+
+
+def test_recommend_declared_set_count_admits_two():
+    """B2-8: current_set + subject_count=2 = typed multiplicity จาก
+    request เดิม (ก่อน resolver) → สอง card ตาม declared count."""
+    needs = (TurnNeed(kind="product", operation="recommend",
+                      subject_scope="current_set", subject_count=2,
+                      product_types=frozenset({"smartwatch"})),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"]), "req-0"),
+        (_sel_card(_W2, "subject", "req-0", "Generic Watch B",
+                   model_codes=["W02"]), "req-0"))
+    req0 = _req("req-0", types=("smartwatch",),
+                subj=("18408364022", "20069873881"))
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    ids = {p.get("item_id") for p in ctx.products}
+    assert {"18408364022", "20069873881"} <= ids, (
+        f"declared set count=2 ต้อง admit สอง subjects — got {ids}")
+
+
+def test_compare_need_keeps_both_requested_subjects():
+    """typed compare — ห้าม over-correct: สอง requested subjects อยู่ครบ."""
+    needs = (TurnNeed(kind="compare", operation="compare",
+                      subject_refs=("W01", "W02")),)
+    sel = _selection(
+        (_sel_card(_W1, "subject", "req-0", "Generic Watch A",
+                   model_codes=["W01"]), "req-0"),
+        (_sel_card(_W2, "subject", "req-0", "Generic Watch B",
+                   model_codes=["W02"]), "req-0"))
+    req0 = _req("req-0", types=("smartwatch",), codes=("W01", "W02"),
+                rel_type="compare")
+    ctx = _compile(needs, sel, _w01_pool(), (req0,), _profile())
+    ids = {p.get("item_id") for p in ctx.products}
+    assert {"18408364022", "20069873881"} <= ids, (
+        f"compare ต้องเก็บทั้งสอง requested subjects — got {ids}")

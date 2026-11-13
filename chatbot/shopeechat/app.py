@@ -1306,7 +1306,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             if anchor_card and req.conversation_id:
                 try:
                     from . import conversation_products as _cp
-                    _cp.add_product(
+                    if _cp.add_product(
                         conversation_id=req.conversation_id,
                         platform=req.platform,
                         shop=req.shop,
@@ -1315,12 +1315,16 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                         source="user_item_card",
                         card=anchor_card,
                         is_anchor=True,
-                    )
-                    print(f"[CONV-PRODUCTS] anchor added: item_id={_tagged_item_id} conv={req.conversation_id}", file=sys.stderr)
+                    ) is not None:
+                        print(f"[CONV-PRODUCTS] anchor added: item_id={_tagged_item_id} conv={req.conversation_id}", file=sys.stderr)
+                    else:
+                        print(f"[CONV-PRODUCTS] anchor write failed: item_id={_tagged_item_id} conv={req.conversation_id}", file=sys.stderr)
                     # ⚡ Phase 2C.2 — explicit item card = highest precedence
                     #   subject identity → single. mutually exclusive callsite
                     #   (item-tag early return ไม่ถึง recorder choke ด้านล่าง)
-                    _sv_item = _cp.get_subject_set(req.conversation_id)
+                    _sv_item = _cp.get_subject_set(
+                        req.conversation_id,
+                        platform=req.platform, shop=req.shop)
                     _sv = _sv_item
                     _subject_view_loaded = True
                     _subject_stored = _sv_item.stored
@@ -1495,6 +1499,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         #   3. human_request keyword (บรรทัด ~1605 — ชัด 100%)
         from . import intent_classifier as _ic
         _intent_result: dict = {}
+        _intent_provider_failed = False
         # ⚡ Phase 6 — รัน intent classification เสมอ (ไม่ gate ด้วย should_run_pass1)
         _t_intent = _time.time()
         try:
@@ -1504,13 +1509,17 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 shop=req.shop,
             )
         except Exception as _ie:
-            # ⚡ Phase 6 — classifier exception/timeout → fallback to keyword
-            print(f"[INTENT] classify_intent() threw: {_ie} → ใช้ keyword fallback", file=sys.stderr)
-            _intent_result = dict(_ic._DEFAULT_RESULT) if hasattr(_ic, "_DEFAULT_RESULT") else {
-                "intent": "other", "product_type": None, "charger_subtype": None,
-                "target_device": None, "needs_description": False,
-                "general_qtype": None, "confidence": 0.0,
-            }
+            # ⚡ Phase 6 — classifier exception/timeout = provider failure
+            #   (operational) — ต้องไม่แปลเป็น semantic intent "other":
+            #   proposal ว่าง + deterministic detectors เดิมตัดสินเอง
+            print(f"[INTENT] classify_intent() threw: {_ie} → provider unavailable (empty proposal)", file=sys.stderr)
+            _intent_result = {}
+            _intent_provider_failed = True
+        if not isinstance(_intent_result, dict):
+            # malformed provider output = provider failure เช่นกัน —
+            #   result ที่ validate ไม่ผ่านห้ามถูกตีความเป็น semantic intent
+            _intent_result = {}
+            _intent_provider_failed = True
         _timing_breakdown["pass1"] = round(_time.time() - _t_intent, 3)
         print(f"[TIMING] Pass1 intent: {_timing_breakdown['pass1']}s  intent={_intent_result.get('intent')} conf={_intent_result.get('confidence')}", file=sys.stderr)
         # record step — Intent (gemini 3.1 flash lite: $0.25/M in, $0.50/M out)
@@ -1634,7 +1643,9 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         #   subject_scope/subject_count ที่ resolver validate — ห้ามอ่าน
         #   scope/count จาก _intent_result โดยตรง (single owner = plan)
         if req.conversation_id and not _subject_view_loaded:
-            _sv = conversation_products.get_subject_set(req.conversation_id)
+            _sv = conversation_products.get_subject_set(
+                req.conversation_id,
+                platform=req.platform, shop=req.shop)
             _subject_view_loaded = True
             _subject_stored = _sv.stored
             _subject_effective = _sv.effective
@@ -1652,6 +1663,10 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 tag_item_ids=(
                     (_tagged_item_id,) if _tagged_item_id else ()),
                 intent_result=_intent_result,
+                # typed real-media input — image/video URLs จริงที่ resolve
+                #   เพื่ออ่านใน turn นี้ (req.images + history ที่ยังไม่มี
+                #   desc + text URL) — ไม่ใช่ text placeholder อย่างเดียว
+                has_visual_media=bool(_urls_to_read),
             )
         except Exception:
             _turn_decision_shadow(None, _steps)
@@ -1687,9 +1702,9 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     "turn_plan: placeholder/noise turn → ไม่ตอบ ไม่ค้นสินค้า"),
                 image_desc=_image_desc_out)
         if _turn_action == "clarify":
+            from . import responses as _resp_mod
             return ChatResponse(
-                answer=("ขอโทษค่ะ ลูกค้าหมายถึงสินค้าตัวไหนคะ "
-                        "ช่วยแจ้งชื่อรุ่นหรือส่งการ์ดสินค้าให้หน่อยนะคะ"),
+                answer=_resp_mod.CLARIFY_REPLY,
                 products=[], source="subject_clarify", shop=req.shop,
                 model=model_name,
                 usage={"prompt": 0, "output": 0, "total": 0},
@@ -1702,8 +1717,9 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             # typed social turn — deterministic greeting ตอบตรง (deterministic
             #   reply เหมือน no_reply/clarify); ไม่เข้า retrieval/resolver
             #   → persisted subject set ไม่ถูกแตะ
+            from . import responses as _resp_mod
             return ChatResponse(
-                answer="สวัสดีค่ะ สนใจสินค้าตัวไหนหรือมีอะไรให้ช่วยไหมคะ",
+                answer=_resp_mod.GREETING_REPLY,
                 products=[], source="greeting", shop=req.shop,
                 model=model_name,
                 usage={"prompt": 0, "output": 0, "total": 0},
@@ -1712,6 +1728,42 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 web_search_used=False, steps=list(_steps),
                 timing={"total": round(_time.time() - _total_start, 3)},
             )
+        if (_intent_provider_failed and _turn_action == "execute_needs"
+                and not _turn_plan.needs):
+            # intent provider ล้ม + ไม่มี deterministic route (plan emits
+            #   needs=() → ไม่มี typed evidence จาก deterministic owner
+            #   เลย) = operational failure ไม่ใช่ semantic other — ห้าม
+            #   ไหลเข้า product pipeline ตอบ no-info ผิดประเภท → transport
+            #   owner เดิม (_send_handoff) + wording ตาม typed outcome
+            #   (assigned→ส่งแล้ว / queued→เข้าคิว / failed→ไม่อ้างส่ง)
+            from . import responses as _resp_mod
+            _pf = _resp_mod.intent_provider_failure_handoff(req)
+            _handoff_ok = _pf["handoff_ok"]
+            _hstate = _pf["handoff_state"]
+            _ipf_answer = _pf["answer"]
+            _total_elapsed = _time.time() - _total_start
+            return ChatResponse(
+                answer=_ipf_answer,
+                products=[], shop=req.shop, model=model_name,
+                source="intent_provider_handoff", usage={},
+                elapsed=round(_total_elapsed, 2), cost=0.0,
+                steps=list(_steps),
+                intent=(_intent_result
+                        if isinstance(_intent_result, dict) else {}),
+                timing={"total": round(_total_elapsed, 3)},
+                handoff_to_admin=_handoff_ok,
+                handoff_reason=(
+                    "intent_provider_failure" if _handoff_ok else None),
+                routing_decision=_routing(
+                    "handoff" if _handoff_ok else "bot_reply",
+                    "intent_provider_failure: provider down + ไม่มี "
+                    "deterministic route → ส่งแอดมิน" if _handoff_ok
+                    else "intent_provider_failure: provider down + "
+                    "ไม่มี deterministic route → handoff ไม่สำเร็จ",
+                    handoff_reason=(
+                        "intent_provider_failure" if _handoff_ok else None),
+                    handoff_state=_hstate or None),
+                image_desc=_image_desc_out)
         if _turn_action == "handoff":
             # ⚡ correction — plan เป็น owner เดียวของ action นี้: ส่ง decision
             #   ให้ transport (เลิก re-detect intent) + ห้าม fallthrough ไป bot
@@ -1821,9 +1873,19 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             #   resolver เฉพาะ explicit scope เพื่อผูก persisted subject
             #   เดิมผ่าน code index (ห้าม substitute สินค้าใหม่ด้วยของเก่า)
             _has_item_ref = any(str(r).isdigit() for r in _subj_refs_all)
+            # open counterpart slot — compat need ที่ subject ถูก explicit
+            #   identity ครองแต่ target_refs ว่าง: deictic ref ("ที่แนะนำ")
+            #   อาจอ้าง counterpart ฝั่ง target — resolver เป็น owner ที่
+            #   validate deictic → persisted set; explicit-subject gate
+            #   ปิดเฉพาะ subject-side deixis ไม่ใช่ counterpart side
+            _has_open_target = bool(_turn_plan and any(
+                n.kind == "compat" and n.subject_refs
+                and not n.target_refs
+                for n in _turn_plan.needs))
             _consult = (not _has_item_ref
                         and (not _has_explicit_subject
-                             or _plan_scope == "explicit"))
+                             or _plan_scope == "explicit"
+                             or _has_open_target))
             if _consult:
                 _persisted_codes = None
                 if (_has_explicit_subject
@@ -1864,14 +1926,15 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                     _stamped_needs = _td.apply_resolved_subject_refs(
                         _turn_plan.needs,
                         _subject_res.subject_set.subject_ids,
-                        plan_scope=_plan_scope)
+                        plan_scope=_plan_scope,
+                        persisted_code_index=_persisted_codes)
                     if _stamped_needs != _turn_plan.needs:
                         _turn_plan = _dc_replace(
                             _turn_plan, needs=_stamped_needs)
         if _subject_res and _subject_res.outcome == "clarify":
+            from . import responses as _resp_mod
             return ChatResponse(
-                answer=("ขอโทษค่ะ ลูกค้าหมายถึงสินค้าตัวไหนคะ "
-                        "ช่วยแจ้งชื่อรุ่นหรือส่งการ์ดสินค้าให้หน่อยนะคะ"),
+                answer=_resp_mod.CLARIFY_REPLY,
                 products=[],
                 source="subject_clarify",
                 shop=req.shop,
@@ -1905,7 +1968,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 _subject_cards = conversation_products.materialize_subject_cards(
                     db, _subject_res.subject_set.subject_ids[:5],
                     products=_subject_products,
-                    shop_filter=req.shop, message=req.message, snap=_snap)
+                    shop_filter=req.shop, platform=req.platform,
+                    message=req.message, snap=_snap)
             except Exception as _e:
                 print(f"[SUBJECT-RES] materialize error: {_e}", file=sys.stderr)
                 _subject_cards = []
@@ -1930,7 +1994,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 _history_cards = conversation_products.materialize_subject_cards(
                     db, list(_subject_effective.subject_ids)[:3],
                     products=_subject_products,
-                    shop_filter=req.shop, message=req.message, snap=_snap)
+                    shop_filter=req.shop, platform=req.platform,
+                    message=req.message, snap=_snap)
             except Exception as _e:
                 print(f"[HISTORY-REF] materialize error: {_e}",
                       file=sys.stderr)
@@ -2329,6 +2394,7 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 platform=req.platform or "shopee",
                 anchor_cards=_resolved_anchor_cards,
                 history_cards=_history_cards,
+                image_desc=_image_desc_out,
             )
         except Exception as _e:
             print(f"[PROFILE] build error: {_e}", file=sys.stderr)
@@ -5219,7 +5285,19 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         _msg_mentions_product = any(
             kw in (req.message or "").lower()
             for kw in product_store._PRODUCT_MENTION_KWS)
-        _suppress_cards = _intent_name in _NON_SALES_INTENTS and not _msg_mentions_product
+        # exact-resolved items (card ที่ attach ผ่าน subject_refs-pinned
+        #   need — item tag/named identity เช่น "[item]" share) ไม่ใช่
+        #   fuzzy-retrieval context — card ของพวกมันคือ asked product เอง
+        #   ห้ามถูก non-sales suppression ตัด (Q1 item-share acceptance)
+        _pinned_idx = {i for i, n in enumerate(
+            _turn_plan.needs if _turn_plan else ())
+            if getattr(n, "subject_refs", ())}
+        _exact_card = _sel_flag and any(
+            _pinned_idx & set(p.get("need_indices") or ())
+            for p in (products or ()))
+        _suppress_cards = (_intent_name in _NON_SALES_INTENTS
+                           and not _msg_mentions_product
+                           and not _exact_card)
         if _suppress_cards and products:
             print(f"[T8] suppress {len(products)} product cards (intent={_intent_name!r}, no product kw)", file=sys.stderr)
         products_for_response = [] if _suppress_cards else products[:req.limit]

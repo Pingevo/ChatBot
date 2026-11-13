@@ -89,8 +89,8 @@ def _wire(monkeypatch, npz, docs_by_item, qvec=None):
     monkeypatch.setattr(_units, "_resolve_snap", lambda _snap: None)
     monkeypatch.setattr(_ps, "_desc_vectors", lambda snap=None: npz)
     monkeypatch.setattr(_ps, "_desc_item_docs",
-                        lambda ids: {i: docs_by_item[i]
-                                     for i in ids if i in docs_by_item})
+                        lambda ids, **_k: {i: docs_by_item[i]
+                                           for i in ids if i in docs_by_item})
     qv = (qvec if qvec is not None else np.array([1.0, 0.0], np.float32))
     from chatbot.shopeechat import embedding as _embmod
     monkeypatch.setattr(_embmod, "embed_query", lambda *a, **k: qv)

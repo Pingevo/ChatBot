@@ -1528,6 +1528,7 @@ class TestLiveCardCacheGeneration:
         return {"item_id": 100, "model_name": "M", "is_anchor": True,
                 "mentioned_at": "2026-10-21T00:00:00Z",
                 "card": {"item_id": 100, "name": "STORED-NAME",
+                         "shop": "shopA",
                          "variants": [{"name": "M"}]}}
 
     def test_materialize_card_does_not_cross_generations(

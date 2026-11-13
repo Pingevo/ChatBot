@@ -1,0 +1,117 @@
+[
+  {
+    "case_id": "image_product_has_media",
+    "message": "[รูปภาพ]",
+    "history": [],
+    "images": ["https://example.invalid/product.jpg"],
+    "expected_route": "bot_reply",
+    "required_terms": [],
+    "forbidden_terms": [],
+    "max_products": 1,
+    "handoff_expected": false
+  },
+  {
+    "case_id": "image_sticker_no_media",
+    "message": "[sticker]",
+    "history": [],
+    "images": [],
+    "expected_route": "no_reply",
+    "required_terms": [],
+    "forbidden_terms": [],
+    "max_products": 0,
+    "handoff_expected": false
+  },
+  {
+    "case_id": "shipping_provider_failure",
+    "message": "ส่งวันนี้ไหม",
+    "history": [],
+    "images": [],
+    "expected_route": "bot_reply",
+    "required_terms": [],
+    "forbidden_terms": ["ไม่พบข้อมูลสินค้า"],
+    "max_products": 0,
+    "handoff_expected": false
+  },
+  {
+    "case_id": "thanks_provider_failure",
+    "message": "ขอบคุณค่ะ",
+    "history": [],
+    "images": [],
+    "expected_route": "bot_reply",
+    "required_terms": [],
+    "forbidden_terms": ["ไม่พบข้อมูลสินค้า"],
+    "max_products": 0,
+    "handoff_expected": false
+  },
+  {
+    "case_id": "explicit_human_request",
+    "message": "ขอคุยกับแอดมิน",
+    "history": [],
+    "images": [],
+    "expected_route": "handoff",
+    "required_terms": [],
+    "forbidden_terms": [],
+    "max_products": 0,
+    "handoff_expected": true
+  },
+  {
+    "case_id": "exact_product_spec",
+    "message": "CTC620P รองรับกี่วัตต์",
+    "history": [],
+    "images": [],
+    "expected_route": "bot_reply",
+    "required_terms": ["240W"],
+    "forbidden_terms": ["ไม่มีข้อมูล"],
+    "max_products": 1,
+    "handoff_expected": false
+  },
+  {
+    "case_id": "requested_feature_recommendation",
+    "message": "อยากได้อุปกรณ์ดูแลสิวที่มีกล้อง",
+    "history": [],
+    "images": [],
+    "expected_route": "bot_reply",
+    "required_terms": [],
+    "forbidden_terms": ["doorbell"],
+    "max_products": 1,
+    "handoff_expected": false
+  },
+  {
+    "case_id": "no_evidence_spec",
+    "message": "CTC620P รับประกันกี่ปี",
+    "history": [],
+    "images": [],
+    "expected_route": "bot_reply",
+    "required_terms": ["ยังไม่มีข้อมูล"],
+    "forbidden_terms": ["ไม่พบสินค้า"],
+    "max_products": 1,
+    "handoff_expected": false
+  },
+  {
+    "case_id": "active_post_handoff",
+    "message": "ยังไม่ได้รับคำตอบ",
+    "history": [
+      {
+        "role": "model",
+        "text": "ระบบได้บันทึกข้อมูลของคุณและส่งต่อให้แอดมินดูแลเรียบร้อยแล้วค่ะ รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+      }
+    ],
+    "images": [],
+    "expected_route": "human_wait",
+    "required_terms": [],
+    "forbidden_terms": [],
+    "max_products": 0,
+    "handoff_expected": false
+  },
+  {
+    "case_id": "zaapi_exact_row",
+    "message": "สาย CTC620P รองรับกี่วัตต์",
+    "history": [],
+    "images": [],
+    "expected_route": "bot_reply",
+    "required_terms": ["240W"],
+    "forbidden_terms": ["ไม่มีข้อมูล"],
+    "max_products": 1,
+    "handoff_expected": false
+  }
+]

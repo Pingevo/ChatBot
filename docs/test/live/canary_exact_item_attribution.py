@@ -90,6 +90,7 @@ _tl: dict = {}
 def _save_tl(cid, platform, shop, products, active_item_id):
     _tl[cid] = {"conversation_id": cid, "platform": platform, "shop": shop,
                 "products": products, "active_item_id": active_item_id}
+    return True  # F4 — save_timeline contract: True = persisted
 
 # ── in-memory claim state (transition/merge owners replaced; fence checks
 #    simplified — single-threaded harness has no CAS race)

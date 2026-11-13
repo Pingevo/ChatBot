@@ -1155,7 +1155,9 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
     if conversation_id:
         try:
             from . import conversation_products as _cp
-            card = _cp.get_active_product(conversation_id, snap=snap)
+            card = _cp.get_active_product(
+                conversation_id, snap=snap,
+                platform=platform, shop=shop)
             if card:
                 anchor_iid = card.get("item_id")
                 for c in (card.get("model_codes") or []):
@@ -1217,7 +1219,9 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
     if conversation_id:
         try:
             from . import conversation_products as _cp
-            card = _cp.get_active_product(conversation_id, snap=snap)
+            card = _cp.get_active_product(
+                conversation_id, snap=snap,
+                platform=platform, shop=shop)
             if card:
                 anchor_iid = anchor_iid or card.get("item_id")
                 for c in (card.get("model_codes") or []):

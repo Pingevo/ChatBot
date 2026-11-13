@@ -110,6 +110,7 @@ def test_shadow_on_appends_trace(monkeypatch):
     assert s["ok"] is True
     assert s["primary_action"] in {
         "no_reply", "human_wait", "execute_needs", "handoff", "clarify",
+        "greeting",
     }
     assert isinstance(s["needs"], list)
     assert s["ownership"] in {"bot", "human", "unknown"}
@@ -366,7 +367,7 @@ def test_plan_claim_and_anchor_come_from_subject_view(monkeypatch):
     load_claim_state/get_active_product แยกสำหรับ plan inputs."""
     monkeypatch.setenv("USE_TURN_DECISION_SHADOW", "1")
     calls = {"view": 0}
-    def _view(cid):
+    def _view(cid, **_scope):
         calls["view"] += 1
         return _cp_shadow.SubjectSetView(
             None, None, (),

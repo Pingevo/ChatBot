@@ -339,7 +339,13 @@ def classify_intent(
         shop: ชื่อร้าน (optional — ใส่ใน prompt เพื่อ context)
 
     Returns:
-        dict ตามรูปแบบด้านบน ถ้า error → คืน _DEFAULT_RESULT (confidence=0)
+        dict ตามรูปแบบด้านบน
+
+    Raises:
+        RuntimeError/json errors — provider exception, empty output หรือ
+        malformed JSON ไม่ถูกกลืนเป็น semantic "other": operational
+        failure ต้องต่างจาก valid semantic result (caller ติด
+        intent_provider_failed flag เอง — legacy chat() / chat_v2)
     """
     if not message or not message.strip():
         return dict(_DEFAULT_RESULT)
@@ -382,8 +388,9 @@ def classify_intent(
         )
         raw = (response.text or "").strip()
         if not raw:
-            print("[INTENT] empty response → default", file=sys.stderr)
-            return dict(_DEFAULT_RESULT)
+            # provider คืน output ว่าง = malformed/failure — ห้ามกลืนเป็น
+            #   semantic "other" (caller ติด operational flag เอง)
+            raise RuntimeError("intent provider returned empty response")
 
         result = json.loads(raw)
         # validate fields
@@ -483,58 +490,10 @@ def classify_intent(
         return result
 
     except json.JSONDecodeError as e:
+        # malformed provider output = provider failure — ห้ามกลืนเป็น
+        #   semantic "other"
         print(f"[INTENT] JSON parse error: {e}  raw={raw[:100]!r}", file=sys.stderr)
-        return dict(_DEFAULT_RESULT)
+        raise
     except Exception as e:
         print(f"[INTENT] error: {e}", file=sys.stderr)
-        return dict(_DEFAULT_RESULT)
-
-
-# ---- helper: ตรวจว่าควรเรียก Pass 1 ไหม ----
-
-def should_run_pass1(
-    message: str,
-    claim_detected: bool,
-    product_types: set[str] | None,
-    has_warranty_history: bool,
-) -> bool:
-    """ตรวจว่า message นี้ควรเรียก LLM รอบแรก (Pass 1) ไหม.
-
-    เรียก Pass 1 เฉพาะ "จุดอ่อน" ของ hardcoded detection:
-      1. detect_claim_request() = True (อาจเป็น false positive)
-      2. มี compatibility keyword ("ใช้กับ", "รองรับ", "สำหรับ")
-      3. product_type detection ไม่ชัดเจน (ไม่มี type หรือมีหลาย type)
-      4. มี history ของ warranty + message ปัจจุบันกำกวม
-
-    ถ้าไม่เข้าเงื่อนไขข้างต้น → ใช้ hardcoded detection ตามเดิม (ประหยัดเวลา)
-    """
-    if not message or not message.strip():
-        return False
-
-    msg_lower = message.lower()
-
-    # 1. claim request detected (อาจเป็น false positive → ให้ LLM ยืนยัน)
-    if claim_detected:
-        return True
-
-    # 2. compatibility keyword
-    compat_kws = ("ใช้กับ", "รองรับ", "สำหรับ", "compatible", "support", "works with")
-    if any(kw in msg_lower for kw in compat_kws):
-        return True
-
-    # 3. product_type ไม่ชัดเจน
-    if product_types is None or len(product_types) == 0:
-        # ไม่ detect ได้ → ลองให้ LLM ช่วย
-        # แต่ถ้าเป็นคำสั้นๆ ที่ไม่น่าเป็นสินค้า (เช่น "ขอบคุณ") → ไม่ต้อง
-        if len(message.split()) >= 2:
-            return True
-
-    # 4. มี warranty history + message ปัจจุบันกำกวม
-    if has_warranty_history:
-        # ถ้า message ปัจจุบันมี keyword ของสินค้า แต่ history เป็น warranty → อาจสับสน
-        product_kws = ("สายชาร์จ", "หัวชาร์จ", "ชุดชาร์จ", "หูฟัง", "เคส", "แบต",
-                       "นาฬิกา", "โทรศัพท์", "สินค้า", "รุ่น")
-        if any(kw in msg_lower for kw in product_kws):
-            return True
-
-    return False
+        raise
