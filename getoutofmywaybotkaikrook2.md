@@ -14045,3 +14045,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - offline suite: 2248 passed, 15 skipped, 1 xfailed, exit 0. First sandboxed run had 1 fail/4 errors solely from denied fixture writes under worktree exports; authorized rerun passed.
 - census owner correction: `conversations_shp.conversation_id` is the join used by `getConversation`; timeline `shop` matches `shop_name`, not `shop_id` on all 2361 matched unscoped docs. Batched read eliminates per-document network query. Read-only counts: total 3261, scoped 492, unscoped 2769, derivable 2361, orphan 408, conflict 0, ambiguous 0.
 - backfill plan corrected; no Mongo write, migration, stage, commit, push, PR, or deploy. 408 orphan docs remain unassigned; any migration requires fresh census and separate review.
+
+## 2026-11-13 — Phase 1 + responsive UI integration — verified
+- Commit `8ca2331` records the 51 Phase 1 candidate paths; merge commit `a076bec` brings in UI commit `bf37843` (ChatAdminWeb). Branch `codex/phase1-chat-logic` is based on `c4f4bcd`; UI and chat changes coexist.
+- Full offline regression on combined tree: 2248 passed, 15 skipped, 1 xfailed, exit 0.
+- ChatAdminWeb `npm ci` used its committed lockfile; production `npm run build` passed with build-only placeholder secrets. Existing warnings: middleware convention deprecation and dynamic filesystem tracing in replay/test-results routes.
+- PR to `main` and merge are the next authorized integration actions. No Mongo migration/backfill was run; census still reports 408 orphans.

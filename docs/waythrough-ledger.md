@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 14047 |
-| active_integrity_prefix_sha256 | `8714232dd7cad630650862d83af4fc6a3c88f58b429aee3ebcfe1f6bb73c8eb7` |
-| active_line_count_at_baseline | 14047 |
-| active_integrity_recorded_at | 2026-11-13 (+0700), Phase 1 worktree and read-only census closeout (A-267); semantic coverage remains partial |
+| active_integrity_prefix_lines | 14053 |
+| active_integrity_prefix_sha256 | `b8ef3bae50f091efab5ceebcd2a38df32aa28580063bb03ca6d37b94ea41d50b` |
+| active_line_count_at_baseline | 14053 |
+| active_integrity_recorded_at | 2026-11-13 (+0700), Phase 1 + responsive UI combined verification (A-268); semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -314,6 +314,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 14020–14037 | read + indexed (A-266 closeout) |
 | 14038–14041 | read + indexed (A-267 pre-work; first line separator) |
 | 14042–14047 | read + indexed (A-267 closeout; first line separator) |
+| 14048–14048 | read + indexed (A-268 pre-work; separator) |
+| 14049–14053 | read + indexed (A-268 combined verification and PR-ready state) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -703,3 +705,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-265 | 14009–14010 | Independent review of A-264 multiplicity cap / 2026-11-13 | pending/deferred work | Reviewed typed admission and selector source without subagents. A-263's `subject_scope=none, subject_count=2` cap now stays one; digit-pattern inference is gone, replaced by normalized ref→pool-identity association. Focused phase10b+phase1 tests freshly passed 231/231, exit 0; no new production-reachable B1/B2 blocker reproduced. A synthetic W01/W02 request with W03 incorrectly pre-labelled `subject` emitted W03, but selector source assigns subject by exact model-code/item-ID or persisted subject channel, so the hand-built input is not evidence of a real selector defect. | verified | Alias map proves identity association, not the original source of refs; collision/persisted resolver-vs-pool disagreement remains unproven and should be bounded by an end-to-end fixture if activation requires it. Full offline suite not repeated; migration census still unexecuted, so activation blocked. No production/test change, stage, commit, push, PR, deploy or Mongo write; semantic coverage partial. |
 | A-266 | 14011–14019, 14020–14037 | Phase 1 pre-commit review and census attempt / 2026-11-13 | pending/deferred work | Read-only review reported focused 608 passed/13 skipped and full offline 2248 passed/15 skipped/1 xfailed; Phase 1 manifest proposed with 51 paths. Actual HEAD was bf37843, including a UI commit after c4f4bcd; staging stayed empty. Census was not executed because process environment lacked ADMIN_MONGO credentials and local default refused connection. No production/test behavior change. | verified | Prior reviewer left this active tail after prefix 14010, mistakenly deferring ledger update until commit. This entry indexes the exact tail and advances integrity now; semantic coverage remains partial. The present user separately authorized load_dotenv for read-only census; no shared Mongo write or migration apply is authorized by this entry. |
 | A-267 | 14038–14041, 14042–14047 | Phase 1 branch isolation and read-only scope census / 2026-11-13 | pending/deferred work | Transferred 51 candidate paths from main checkout into `codex/phase1-chat-logic` based at c4f4bcd; UI commit excluded, source work preserved. Full offline worktree suite passed: 2248 passed, 15 skipped, 1 xfailed, exit 0. Read-only admin Mongo census corrected the join to `conversations_shp.conversation_id` and timeline shop comparison to `shop_name`; batch read removed per-doc query. Counts: 3261 total, 492 scoped, 2769 unscoped; 2361 derivable, 408 orphan, 0 ambiguous/conflict. Backfill plan updated; no Mongo write or migration. | verified | First sandboxed suite run failed solely on denied fixture writes; authorized rerun passed. 408 orphans remain unresolved and must not be assigned by inference. No stage/commit/push/PR/deploy. Semantic coverage remains partial. |
+| A-268 | 14048–14048, 14049–14053 | Phase 1 + responsive UI integration verification / 2026-11-13 | passed behavior | Committed the 51-path Phase 1 candidate as `8ca2331` on `codex/phase1-chat-logic`, then merged UI commit `bf37843` as `a076bec`; combined tree contains 92 ChatAdminWeb paths and 16 chatbot paths. Full offline regression: 2248 passed/15 skipped/1 xfailed, exit 0. Next production build passed after `npm ci` from the committed lockfile and build-only placeholder secrets; warns about middleware convention deprecation and dynamic filesystem tracing in replay/test-results routes. No Mongo writes; the 408 orphan timeline docs remain unassigned. | verified | PR to `main` and merge are authorized and pending execution; semantic ledger coverage remains partial. |
