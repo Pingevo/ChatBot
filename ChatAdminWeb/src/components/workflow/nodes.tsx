@@ -20,10 +20,10 @@ export const NODE_TYPE_META: Record<
   FlowNodeType,
   { label: string; color: string; bg: string; border: string; icon: React.ReactNode }
 > = {
-  trigger: { label: "Trigger", color: "#d97706", bg: "#ffffff", border: "#e5e7eb", icon: <Zap size={13} /> },
-  condition: { label: "Condition", color: "#7c3aed", bg: "#ffffff", border: "#e5e7eb", icon: <GitBranch size={13} /> },
-  action: { label: "Action", color: "#059669", bg: "#ffffff", border: "#e5e7eb", icon: <Play size={13} /> },
-  wait: { label: "Wait", color: "#8b1e28", bg: "#ffffff", border: "#e5e7eb", icon: <Clock size={13} /> },
+  trigger: { label: "Trigger", color: "#d97706", bg: "var(--color-surface)", border: "var(--color-border)", icon: <Zap size={13} /> },
+  condition: { label: "Condition", color: "#7c3aed", bg: "var(--color-surface)", border: "var(--color-border)", icon: <GitBranch size={13} /> },
+  action: { label: "Action", color: "#059669", bg: "var(--color-surface)", border: "var(--color-border)", icon: <Play size={13} /> },
+  wait: { label: "Wait", color: "#8b1e28", bg: "var(--color-surface)", border: "var(--color-border)", icon: <Clock size={13} /> },
 };
 
 export const SUBTYPE_META: Record<string, { label: string; icon: React.ReactNode }> = {
@@ -367,7 +367,7 @@ function OutHandles({ nodeId, handles }: { nodeId: string; handles: CardHandle[]
             style={{
               position: "absolute", right: -6, top: "50%", transform: "translateY(-50%)",
               background: h.color, width: 9, height: 9,
-              border: "2px solid #ffffff", boxShadow: "0 0 0 1px rgba(0,0,0,0.08)",
+              border: "2px solid var(--color-surface)", boxShadow: "0 0 0 1px color-mix(in srgb, var(--color-text) 12%, transparent)",
             }}
           />
         </div>
@@ -390,7 +390,7 @@ function NodeShell({
   return (
     <div
       style={{
-        background: "#ffffff",
+        background: "var(--color-surface)",
         border: `1.5px solid ${selected ? meta.color : meta.border}`,
         borderRadius: 10,
         minWidth: 190,

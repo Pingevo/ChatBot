@@ -634,8 +634,8 @@ export default function ReplayComparePage() {
       {/* Header — 2 rows: title+tabs / status+actions */}
       <div className="border-b border-border bg-surface">
         {/* Row 1: title + tabs */}
-        <div className="flex items-center justify-between px-4 pt-3 overflow-x-auto">
-          <div className="flex items-center gap-3 shrink-0">
+        <div className="replay-header-main flex items-center justify-between px-4 pt-3 overflow-x-auto">
+          <div className="replay-header-group flex items-center gap-3 shrink-0">
             <Scale className="w-5 h-5 text-info" />
             <div className="flex items-center gap-1.5">
               <h1 className="text-lg font-semibold">เปรียบเทียบรีเพลย์</h1>
@@ -648,7 +648,7 @@ export default function ReplayComparePage() {
               </Link>
             </div>
             {/* ⚡ 3 tabs: เลือกแชท (inbox) | History | ไฟล์ผล (files) */}
-            <div className="flex items-center gap-1 ml-2">
+            <div className="replay-mode-tabs flex items-center gap-1 ml-2">
               <button
                 onClick={() => setMode("inbox")}
                 className={`px-2.5 py-1 text-xs rounded font-medium transition ${
@@ -780,7 +780,7 @@ export default function ReplayComparePage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Left: Conversation list — inbox หรือ files แล้วแต่ mode */}
         <div
-          className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex w-full lg:w-72 shrink-0 border-r overflow-y-auto bg-white flex-col`}
+          className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex w-full lg:w-72 shrink-0 border-r overflow-y-auto bg-surface flex-col`}
           onScroll={mode === "inbox" ? (e) => {
             const el = e.currentTarget;
             if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) {
@@ -793,7 +793,7 @@ export default function ReplayComparePage() {
           {mode === "inbox" ? (
             <>
               {/* ⚡ Inbox picker — search + filter + list จาก /admin/conversations */}
-              <div className="sticky top-0 z-10 bg-white border-b px-2 py-2 space-y-2">
+              <div className="sticky top-0 z-10 bg-surface border-b px-2 py-2 space-y-2">
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-text-subtle absolute left-2 top-2" />
                   <input
@@ -894,7 +894,7 @@ export default function ReplayComparePage() {
           ) : mode === "history" ? (
             <>
               {/* ⚡ History — แชทที่เคย replay ผ่าน inbox แล้ว */}
-              <div className="sticky top-0 z-10 bg-white border-b px-2 py-2 space-y-2">
+              <div className="sticky top-0 z-10 bg-surface border-b px-2 py-2 space-y-2">
                 <div className="relative">
                   <Search className="w-3.5 h-3.5 text-text-subtle absolute left-2 top-2" />
                   <input
@@ -1051,7 +1051,7 @@ export default function ReplayComparePage() {
           {/* ⚡ Preview panel — ก่อน replay แสดงข้อความต้นฉบับให้ดูก่อน */}
           {previewConv && !selectedConv && (
             <div className="p-4 space-y-3">
-              <div className="flex items-center justify-between flex-wrap gap-2 bg-white rounded-lg border p-3">
+              <div className="flex items-center justify-between flex-wrap gap-2 bg-surface rounded-lg border p-3">
                 <div>
                   <h2 className="font-semibold text-sm">
                     {previewConv.shop_name} · {previewConv.id?.slice(-12)}
@@ -1078,7 +1078,7 @@ export default function ReplayComparePage() {
                 />
               )}
               {!previewLoading && previewMessages.length > 0 && (
-                <div className="bg-white rounded-lg border p-3 space-y-2 max-h-[60vh] overflow-y-auto">
+                <div className="bg-surface rounded-lg border p-3 space-y-2 max-h-[60vh] overflow-y-auto">
                   <div className="text-xs text-text-subtle mb-2">
                     {previewMessages.length} ข้อความ · ตรวจดูก่อน แล้วกด "รัน Replay Compare"
                   </div>
@@ -1246,7 +1246,7 @@ export default function ReplayComparePage() {
                         {selectedQa.user_products && selectedQa.user_products.length > 0 && (
                           <div className="mt-2 space-y-2">
                             {selectedQa.user_products.map((p, idx) => (
-                              <div key={idx} className="flex gap-2 bg-white border border-info/20 rounded-lg p-2 max-w-xs">
+                              <div key={idx} className="flex gap-2 bg-surface border border-info/20 rounded-lg p-2 max-w-xs">
                                 {p.image && (
                                   <img
                                     src={p.image}
@@ -1470,7 +1470,7 @@ export default function ReplayComparePage() {
         </div>
 
         {/* Right: Analysis summary */}
-        <div className={`${mobileView === "stat" ? "flex" : "hidden"} lg:flex flex-col w-full lg:w-80 shrink-0 border-l bg-white`}>
+        <div className={`${mobileView === "stat" ? "flex" : "hidden"} lg:flex flex-col w-full lg:w-80 shrink-0 border-l bg-surface`}>
           {/* ⚡ Mobile/Tablet (<lg) header — back ไปที่หน้าเปรียบเทียบ */}
           <div className="lg:hidden flex items-center gap-1 px-2 py-2.5 border-b border-border shrink-0">
             <button

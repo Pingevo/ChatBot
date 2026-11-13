@@ -29,10 +29,15 @@ export const useAuth = create<AuthState>((set) => ({
   fetchMe: async () => {
     try {
       const data = await authService.me();
+      const theme = data.admin.theme_preference === "dark" ? "dark" : "light";
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
       set({ user: data.admin, initialized: true });
       // โหลด permission matrix ล่าสุด (fail → ใช้ DEFAULT ใน roles.ts)
       loadPermissions().catch(() => {});
     } catch {
+      document.documentElement.dataset.theme = "light";
+      document.documentElement.style.colorScheme = "light";
       set({ user: null, initialized: true });
     }
   },
@@ -43,6 +48,8 @@ export const useAuth = create<AuthState>((set) => ({
     } catch {
       // ignore — still clear local state
     }
+    document.documentElement.dataset.theme = "light";
+    document.documentElement.style.colorScheme = "light";
     set({ user: null, initialized: true });
   },
 

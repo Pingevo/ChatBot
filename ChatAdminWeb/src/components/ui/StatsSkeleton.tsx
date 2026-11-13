@@ -47,18 +47,20 @@ export function DashboardSkeleton() {
   );
 }
 
-export function AnalyticsSkeleton() {
+export function AnalyticsSkeleton({ hideHeading = false }: { hideHeading?: boolean }) {
   return (
-    <div className="space-y-6 animate-pulse">
+    <div className="analytics-loading-skeleton space-y-6 animate-pulse">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="h-6 w-40 bg-surface-2 rounded" />
-        <div className="h-9 w-64 bg-surface-2 rounded-lg" />
-      </div>
+      {!hideHeading && (
+        <div className="flex items-center justify-between">
+          <div className="h-6 w-40 bg-surface-2 rounded" />
+          <div className="h-9 w-64 bg-surface-2 rounded-lg" />
+        </div>
+      )}
       {/* Channel header */}
       <div className="h-12 w-full bg-surface-2 rounded-xl" />
       {/* KPI grid */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+      <div className="analytics-skeleton-kpi-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {Array.from({ length: 6 }).map((_, i) => (
           <div key={i} className="bg-surface border border-border rounded-xl p-4 h-32">
             <div className="h-3 w-32 bg-surface-2 rounded mb-3" />
@@ -68,7 +70,7 @@ export function AnalyticsSkeleton() {
         ))}
       </div>
       {/* Charts */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="analytics-skeleton-chart-grid grid grid-cols-1 lg:grid-cols-2 gap-4">
         {Array.from({ length: 4 }).map((_, i) => (
           <div key={i} className="bg-surface border border-border rounded-xl p-4 h-48">
             <div className="h-4 w-40 bg-surface-2 rounded mb-3" />
@@ -80,17 +82,21 @@ export function AnalyticsSkeleton() {
   );
 }
 
-export function LiveSkeleton() {
+export function LiveSkeleton({ hideHeading = false }: { hideHeading?: boolean }) {
   return (
-    <div className="space-y-4 animate-pulse">
-      <div className="flex items-center justify-between">
-        <div className="h-6 w-32 bg-surface-2 rounded" />
-        <div className="h-9 w-80 bg-surface-2 rounded-lg" />
-      </div>
-      <div className="h-4 w-48 bg-surface-2 rounded" />
+    <div className="analytics-loading-skeleton space-y-4 animate-pulse">
+      {!hideHeading && (
+        <>
+          <div className="flex items-center justify-between">
+            <div className="h-6 w-32 bg-surface-2 rounded" />
+            <div className="h-9 w-80 bg-surface-2 rounded-lg" />
+          </div>
+          <div className="h-4 w-48 bg-surface-2 rounded" />
+        </>
+      )}
       <div className="h-12 w-full bg-surface-2 rounded-xl" />
       {/* Big stat cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="analytics-live-skeleton-grid grid grid-cols-1 md:grid-cols-2 gap-4">
         {Array.from({ length: 2 }).map((_, i) => (
           <div key={i} className="bg-surface border border-border rounded-xl p-5 h-28">
             <div className="h-3 w-32 bg-surface-2 rounded mb-3" />
@@ -100,12 +106,12 @@ export function LiveSkeleton() {
         ))}
       </div>
       {/* Closed */}
-      <div className="bg-surface border border-border rounded-xl p-5 h-24">
+      <div className="analytics-live-skeleton-closed bg-surface border border-border rounded-xl p-5 h-24">
         <div className="h-3 w-32 bg-surface-2 rounded mb-3" />
         <div className="h-8 w-16 bg-surface-2 rounded" />
       </div>
       {/* Panels */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="analytics-skeleton-chart-grid grid grid-cols-1 lg:grid-cols-2 gap-4">
         {Array.from({ length: 2 }).map((_, i) => (
           <div key={i} className="bg-surface border border-border rounded-xl p-5 h-64">
             <div className="h-4 w-40 bg-surface-2 rounded mb-4" />

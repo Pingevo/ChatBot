@@ -24,6 +24,7 @@ export interface AdminDoc extends Document {
   is_accepting_chats?: boolean;
   channels_access?: string[];
   bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex)
+  theme_preference?: "light" | "dark";
   failed_login_count?: number;
   locked_until?: Date | null;
   last_login_at?: Date | null;
@@ -46,6 +47,7 @@ export interface SafeAdmin {
   active: boolean;
   is_accepting_chats?: boolean;
   bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex)
+  theme_preference: "light" | "dark";
   last_login_at: string | null;
   created_at: string;
 }
@@ -61,6 +63,7 @@ function safeAdmin(admin: AdminDoc): SafeAdmin {
     active: admin.active ?? true,
     is_accepting_chats: admin.is_accepting_chats ?? true,
     bubble_color: admin.bubble_color,
+    theme_preference: admin.theme_preference === "dark" ? "dark" : "light",
     last_login_at: admin.last_login_at ? admin.last_login_at.toISOString() : null,
     created_at: admin.created_at ? admin.created_at.toISOString() : "",
   };
@@ -222,7 +225,15 @@ export async function toggleAdminActive(adminId: string, active: boolean): Promi
 
 export async function updateAdminProfile(
   adminId: string,
-  fields: { name?: string; username?: string; channels_access?: string[]; is_accepting_chats?: boolean; bubble_color?: string; role?: string }
+  fields: {
+    name?: string;
+    username?: string;
+    channels_access?: string[];
+    is_accepting_chats?: boolean;
+    bubble_color?: string;
+    theme_preference?: "light" | "dark";
+    role?: string;
+  }
 ): Promise<boolean> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
   const update: Record<string, unknown> = {};
@@ -232,6 +243,7 @@ export async function updateAdminProfile(
   if (fields.channels_access !== undefined) update.channels_access = fields.channels_access;
   if (fields.is_accepting_chats !== undefined) update.is_accepting_chats = fields.is_accepting_chats;
   if (fields.bubble_color !== undefined) update.bubble_color = fields.bubble_color;
+  if (fields.theme_preference !== undefined) update.theme_preference = fields.theme_preference;
   if (Object.keys(update).length === 0) return false;
   const result = await coll.updateOne({ admin_id: adminId }, { $set: update });
   if (result.modifiedCount > 0) {

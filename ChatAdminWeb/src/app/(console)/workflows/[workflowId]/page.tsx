@@ -10,7 +10,7 @@ export default async function WorkflowEditorPage({
 }) {
   const { workflowId } = await params;
   return (
-    <div style={{ height: "calc(100vh - 52px)", display: "flex", flexDirection: "column" }}>
+    <div className="workflow-page-shell" style={{ height: "calc(100vh - 52px)", display: "flex", flexDirection: "column" }}>
       <WorkflowEditor workflowId={workflowId} />
     </div>
   );

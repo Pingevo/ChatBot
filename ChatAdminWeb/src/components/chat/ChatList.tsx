@@ -9,6 +9,8 @@ import { Search, ChevronDown, Check, X, ArrowDownUp, MessageSquare, Trash2, Rota
 import type { Conversation, Platform, AdminUser } from "@/lib/types";
 import { formatDateLabel } from "@/components/shadow/DateBanner";
 import { AnnotationDot, type Annotation } from "@/components/ui/AnnotationDot";
+import { ModalLayer } from "@/components/ui/ModalLayer";
+import { useFocusTrap } from "@/lib/useKeyboardShortcuts";
 
 interface Props {
   conversations: Conversation[];
@@ -318,16 +320,16 @@ export function ChatList({
   const activeFilterCount = platforms.size + (chatStatus !== "all" ? 1 : 0) + (msgStatus !== "all" ? 1 : 0) + shops.size;
 
   return (
-    <div className="w-full bg-surface flex flex-col h-full">
+    <div className="mobile-chat-list w-full bg-surface flex flex-col h-full">
       {/* Header — title + search + collapsible filters */}
-      <div className="p-2.5 border-b border-border space-y-2">
+      <div className="mobile-chat-list-header p-2.5 border-b border-border space-y-2">
         {/* Row 1: title + count + accept toggle */}
-        <div className="flex items-center justify-between gap-2">
+        <div className="mobile-chat-list-title-row flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <div className="w-6 h-6 rounded-md bg-brand/15 flex items-center justify-center shrink-0">
               <MessageSquare size={13} className="text-brand" />
             </div>
-            <h2 className="font-semibold text-text text-sm truncate">กล่องข้อความ</h2>
+            <h2 className="mobile-chat-list-title font-semibold text-text text-sm truncate">กล่องข้อความ</h2>
             <Badge tone="brand">{totalCount != null ? totalCount : filtered.length}</Badge>
             {activeFilterCount > 0 && (
               <button onClick={clearAll} className="text-[10px] text-text-muted hover:text-vibrant-coral transition-colors">
@@ -379,7 +381,7 @@ export function ChatList({
             value={search}
             onChange={(e) => handleSearchChange(e.target.value)}
             placeholder="ค้นหา ชื่อ / ข้อความ / ร้าน..."
-            className="w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+              className="mobile-chat-search w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
           />
         </div>
 
@@ -401,9 +403,7 @@ export function ChatList({
                 <ChevronDown size={10} className="text-text-muted shrink-0" />
               </button>
               {showAdminDropdown && (
-                <>
-                  <div className="fixed inset-0 z-20" onClick={() => setShowAdminDropdown(false)} />
-                  <div className="absolute top-full left-0 mt-1 min-w-[140px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1 max-h-60 overflow-y-auto">
+                <FilterMenu label="ผู้รับแชท" onClose={() => setShowAdminDropdown(false)}>
                     <button onClick={() => { onChatFilterChange("me"); setShowAdminDropdown(false); }} className={`w-full text-left px-2.5 py-1.5 text-[11px] hover:bg-surface-2 ${chatFilter === "me" ? "text-brand font-medium" : "text-text"}`}>ฉัน</button>
                     <button onClick={() => { onChatFilterChange("all"); setShowAdminDropdown(false); }} className={`w-full text-left px-2.5 py-1.5 text-[11px] hover:bg-surface-2 ${chatFilter === "all" ? "text-brand font-medium" : "text-text"}`}>ทั้งหมด</button>
                     {admins.length > 0 && (
@@ -416,8 +416,7 @@ export function ChatList({
                         ))}
                       </>
                     )}
-                  </div>
-                </>
+                </FilterMenu>
               )}
             </div>
           )}
@@ -563,8 +562,8 @@ export function ChatList({
                     onSelect(c.id);
                   }
                 }}
-                className={`w-full flex items-start gap-3 p-3 border-b border-border text-left transition-colors cursor-pointer ${
-                  active ? "bg-pale-sky-soft border-l-2 border-l-brand" : "hover:bg-surface-2"
+                className={`mobile-chat-row w-full flex items-start gap-3 p-3 border-b border-border text-left transition-colors cursor-pointer ${
+                  active ? "bg-pale-sky-soft md:border-l-2 md:border-l-brand" : "hover:bg-surface-2"
                 }`}
               >
                 <div className="relative shrink-0">
@@ -576,7 +575,7 @@ export function ChatList({
 
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-1.5">
-                    <span className="text-sm font-medium text-text truncate flex-1 min-w-0">{c.customer_name}</span>
+                    <span className="mobile-chat-customer-name text-sm font-medium text-text truncate flex-1 min-w-0">{c.customer_name}</span>
                     <span className="text-[10px] text-text-subtle shrink-0">{timeLabel(c.last_timestamp)}</span>
                     {annotationsMap && onAnnotationsChange && (
                       <AnnotationDot
@@ -622,8 +621,8 @@ export function ChatList({
                       </span>
                     )}
                   </div>
-                  <div className="text-[11px] text-text-muted truncate">{c.shop_name}</div>
-                  <div className="text-xs text-text-muted truncate mt-0.5">{c.last_message}</div>
+                  <div className="mobile-chat-shop text-[11px] text-text-muted truncate">{c.shop_name}</div>
+                  <div className="mobile-chat-preview text-xs text-text-muted truncate mt-0.5">{c.last_message}</div>
                   <div className="flex items-center gap-1.5 mt-1">
                     <Badge tone={statusTone[c.status] || "neutral"}>{statusLabel[c.status] || c.status}</Badge>
                     {c.replay_verdict && (
@@ -704,14 +703,65 @@ function Dropdown({
         <span className="font-medium truncate" style={{ minWidth: `${minLabelWidth}px`, maxWidth: "100px" }}>{text}</span>
         <ChevronDown size={10} className="text-text-muted shrink-0" />
       </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-20" onClick={onClose} />
-          <div className="absolute top-full left-0 mt-1 min-w-[160px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-            {children}
-          </div>
-        </>
-      )}
+      {open && <FilterMenu label={label} onClose={onClose}>{children}</FilterMenu>}
+    </div>
+  );
+}
+
+function FilterMenu({ label, onClose, children }: { label: string; onClose: () => void; children: React.ReactNode }) {
+  const [phoneLayout, setPhoneLayout] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 767px), (pointer: coarse) and (max-height: 500px)");
+    const update = () => setPhoneLayout(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  if (phoneLayout === null) return null;
+
+  if (phoneLayout) {
+    return (
+      <ModalLayer presentation="sheet" className="fixed inset-0 z-[120] flex items-end justify-center bg-black/40" onClick={onClose} onBack={onClose}>
+        <MobileFilterDialogContent label={label} onClose={onClose}>{children}</MobileFilterDialogContent>
+      </ModalLayer>
+    );
+  }
+
+  return (
+    <>
+      <div className="fixed inset-0 z-20" onClick={onClose} />
+      <div className="absolute top-full left-0 mt-1 min-w-[160px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1 max-h-60 overflow-y-auto">
+        {children}
+      </div>
+    </>
+  );
+}
+
+function MobileFilterDialogContent({ label, onClose, children }: { label: string; onClose: () => void; children: React.ReactNode }) {
+  const dialogRef = useFocusTrap<HTMLDivElement>(true);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  return (
+    <div ref={dialogRef} tabIndex={-1} role="dialog" aria-modal="true" aria-label={`ตัวกรอง${label}`} className="mobile-filter-dialog w-full bg-surface" onClick={(event) => event.stopPropagation()}>
+      <div className="mobile-filter-heading flex items-center justify-between border-b border-border px-4 py-3">
+        <h2 className="text-base font-semibold text-text">{label}</h2>
+        <button type="button" onClick={onClose} className="w-10 h-10 rounded-xl hover:bg-surface-2" aria-label="ปิดตัวกรอง">
+          <X size={18} className="mx-auto" />
+        </button>
+      </div>
+      <div className="mobile-filter-options py-1">{children}</div>
     </div>
   );
 }

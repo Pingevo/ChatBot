@@ -3,9 +3,10 @@ import { useEffect, useState, useCallback, useMemo } from "react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { statsService, type LiveStats } from "@/lib/services";
 import { ConnectedChannelsHeader, DonutCenterChart, avatarColor } from "@/components/charts/ZaapiStats";
-import { Info } from "lucide-react";
-import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
+import { Activity, Info } from "lucide-react";
+import { rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
 import { LiveSkeleton } from "@/components/ui/StatsSkeleton";
+import { AnalyticsPageHeading } from "@/components/charts/AnalyticsPageHeading";
 
 const DONUT_COLORS = ["#3b82c4", "#e0578a", "#4a9d6f", "#f0a13a", "#8b5fbf", "#c8912b"];
 
@@ -47,24 +48,27 @@ export default function LiveStatsPage() {
     };
   }, [load]);
 
-  if (loading && !data) return <LiveSkeleton />;
-  if (error && !data) return <EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} />;
+  const pageHeading = (
+    <AnalyticsPageHeading
+      icon={Activity}
+      title="ข้อมูลสด"
+      description="ภาพรวมแชทที่กำลังดูแลและงานที่ยังรอคำตอบ"
+      value={dateRange}
+      onChange={setDateRange}
+      helpHref="/help"
+      showDescriptionDesktop
+    />
+  );
+
+  if (loading && !data) return <div className="analytics-page-body space-y-5">{pageHeading}<LiveSkeleton hideHeading /></div>;
+  if (error && !data) return <div className="analytics-page-body space-y-5">{pageHeading}<EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} /></div>;
   if (!data) return null;
 
   const maxWorkload = Math.max(...data.workload_by_admin.map((w) => w.count), 1);
 
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <h2 className="text-lg font-bold text-text">ข้อมูลสด</h2>
-        <div className="flex items-center gap-3">
-          <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
-          <a href="/help" className="text-xs text-brand flex items-center gap-1 hover:underline">
-            <Info size={13} /> แนะนำการใช้งาน
-          </a>
-        </div>
-      </div>
-      <p className="text-sm text-text-muted -mt-3">ภาพรวมทีมที่เปิดอยู่แบบเรียลไทม์</p>
+    <div className="analytics-page-body space-y-5">
+      {pageHeading}
 
       <ConnectedChannelsHeader
         connectedCount={data.connected_shops}
@@ -77,7 +81,7 @@ export default function LiveStatsPage() {
       <div className={loading ? "opacity-50 pointer-events-none transition-opacity" : "transition-opacity"}>
 
       {/* Two big stat cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="analytics-live-stat-grid grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-surface rounded-xl border border-border p-5">
           <div className="flex items-center gap-1 mb-2">
             <span className="text-sm text-text-muted">แชทที่เปิดอยู่ทั้งหมด</span>
@@ -102,7 +106,7 @@ export default function LiveStatsPage() {
       </div>
 
       {/* Closed chats card */}
-      <div className="bg-surface rounded-xl border border-border p-5 mt-1">
+      <div className="analytics-live-closed-card bg-surface rounded-xl border border-border p-5 mt-1">
         <div className="flex items-center gap-1 mb-2">
           <span className="text-sm text-text-muted">แชทที่ปิดไปแล้ว</span>
         </div>
@@ -128,8 +132,11 @@ export default function LiveStatsPage() {
         <div className="bg-surface rounded-xl border border-border p-5">
           <h3 className="text-sm font-semibold text-text">แชทที่เปิดอยู่ตามเจ้าหน้าที่</h3>
           <p className="text-xs text-text-subtle mb-4">ภาระงานปัจจุบัน เรียงตามแชทที่ใช้งานอยู่</p>
-          <div className="space-y-3">
-            {data.workload_by_admin.map((w) => (
+          {data.workload_by_admin.length === 0 ? (
+            <p className="analytics-chart-empty py-8 text-center text-sm text-text-muted">ยังไม่มีข้อมูลภาระงานของเจ้าหน้าที่</p>
+          ) : (
+            <div className="space-y-3">
+              {data.workload_by_admin.map((w) => (
               <div key={w.admin_id} className="flex items-center gap-3">
                 <div
                   className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0"
@@ -146,8 +153,9 @@ export default function LiveStatsPage() {
                 </div>
                 <span className="text-sm font-medium text-text w-4 text-right shrink-0">{w.count}</span>
               </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
 
         <div className="bg-surface rounded-xl border border-border p-5">

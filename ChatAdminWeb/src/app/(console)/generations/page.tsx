@@ -13,7 +13,7 @@ import { api } from "@/lib/apiClient";
 import { useToastError, toast } from "@/components/ui/Toast";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
-import { BuildProgressCat } from "@/components/generations/BuildProgressCat";
+import { BuildProgressCat, PixelCat, type PixelCatAction, type PixelCatMood, type PixelCatOutfit } from "@/components/generations/BuildProgressCat";
 import { GenTracks } from "@/components/generations/GenTracks";
 
 const API = "/chatbot/shopee/admin/generations";
@@ -29,6 +29,9 @@ const STEP_LABEL: Record<string, string> = {
   description_embeddings: "Description vectors", import_db: "Import DB",
   validate: "Validate + Manifest",
 };
+const MASCOT_ACTIONS: PixelCatAction[] = ["wave", "snack", "walk", "mood"];
+const MASCOT_MOODS: PixelCatMood[] = ["adoring", "angry", "happy", "downcast"];
+const MASCOT_OUTFITS: PixelCatOutfit[] = ["classic", "maroon", "hoodie"];
 
 type StepInfo = { name: string; status: string; percent?: number | null;
                   error?: string | null; carried_from?: string };
@@ -158,9 +161,9 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
   const canResume = dead || run.status === "failed" || run.status === "stopped";
   const canDiscard = dead || ["pending", "failed", "stopped"].includes(run.status);
   return (
-    <div className="border border-border rounded-xl p-4 bg-surface">
+    <div className="generation-run-card border border-border rounded-xl p-4 bg-surface">
       <button type="button" onClick={onToggle}
-              className="w-full flex items-center gap-2 flex-wrap text-left">
+              className="generation-run-summary w-full flex items-center gap-2 flex-wrap text-left">
         <code className="text-xs font-semibold">{gid}</code>
         <span className={`text-[10px] px-2 py-0.5 rounded-full ${STATUS_COLOR[run.status] || ""}`}>
           {run.status}
@@ -175,10 +178,12 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
       </button>
       {run.status === "building" && (
         <>
-          <BuildProgressCat current={Math.max(curIdx, 0)} total={STEP_ORDER.length} walking={!dead} />
+          <div className="generation-build-cat-rail">
+            <BuildProgressCat current={Math.max(curIdx, 0)} total={STEP_ORDER.length} walking={!dead} />
+          </div>
           <div className="space-y-1.5 mt-1">
             {STEP_ORDER.map((s) => (
-              <div key={s} className="grid grid-cols-[150px_1fr_42px] items-center gap-2">
+              <div key={s} className="generation-step-row grid grid-cols-[150px_1fr_42px] items-center gap-2">
                 <span className="text-[11px] text-muted truncate">{STEP_LABEL[s]}</span>
                 <StepBar info={steps[s]} />
                 <span className="text-[10px] text-muted text-right">
@@ -201,7 +206,7 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
         <div className="text-[11px] text-muted mt-1">description ยืมจาก {run.description_source_gid}</div>
       )}
       {(run.status === "pending" || canRollback || canStop || canResume || canDiscard) && editable && (
-        <div className="flex items-center gap-1.5 pt-3">
+        <div className="generation-run-actions flex items-center gap-1.5 pt-3">
           {canStop && (
             <Button size="sm" variant="danger" disabled={busy} title="หยุด build — ของที่เสร็จแล้วเก็บไว้ ทำต่อได้"
                     onClick={() => onAction("stop", gid)}>
@@ -253,6 +258,9 @@ export default function GenerationsPage() {
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [startMode, setStartMode] = useState<"daily" | "weekly">("daily");
+  const [mascotAction, setMascotAction] = useState<PixelCatAction>("wave");
+  const [mascotMood, setMascotMood] = useState<PixelCatMood>("happy");
+  const [mascotOutfit, setMascotOutfit] = useState<PixelCatOutfit>("classic");
 
   const load = useCallback(async (quiet = false) => {
     if (!quiet) setLoading(true);
@@ -273,6 +281,26 @@ export default function GenerationsPage() {
     const t = setInterval(() => load(true), 5000);
     return () => clearInterval(t);
   }, [load]);
+
+  useEffect(() => {
+    setMascotAction(MASCOT_ACTIONS[Math.floor(Math.random() * MASCOT_ACTIONS.length)]);
+    setMascotMood(MASCOT_MOODS[Math.floor(Math.random() * MASCOT_MOODS.length)]);
+    setMascotOutfit(MASCOT_OUTFITS[Math.floor(Math.random() * MASCOT_OUTFITS.length)]);
+    const actionTimer = window.setInterval(
+      () => setMascotAction(MASCOT_ACTIONS[Math.floor(Math.random() * MASCOT_ACTIONS.length)]), 12000,
+    );
+    const moodTimer = window.setInterval(
+      () => setMascotMood(MASCOT_MOODS[Math.floor(Math.random() * MASCOT_MOODS.length)]), 9000,
+    );
+    const outfitTimer = window.setInterval(
+      () => setMascotOutfit(MASCOT_OUTFITS[Math.floor(Math.random() * MASCOT_OUTFITS.length)]), 30000,
+    );
+    return () => {
+      window.clearInterval(actionTimer);
+      window.clearInterval(moodTimer);
+      window.clearInterval(outfitTimer);
+    };
+  }, []);
 
   const nxt = useMemo(nextRun, []);
   const lastDone = useMemo(
@@ -335,8 +363,87 @@ export default function GenerationsPage() {
   };
 
   return (
-    <PageShell title="Generation Pipeline" subtitle="build → review → publish (pointer สลับเฉพาะตอน Accept)">
-      <div className="mb-3 grid gap-2 md:grid-cols-3 text-[12px]">
+    <PageShell
+      title="Generation Pipeline"
+      subtitle={<> <span className="hidden md:inline">build → review → publish (pointer สลับเฉพาะตอน Accept)</span><span className="md:hidden">ติดตามชุดข้อมูลและสถานะ build</span></>}
+    >
+      <div className="generation-mobile-overview md:hidden">
+        <section className="generation-current-panel">
+          <div className="generation-current-copy">
+            <span className="generation-kicker">ข้อมูลที่ใช้งานอยู่</span>
+            <strong className="generation-current-state">
+              {building?.pid_alive === false ? "build หยุดชั่วคราว" : building ? "กำลังสร้างข้อมูล" : active ? "พร้อมใช้งาน" : "ยังไม่มีชุดข้อมูล"}
+            </strong>
+            <code className="generation-current-id">{active || "ยังไม่มี generation"}</code>
+            <span className="generation-current-badge">{active ? "ACTIVE · LIVE" : "รอ generation แรก"}</span>
+          </div>
+          <button
+            type="button"
+            className={`generation-cat-scene focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${liveBuilding ? "is-building" : ""}`}
+            aria-label={liveBuilding ? "แมวกำลังเดินตามสถานะ build" : "เปลี่ยนท่าทางแมว"}
+            title={liveBuilding ? "แมวกำลังเดินตามสถานะ build" : "แตะเพื่อเปลี่ยนท่าทางแมว"}
+            disabled={!!liveBuilding}
+            onClick={() => setMascotAction((current) => current === "wave" ? "mood" : current === "mood" ? "snack" : current === "snack" ? "walk" : "wave")}
+          >
+            <span className="generation-cat-orbit" aria-hidden="true" />
+            <span className="generation-cat-star generation-cat-star-one" aria-hidden="true" />
+            <span className="generation-cat-star generation-cat-star-two" aria-hidden="true" />
+            <PixelCat
+              walking={!!liveBuilding}
+              action={liveBuilding ? "walk" : mascotAction}
+              outfit={mascotOutfit}
+              mood={mascotMood}
+            />
+          </button>
+        </section>
+
+        <section className="generation-schedule-panel">
+          <div className="generation-schedule-copy">
+            <span className="generation-kicker">รอบ build ถัดไป</span>
+            <strong>{building ? "กำลัง build อยู่" : nxt.at.toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })}</strong>
+            <span>{building ? "รอบใหม่จะเริ่มได้เมื่อรอบนี้จบ" : `${nxt.kind} · เวลาไทย`}</span>
+          </div>
+          {editable && !liveBuilding && (
+            <div className="generation-start-controls">
+              <label className="sr-only" htmlFor="generation-start-mode">ประเภท build</label>
+              <select
+                id="generation-start-mode"
+                value={startMode}
+                onChange={(e) => setStartMode(e.target.value as "daily" | "weekly")}
+                className="generation-mode-select hidden md:block"
+              >
+                <option value="daily">daily</option>
+                <option value="weekly">weekly</option>
+              </select>
+              <div className="generation-mode-options grid md:hidden" role="group" aria-label="ประเภท build">
+                {(["daily", "weekly"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`generation-mode-option${startMode === mode ? " is-selected" : ""}`}
+                    aria-pressed={startMode === mode}
+                    onClick={() => setStartMode(mode)}
+                  >
+                    {mode}
+                  </button>
+                ))}
+              </div>
+              <Button size="sm" disabled={busy} onClick={onStart}
+                      title="สร้าง generation ใหม่และเริ่ม build ทันที"
+                      className="generation-start-button">
+                <Zap size={14} />
+                <span>เริ่ม build</span>
+              </Button>
+            </div>
+          )}
+          <div className="generation-last-build">
+            <span>สร้างล่าสุด</span>
+            <strong>{lastDone ? fmtTs(lastDone.updated_at || lastDone.created_at) : "ยังไม่มี"}</strong>
+          </div>
+        </section>
+      </div>
+
+      <div className="generation-desktop-summary mb-3 grid hidden md:grid md:grid-cols-3 gap-2 text-[12px]">
         <div className="border border-border rounded-lg p-3 bg-surface">
           <div className="text-muted">active generation</div>
           <code className="font-semibold">{active || "-"}</code>
@@ -372,24 +479,32 @@ export default function GenerationsPage() {
         </div>
       </div>
       <GenTracks runs={runs} active={active} />
-      <div className="mt-3" />
       {loading ? <Loading /> : (
-        <div className="space-y-3">
-          {runs.length === 0 && (
-            <div className="border border-dashed border-border rounded-xl p-6 text-center">
-              <BuildProgressCat current={0} total={1} walking={false} />
-              <div className="text-sm text-muted mt-2">
-                ยังไม่มี generation run — รอบแรกจะเริ่ม {nxt.at.toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })} ({nxt.kind})
-              </div>
+        <section className="generation-run-history">
+          <div className="generation-history-heading md:hidden">
+            <div>
+              <span>ประวัติการ build</span>
+              <small>ตรวจสถานะและเปิดดูรายละเอียดได้</small>
             </div>
-          )}
-          {runs.map((r) => (
-            <RunCard key={r._id} run={r} active={active} previous={previous}
-                     editable={editable} busy={busy} onAction={onAction}
-                     expanded={expanded === r._id}
-                     onToggle={() => setExpanded(expanded === r._id ? null : r._id)} />
-          ))}
-        </div>
+            <span className="generation-run-count">{runs.length}</span>
+          </div>
+          <div className="space-y-3">
+            {runs.length === 0 && (
+              <div className="border border-dashed border-border rounded-xl p-6 text-center">
+                <BuildProgressCat current={0} total={1} walking={false} />
+                <div className="text-sm text-muted mt-2">
+                  ยังไม่มี generation run — รอบแรกจะเริ่ม {nxt.at.toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })} ({nxt.kind})
+                </div>
+              </div>
+            )}
+            {runs.map((r) => (
+              <RunCard key={r._id} run={r} active={active} previous={previous}
+                       editable={editable} busy={busy} onAction={onAction}
+                       expanded={expanded === r._id}
+                       onToggle={() => setExpanded(expanded === r._id ? null : r._id)} />
+            ))}
+          </div>
+        </section>
       )}
       <div className="mt-4 text-[11px] text-muted">
         หมายเหตุ: rollback สลับ artifact ทั้งชุด (units/product/description/image_texts) — ไม่มี rollback บางส่วน เพราะ pointer อ้างทั้ง bundle

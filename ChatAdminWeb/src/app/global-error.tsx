@@ -29,7 +29,7 @@ export default function GlobalError({
           </div>
           <button
             onClick={() => reset()}
-            className="px-4 py-2 rounded-lg bg-brand text-white text-sm font-medium hover:bg-brand-dark transition-colors"
+            className="phone-state-action px-4 py-2 rounded-lg bg-brand text-white text-sm font-medium hover:bg-brand-dark transition-colors"
           >
             ลองใหม่
           </button>

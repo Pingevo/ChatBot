@@ -1,0 +1,106 @@
+.shell {
+  isolation: isolate;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 92% 5%, color-mix(in srgb, var(--color-brand) 5%, transparent), transparent 35%),
+    var(--color-surface-1);
+}
+
+.scrollArea {
+  scrollbar-color: color-mix(in srgb, var(--color-text-subtle) 28%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+.hero {
+  isolation: isolate;
+}
+
+.ambientGlow {
+  position: absolute;
+  z-index: 0;
+  top: -4.5rem;
+  right: -3.5rem;
+  width: 15rem;
+  height: 12rem;
+  border-radius: 50%;
+  background: radial-gradient(ellipse, rgb(18 43 78 / 12%), color-mix(in srgb, var(--color-brand) 7%, transparent) 42%, transparent 72%);
+  filter: blur(14px);
+  animation: ambientDrift 12s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+
+.liveDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-brand) 11%, transparent);
+}
+
+.fieldGroup {
+  box-shadow: 0 2px 8px rgb(17 38 69 / 4%);
+}
+
+.choice {
+  touch-action: manipulation;
+  transition: transform 160ms ease, border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.choice:active {
+  transform: scale(0.99);
+}
+
+.selectedChoice {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-brand) 8%, transparent);
+}
+
+.summary {
+  background: linear-gradient(112deg, color-mix(in srgb, var(--color-brand) 5%, var(--color-surface)), var(--color-surface));
+}
+
+.help[open] .helpChevron {
+  transform: rotate(180deg);
+}
+
+.helpChevron {
+  transition: transform 160ms ease;
+}
+
+.actionBar {
+  border-top: 1px solid color-mix(in srgb, var(--color-border) 75%, transparent);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--color-surface) 84%, transparent), var(--color-surface) 30%);
+  box-shadow: 0 -8px 20px rgb(17 38 69 / 5%);
+  backdrop-filter: blur(14px);
+}
+
+.startButton {
+  box-shadow: 0 7px 18px color-mix(in srgb, var(--color-brand) 20%, transparent);
+}
+
+.startButton:not(:disabled):active {
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--color-brand) 18%, transparent);
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--color-brand), var(--color-brand-light));
+  transition: width 260ms ease-out;
+}
+
+@keyframes ambientDrift {
+  from { transform: translate3d(0, 0, 0) scale(0.96); }
+  to { transform: translate3d(-10px, 8px, 0) scale(1.04); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ambientGlow,
+  .choice,
+  .helpChevron,
+  .progressFill,
+  .startButton {
+    animation: none !important;
+    transition: none !important;
+    transform: none !important;
+  }
+}

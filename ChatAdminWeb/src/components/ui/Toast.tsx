@@ -64,9 +64,9 @@ export function ToastContainer() {
   return (
     // 🔒 P2a: aria-live region for screen reader announcements
     // role="alert" on error toasts, aria-live="polite" on the container for others
-    // ⚡ <lg (phone/tablet): toast ขึ้นกลางจอ (HUD style) — lg+: stack มุมขวาบนตามเดิม
+    // Phone toasts use the safe-area top edge so status stays visible without covering the work area.
     <div
-      className="fixed z-[100] flex flex-col gap-2 pointer-events-none
+      className="mobile-toast-container fixed z-[100] flex flex-col gap-2 pointer-events-none
         max-lg:inset-x-0 max-lg:top-1/2 max-lg:-translate-y-1/2 max-lg:items-center max-lg:px-4
         lg:top-4 lg:right-4 lg:max-w-sm lg:w-full"
       aria-live="polite"
@@ -79,7 +79,7 @@ export function ToastContainer() {
           <div
             key={t.id}
             role={t.type === "error" || t.type === "warning" ? "alert" : "status"}
-            className={`pointer-events-auto flex items-center gap-3 bg-surface ${c.border} border rounded-xl shadow-xl px-4 py-3 max-lg:w-full max-lg:max-w-xs lg:animate-slide-in max-lg:animate-toast-pop`}
+            className={`mobile-toast-item pointer-events-auto flex items-center gap-3 bg-surface ${c.border} border rounded-xl shadow-xl px-4 py-3 max-lg:w-full max-lg:max-w-xs lg:animate-slide-in max-lg:animate-toast-pop`}
           >
             <div className={`w-8 h-8 rounded-full ${c.bg} flex items-center justify-center shrink-0`}>
               <Icon size={16} className={c.text} />

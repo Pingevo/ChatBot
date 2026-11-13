@@ -15,6 +15,7 @@ import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { PAGES, type AccessLevel, type PageDef } from "@/lib/pages";
+import { MobileDataTable, MobileInfoCard } from "@/components/mobile/MobilePresentation";
 
 interface RoleDef { key: string; label: string; builtin: boolean }
 
@@ -136,6 +137,19 @@ export default function RolesPage() {
           </Button>
         </div>
       }
+      mobileHeaderActions={
+        <>
+          <Button variant="secondary" size="icon" onClick={load} disabled={loading} aria-label="รีเฟรช" title="รีเฟรช">
+            <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
+          </Button>
+          <Button size="icon" onClick={save} disabled={saving || loading} aria-label="บันทึกสิทธิ์" title="บันทึกสิทธิ์">
+            <Save size={15} />
+          </Button>
+        </>
+      }
+      mobileAddActions={[
+        { label: "เพิ่ม role", icon: <UserPlus size={17} />, onSelect: addRole },
+      ]}
     >
       {loading ? (
         <div className="flex justify-center py-16"><Loading size={28} /></div>
@@ -165,7 +179,7 @@ export default function RolesPage() {
             <div className="flex gap-2 max-w-lg">
               <Input value={newKey} onChange={(e) => setNewKey(e.target.value)} placeholder="key เช่น viewer" className="w-40 font-mono" />
               <Input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="ชื่อแสดง (optional)" className="flex-1" />
-              <Button variant="secondary" onClick={addRole}><UserPlus size={15} /> เพิ่ม</Button>
+              <Button className="phone-mobile-add-hidden" variant="secondary" onClick={addRole}><UserPlus size={15} /> เพิ่ม</Button>
             </div>
             <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-warning-dark">
               <ShieldAlert size={13} className="mt-0.5 shrink-0" />
@@ -175,7 +189,59 @@ export default function RolesPage() {
           </Card>
 
           {/* ---- Matrix ---- */}
-          <Card className="p-5 overflow-x-auto">
+          <Card className="p-5">
+            <div className="mobile-only-grid gap-2">
+              {groups.map((group) => {
+                const groupPages = PAGES.filter((page) => page.group === group);
+                const activeRules = groupPages.reduce((count, page) =>
+                  count + roles.filter((role) => role.key !== "dev" && levelOf(page.key, role) !== "none").length, 0);
+                return (
+                  <MobileInfoCard
+                    key={`mobile-${group}`}
+                    title={group}
+                    subtitle={`${groupPages.length} หน้า · ${roles.length} roles`}
+                    summary={<span className="text-xs text-text-muted">กำหนดสิทธิ์ไว้ {activeRules} รายการ</span>}
+                    previewCount={1}
+                    rows={[{ label: "หน้าที่อยู่ในกลุ่ม", value: groupPages.length }]}
+                    details={<div className="space-y-3">
+                      {groupPages.map((page) => (
+                        <section key={page.key} className="rounded-xl border border-border bg-surface-1 p-3">
+                          <div className="mb-2 border-b border-border-subtle pb-2">
+                            <h3 className="text-sm font-semibold text-text">{page.label}</h3>
+                            <code className="text-[11px] text-text-subtle">{page.key}</code>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            {roles.map((role) => {
+                              const level = levelOf(page.key, role);
+                              return (
+                                <label key={role.key} className="min-w-0 rounded-lg border border-border-subtle bg-surface px-2 py-1.5">
+                                  <span className="mb-1 block truncate text-[11px] font-medium text-text-muted">{role.label || role.key}</span>
+                                  {role.key === "dev" ? (
+                                    <span className={`text-xs font-semibold ${LEVEL_TONE.edit}`}>edit</span>
+                                  ) : (
+                                    <select
+                                      value={level}
+                                      onChange={(event) => setLevel(page.key, role.key, event.target.value as AccessLevel)}
+                                      className={`w-full rounded-md border border-border bg-surface px-2 py-1.5 text-xs font-medium ${LEVEL_TONE[level]}`}
+                                    >
+                                      <option value="none">none</option>
+                                      <option value="read">read</option>
+                                      <option value="edit">edit</option>
+                                    </select>
+                                  )}
+                                </label>
+                              );
+                            })}
+                          </div>
+                        </section>
+                      ))}
+                    </div>}
+                  />
+                );
+              })}
+            </div>
+            <div className="hidden md:block">
+            <MobileDataTable>
             <table className="w-full min-w-[560px] text-sm">
               <thead>
                 <tr className="border-b border-border text-left">
@@ -199,6 +265,8 @@ export default function RolesPage() {
                 ))}
               </tbody>
             </table>
+            </MobileDataTable>
+            </div>
             <p className="mt-3 text-[11px] text-text-subtle">
               หน้าใหม่ที่เพิ่มใน page registry จะขึ้นที่นี่อัตโนมัติ — ค่าเริ่มต้นของหน้าใหม่คือ dev:edit, อื่นๆ:none
             </p>

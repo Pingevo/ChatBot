@@ -11,6 +11,7 @@ import { splitAnswerSegments } from "@/lib/answerSegments";
 import { useToastError } from "@/components/ui/Toast";
 import { Loading } from "@/components/ui/Loading";
 import { MessageContent } from "@/components/chat/MessageContent";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import type { ChatMessage } from "@/lib/types";
 import {
   MessageSquare, Star, Search, User, Bot, ShieldCheck,
@@ -646,10 +647,12 @@ export default function TestChatResultPage() {
 
         {/* ⚡ Phase 3B-7 — Image Lightbox */}
         {lightbox && (
-          <div
-            className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+          <ModalLayer
+            presentation="image"
+            className="mobile-image-viewer-overlay fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
             onClick={() => setLightbox(null)}
           >
+            <div role="dialog" aria-modal="true" aria-label="ดูรูป" className="relative h-full w-full">
             <button
               className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 hover:bg-white/20 flex items-center justify-center text-white"
               onClick={() => setLightbox(null)}
@@ -664,7 +667,8 @@ export default function TestChatResultPage() {
               className="max-w-full max-h-full object-contain rounded-lg"
               onClick={(e) => e.stopPropagation()}
             />
-          </div>
+            </div>
+          </ModalLayer>
         )}
       </div>
     </div>

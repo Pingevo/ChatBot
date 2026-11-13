@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { FilterChips, type FilterChip } from "@/components/ui/FilterChips";
 import { FormField } from "@/components/ui/FormField";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import { PageShell } from "@/components/ui/PageShell";
 import { Loading } from "@/components/ui/Loading";
 import { Pagination } from "@/components/ui/Pagination";
@@ -72,6 +73,7 @@ const emptyForm: FormState = {
 
 export default function KnowledgePage() {
   const searchRef = useRef<HTMLInputElement>(null);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   useSearchShortcut(searchRef);
   const handleSearchEsc = useEscToClear(() => setSearch(""));
   const { user } = useAuth();
@@ -136,16 +138,17 @@ export default function KnowledgePage() {
   const closeForm = async () => {
     const current = JSON.stringify({ type: form.type, topic: form.topic, answer: form.answer, platform: form.platform, question_patterns: form.question_patterns, brand: form.brand, model: form.model, category: form.category, highlights: form.highlights, description: form.description, warranty_period: form.warranty_period });
     const isDirty = current !== formSnapshot.current;
-    if (!isDirty) { setEditing(null); setShowForm(false); return; }
+    if (!isDirty) { setEditing(null); setShowForm(false); return true; }
     const ok = await confirm.ask({
       title: "ปิดฟอร์มโดยไม่บันทึก?",
       message: "การเปลี่ยนแปลงที่ยังไม่บันทึกจะหายไป",
       confirmText: "ปิด",
       variant: "primary",
     });
-    if (!ok) return;
+    if (!ok) return false;
     setEditing(null);
     setShowForm(false);
+    return true;
   };
 
   // ESC to close form modal (closeForm มี dirty-check อยู่แล้ว)
@@ -452,7 +455,7 @@ export default function KnowledgePage() {
             <label className="inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-lg border border-border bg-surface-2 text-text-muted hover:bg-pale-sky-soft cursor-pointer">
               <Upload size={14} />
               {uploading ? "กำลังอัปโหลด..." : "อัปโหลด Excel"}
-              <input type="file" accept=".xlsx" onChange={handleUpload} className="hidden" disabled={uploading} />
+              <input ref={uploadInputRef} type="file" accept=".xlsx" onChange={handleUpload} className="hidden" disabled={uploading} />
             </label>
             <Button size="sm" onClick={openCreate}>
               <Plus size={14} /> เพิ่ม
@@ -460,6 +463,15 @@ export default function KnowledgePage() {
           </>
         )
       }
+      mobileHeaderActions={editable && corpus === "legacy" ? (
+        <Button size="icon" variant="outline" onClick={handleDownloadTemplate} aria-label="ดาวน์โหลด Template" title="ดาวน์โหลด Template">
+          <Download size={15} />
+        </Button>
+      ) : undefined}
+      mobileAddActions={editable && corpus === "legacy" ? [
+        { label: "เพิ่มข้อมูล", icon: <Plus size={17} />, onSelect: openCreate },
+        { label: "อัปโหลด Excel", icon: <Upload size={17} />, onSelect: () => uploadInputRef.current?.click(), disabled: uploading },
+      ] : undefined}
       filterBarBelow
       filterBar={corpus === "zaapi" ? undefined :
         <>
@@ -894,9 +906,11 @@ export default function KnowledgePage() {
 
       {/* Form Modal */}
       {showForm && (
-        <div
+        <ModalLayer
+          presentation="workspace"
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
           onClick={() => closeForm()}
+          onBack={closeForm}
         >
           <div
             className="bg-surface rounded-2xl shadow-xl w-full max-w-lg max-h-[85vh] overflow-y-auto"
@@ -919,8 +933,8 @@ export default function KnowledgePage() {
                 <X size={16} className="text-text-muted" />
               </button>
             </div>
-            <form onSubmit={(e) => { e.preventDefault(); handleSave(); }}>
-            <div className="p-4 space-y-3">
+            <form className="mobile-workspace-form" onSubmit={(e) => { e.preventDefault(); handleSave(); }}>
+            <div className="mobile-workspace-body p-4 space-y-3">
               {/* Type selector — disabled when editing */}
               <div>
                 <label htmlFor="kb-form-type" className="text-xs text-text-muted">
@@ -1060,7 +1074,8 @@ export default function KnowledgePage() {
                 </>
               )}
 
-              <div className="flex justify-end gap-2 pt-2">
+            </div>
+              <div className="mobile-workspace-actions flex justify-end gap-2 pt-2">
                 <Button variant="ghost" onClick={() => closeForm()}>
                   ยกเลิก
                 </Button>
@@ -1075,10 +1090,9 @@ export default function KnowledgePage() {
                   บันทึก
                 </Button>
               </div>
-            </div>
             </form>
           </div>
-        </div>
+        </ModalLayer>
       )}
     </PageShell>
   );

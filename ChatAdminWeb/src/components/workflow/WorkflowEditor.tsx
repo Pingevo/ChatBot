@@ -14,7 +14,7 @@ import "@xyflow/react/dist/style.css";
 import { Button } from "@/components/ui/Button";
 import { toast } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
-import { nodeTypes, toXYFlowType, NODE_TYPE_META, SUBTYPE_META, type FlowNodeType } from "./nodes";
+import { nodeTypes, toXYFlowType, NODE_TYPE_META, SUBTYPE_META, resolveCardHandles, type FlowNodeType } from "./nodes";
 import { Plus, Settings2, X, Save, Trash2, ArrowLeft, Upload, Download, CheckCircle2, AlertTriangle } from "lucide-react";
 import {
   WORKFLOW_PLATFORMS, listByFamily, getNodeDef, nodeAvailabilityFor,
@@ -477,6 +477,10 @@ function EditorInner({ workflowId }: { workflowId: string }) {
 
   const [paletteOpen, setPaletteOpen] = useState(true);
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
+  const [phoneLayout, setPhoneLayout] = useState(false);
+  const [mobileSourceId, setMobileSourceId] = useState("");
+  const [mobileTargetId, setMobileTargetId] = useState("");
+  const [mobileBranchId, setMobileBranchId] = useState("");
 
   // ── Foundation: registry-driven import/export/validate state ──
   const [importedDraft, setImportedDraft] = useState<CanonicalDraft | null>(null);
@@ -489,6 +493,17 @@ function EditorInner({ workflowId }: { workflowId: string }) {
     structural: { ok: boolean; errors: string[] };
     capability: ReturnType<typeof validateCanonicalDraft>;
   } | null>(null);
+
+  useEffect(() => {
+    const phone = window.matchMedia("(max-width: 767px), (pointer: coarse) and (max-height: 500px)");
+    const update = () => {
+      setPhoneLayout(phone.matches);
+      if (phone.matches) setPaletteOpen(false);
+    };
+    update();
+    phone.addEventListener("change", update);
+    return () => phone.removeEventListener("change", update);
+  }, []);
 
   /** canvas → canonical draft shape (pure — no persistence) */
   const canvasToDraft = useCallback((): CanonicalDraft => ({
@@ -565,6 +580,17 @@ function EditorInner({ workflowId }: { workflowId: string }) {
   // imported zaapi draft → bindings unresolved + persistence อยู่นอก scope รอบนี้ → save/publish disabled
   const saveBlocked = !!importedDraft || !settings.name.trim() || saving;
   const saveBlockReason = importedDraft ? "imported draft — bindings ยังไม่ resolve และ persistence ไม่อยู่ใน scope รอบนี้" : !settings.name.trim() ? "ตั้งชื่อ workflow ก่อน" : "";
+  const mobileSourceNode = nodes.find((node) => node.id === mobileSourceId) || nodes[0] || null;
+  const mobileTargetNode = nodes.find((node) => node.id === mobileTargetId)
+    || nodes.find((node) => node.id !== mobileSourceNode?.id)
+    || nodes[0]
+    || null;
+  const mobileOutputHandles = mobileSourceNode
+    ? resolveCardHandles(mobileSourceNode.data.subtype, mobileSourceNode.data.config || {})
+    : [];
+  const activeMobileBranchId = mobileOutputHandles.some((handle) => handle.id === mobileBranchId)
+    ? mobileBranchId
+    : mobileOutputHandles[0]?.id || "";
 
   // ⚡ กันออกจากหน้าโดยไม่บันทึก — 2 ชั้น:
   //   1) beforeunload = ปิดแท็บ/refresh (browser chrome — แก้ UI ไม่ได้ เป็นของ browser)
@@ -624,7 +650,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
   return (
     <div className="flex flex-col h-full min-h-0">
       {/* ── Top bar — ชื่อ + status + toggle เปิดใช้งาน (บรรทัดเดียว) ── */}
-      <div className="flex items-center gap-2 px-3 lg:px-5 py-2.5 border-b border-border bg-surface shrink-0">
+      <div className="workflow-topbar flex items-center gap-2 px-3 lg:px-5 py-2.5 border-b border-border bg-surface shrink-0">
         <input
           value={settings.name}
           onChange={(e) => { setSettings((s) => ({ ...s, name: e.target.value })); setWfVersion((v) => v + 1); }}
@@ -647,6 +673,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         <button
           role="switch"
           aria-checked={settings.enabled}
+          aria-label={settings.enabled ? "ปิดใช้งาน workflow" : "เปิดใช้งาน workflow"}
           disabled={isImported}
           onClick={toggleEnabled}
           title={isImported
@@ -664,7 +691,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
       </div>
 
       {/* ── Toolbar — Node/Settings (ซ้าย) + Save/Delete/Back (ขวา, icon) ── */}
-      <div className="flex items-center gap-1.5 px-3 lg:px-5 py-2 border-b border-border bg-surface-2 shrink-0">
+      <div className="workflow-toolbar flex items-center gap-1.5 px-3 lg:px-5 py-2 border-b border-border bg-surface-2 shrink-0">
         <button
           onClick={() => setPaletteOpen(!paletteOpen)}
           className={`inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border transition-colors ${paletteOpen ? "bg-brand text-white border-brand" : "bg-surface text-text-muted border-border hover:text-text"}`}
@@ -752,7 +779,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
         >
           <Save size={14} />
-          <span className="hidden sm:inline">{saving ? "กำลังบันทึก…" : "บันทึก"}</span>
+          <span className="workflow-save-label hidden sm:inline">{saving ? "กำลังบันทึก…" : "บันทึก"}</span>
         </button>
         {!isNew && (
           <button
@@ -775,12 +802,12 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         </span>
       </div>
 
-      <div className="flex flex-1 min-h-0 relative">
+      <div className={`${phoneLayout ? "phone-workflow-scroll flex-1 min-h-0 overflow-y-auto" : "flex flex-1 min-h-0 relative"}`}>
         {/* ── Palette — collapsible overlay on mobile, sidebar on desktop ── */}
         {paletteOpen && (
           <>
             <div className="lg:hidden fixed inset-0 bg-black/40 z-30" onClick={() => setPaletteOpen(false)} />
-            <div className={`
+            <div role="dialog" aria-label="เพิ่ม Node" className={`workflow-palette
               w-56 border-r border-border bg-surface p-3 overflow-y-auto shrink-0
               lg:relative lg:static
               fixed inset-y-0 left-0 z-40 shadow-xl lg:shadow-none
@@ -830,7 +857,11 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                         <button
                           key={d.type}
                           disabled={!usable}
-                          onClick={() => { addNode(group.type, d.type); if (window.innerWidth < 1024) setPaletteOpen(false); }}
+                          onClick={() => {
+                            addNode(group.type, d.type);
+                            if (phoneLayout) setWfVersion((version) => version + 1);
+                            if (window.innerWidth < 1024) setPaletteOpen(false);
+                          }}
                           title={av.state === "supported" ? d.description : `${availabilityBadge(av.state)} — ${av.reason || ""}`}
                           className="w-full text-left px-2 py-1.5 mb-1 text-xs rounded-md border transition-colors flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-surface-2"
                           style={{ borderColor: meta.border, backgroundColor: meta.bg }}
@@ -849,6 +880,186 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           </>
         )}
 
+        {phoneLayout ? (
+          <div className="phone-workflow-editor space-y-4 p-4 pb-24">
+            <section className="rounded-2xl border border-border bg-surface p-4 shadow-xs">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-text-subtle">WORKFLOW</p>
+                  <h2 className="mt-1 text-base font-semibold text-navy">ผังงาน</h2>
+                </div>
+                <div className="text-right text-xs text-text-muted">
+                  <span className="font-semibold tabular-nums text-text">{nodes.length}</span> โหนด
+                  <span className="mx-1.5 text-border-strong">·</span>
+                  <span className="font-semibold tabular-nums text-text">{edges.length}</span> เส้นเชื่อม
+                </div>
+              </div>
+              {nodes.length === 0 ? (
+                <p className="mt-3 rounded-xl bg-surface-1 px-3 py-3 text-sm leading-6 text-text-muted">
+                  เริ่มจากเพิ่มโหนด แล้วเลือกชนิดและตั้งค่ารายละเอียดได้จากรายการด้านล่าง
+                </p>
+              ) : (
+                <ol className="mt-4 space-y-2">
+                  {nodes.map((node, index) => {
+                    const selected = selectedNodeId === node.id;
+                    const definition = getNodeDef(node.data.subtype);
+                    return (
+                      <li key={node.id} className="relative">
+                        {index > 0 && <div aria-hidden="true" className="absolute -top-2 left-5 h-2 border-l border-border-strong" />}
+                        <button
+                          type="button"
+                          onClick={() => setSelectedNodeId(selected ? null : node.id)}
+                          aria-pressed={selected}
+                          className={`flex min-h-14 w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors ${selected ? "border-accent bg-accent-softer" : "border-border bg-surface-1 hover:bg-surface-2"}`}
+                        >
+                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-navy-soft text-xs font-bold tabular-nums text-navy">{index + 1}</span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm font-semibold text-text">{definition?.label || SUBTYPE_META[node.data.subtype]?.label || node.data.subtype}</span>
+                            <span className="block truncate font-mono text-[11px] text-text-subtle">{node.id}</span>
+                          </span>
+                          <span className="shrink-0 text-[11px] text-text-muted">ตั้งค่า</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )}
+            </section>
+
+            {selectedNode && (
+              <section className="rounded-2xl border border-border bg-surface p-4 shadow-xs">
+                <NodeConfigPanel
+                  node={selectedNode}
+                  allNodes={nodes}
+                  onUpdateConfig={updateSelectedConfig}
+                  onUpdateSubtype={updateSelectedSubtype}
+                  onDelete={() => {
+                    deleteSelected();
+                    setWfVersion((version) => version + 1);
+                  }}
+                  bindings={importBindings.filter((binding) => binding.node_id === selectedNode.id)}
+                  validation={lastValidation}
+                  resolution={isImported && resolutionView ? {
+                    view: resolutionView, picks, repeats, submitting: resolving,
+                    onPick: (bindingId, index, pick) => setPicks((previous) => {
+                      const current = { ...(previous[bindingId] || {}) };
+                      if (pick) current[index] = pick; else delete current[index];
+                      return { ...previous, [bindingId]: current };
+                    }),
+                    onRepeat: (bindingId, repeat) => setRepeats((previous) => ({ ...previous, [bindingId]: repeat })),
+                    onResolve: resolveBinding,
+                  } : null}
+                />
+              </section>
+            )}
+
+            <section className="rounded-2xl border border-border bg-surface p-4 shadow-xs">
+              <h2 className="text-sm font-semibold text-navy">เชื่อมโหนด</h2>
+              <p className="mt-1 text-xs leading-5 text-text-muted">เลือกโหนดต้นทาง ทางออก และปลายทางเพื่อเพิ่มเส้นเชื่อม</p>
+              <div className="mt-3 grid min-w-0 gap-3">
+                <label className="grid gap-1.5 text-xs font-semibold text-text-muted">
+                  จากโหนด
+                  <select
+                    aria-label="โหนดต้นทาง"
+                    value={mobileSourceNode?.id || ""}
+                    onChange={(event) => { setMobileSourceId(event.target.value); setMobileBranchId(""); }}
+                    className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text"
+                  >
+                    {nodes.map((node) => <option key={node.id} value={node.id}>{getNodeDef(node.data.subtype)?.label || node.data.subtype} · {node.id}</option>)}
+                  </select>
+                </label>
+                <label className="grid gap-1.5 text-xs font-semibold text-text-muted">
+                  ทางออก / สาขา
+                  <select
+                    aria-label="ทางออกของโหนด"
+                    value={activeMobileBranchId}
+                    onChange={(event) => setMobileBranchId(event.target.value)}
+                    disabled={mobileOutputHandles.length === 0}
+                    className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text disabled:opacity-50"
+                  >
+                    {mobileOutputHandles.map((handle) => <option key={handle.id} value={handle.id}>{handle.label} · {handle.id}</option>)}
+                  </select>
+                </label>
+                <label className="grid gap-1.5 text-xs font-semibold text-text-muted">
+                  ไปยังโหนด
+                  <select
+                    aria-label="โหนดปลายทาง"
+                    value={mobileTargetNode?.id || ""}
+                    onChange={(event) => setMobileTargetId(event.target.value)}
+                    className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text"
+                  >
+                    {nodes.map((node) => <option key={node.id} value={node.id}>{getNodeDef(node.data.subtype)?.label || node.data.subtype} · {node.id}</option>)}
+                  </select>
+                </label>
+                <Button
+                  type="button"
+                  disabled={!mobileSourceNode || !mobileTargetNode || !activeMobileBranchId}
+                  onClick={() => {
+                    if (!mobileSourceNode || !mobileTargetNode || !activeMobileBranchId) return;
+                    onConnect({ source: mobileSourceNode.id, sourceHandle: activeMobileBranchId, target: mobileTargetNode.id, targetHandle: "in" });
+                    setWfVersion((version) => version + 1);
+                  }}
+                  className="min-h-12 w-full justify-center"
+                >
+                  เพิ่มเส้นเชื่อม
+                </Button>
+              </div>
+              <div className="mt-4 space-y-2" aria-label="เส้นเชื่อมปัจจุบัน">
+                {edges.length === 0 ? (
+                  <p className="rounded-lg bg-surface-1 px-3 py-2 text-sm text-text-muted">ยังไม่มีเส้นเชื่อม</p>
+                ) : edges.map((edge) => {
+                  const source = nodes.find((node) => node.id === edge.source);
+                  const target = nodes.find((node) => node.id === edge.target);
+                  const branch = source && resolveCardHandles(source.data.subtype, source.data.config || {}).find((handle) => handle.id === (edge.sourceHandle || "out"));
+                  return (
+                    <div key={edge.id} className="flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface-1 px-3 py-2.5">
+                      <div className="min-w-0 flex-1 text-xs leading-5">
+                        <p className="break-words font-medium text-text">{getNodeDef(source?.data.subtype || "")?.label || source?.data.subtype || edge.source}</p>
+                        <p className="break-words text-text-muted">{branch?.label || edge.sourceHandle || "ต่อไป"} → {getNodeDef(target?.data.subtype || "")?.label || target?.data.subtype || edge.target}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEdges((current) => current.filter((candidate) => candidate.id !== edge.id));
+                          setWfVersion((version) => version + 1);
+                        }}
+                        aria-label={`ลบเส้นเชื่อมจาก ${edge.source} ไป ${edge.target}`}
+                        className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-error hover:bg-error-soft"
+                      >
+                        <Trash2 size={17} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="rounded-2xl border border-border bg-surface shadow-xs">
+              <button
+                type="button"
+                onClick={() => setSettingsPanelOpen((open) => !open)}
+                aria-expanded={settingsPanelOpen}
+                className="flex min-h-12 w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-navy"
+              >
+                ตั้งค่า workflow
+                <span className="text-xs font-normal text-text-muted">{settingsPanelOpen ? "ซ่อน" : "แสดง"}</span>
+              </button>
+              {settingsPanelOpen && (
+                <div className="border-t border-border p-4">
+                  <FlowSettingsPanel settings={settings} setSettings={(next) => { setSettings(next); setWfVersion((version) => version + 1); }} shops={shops} imported={isImported} />
+                </div>
+              )}
+            </section>
+
+            {lastValidation && (
+              <section className={`rounded-xl border p-4 text-sm ${lastValidation.structural.ok && lastValidation.capability.ok ? "border-success/30 bg-success-soft text-success-dark" : "border-warning/30 bg-warning-soft text-warning-dark"}`} role="status">
+                <h2 className="font-semibold">{lastValidation.structural.ok && lastValidation.capability.ok ? "ตรวจ workflow ผ่าน" : "ผลตรวจ workflow"}</h2>
+                {[...lastValidation.structural.errors, ...lastValidation.capability.errors].map((error, index) => <p key={`${index}-${error}`} className="mt-1 break-words">{error}</p>)}
+              </section>
+            )}
+          </div>
+        ) : (
+          <>
         {/* ── Canvas กลาง ── */}
         <div className="flex-1 min-w-0 relative">
           <ReactFlow
@@ -907,6 +1118,8 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                 <FlowSettingsPanel settings={settings} setSettings={(s) => { setSettings(s); setWfVersion((v) => v + 1); }} shops={shops} imported={isImported} />
               )}
             </div>
+          </>
+        )}
           </>
         )}
 

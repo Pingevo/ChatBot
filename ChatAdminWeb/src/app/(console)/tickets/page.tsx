@@ -7,6 +7,7 @@ import { InfoTab } from "@/components/chat/InfoTab";
 import { ChatLogTab } from "@/components/chat/ChatLogTab";
 import { ProductsTab } from "@/components/chat/ProductsTab";
 import { CloseChatModal } from "@/components/chat/CloseChatModal";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import { chatService } from "@/lib/services";
 import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
@@ -368,9 +369,9 @@ export default function TicketsPage() {
   }, [selectedId]);
 
   return (
-    <div className="h-full flex">
+    <div className="mobile-ticket-stage h-full flex">
       {/* ── Panel ซ้าย: Conversation list (รวม title + filter + accept ใน ChatList) ── */}
-      <div className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-80 shrink-0 border-r border-border`}>
+      <div className={`mobile-ticket-list-panel ${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-80 shrink-0 border-r border-border`}>
         <ChatList
           conversations={conversations}
           selectedId={selectedId}
@@ -391,7 +392,7 @@ export default function TicketsPage() {
       </div>
 
       {/* ── Panel กลาง: Ticket fields + Chat ── */}
-      <div className={`${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 h-full min-w-0 relative`}>
+      <div className={`mobile-ticket-chat-panel ${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 h-full min-w-0 relative`}>
         <TicketChatPanel
           conversation={selected}
           messages={messages}
@@ -416,19 +417,20 @@ export default function TicketsPage() {
             className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "lg:hidden" : "lg:flex"} h-full w-full lg:w-auto transition-[width] duration-200 ease-in-out`}
           >
             <div className="relative h-full flex flex-col w-full lg:w-[340px] border-l border-border bg-surface">
-              <button
-                onClick={() => setMobileView("chat")}
-                className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
-                title="กลับ"
-                aria-label="กลับ"
-              >
-                <ArrowLeft size={16} className="text-text" />
-              </button>
-
               {/* Tab switcher — 3 tabs */}
-              <div className="flex border-b border-border shrink-0">
+              <div className="phone-info-tabs flex border-b border-border shrink-0">
+                <button
+                  onClick={() => setMobileView("chat")}
+                  className="lg:hidden min-h-11 min-w-11 px-3 flex items-center justify-center gap-1 text-text-muted"
+                  title="กลับไปแชท"
+                  aria-label="กลับไปแชท"
+                >
+                  <ArrowLeft size={16} />
+                  <span className="sr-only">กลับ</span>
+                </button>
                 <button
                   onClick={() => setRightTab("info")}
+                  aria-pressed={rightTab === "info"}
                   className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${rightTab === "info" ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"
                     }`}
                 >
@@ -436,6 +438,7 @@ export default function TicketsPage() {
                 </button>
                 <button
                   onClick={() => setRightTab("chatlog")}
+                  aria-pressed={rightTab === "chatlog"}
                   className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${rightTab === "chatlog" ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"
                     }`}
                 >
@@ -443,6 +446,7 @@ export default function TicketsPage() {
                 </button>
                 <button
                   onClick={() => setRightTab("products")}
+                  aria-pressed={rightTab === "products"}
                   className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${rightTab === "products" ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"
                     }`}
                 >
@@ -451,7 +455,7 @@ export default function TicketsPage() {
                 {/* Collapse button */}
                 <button
                   onClick={() => setRightCollapsed(true)}
-                  className="px-2 text-text-muted hover:text-text transition-colors shrink-0"
+                  className="hidden md:flex px-2 text-text-muted hover:text-text transition-colors shrink-0"
                   title="ซ่อน panel"
                   aria-label="ซ่อน panel"
                 >
@@ -548,8 +552,8 @@ export default function TicketsPage() {
 
       {/* Phase 7.9 — Conflict popup (ตอบทับแชทที่ assign ให้คนอื่น) */}
       {conflictPopup && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
-          <div role="dialog" aria-modal="true" aria-labelledby="ticket-assign-modal-title" className="bg-surface rounded-xl border border-border p-5 max-w-md w-full shadow-xl">
+        <ModalLayer presentation="center" className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50 p-4">
+          <div role="dialog" aria-modal="true" aria-labelledby="ticket-assign-modal-title" className="mobile-confirm-dialog bg-surface rounded-xl border border-border p-5 max-w-md w-full shadow-xl">
             <div className="flex items-center gap-2 mb-3">
               <div className="w-8 h-8 rounded-full bg-warning/15 flex items-center justify-center flex-shrink-0">
                 <Info size={16} className="text-warning" />
@@ -586,7 +590,7 @@ export default function TicketsPage() {
               </button>
             </div>
           </div>
-        </div>
+        </ModalLayer>
       )}
     </div>
   );

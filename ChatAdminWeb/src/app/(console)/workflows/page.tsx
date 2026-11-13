@@ -22,6 +22,7 @@ import {
   GitBranch, Plus, Trash2, Pencil, RefreshCw, Search, Check, X, Info, Upload, Download,
 } from "lucide-react";
 import { ZaapiImportDialog } from "@/components/workflow/ZaapiImportDialog";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import { useSearchShortcut, useEscToClear } from "@/lib/useKeyboardShortcuts";
 import { FilterSelect } from "@/components/ui/FilterSelect";
 import { Tooltip } from "@/components/ui/Tooltip";
@@ -387,6 +388,15 @@ export default function WorkflowsPage() {
           </Button>
         </>
       }
+      mobileHeaderActions={
+        <Button size="icon" variant="outline" onClick={load} disabled={loading} aria-label="รีเฟรช" title="รีเฟรช">
+          <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
+        </Button>
+      }
+      mobileAddActions={[
+        { label: "สร้างเวิร์กโฟลว์", icon: <Plus size={17} />, onSelect: openCreate },
+        { label: "Import Zaapi", icon: <Upload size={17} />, onSelect: () => setImportOpen(true) },
+      ]}
       filterBarBelow
       filterBar={
         <>
@@ -464,7 +474,7 @@ export default function WorkflowsPage() {
             description="สร้าง flow แรกของคุณ — เช่น ลูกค้าถามสเปค → บอทตอบ → ถามสนใจซื้อ → รอตอบ → แตกกิ่งสั่งซื้อ/ทีมขาย"
           />
           <div className="flex justify-center mt-2">
-            <Button onClick={openCreate}><Plus size={14} /> สร้าง Workflow</Button>
+            <Button className="phone-mobile-add-hidden" onClick={openCreate}><Plus size={14} /> สร้าง Workflow</Button>
           </div>
         </div>
       ) : visible.length === 0 ? (
@@ -600,9 +610,15 @@ export default function WorkflowsPage() {
 
       {/* ⚡ Create modal — เลือก name/description/platform→ร้าน ก่อนเข้า editor */}
       {showCreate && (
-        <div
+        <ModalLayer
+          presentation="workspace"
           className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
           onClick={() => !creating && setShowCreate(false)}
+          onBack={() => {
+            if (creating) return false;
+            setShowCreate(false);
+            return true;
+          }}
         >
           <div
             role="dialog"
@@ -629,7 +645,7 @@ export default function WorkflowsPage() {
             </div>
 
             {/* Body */}
-            <div className="p-4 space-y-4">
+            <div className="mobile-workspace-body p-4 space-y-4">
               {/* Name */}
               <div>
                 <label className="block text-sm font-medium text-text mb-1.5">
@@ -719,18 +735,17 @@ export default function WorkflowsPage() {
                 )}
               </div>
 
-              {/* Footer */}
-              <div className="flex gap-2 pt-4 border-t border-border mt-2">
-                <Button variant="ghost" className="flex-1" onClick={() => setShowCreate(false)} disabled={creating}>
-                  ยกเลิก
-                </Button>
-                <Button className="flex-1" onClick={submitCreate} disabled={creating || !cName.trim()}>
-                  {creating ? "กำลังสร้าง…" : "สร้างและเปิด editor"}
-                </Button>
-              </div>
+            </div>
+            <div className="mobile-workspace-actions flex gap-2 border-t border-border">
+              <Button variant="ghost" className="flex-1" onClick={() => setShowCreate(false)} disabled={creating}>
+                ยกเลิก
+              </Button>
+              <Button className="flex-1" onClick={submitCreate} disabled={creating || !cName.trim()}>
+                {creating ? "กำลังสร้าง…" : "สร้างและเปิด editor"}
+              </Button>
             </div>
           </div>
-        </div>
+        </ModalLayer>
       )}
       {/* ⚡ Zaapi import — dry-run preview → apply เป็น disabled drafts → refresh list */}
       <ZaapiImportDialog

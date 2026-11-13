@@ -6,6 +6,7 @@ import { create } from "zustand";
 import { useEffect, useState } from "react";
 import { X, ZoomIn, ZoomOut, Download, Maximize2, RotateCw } from "lucide-react";
 import { useFocusTrap } from "@/lib/useKeyboardShortcuts";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 
 interface ViewerState {
   open: boolean;
@@ -56,19 +57,12 @@ export function ImageViewerOverlay() {
     return () => window.removeEventListener("keydown", handler);
   }, [open, zoom, rotation, close, setZoom, setRotation]);
 
-  // Lock scroll
-  useEffect(() => {
-    if (open) {
-      document.body.style.overflow = "hidden";
-      return () => { document.body.style.overflow = ""; };
-    }
-  }, [open]);
-
   if (!open || !url) return null;
 
   return (
-    <div
-      className="fixed inset-0 z-[95] flex items-center justify-center bg-black/90 animate-fade-in"
+    <ModalLayer
+      presentation="image"
+      className="mobile-image-viewer-overlay fixed inset-0 z-[95] flex items-center justify-center bg-black/90 animate-fade-in"
       onClick={close}
     >
       {/* Toolbar */}
@@ -104,7 +98,7 @@ export function ImageViewerOverlay() {
 
       {/* Content */}
       <div
-        className="max-w-[95vw] max-h-[95vh] overflow-auto"
+        className="mobile-image-viewer-content max-w-[95vw] max-h-[95vh] overflow-auto"
         role="dialog"
         aria-modal="true"
         aria-label="ดูรูป"
@@ -149,6 +143,6 @@ export function ImageViewerOverlay() {
           {Math.round(zoom * 100)}%
         </div>
       )}
-    </div>
+    </ModalLayer>
   );
 }

@@ -198,16 +198,16 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
     : undefined;
 
   return (
-    <div className={`flex gap-2.5 ${isUser ? "justify-start" : "justify-end"} animate-fade-in`}>
-      {isUser && <Avatar name={customerName || "User"} src={customerAvatar} size={32} className="mt-1 shrink-0" />}
-      <div className={`max-w-[70%] min-w-0 ${isUser ? "" : "flex flex-col items-end gap-1"}`}>
+    <div className={`mobile-chat-message flex gap-2.5 ${isUser ? "justify-start" : "justify-end"} animate-fade-in`}>
+      {isUser && <Avatar name={customerName || "User"} src={customerAvatar} size={32} className="mobile-chat-customer-avatar mt-1 shrink-0" />}
+      <div className={`mobile-chat-bubble-group max-w-[70%] min-w-0 ${isUser ? "" : "flex flex-col items-end gap-1"}`}>
         {/* แสดงชื่อ admin ถ้าเป็น admin message จริง */}
         {isAdmin && msg.admin_name && (
-          <div className="text-[10px] text-text-muted mb-0.5 pr-1">{msg.admin_name}</div>
+          <div className="mobile-chat-author text-[10px] text-text-muted mb-0.5 pr-1">{msg.admin_name}</div>
         )}
-        {/* แสดง label ฝั่ง out */}
+        {/* แสดง label ฝั่ง out เพื่อระบุ role บน desktop */}
         {!isUser && (
-          <div className="text-[10px] text-text-subtle mb-0.5 pr-1">
+          <div className="mobile-chat-role-label text-[10px] text-text-subtle mb-0.5 pr-1">
             {isZaapi ? "Zaapi" : isBot ? "Bot" : isAdmin ? "Admin" : ""}
           </div>
         )}
@@ -217,7 +217,8 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
           </div>
         ))}
 
-        <div className="flex items-center gap-1.5 mt-1 text-[10px] text-text-subtle">
+        <div className="mobile-chat-meta flex items-center gap-1.5 mt-1 text-[10px] text-text-subtle">
+          <span className="mobile-chat-role-accessible sr-only">{isUser ? "ลูกค้า" : isZaapi ? "Zaapi" : isBot ? "Bot" : "Admin"}</span>
           {isBot && <Bot size={10} />}
           {isAdmin && <Headset size={10} />}
           {isZaapi && <Zap size={10} />}
@@ -226,8 +227,8 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
         </div>
       </div>
       {!isUser && !isSystem && (
-        <div className={`mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarBg}`} style={avatarStyle}>
-          {isZaapi ? <Zap size={16} className="text-white" /> : isBot ? <Bot size={16} className="text-white" /> : <Headset size={16} className="text-white" />}
+        <div className={`mobile-chat-speaker-avatar mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarBg}`} style={avatarStyle}>
+          {isZaapi ? <Zap size={16} className="mobile-chat-speaker-icon text-white" /> : isBot ? <Bot size={16} className="mobile-chat-speaker-icon text-white" /> : <Headset size={16} className="mobile-chat-speaker-icon text-white" />}
         </div>
       )}
     </div>
@@ -474,23 +475,23 @@ export function TicketChatPanel({
   }
 
   return (
-    <div className="flex-1 flex flex-col min-w-0 bg-bg">
+    <div className="mobile-ticket-chat flex-1 flex flex-col min-w-0 bg-bg">
       {/* ── Header (topbar) — มือถือแยกเป็น 2 แถว (nav+identity / actions) desktop แถวเดียว ── */}
-      <div className="px-3 lg:px-4 py-2.5 border-b border-border bg-surface shrink-0">
-        <div className="flex flex-wrap lg:flex-nowrap items-center gap-x-2 lg:gap-x-3 gap-y-2">
+      <div className="mobile-ticket-chat-header px-3 lg:px-4 py-2.5 border-b border-border bg-surface shrink-0">
+        <div className="mobile-ticket-chat-head-row flex flex-wrap lg:flex-nowrap items-center gap-x-2 lg:gap-x-3 gap-y-2">
           {/* Mobile back — เข้า flow header ไม่ทับ avatar */}
           {onBack && (
             <button
               onClick={onBack}
               title="กลับ"
               aria-label="กลับ"
-              className="lg:hidden -ml-1 w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text hover:bg-surface-2 transition-colors"
+              className="mobile-ticket-back lg:hidden -ml-1 w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text hover:bg-surface-2 transition-colors"
             >
               <ArrowLeft size={17} />
             </button>
           )}
-          <Avatar name={conversation.customer_name} src={conversation.customer_avatar} size={34} className="shrink-0" />
-          <div className="flex-1 min-w-0">
+          <Avatar name={conversation.customer_name} src={conversation.customer_avatar} size={34} className="mobile-ticket-avatar shrink-0" />
+          <div className="mobile-ticket-identity flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <span className="font-semibold text-text truncate">{conversation.customer_name}</span>
               <PlatformIcon platform={conversation.platform} size={16} />
@@ -504,18 +505,22 @@ export function TicketChatPanel({
               onClick={onInfo}
               title="รายละเอียด"
               aria-label="รายละเอียด"
-              className="lg:hidden w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text-muted hover:bg-surface-2 transition-colors"
+              className="mobile-ticket-info-button lg:hidden w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text-muted hover:bg-surface-2 transition-colors"
             >
               <Info size={17} />
             </button>
           )}
 
           {/* Controls — มือถือขึ้นแถวใหม่เต็มกว้าง (basis-full) / desktop ต่อท้ายแถวเดียว */}
-          <div className="flex items-center gap-2 lg:gap-3 basis-full lg:basis-auto shrink-0">
+          <div className="mobile-ticket-actions flex items-center gap-2 lg:gap-3 basis-full lg:basis-auto shrink-0">
             {/* Admin responsible — แสดงว่าใครรับผิดชอบ (หรือ "บอท") */}
-            <div className="flex items-center gap-1.5 text-xs text-text-muted shrink-0">
+            <div className="mobile-ticket-control-status flex items-center gap-1.5 text-xs text-text-muted shrink-0">
+              <span
+                aria-hidden="true"
+                className={`mobile-ticket-status-indicator ${conversation.status === "bot" ? "is-bot" : conversation.status === "closed" ? "is-closed" : "is-admin"}`}
+              />
               <Headset size={12} />
-              <span>
+              <span className="mobile-ticket-status-copy">
                 {conversation.status === "bot"
                   ? "บอทตอบ"
                   : conversation.assigned_to
@@ -524,36 +529,38 @@ export function TicketChatPanel({
               </span>
             </div>
 
-            {/* Transfer dropdown — โยนแชทให้ admin คนอื่น */}
-            {onTransfer && conversation.status !== "bot" && (
-              <TransferDropdown
-                currentAdminId={conversation.assigned_to}
-                onSelect={onTransfer}
-              />
-            )}
+            <div className="mobile-ticket-action-group" role="group" aria-label="จัดการบทสนทนา">
+              {/* Transfer dropdown — โยนแชทให้ admin คนอื่น */}
+              {onTransfer && conversation.status !== "bot" && (
+                <TransferDropdown
+                  currentAdminId={conversation.assigned_to}
+                  onSelect={onTransfer}
+                />
+              )}
 
-            {conversation.status === "bot" && (
-              <Button size="sm" variant="outline" onClick={onHandoff} className="shrink-0 ml-auto lg:ml-0">
-                <Headset size={14} /> รับเรื่อง
-              </Button>
-            )}
-            {conversation.status === "closed" ? (
-              onReopen && (
-                <Button size="sm" variant="outline" onClick={onReopen} disabled={reopening} className="shrink-0 ml-auto lg:ml-0">
-                  <RotateCcw size={14} /> {reopening ? "กำลังประมวลผล..." : "เปิดแชทใหม่"}
+              {conversation.status === "bot" && (
+                <Button size="sm" variant="outline" onClick={onHandoff} className="mobile-ticket-claim shrink-0 ml-auto lg:ml-0">
+                  <Headset size={14} /> รับเรื่อง
                 </Button>
-              )
-            ) : (
-              <Button size="sm" onClick={onResolve} className="shrink-0 ml-auto lg:ml-0">
-                <Lock size={14} /> ปิดสนทนา
-              </Button>
-            )}
+              )}
+              {conversation.status === "closed" ? (
+                onReopen && (
+                  <Button size="sm" variant="outline" onClick={onReopen} disabled={reopening} className="mobile-ticket-reopen shrink-0 ml-auto lg:ml-0">
+                    <RotateCcw size={14} /> {reopening ? "กำลังประมวลผล..." : "เปิดแชทใหม่"}
+                  </Button>
+                )
+              ) : (
+                <Button size="sm" onClick={onResolve} className="mobile-ticket-resolve shrink-0 ml-auto lg:ml-0">
+                  <Lock size={14} /> ปิดสนทนา
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
       {/* ── Messages ── */}
-      <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+      <div ref={scrollRef} onScroll={handleScroll} className="mobile-ticket-messages flex-1 overflow-y-auto px-4 py-4 space-y-3">
         {messages.length === 0 ? (
           <div className="text-center text-sm text-text-muted py-8">ยังไม่มีข้อความในบทสนทนานี้</div>
         ) : (
@@ -568,7 +575,7 @@ export function TicketChatPanel({
       </div>
 
       {/* ── Composer ── */}
-      <form onSubmit={handleSubmit} className="p-3 border-t border-border bg-surface shrink-0">
+      <form onSubmit={handleSubmit} className="mobile-chat-composer p-3 border-t border-border bg-surface shrink-0">
         {/* ⚡ Quick replies — floating chips above text box (ไม่ใช่ dropdown ใหญ่) */}
         {quickReplies.length > 0 && (
           <div className="flex flex-wrap gap-1.5 mb-2 max-h-20 overflow-y-auto">
