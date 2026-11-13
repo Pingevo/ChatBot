@@ -13,6 +13,8 @@ import sys
 import time as _time
 from typing import Literal
 
+from .message_detectors import _VOCATIVE_TAIL_RE, _get_word_tokenizer
+
 # --- short toxic token matcher (5F-A, hardened 5F-H1) ---
 # สระ/วรรณยุกต์/เครื่องหมายที่ต้องแปะพยัญชนะ — ถ้าอยู่ "หลัง" token แปลว่า
 # พยัญชนะตัวท้ายขึ้นพยางค์ใหม่ ("นาฬิกากัน"=นาฬิกา+กัน ไม่มี "กาก")
@@ -29,22 +31,6 @@ _TOXIC_SUBJECTS = (
     "ของ", "สินค้า", "ร้าน", "บริการ", "งาน", "พัสดุ", "แอดมิน",
     "คุณภาพ", "เจ้าหน้าที่", "ไอเทม", "ไอเท็ม", "ตัวนี้", "ชิ้นนี้",
 )
-
-_WORD_TOKENIZER = None
-
-
-def _get_word_tokenizer():
-    """lazy-load pythainlp word_tokenize (pattern เดียวกับ warranty._get_ner) —
-    คืน callable หรือ None ถ้าไม่มี lib."""
-    global _WORD_TOKENIZER
-    if _WORD_TOKENIZER is None:
-        try:
-            from pythainlp import word_tokenize
-            _WORD_TOKENIZER = word_tokenize
-        except Exception:
-            _WORD_TOKENIZER = False
-    return _WORD_TOKENIZER if _WORD_TOKENIZER is not False else None
-
 
 def _is_thai_word_char(ch: str) -> bool:
     return "ก" <= ch <= "ๅ"  # U+0E01–U+0E45 consonant/vowel/sign (ไม่รวม ๆ)
@@ -125,11 +111,6 @@ _PROMO_TERMS = (
 _QUESTION_RE = re.compile(
     r"(ไหม|มั้ย|หรอ|เหรอ|รึเปล่า|หรือเปล่า|ป่าว|บ้าง|แค่ไหน|เท่าไหร่|เท่าไหน"
     r"|กี่วัน|กี่ชั่วโมง|เมื่อไหร่|เมื่อไหน|ตอนไหน|รึ)[คะค่ะครับ\s\?]*$")
-_VOCATIVE_TAIL_RE = re.compile(
-    r"(?:ครับ|ค่ะ|คะ|จ้า|จ๊ะ|นะ|น๊า|งับ|งั้บ|ฮะ|หะ|เอย|คร้าบ|คับ|ค่า"
-    r"|แอดมิน|แอด|admin)+[\s\?\.!~]*$")
-
-
 def _term_spans(text: str, terms: tuple) -> list[tuple[int, int]]:
     """ทุก occurrence (start,end) ของ terms ใน text — สำหรับ span masking."""
     out = []
@@ -332,13 +313,25 @@ def detect_human_request(req, ctx: dict, *, plan_decided_reason:
 
     # ส่งต่อแอดมิน — outcome ยืนยันเท่านั้นถึง claim ส่งสำเร็จ
     #   failed/exhausted → flag False + ตอบตรงๆ ว่าติดต่อแอดมินไม่ได้ (ห้ามโกหก)
-    _handoff_ok = bool(
-        _app_module._send_handoff(req, None, reason=plan_decided_reason,
-                      claim={"topic": _topic}, log_tag="HUMAN-HANDOFF")
-    ) if req.conversation_id else False
+    _hs = (_app_module._send_handoff(req, None, reason=plan_decided_reason,
+                     claim={"topic": _topic}, log_tag="HUMAN-HANDOFF")
+           if req.conversation_id else None)
+    _handoff_ok = bool(_hs)
+    # Task 9 — typed outcome.state propagate (assigned|queued); queued =
+    #   persist เข้าคิวแล้วแต่ยังไม่มีคนรับงาน → wording บอกว่าเข้าคิว
+    #   ไม่อ้างว่าแอดมินรับแล้ว
+    _hstate = str(((_hs or {}).get("outcome") or {}).get("state") or "").lower()
     if not _handoff_ok:
         _human_answer = _resp_mod.HANDOFF_FAILED_REPLY
-    print(f"[TIMING] HUMAN-HANDOFF({plan_decided_reason}): {_total_elapsed:.2f}s ok={_handoff_ok}", file=sys.stderr)
+    elif _hstate == "queued":
+        _human_answer = (
+            f"ขออภัยที่ให้รอนะคะ ตอนนี้แชทนี้เข้าคิวให้แอดมินแล้วนะคะ "
+            f"รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ"
+            if _human_req else
+            f"ขออภัยที่ทำให้ไม่พอใจนะคะ ตอนนี้แชทนี้เข้าคิวให้แอดมินแล้วนะคะ "
+            f"รบกวนรอการติดต่อกลับอีกครั้งนะคะ"
+        )
+    print(f"[TIMING] HUMAN-HANDOFF({plan_decided_reason}): {_total_elapsed:.2f}s ok={_handoff_ok} state={_hstate or '-'}", file=sys.stderr)
     return dict(
         answer=_human_answer,
         answer_segments=llm.split_segments(_human_answer),
@@ -358,6 +351,7 @@ def detect_human_request(req, ctx: dict, *, plan_decided_reason:
             f"{plan_decided_reason}: {_topic} → ส่งแอดมิน" if _handoff_ok
                 else f"{plan_decided_reason}: {_topic} → handoff ไม่สำเร็จ (ติดต่อแอดมินไม่ได้)",
             handoff_reason=plan_decided_reason if _handoff_ok else None,
+            handoff_state=_hstate or None,
         ),
         image_desc=_image_desc_out,
     )
@@ -462,8 +456,9 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
         if not _cert_types and req.conversation_id:
             try:
                 from . import conversation_products as _cp_cert
-                _ac = _cp_cert.get_active_product(req.conversation_id,
-                                                  snap=_snap)
+                _ac = _cp_cert.get_active_product(
+                    req.conversation_id, snap=_snap,
+                    platform=req.platform, shop=req.shop)
                 if _ac:
                     _cert_types = _rc_cert.requested_product_types(
                         _ac.get("name") or "")

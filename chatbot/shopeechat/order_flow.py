@@ -67,7 +67,9 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
         try:
             from . import conversation_products as _cp_claim
             from .warranty_flow import _claim_lifecycle
-            if _claim_lifecycle(_cp_claim.load_claim_state(req.conversation_id)).lifecycle_open:
+            if _claim_lifecycle(_cp_claim.load_claim_state(
+                    req.conversation_id,
+                    platform=req.platform, shop=req.shop)).lifecycle_open:
                 _in_claim_flow = True
                 print(f"[ORDER] ข้าม order_lookup เพราะ claim_state กำลังเก็บข้อมูล", file=sys.stderr)
         except Exception:
@@ -78,7 +80,9 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
     if not _order_sn and not _in_claim_flow and req.conversation_id:
         from . import conversation_products as _cp_order
         if _cp_order.is_order_question(req.message):
-            _anchor_sn = _cp_order.resolve_active_order_sn(req.conversation_id, req.message)
+            _anchor_sn = _cp_order.resolve_active_order_sn(
+                req.conversation_id, req.message,
+                platform=req.platform, shop=req.shop)
             if _anchor_sn:
                 _order_sn = _anchor_sn
                 _order_sn_from_anchor = True
@@ -268,6 +272,7 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                     )
                     # anchor order items as products (เหมือน order lookup block)
                     from . import product_store as _ps_rr
+                    _rr_anchored = 0
                     for _oi in _rr_order.get("items", []):
                         _oi_item_id = str(_oi.get("item_id", "") or "").strip()
                         _oi_name = _oi.get("name", "") or ""
@@ -288,14 +293,16 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                                 "price": _oi.get("price", 0),
                                 "image_url": _oi.get("image_url", ""),
                             }
-                        _cp_rr.add_product(
+                        if _cp_rr.add_product(
                             conversation_id=req.conversation_id,
                             platform=req.platform, shop=req.shop,
                             item_id=_oi_item_id, name=_oi_name,
                             source="user_order", card=_oi_card, is_anchor=True,
                             model_id=_oi.get("model_id"), model_name=_oi.get("model_name"),
-                        )
-                    print(f"[RETURN-REFUND] anchored order items for order_sn={_order_sn}", file=sys.stderr)
+                        ) is not None:
+                            _rr_anchored += 1
+                    if _rr_anchored:
+                        print(f"[RETURN-REFUND] anchored {_rr_anchored} order items for order_sn={_order_sn}", file=sys.stderr)
                 except Exception as _e:
                     print(f"[RETURN-REFUND] error anchoring: {_e}", file=sys.stderr)
             # handoff แอดมิน
@@ -515,7 +522,7 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                                 "price": _oi.get("price", 0),
                                 "image_url": _oi.get("image_url", ""),
                             }
-                        _cp_items.add_product(
+                        if _cp_items.add_product(
                             conversation_id=req.conversation_id,
                             platform=req.platform,
                             shop=req.shop,
@@ -526,8 +533,8 @@ def early_order_flow(req, ctx: dict, history: list[dict], db) -> dict | None:
                             is_anchor=True,
                             model_id=_oi.get("model_id"),
                             model_name=_oi.get("model_name"),
-                        )
-                        _anchored_count += 1
+                        ) is not None:
+                            _anchored_count += 1
                     if _anchored_count:
                         print(f"[ORDER-ANCHOR] anchored {_anchored_count} order items as products (order_sn={_order_sn})", file=sys.stderr)
                 except Exception as _e:

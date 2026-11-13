@@ -197,7 +197,7 @@ def test_runtime_loads_artifact(gen_artifact):
 def test_fetch_maps_winning_chunk_to_product(gen_artifact, monkeypatch):
     _ps._DESC_VEC_CACHE.clear()
     monkeypatch.setattr(_ps, "_desc_item_docs",
-                        lambda ids: {i: _doc(i) for i in ids})
+                        lambda ids, **_k: {i: _doc(i) for i in ids})
     dv = _ps._desc_vectors(_Snap())
     qv = np.asarray(dv["emb"])[
         [str(i) for i in dv["item_ids"]].index(str(IID_A))].astype(np.float32)
@@ -214,7 +214,7 @@ def test_fetch_maps_winning_chunk_to_product(gen_artifact, monkeypatch):
 def test_anchor_isolation_on_fixture(gen_artifact, monkeypatch):
     _ps._DESC_VEC_CACHE.clear()
     monkeypatch.setattr(_ps, "_desc_item_docs",
-                        lambda ids: {i: _doc(i) for i in ids})
+                        lambda ids, **_k: {i: _doc(i) for i in ids})
     from chatbot.shopeechat import embedding as _em
     monkeypatch.setattr(_em, "embed_query",
                         lambda *a, **k: np.zeros(EMBEDDING_DIM, np.float32))

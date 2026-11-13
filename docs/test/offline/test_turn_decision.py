@@ -960,3 +960,15 @@ def test_subject_scope_is_not_overridden_by_redundant_ref_kind():
     prod = [n for n in p.needs if n.kind == "product"]
     assert prod
     assert all(n.subject_scope == "none" for n in prod)
+
+
+# ── Phase 1 Task 2 — real visual media as typed turn input ──────────────────
+def test_real_visual_media_placeholder_executes_needs():
+    p = decide_turn("[รูปภาพ]", has_visual_media=True)
+    assert p.primary_action == "execute_needs"
+    assert any(n.kind == "product" for n in p.needs)
+
+
+def test_placeholder_only_without_real_media_stays_no_reply():
+    p = decide_turn("[sticker]", has_visual_media=False)
+    assert p.primary_action == "no_reply"

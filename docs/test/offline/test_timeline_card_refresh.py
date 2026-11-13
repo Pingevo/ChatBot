@@ -69,6 +69,7 @@ def main() -> int:
             "card": {
                 "item_id": _ITEM_ID, "name": "OLD NAME (stale)",
                 "image_url": _STALE_IMG, "status": "NORMAL",
+                "shop": "ZMIThailand",
                 "total_stock": 1, "sold_out": True,
                 "variants": [{"name": _UNIT_MODEL}],
             },
@@ -91,7 +92,7 @@ def main() -> int:
             "is_anchor": False,
             "card": {
                 "item_id": _LISTING_ID, "name": "OLD LISTING NAME",
-                "image_url": _STALE_IMG,
+                "image_url": _STALE_IMG, "shop": "ZMIThailand",
                 "variants": [{"name": "CUKTECH AL870 (MFI)"},
                              {"name": "CUKTECH CL315P (MFI)"}],
             },

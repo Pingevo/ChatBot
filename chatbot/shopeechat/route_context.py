@@ -376,8 +376,11 @@ def _bounded_history_facts(history: list[dict] | None) -> dict:
         else:
             role = getattr(entry, "role", None)
             text = getattr(entry, "text", None) or getattr(entry, "message", None) or ""
-        if role != "user" or not text:
+        if role != "user":
             continue
+        # text ว่าง (image-only turn) — extractors บน "" ให้ค่าว่างเอง;
+        #   อย่า skip ทั้ง entry เพราะ persisted image_desc ยังเป็น
+        #   device evidence ได้ (branch ด้านล่าง)
         if not facts["types"]:
             t = _ps._detect_product_types(text)
             if t:
@@ -391,10 +394,15 @@ def _bounded_history_facts(history: list[dict] | None) -> dict:
             # persisted vision cache ของ entry นี้ (image_desc = typed
             #   field ที่ client serialize บน user message — extractor
             #   เดียวกับ text device; explicit text ชนะ image เสมอ)
+            #   distinct canonical >1 = ambiguous → fail closed ไม่เลือก
+            #   เอง (convention เดียวกับ current image ใน
+            #   build_retrieval_profile)
             _desc = (entry.get("image_desc") if isinstance(entry, dict)
                      else getattr(entry, "image_desc", None)) or ""
-            facts["device"] = next((cn or rw for rw, cn in
-                                    _dc._device_candidates(_desc)), None)
+            _ic = tuple(dict.fromkeys(cn or rw for rw, cn in
+                                      _dc._device_candidates(_desc)))
+            if len(_ic) == 1:
+                facts["device"] = _ic[0]
         if not facts["codes"]:
             facts["codes"] = tuple(_extract_codes(text))
     return facts
@@ -681,9 +689,42 @@ def build_retrieval_profile(
         #   (image identity ≠ compat authorization)
         target_device = img_device
         sources.append(("target_device", "image_desc"))
-    elif is_followup and hist["device"]:
+    elif (is_followup or (cur_types - _dc._SKIP_TYPES)
+          or cur_subtype) and hist["device"]:
+        # device continuity: productish turn ที่ไม่ได้ตั้ง device เองใน
+        #   conversation เดิม → carry device context (typed continuation —
+        #   type/subtype-change ask เช่น "หัวชาร์จละ" หลังถามสายสำหรับ
+        #   xiaomi ไม่ใช่ elliptical/deictic แต่ยังเป็น shopping context
+        #   เดียวกัน); code-only/non-productish turn → ไม่ carry
         target_device = hist["device"]
-        sources.append(("target_device", "history"))
+        # provenance — replay precedence เดียวกับ _bounded_history_facts
+        #   (text ก่อน image_desc ภายใน entry; entry ใหม่สุดที่ yield ชนะ):
+        #   device จาก persisted image_desc = visual context ต้องแยก source
+        #   ให้ verdict owner แยกแยะ (history_image_desc ≠ compat auth)
+        _hdev_src = "history"
+        for _e in reversed(list(history or ())[-4:]):
+            if isinstance(_e, dict):
+                _er = _e.get("role")
+                _et = _e.get("text") or _e.get("message") or ""
+                _ed = _e.get("image_desc") or ""
+            else:
+                _er = getattr(_e, "role", None)
+                _et = getattr(_e, "text", None) or getattr(
+                    _e, "message", None) or ""
+                _ed = getattr(_e, "image_desc", None) or ""
+            if _er != "user":
+                continue
+            # _et ว่าง (image-only turn) → text branch ไม่ yield → ไหล
+            #   ต่อไปยัง image_desc check (mirror _bounded_history_facts)
+            if next((cn or rw for rw, cn in
+                     _dc._device_candidates(str(_et))), None):
+                break
+            _ic = tuple(dict.fromkeys(cn or rw for rw, cn in
+                                      _dc._device_candidates(str(_ed))))
+            if len(_ic) == 1:
+                _hdev_src = "history_image_desc"
+                break
+        sources.append(("target_device", _hdev_src))
     else:
         target_device = None
 

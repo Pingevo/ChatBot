@@ -26,7 +26,8 @@ from test_legacy_turn_incident_replay import (  # noqa: E402
 from test_zaapi_task5_contract import _gen_db  # noqa: E402
 from zaapi_phase4_helpers import record  # noqa: E402
 
-from shopeechat import app, kb_zaapi as kz, runtime_config  # noqa: E402
+from shopeechat import (  # noqa: E402
+    app, kb_zaapi as kz, route_context as rc, runtime_config)
 
 
 def _unit(unit_id, item_id, model_id, name, codes, ptype, shop="ShopA",
@@ -91,7 +92,8 @@ _MSG = "สาย CTC620P ใช้กับ Xiaomi 17 Ultra ได้ไหม 
 
 def _chat(zaapi_recs, msg=_MSG, llm_reply="", shop="ShopA",
           catalog=None, units=None, intent_result=None,
-          patch=None, calls_out=None):
+          patch=None, calls_out=None, images=(), history=(),
+          item_id=None):
     mp = MonkeyPatch()
     cid = f"fa-{id(zaapi_recs) & 0xffff:x}-{len(msg)}"
     fx = {"id": cid, "shop": shop, "platform": "shopee",
@@ -99,11 +101,13 @@ def _chat(zaapi_recs, msg=_MSG, llm_reply="", shop="ShopA",
           "catalog": catalog if catalog is not None else
           [_item_doc("i-ct", "CTC620P สายชาร์จ 240W",
                      ("CTC620P",), "cable")],
-          "turns": [{"text": msg,
-                     "intent_result": intent_result or
-                     {"intent": "product_compat",
-                      "confidence": 0.9,
-                      "requested_facts": ["charging_speed"]}}],
+          "turns": [dict({"text": msg,
+                          "intent_result": intent_result or
+                          {"intent": "product_compat",
+                           "confidence": 0.9,
+                           "requested_facts": ["charging_speed"]}},
+                         **({"item_id": item_id}
+                            if item_id is not None else {}))],
           "llm_reply": llm_reply,
           "runtime_flags": {"grouped_selection": True}}
     with tempfile.TemporaryDirectory() as tmpd:
@@ -131,9 +135,10 @@ def _chat(zaapi_recs, msg=_MSG, llm_reply="", shop="ShopA",
             patch(mp)
         try:
             resp = app.chat(app.ChatRequest(
-                message=msg, shop=shop, platform="shopee", history=[],
+                message=msg, shop=shop, platform="shopee",
+                images=list(images), history=list(history),
                 conversation_id=cid, limit=5, simulate_assignment=True,
-                test_source="task5-final-answer"))
+                test_source="customer-answer-quality"))
         finally:
             mp.undo()  # undo เสมอ — exception ระหว่าง chat ต้องไม่ leak patch
         typed_ctx = next(
@@ -1269,3 +1274,588 @@ def test_zaapi_files_conflicting_sources_both_reach_evidence():
     assert "test-kb.xlsx" in files_seen
     assert "second-kb.xlsx" in files_seen, \
         "conflicting file silently dropped from evidence"
+
+
+# ── Phase 1 Task 2 — real visual media as typed turn input ──────────────────
+def test_real_image_and_describe_produce_product_reply():
+    from shopeechat import llm as _llm
+    resp, _ = _chat([], msg="[รูปภาพ]", llm_reply="มีสินค้านี้ค่ะ",
+                    images=["https://example.invalid/p.jpg"], history=[
+                        {"role": "user", "text": "[รูปภาพ]",
+                         "image_desc": "สายชาร์จ CTC620P 240W"}],
+                    patch=lambda mp: mp.setattr(
+                        _llm, "describe_images",
+                        lambda *a, **k: ("สายชาร์จ CTC620P 240W",
+                                         {"prompt": 0, "output": 0})))
+    assert resp.answer.strip()
+    assert 0 < len(resp.products) <= 1
+
+
+def test_real_media_placeholder_only_turn_not_silenced():
+    """[รูปภาพ] + real media resolved but no single-product image match →
+    the typed has_visual_media input must still produce execute_needs and a
+    bot answer (vision context can ground the reply) — not silent no_reply."""
+    from shopeechat import llm as _llm
+    resp, _ = _chat([], msg="[รูปภาพ]", llm_reply="รูปนี้เป็นแมวค่ะ สนใจสินค้าตัวไหนบอกได้นะคะ",
+                    images=["https://example.invalid/cat.jpg"],
+                    patch=lambda mp: mp.setattr(
+                        _llm, "describe_images",
+                        lambda *a, **k: ("แมวนอนอยู่บนโต๊ะ",
+                                         {"prompt": 0, "output": 0})))
+    assert resp.answer.strip()
+    assert resp.source != "no_reply"
+
+
+# ── Phase 1 Task 3 — intent provider failure ≠ semantic "other" ─────────────
+def _raise_intent(mp):
+    """Test seam: inject intent provider failure (classify_intent raises)."""
+    from shopeechat import intent_classifier as _ic
+    mp.setattr(_ic, "classify_intent",
+               lambda *a, **k: (_ for _ in ()).throw(
+                   RuntimeError("intent-provider-down")))
+
+
+def test_intent_provider_failure_shipping_does_not_become_product_no_info():
+    # shipping phrase ที่ deterministic owner จำแนกได้อยู่แล้ว — intent
+    #   provider down ต้องไม่หล่นไป product no-info
+    resp, _ = _chat([], msg="เมื่อไหร่ส่ง", patch=_raise_intent)
+    assert resp.source == "general:shipping_policy"
+    assert "ไม่พบข้อมูลสินค้า" not in (resp.answer or "")
+
+
+def test_shipping_today_phrase_provider_failure_operational_handoff():
+    """Final-blocker Task 2/3: 'ส่งวันนี้ไหม' + intent provider down —
+    ไม่มี deterministic route (needs=()) → operational fallback/handoff
+    เจ้าของเดิม ซื่อสัตย์กับ transport outcome; ห้ามตอบ product no-info,
+    ห้ามสร้าง cards, ห้ามเดาเป็น shipping intent."""
+    resp, _ = _chat([], msg="ส่งวันนี้ไหม", patch=_raise_intent)
+    assert not resp.products
+    assert "ไม่พบข้อมูลสินค้า" not in (resp.answer or "")
+    rd = resp.routing_decision or {}
+    assert resp.handoff_to_admin is True or rd.get("path") == "handoff", (
+        f"provider failure ไม่มี deterministic route ต้องเข้า operational "
+        f"handoff ไม่ใช่ product path: source={resp.source!r} rd={rd!r}")
+    assert (rd.get("handoff_state") in ("assigned", "queued")
+            or resp.source == "handoff_failed"), (
+        f"handoff outcome ต้อง typed ซื่อสัตย์: rd={rd!r}")
+
+
+def test_intent_provider_failure_explicit_human_request_handoffs():
+    resp, _ = _chat([], msg="ขอคุยกับแอดมิน", patch=_raise_intent)
+    assert resp.handoff_to_admin is True
+    assert (resp.routing_decision or {}).get("path") == "handoff"
+
+
+def test_intent_provider_failure_thanks_does_not_search_products():
+    resp, _ = _chat([], msg="ขอบคุณค่ะ", patch=_raise_intent)
+    assert not resp.products
+    assert "ไม่พบข้อมูลสินค้า" not in (resp.answer or "")
+
+
+def test_intent_provider_failure_explicit_item_share_still_products():
+    """E-contract: provider down แต่มี typed product signal (item-share)
+    → deterministic owner เดิมทำงาน ห้าม block ทั้งระบบ."""
+    card = _item_doc("i-it1", "CTC620P", ("CTC620P",), "cable")
+    resp, _ = _chat([], msg="https://s.shopee.co.th/x-it1",
+                    item_id="it1", catalog=[card], patch=_raise_intent)
+    assert resp.products, "item-share + provider down ต้องยังตอบสินค้าได้"
+    assert "ไม่พบข้อมูลสินค้า" not in (resp.answer or "")
+
+
+def test_intent_malformed_output_is_provider_failure():
+    """D-contract: provider คืน non-dict = malformed → provider failure
+    เดียวกัน ห้ามตีความเป็น semantic other."""
+    from shopeechat import intent_classifier as _ic
+    def _malformed(mp):
+        mp.setattr(_ic, "classify_intent", lambda *a, **k: ["not", "a", "dict"])
+    resp, _ = _chat([], msg="ส่งวันนี้ไหม", patch=_malformed)
+    assert not resp.products
+    assert "ไม่พบข้อมูลสินค้า" not in (resp.answer or "")
+    rd = resp.routing_decision or {}
+    assert resp.handoff_to_admin is True or rd.get("path") == "handoff"
+
+
+# ── Phase 1 Task 4 — same-identity description/spec reaches owning need ─────
+def test_exact_product_description_spec_is_not_reported_missing():
+    card = _item_doc("i-ct", "CTC620P", ("CTC620P",), "cable")
+    card["description"] = "สาย CTC620P รองรับกำลังไฟสูงสุด 240W"
+    resp, ctx = _chat(
+        [], msg="CTC620P รองรับกี่วัตต์",
+        llm_reply="CTC620P รองรับกำลังไฟสูงสุด 240W ค่ะ",
+        catalog=[card],
+        units=[_unit("u-ct", "i-ct", "m-ct", "CTC620P",
+                     ("CTC620P",), "cable")],
+        intent_result={"intent": "product_spec", "confidence": 0.99,
+                       "requested_facts": ["charging_speed"]},
+    )
+    assert "240W" in (resp.answer or "")
+    assert "ไม่มีข้อมูล" not in (resp.answer or "")
+    assert any(str(p.get("item_id")) == "i-ct" and
+               "240W" in str(p.get("description_excerpt") or "")
+               for p in ctx.products)
+    assert "240W" in ctx.context_text()
+
+
+def test_foreign_item_description_cannot_answer_spec_need():
+    asked = _item_doc("i-ct", "CTC620P", ("CTC620P",), "cable")
+    asked["description"] = "สายชาร์จทั่วไป"
+    foreign = _item_doc("i-fx", "CTL999", ("CTL999",), "cable")
+    foreign["description"] = "สาย CTL999 รองรับกำลังไฟสูงสุด 999W"
+    resp, ctx = _chat(
+        [], msg="CTC620P รองรับกี่วัตต์",
+        llm_reply="CTC620P รองรับสูงสุด 120W ค่ะ",
+        catalog=[asked, foreign],
+        units=[_unit("u-ct", "i-ct", "m-ct", "CTC620P",
+                     ("CTC620P",), "cable"),
+               _unit("u-fx", "i-fx", "m-fx", "CTL999",
+                     ("CTL999",), "cable")],
+        intent_result={"intent": "product_spec", "confidence": 0.99,
+                       "requested_facts": ["charging_speed"]})
+    assert "999W" not in (resp.answer or "")
+    if ctx is not None:
+        assert "999W" not in ctx.context_text()
+
+
+def test_foreign_shop_description_cannot_answer_spec_need():
+    asked = _item_doc("i-ct", "CTC620P", ("CTC620P",), "cable")
+    asked["description"] = "สายชาร์จทั่วไป"
+    foreign = _item_doc("i-fx", "CTC620P", ("CTC620P",), "cable",
+                        shop="ShopB")
+    foreign["description"] = "สาย CTC620P รองรับกำลังไฟสูงสุด 999W"
+    resp, ctx = _chat(
+        [], msg="CTC620P รองรับกี่วัตต์",
+        llm_reply="CTC620P รองรับสูงสุด 120W ค่ะ",
+        catalog=[asked, foreign],
+        units=[_unit("u-ct", "i-ct", "m-ct", "CTC620P",
+                     ("CTC620P",), "cable"),
+               _unit("u-fx", "i-fx", "m-fx", "CTC620P",
+                     ("CTC620P",), "cable")],
+        intent_result={"intent": "product_spec", "confidence": 0.99,
+                       "requested_facts": ["charging_speed"]})
+    assert "999W" not in (resp.answer or "")
+    if ctx is not None:
+        assert "999W" not in ctx.context_text()
+
+
+def test_foreign_model_description_cannot_answer_spec_need():
+    asked = _item_doc("i-ct", "CTC620P", ("CTC620P",), "cable")
+    asked["description"] = "สายชาร์จทั่วไป"
+    foreign = _item_doc("i-fx", "CTL301", ("CTL301",), "cable")
+    foreign["description"] = "สาย CTL301 รองรับกำลังไฟสูงสุด 999W"
+    resp, ctx = _chat(
+        [], msg="CTC620P รองรับกี่วัตต์",
+        llm_reply="CTC620P รองรับสูงสุด 120W ค่ะ",
+        catalog=[asked, foreign],
+        units=[_unit("u-ct", "i-ct", "m-ct", "CTC620P",
+                     ("CTC620P",), "cable"),
+               _unit("u-fx", "i-fx", "m-fx", "CTL301",
+                     ("CTL301",), "cable")],
+        intent_result={"intent": "product_spec", "confidence": 0.99,
+                       "requested_facts": ["charging_speed"]})
+    assert "999W" not in (resp.answer or "")
+    if ctx is not None:
+        assert "999W" not in ctx.context_text()
+
+
+# ── Phase 1 Task 5 — one primary product + answer/card identity bound ───────
+def test_requested_camera_feature_never_returns_unrelated_doorbell():
+    resp, ctx = _chat(
+        [],
+        msg="อยากได้อุปกรณ์ดูแลสิวที่มีกล้อง",
+        llm_reply="แนะนำ Doorbell Lite ค่ะ",
+        catalog=[
+            _item_doc("i-door", "Doorbell Lite", ("DBL1",), "doorbell"),
+            _item_doc("i-skin", "Skin Camera SC1", ("SC1",), "other"),
+        ],
+        units=[
+            _unit("u-door", "i-door", "m-door", "Doorbell Lite",
+                  ("DBL1",), "doorbell"),
+            _unit("u-skin", "i-skin", "m-skin", "Skin Camera SC1",
+                  ("SC1",), "other"),
+        ],
+        intent_result={"intent": "product_recommend", "confidence": 0.95,
+                       "required_features": ["มีกล้อง"]},
+    )
+    # typed attach boundary (review: candidate_names prose-scan ถูกลบ —
+    #   compose ไม่ scan model prose; guarantee ที่เหลือ = card evidence)
+    assert all("doorbell" not in (p.get("name") or "").lower()
+               for p in resp.products)
+    # doorbell ห้ามมี card/link/image evidence (deterministic card bubbles
+    #   render เฉพาะ attached products — model residual prose ไม่มี CTA)
+    for seg in (resp.answer or "").split("|||"):
+        if "](" in seg or "สั่งซื้อ" in seg:
+            assert "doorbell" not in seg.lower(), seg
+
+
+def test_single_product_question_keeps_answer_and_card_on_same_identity():
+    resp, ctx = _chat(
+        [],
+        msg="CTC620P รองรับกี่วัตต์",
+        llm_reply="สาย CTC620P รองรับสูงสุด 240W ค่ะ",
+        catalog=[_item_doc("i-ct", "CTC620P", ("CTC620P",), "cable")],
+        units=[_unit("u-ct", "i-ct", "m-ct", "CTC620P",
+                     ("CTC620P",), "cable")],
+        intent_result={"intent": "product_spec", "confidence": 0.95,
+                       "requested_facts": ["charging_speed"]},
+    )
+    assert len(resp.products) <= 1
+    selected_ids = {str(p.get("item_id")) for p in resp.products}
+    context_ids = {str(p.get("item_id")) for p in (ctx.products or ())}
+    assert selected_ids == context_ids
+
+
+def test_general_recommendation_returns_one_primary_product_and_card():
+    resp, ctx = _chat(
+        [], msg="แนะนำสาย USB-C สำหรับ Xiaomi 17 Ultra",
+        llm_reply="แนะนำ CTC620P ค่ะ",
+        catalog=[
+            _item_doc("i-620", "CTC620P", ("CTC620P",), "cable"),
+            _item_doc("i-615", "CTC615P", ("CTC615P",), "cable"),
+            _item_doc("i-cmc", "CMC615P", ("CMC615P",), "cable"),
+        ],
+        units=[
+            _unit("u-620", "i-620", "m-620", "CTC620P",
+                  ("CTC620P",), "cable"),
+            _unit("u-615", "i-615", "m-615", "CTC615P",
+                  ("CTC615P",), "cable"),
+            _unit("u-cmc", "i-cmc", "m-cmc", "CMC615P",
+                  ("CMC615P",), "cable"),
+        ],
+        intent_result={"intent": "product_recommend", "confidence": 0.99},
+    )
+    assert len(ctx.products) == 1
+    assert len(resp.products) == 1
+    assert str(ctx.products[0].get("item_id")) == str(resp.products[0].get("item_id"))
+
+
+def test_explicit_compare_keeps_all_named_subjects():
+    resp, ctx = _chat(
+        [], msg="เทียบ CTC620P กับ CTC615P",
+        llm_reply="CTC620P และ CTC615P ต่างกันดังนี้ค่ะ",
+        catalog=[
+            _item_doc("i-620", "CTC620P", ("CTC620P",), "cable"),
+            _item_doc("i-615", "CTC615P", ("CTC615P",), "cable"),
+        ],
+        units=[
+            _unit("u-620", "i-620", "m-620", "CTC620P",
+                  ("CTC620P",), "cable"),
+            _unit("u-615", "i-615", "m-615", "CTC615P",
+                  ("CTC615P",), "cable"),
+        ],
+        intent_result={"intent": "product_compare", "confidence": 0.99},
+    )
+    assert {str(p.get("item_id")) for p in ctx.products} == {"i-620", "i-615"}
+
+
+def test_recommendation_context_does_not_expose_price_to_answer_model():
+    card = _item_doc("i-620", "CTC620P", ("CTC620P",), "cable")
+    card["price"] = 1499
+    resp, ctx = _chat(
+        [], msg="แนะนำสาย USB-C",
+        llm_reply="แนะนำ CTC620P ค่ะ",
+        catalog=[card],
+        units=[_unit("u-620", "i-620", "m-620", "CTC620P",
+                     ("CTC620P",), "cable")],
+        intent_result={"intent": "product_recommend", "confidence": 0.99},
+    )
+    assert "1499" not in ctx.context_text()
+    assert "บาท" not in (resp.answer or "")
+
+
+# ─── Phase 1 Task 6 — customer-boundary follow-up continuity ──────────────
+
+def _chat_two_turns(turn1, turn2, *, catalog, units, shop="ShopA",
+                    conversation_id="fa-2turn", zaapi_recs=None):
+    """สอง turn ใน conversation เดียวกัน — persistence จริงผ่าน FakeDb
+    (conversation_products/subject_set) — caller รับ (resp1, resp2,
+    captured, admindb)"""
+    mp = MonkeyPatch()
+    fx = {"id": conversation_id, "shop": shop, "platform": "shopee",
+          "conversation_id": conversation_id,
+          "catalog": catalog,
+          "turns": [{"text": turn1["msg"],
+                     "intent_result": turn1["intent_result"]},
+                    {"text": turn2["msg"],
+                     "intent_result": turn2["intent_result"]}],
+          "llm_reply": "",
+          "runtime_flags": {"grouped_selection": True}}
+    with tempfile.TemporaryDirectory() as tmpd:
+        client, captured, _ = _install(mp, fx)
+        admindb = client[ADMIN_DB]
+        for u in units:
+            admindb["sellable_units"].insert_one(u)
+        if zaapi_recs is not None:
+            _seed_zaapi(admindb, Path(tmpd), zaapi_recs)
+            mp.setattr(runtime_config, "kb_source", lambda: "zaapi")
+            mp.setattr(runtime_config, "source_enabled",
+                       lambda *a, **k: True)
+            _orig = kz.zaapi_kb_evidence
+            mp.setattr(kz, "zaapi_kb_evidence",
+                       lambda **kw: _orig(
+                           **{k: v for k, v in kw.items()
+                              if k != "exports_root"},
+                           exports_root=Path(tmpd)))
+            mp.setattr(kz, "_zaapi_allowed", lambda: True)
+        hist = []
+        resps = []
+        try:
+            for turn in (turn1, turn2):
+                resp = app.chat(app.ChatRequest(
+                    message=turn["msg"], shop=shop, platform="shopee",
+                    history=list(hist),
+                    conversation_id=conversation_id, limit=5,
+                    simulate_assignment=True,
+                    test_source="customer-answer-quality"))
+                resps.append(resp)
+                hist.append({"role": "user", "text": turn["msg"]})
+                hist.append({"role": "model",
+                             "text": getattr(resp, "answer", "") or ""})
+        finally:
+            mp.undo()
+        return resps[0], resps[1], captured, admindb
+
+
+def test_followup_uses_persisted_suggestion_as_compat_target():
+    """turn1 แนะนำ CTC620P → turn2 ถาม หัว AD1404T ใช้กับสายที่แนะนำ —
+    target identity ต้องมาจาก conversation เดียวกัน (i-cable/CTC620P)
+    ไม่ใช่สินค้าอื่นใน catalog"""
+    cable = _item_doc("1001", "CTC620P สายชาร์จ 240W",
+                      ("CTC620P",), "cable")
+    head = _item_doc("1002", "AD1404T หัวชาร์จ USB-C",
+                     ("AD1404T",), "charger")
+    stray = _item_doc("1003", "CMC615P สายชาร์จรุ่นอื่น",
+                      ("CMC615P",), "cable")
+    u_cable = _unit("u-cable", "1001", "m-cable", "CTC620P",
+                    ("CTC620P",), "cable")
+    u_cable["canonical_specs"] = {"connector": "usb-c",
+                                  "power_capacity_w": 240}
+    u_head = _unit("u-head", "1002", "m-head", "AD1404T",
+                   ("AD1404T",), "charger")
+    u_head["canonical_specs"] = {"connector": "usb-c"}
+    u_stray = _unit("u-stray", "1003", "m-stray", "CMC615P",
+                    ("CMC615P",), "cable")
+    u_stray["canonical_specs"] = {"connector": "usb-a"}
+    r1, resp, captured, admindb = _chat_two_turns(
+        {"msg": "แนะนำสายชาร์จ 240W",
+         "intent_result": {"intent": "product_recommend",
+                           "confidence": 0.99}},
+        {"msg": "หัว AD1404T ที่ส่งมา ใช้กับสายที่แนะนำได้ไหม",
+         "intent_result": {"intent": "compatibility_check",
+                           "confidence": 0.99}},
+        catalog=[cable, head, stray],
+        units=[u_cable, u_head, u_stray])
+    ans = resp.answer or ""
+    assert "AD1404T" in ans, ans
+    assert "CTC620P" in ans, ans
+    # honest contract (deferred-pairing-contract): product×product pair
+    #   resolves correctly แต่ไม่มี authoritative pairing verdict ใน
+    #   active evidence model → cannot-confirm เท่านั้น; unknown ≠
+    #   incompatible (ห้าม "ไม่ได้") และห้าม positive pairing claim
+    assert _cannot_confirm(ans), ans
+    assert "ใช้งานร่วมกับ CTC620P ได้" not in ans, ans
+    assert "ใช้งานร่วมกับ CTC620P ไม่ได้" not in ans, ans
+    assert {str(p.get("item_id")) for p in (resp.products or ())} <= \
+        {"1001", "1002"}, ans
+    assert "CMC615P" not in ans, ans
+    ctx2 = [c["context"] for c in captured.calls
+            if c["fn"] == "answer_typed"][-1]
+    assert any(u.kind == "compat" and u.reason == "no_evidence"
+               for u in (ctx2.unanswered_needs or ())), \
+        ctx2.unanswered_needs
+
+
+def test_followup_subtype_change_keeps_conversation_target_device():
+    """turn1 ขอสายชาร์จสำหรับ xiaomi 17 ultra → turn2 "หัวชาร์จละ" —
+    profile ต้อง retain target_device เดิม + subtype เปลี่ยนเป็น charger
+    และห้ามแนะนำสายชาร์จเดิมซ้ำ"""
+    cable = _item_doc("1001", "CTC620P สายชาร์จ 240W",
+                      ("CTC620P",), "cable")
+    head = _item_doc("1002", "WPB100P หัวชาร์จ 100W",
+                     ("WPB100P",), "charger")
+    u_cable = _unit("u-cable", "1001", "m-cable", "CTC620P",
+                    ("CTC620P",), "cable")
+    u_head = _unit("u-head", "1002", "m-head", "WPB100P",
+                   ("WPB100P",), "charger")
+    r1, resp, captured, admindb = _chat_two_turns(
+        {"msg": "แนะนำสายชาร์จสำหรับ xiaomi 17 ultra",
+         "intent_result": {"intent": "product_recommend",
+                           "confidence": 0.99}},
+        {"msg": "หัวชาร์จละ",
+         "intent_result": {"intent": "product_recommend",
+                           "confidence": 0.99,
+                           "product_type": "charger"}},
+        catalog=[cable, head],
+        units=[u_cable, u_head])
+    prof = rc.build_retrieval_profile(
+        "หัวชาร์จละ",
+        history=[{"role": "user", "text": "แนะนำสายชาร์จสำหรับ xiaomi 17 ultra"},
+                 {"role": "model", "text": r1.answer or ""}],
+        intent_result={"intent": "product_recommend", "confidence": 0.99,
+                       "product_type": "charger"},
+        shop="ShopA", platform="shopee")
+    assert getattr(prof, "target_device", None) == "xiaomi 17 ultra", prof
+    assert "CTC620P" not in (resp.answer or ""), resp.answer
+
+
+def _snap_patch(mp):
+    """active generation snap — เปิด units evidence path (fetch_units
+    fail closed เมื่อ snap=None); npz paths ว่าง → vector off, code/
+    field matching ยังทำงาน — canonical_specs ถึง card ผ่าน unit path."""
+    from shopeechat import generation_pointer as _gp
+    gid = "g20260101-000000-abcdef12"
+    snap = _gp.EvidenceSnapshot(
+        generation_id=gid, units_collection=f"sellable_units_{gid}",
+        image_texts_collection=f"image_texts_{gid}",
+        units_npz="/nonexistent", product_npz="/nonexistent",
+        units_jsonl="/nonexistent", manifest_path="/nonexistent",
+        manifest_sha256="x", activated_at="t")
+    mp.setattr(_gp, "resolve_snapshot", lambda *a, **k: snap)
+
+
+def _paired_item_doc(item_id, name, codes, ptype, model_id):
+    """catalog doc ที่ model row ผูก unit.model_id — production shape:
+    unit↔listing join ต้อง match model_id ไม่งั้น variant = model_missing
+    (customer_hidden → ไม่มีทางเป็น subject ได้)"""
+    doc = _item_doc(item_id, name, codes, ptype)
+    doc["model"][0]["model_id"] = model_id
+    return doc
+
+
+def test_complete_device_and_product_specs_do_not_render_generic_unknown():
+    """Task 7: connector match (usb-c ∩ usb-c, spec-db target) → decided
+    compatible → direct positive wording; no generic unknown."""
+    unit = _unit("u1", "i-ct", "m-ct", "CTC620P",
+                 ("CTC620P",), "cable")
+    unit["canonical_specs"] = {
+        "connector": "usb-c", "power_capacity_w": 240,
+        "max_current_a": 6,
+    }
+    resp, ctx = _chat(
+        [],
+        msg="CTC620P ใช้กับ xiaomi 17 ultra ได้ไหม",
+        catalog=[_paired_item_doc("i-ct", "CTC620P สายชาร์จ 240W",
+                                  ("CTC620P",), "cable", "m-ct")],
+        units=[unit],
+        intent_result={"intent": "compatibility_check", "confidence": 0.99,
+                       "product_type": "charger", "charger_subtype": "cable",
+                       "target_device": "xiaomi 17 ultra"},
+        patch=_snap_patch,
+    )
+    assert "ใช้งานร่วมกับ xiaomi 17 ultra ได้" in resp.answer
+    assert "ยังยืนยันไม่ได้" not in resp.answer
+    assert "ไม่สามารถยืนยัน" not in resp.answer
+
+
+def test_typed_incompatible_verdict_answers_cannot_use_directly():
+    """Task 7: lightning vs usb-c → decided incompatible → direct
+    negative wording (ไม่ใช่ generic unknown)."""
+    unit = _unit("u1", "i-ct", "m-ct", "CTL301",
+                 ("CTL301",), "cable")
+    unit["canonical_specs"] = {"connector": "lightning"}
+    resp, _ = _chat(
+        [],
+        msg="CTL301 ใช้กับ xiaomi 17 ultra ได้ไหม",
+        catalog=[_paired_item_doc("i-ct", "CTL301 สายชาร์จ Lightning",
+                                  ("CTL301",), "cable", "m-ct")],
+        units=[unit],
+        intent_result={"intent": "compatibility_check", "confidence": 0.99,
+                       "product_type": "charger", "charger_subtype": "cable",
+                       "target_device": "xiaomi 17 ultra"},
+        patch=_snap_patch,
+    )
+    assert "ใช้งานร่วมกับ xiaomi 17 ultra ไม่ได้" in resp.answer
+    assert "ยังยืนยันไม่ได้" not in resp.answer
+
+
+def test_product_found_spec_missing_names_missing_fact_not_missing_product():
+    """Task 7: product found แต่ warranty fact ไม่มี → missing-fact
+    wording (ยังไม่มีข้อมูล — model เป็น owner ของ honest limitation
+    ตาม typed instruction) ไม่ใช่ product-not-found; card ยังผูก
+    identity เดิม."""
+    resp, _ = _chat(
+        [], msg="CTC620P รับประกันกี่ปี",
+        catalog=[_item_doc("i-ct", "CTC620P", ("CTC620P",), "cable")],
+        llm_reply="CTC620P ยังไม่มีข้อมูลระยะเวลารับประกันค่ะ",
+        intent_result={"intent": "warranty_duration", "confidence": 0.95,
+                       "requested_facts": ["warranty"]},
+    )
+    assert "ไม่พบสินค้า" not in resp.answer
+    assert "ยังไม่มีข้อมูล" in resp.answer
+    assert "CTC620P" in resp.answer
+
+
+def _handoff_state_patch(state):
+    """stub _send_handoff → confirmed outcome dict ตาม state."""
+    def _patch(mp):
+        from shopeechat import app as _app
+        try:
+            from shopeechat import responses as _resp_mod
+            mp.setattr(_resp_mod, "_send_handoff",
+                       lambda *a, **k: {"outcome": {"state": state}})
+        except Exception:
+            pass
+        mp.setattr(_app, "_send_handoff",
+                   lambda *a, **k: {"outcome": {"state": state}})
+    return _patch
+
+
+def test_handoff_success_wording_requires_handoff_true():
+    """Task 8/9 — non-vacuous: transport ยืนยัน assigned →
+    handoff_to_admin=True + wording ส่งต่อจริง + routing path=handoff +
+    typed outcome.state propagate เข้า routing_decision."""
+    resp, _ = _chat([], msg="ขอคุยกับแอดมิน",
+                    intent_result={"intent": "human_request",
+                                   "confidence": 1.0})
+    assert resp.handoff_to_admin is True, (
+        f"assigned outcome ต้องตั้ง flag — answer={resp.answer!r}")
+    assert "ส่งต่อ" in resp.answer, (
+        f"assigned → ต้องมี wording ส่งต่อตามความจริง: {resp.answer!r}")
+    rd = resp.routing_decision or {}
+    assert rd.get("path") == "handoff", f"routing path ผิด: {rd}"
+    assert rd.get("handoff_state") == "assigned", (
+        f"outcome.state ไม่ propagate เข้า typed result: {rd}")
+    assert rd.get("handoff_reason"), f"handoff_reason หาย: {rd}"
+
+
+def test_queued_handoff_says_queued_not_assigned():
+    """Task 9 — queued outcome: flag ยังจริง (persisted/queued) แต่
+    wording ต้องบอกว่าเข้าคิว ไม่อ้างว่ามีแอดมินรับงานแล้ว; state
+    propagate เข้า routing_decision."""
+    resp, _ = _chat([], msg="ขอคุยกับแอดมิน",
+                    intent_result={"intent": "human_request",
+                                   "confidence": 1.0},
+                    patch=_handoff_state_patch("queued"))
+    assert resp.handoff_to_admin is True, (
+        f"queued outcome = confirmed persist → flag ต้อง True: {resp.answer!r}")
+    assert "เข้าคิว" in resp.answer, (
+        f"queued → wording ต้องบอกว่าเข้าคิว ไม่อ้าง assigned: {resp.answer!r}")
+    rd = resp.routing_decision or {}
+    assert rd.get("handoff_state") == "queued", (
+        f"queued state ไม่ propagate: {rd}")
+
+
+def test_failed_handoff_never_claims_sent():
+    """Task 7: handoff ไม่ persist/queue → ห้าม claim ว่าส่งแล้ว
+    (transport ตอบ None — _install stub คืน assigned เสมอจึง patch
+    ให้ fail เพื่อจำลอง handoff ไม่สำเร็จ)."""
+    def _fail(mp):
+        from shopeechat import app as _app
+        try:
+            from shopeechat import responses as _resp_mod
+            mp.setattr(_resp_mod, "_send_handoff",
+                       lambda *a, **k: None)
+        except Exception:
+            pass
+        mp.setattr(_app, "_send_handoff", lambda *a, **k: None)
+    resp, _ = _chat([], msg="ช่วยส่งให้แอดมินตรวจสอบ",
+                    intent_result={"intent": "human_request",
+                                   "confidence": 1.0},
+                    patch=_fail)
+    assert resp.handoff_to_admin is False
+    assert "ส่งให้แอดมินแล้ว" not in resp.answer
+    assert "ส่งต่อ" not in resp.answer, (
+        f"failed → ห้าม claim ส่งต่อ: {resp.answer!r}")
+    rd = resp.routing_decision or {}
+    assert rd.get("path") != "handoff", f"failed ต้องไม่ route=handoff: {rd}"
+    assert not rd.get("handoff_state"), f"failed ต้องไม่มี state: {rd}"
+    assert not rd.get("handoff_reason"), f"failed ต้องไม่มี reason: {rd}"

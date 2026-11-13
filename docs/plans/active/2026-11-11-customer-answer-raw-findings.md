@@ -11,7 +11,10 @@
 - **TRANSCRIPT** — สิ่งที่เห็นตรง ๆ ในไฟล์บทสนทนาที่แนบ ไม่ได้พิสูจน์ว่า source data ถูกหรือผิด
 - **CODE** — เส้นทางหรือ field ที่ตรวจพบใน source code; การมี code path ไม่ได้พิสูจน์ว่ามันถูกใช้ในคำถามทุกครั้ง
 - **MONGO-READ** — ผล query/audit Mongo แบบอ่านอย่างเดียวที่บันทึกใน session A-189; ไม่ได้เชื่อมต่อและรัน census ใหม่ในงานเอกสารรอบนี้
+- **MONGO-READ-RERUN** — query แบบอ่านอย่างเดียวที่รันซ้ำใน audit continuation วันที่ 2026-11-11; เป็น snapshot ณ เวลารัน ไม่ใช่ข้อมูลหน้า Shopee แบบ real-time
 - **TEST** — ผลคำสั่งทดสอบที่บันทึกไว้; suite ที่ค้าง/ถูก interrupt ไม่ถือว่าผ่าน
+- **TEST-RERUN** — คำสั่งทดสอบที่รันจริงใน audit continuation นี้; ระบุ command และ failure แยกต่างหาก
+- **REVIEW-BLOCK** — คำสั่งที่ automatic approval review ปฏิเสธ; ไม่มีการหาทางอ้อมด้วย client หรือ route อื่น
 - **USER-REPORTED** — อาการที่ผู้ใช้เล่า; ยังไม่ถือว่า reproduce จนกว่าจะมี request/response/trace ที่ผูกกัน
 - **UNVERIFIED** — สิ่งที่ข้อมูลที่มีไม่พอจะตัดสิน
 
@@ -567,3 +570,93 @@ flowchart TD
 Target นี้ใช้ความเข้าใจล่าสุดจาก thread ว่า units ใช้ค้นหา/ระบุตัวสินค้า และ ShpProducts ใช้ตรวจ stock/status จาก record ที่ join ตรง; Mongo แสดงข้อมูลตามรอบ sync ไม่ได้พิสูจน์สถานะหน้า Shopee แบบ real-time. ถ้า join ไม่ได้ การจัดการ units snapshot ต้องไม่ถูกเรียกว่า live stock. ใน thread มีข้อความก่อนหน้าที่เรียก units ว่า stock authority เพียงแหล่งเดียว; บันทึกความต่างไว้ ไม่ถือว่าเป็นพฤติกรรมปัจจุบัน.
 
 **เกณฑ์ที่ flow เป้าหมายตั้งไว้ (ยังไม่ได้ทดสอบ/implement ในงานนี้):** seller/platform scope ถูกใช้ใน query ของทุก source ก่อน limit/top-K; ไม่ fallback ข้ามร้าน; stock ผูกกับ product/model/variant เดียวกับที่เลือก; Zaapi KB และ Mongo facts คง provenance; candidates ที่ผิด scope ไม่เข้า pool; คำตอบ/การ์ดไม่แสดงราคาตามข้อห้าม; คำว่า “ส่งให้แอดมินแล้ว” ใช้ได้เมื่อ handoff transport สำเร็จเท่านั้น.
+
+## 13. Audit continuation — fresh runtime, Mongo, retrieval, and tests
+
+ขอบเขต: รันต่อจาก pre-work A-206 ใน branch `feature-set-branch-n-go`; อ่าน config/ข้อมูล Mongo เท่านั้น, อ่าน health endpoints เท่านั้น, ไม่เขียน Mongo/Product DB/config, ไม่ส่งข้อความให้ลูกค้า. การเรียก Gemini ด้วยคำถามสินค้าจริงไม่สำเร็จจาก approval boundary ตาม §13.5.
+
+### 13.1 Runtime mode เทียบกับเงื่อนไขที่ผู้ใช้กำหนด
+
+**MONGO-READ-RERUN:** ค่าใน `main_config` ขณะตรวจ:
+
+| setting | ค่า | ความหมายต่อ QA |
+|---|---|---|
+| `kb_source` | `zaapi` | เลือก file-backed Zaapi KB |
+| `pool_sources` | `kb`, `mongo_catalog`, `units`, `image_text` = `true` | pool sources เปิดครบตามที่ผู้ใช้ระบุ |
+| `grouped_retrieval_selection_enabled` | `true` (latest successful read) | ตรงกับเงื่อนไขผู้ใช้; API responses มี `GroupedRetrievalSelection` step |
+| `grouped_retrieval_shadow_enabled` | `false` | shadow comparison ปิด |
+| `prompt_modular` | `true` (latest successful read) | ตรงกับเงื่อนไขผู้ใช้ |
+
+ไม่ได้เปลี่ยนค่า config. ค่าล่าสุดมาจาก persisted Mongo document `config_key=main_config`; API canaries หลังอ่านค่าแสดง `GroupedRetrievalSelection` step. Snapshot ก่อนหน้าที่รายงาน grouped=false/prompt unknown ถูก supersede โดยการอ่านสำเร็จล่าสุด; ไม่ได้เขียน config.
+
+### 13.2 สถานะ Zaapi ที่อ่านใหม่
+
+**MONGO-READ-RERUN:** `file_kb_ready` พบ registry 118 files, active file rows 7,101, manual rows 0, legacy/unmigrated rows 8,600; `searchable=true`. Active files/rows ที่อยู่ใน scope ร้านเป้าหมาย:
+
+| shop | active files | active rows |
+|---|---:|---:|
+| KingGadgets | 9 | 1,094 |
+| KieslectThailand | 9 | 925 |
+| CukTechThailand | 12 | 1,264 |
+| BlackShark | 5 | 870 |
+
+จำนวน 8,600 legacy/unmigrated แยกจาก active 7,101; การมีทั้งสองกลุ่มใน collection ไม่ได้พิสูจน์ว่ามี duplicate. ยังไม่ได้ทำ full duplicate-content/key census.
+
+**ขอบเขตข้อมูล:** รายงาน A-189 ก่อนหน้าเคยพบ troubleshooting row ของ PB150S จาก Mongo path ที่ตรวจในเวลานั้น. การอ่าน active file-backed snapshot รอบนี้ไม่พบแถวประเภท troubleshooting ในไฟล์ที่ตรวจ และยังไม่ได้ผูก record จาก A-189 กับ active file/revision เดียวกัน. จึงห้ามสรุปว่า “ไม่มีข้อมูลใน Mongo” หรือว่าแถวเก่าถูกลบ; ประเด็นที่ยังเปิดคือ corpus/revision และ serving path ใดถูกใช้จริงต่อ request.
+
+### 13.3 Retrieval probes บน local embedding เท่านั้น
+
+**MONGO-READ-RERUN:** ใช้ `zaapi_search`/BGE-M3 ในเครื่อง โดย `HF_HUB_OFFLINE=1` และ `TRANSFORMERS_OFFLINE=1`; ไม่มี provider call:
+
+1. KingGadgets query `CUKTECH LPB200NL รับประกันกี่ปี`, types warranty/faq: trace มี 818 hits/candidates, 852 docs, 118 registry files. Top hit ตรง LPB200NL ระบุประกัน 1 ปี, score 0.8249; near-model LPB200NC ได้ 0.7738 และ LPB200N ได้ 0.7596. ครั้งแรกใช้ 25.185s รวม cold load ของ local embedding/model; **ไม่ใช่ steady-state latency** และ top-K ยังมี near-model risk ที่ต้องตรวจเมื่อถึง final answer.
+2. CukTech query `PB150S ชาร์จไม่เข้า วิธีแก้` โดยขอ `types=(troubleshooting,)` ได้ 0 hit (`zaapi_files_empty`, registry 118). Mongo มีแถว PB150S ในชนิด product (รายละเอียด/spec/stock) และ FAQ link แต่ไม่พบ active troubleshooting row ในไฟล์ที่ตรวจ. เมื่อค้น types=product พบข้อมูล PB150S 3 รายการ; แสดงว่ามีข้อมูลบางชนิด แต่ไม่ใช่หลักฐานว่ามีวิธีแก้ปัญหาอาการนี้.
+3. ค้น PB150S แบบไม่บังคับชนิดได้ 8 hits; ผลปน FAQ link, PB150P และแถวสินค้า/ประกัน PB150S/PB150N. เป็นหลักฐานว่า query กว้างอาจดึง near-model ได้; ไม่ถือเป็นคำตอบปลายทางที่ถูก/ผิดเพราะไม่ได้เรียก answer model.
+4. Probe BP35S แบบ Zaapi product query ไม่ได้ match. แยกจาก ShpProducts snapshot ที่มีสินค้า BP35S อยู่จริง; สองระบบนี้เป็นคนละ retrieval source.
+
+**CODE:** `knowledge_base.search_qa` ใน Zaapi mode ส่ง types ตาม caller; `qa_troubleshoot_tips` ขอเฉพาะ FAQ/troubleshooting และยอมรับ level เฉพาะ model/item/brand. Zaapi adapter `kb_zaapi_evidence` รับเฉพาะ productish needs แม้จะขอ content types ทั้งหมด. เมื่อข้อมูล spec อยู่ใน `product` rows แต่ need ถูกส่งเข้า troubleshooting-only path แถว spec จะไม่ถูกค้นโดย path นั้น. นี่เป็นข้อจำกัดของการเชื่อม need-kind กับ record-kind ที่ยืนยันจาก code + census ตัวอย่าง; ยังไม่มี final `/chat` replay ยืนยันผลกับประโยคจริง.
+
+### 13.4 Product snapshot และ stock
+
+**MONGO-READ-RERUN:** ShpProducts snapshot ระบุ BP35S (KingGadgets) status `NORMAL`, stock รวม 80, available=true; pink 50, green 30, white 0; description มี swing 120°. BlackShark GS3 family snapshot รวม 1,393 units: GS3 Ultra Black 550, GS3 Green 150, GS3 Black 499, GS3 Ultra Silver 194. เป็นค่าจาก Mongo sync ตอน query ไม่ใช่ Shopee live inventory. Snapshot GS3 นี้ต่างจากตัวเลขใน QA เก่าบางรายการ; ห้ามเอาค่าเดิมมาอ้างว่าเป็นสถานะปัจจุบัน.
+
+### 13.5 ราคาใน context กับ automatic approval boundary
+
+**CODE:** `answer_context._BASE_CARD_FIELDS` มี `price` ใน field set พื้นฐาน และ `_scope_card` คัด field นี้เข้า model-visible card. `llm.py` สั่งห้ามบอกราคา แต่ `guards.py` ไม่มี output-price validation ที่ค้นพบใน scan นี้; `test_phase8_composition.py` ตั้ง product segment เป็น `WPB100L ราคา 990 บาทค่ะ` และ test valid composition ยืนยันว่า `guards.enforce` คืนข้อความเดิม. ดังนั้นข้อห้ามราคาปัจจุบันเป็น prompt-level สำหรับ LLM prose และไม่ได้ถูกบังคับด้วย output owner ที่ตรวจพบ; transcript Q3 ก่อนหน้าแสดงราคาหลุดจริง. ห้ามเพิ่ม regex/guard เพื่อปิดช่องนี้โดยไม่ขออนุมัติ §9.
+
+**REVIEW-BLOCK แล้วมี approved retry:** direct authenticated `POST /chat` ครั้งแรกถูก automatic approval review ปฏิเสธ เพราะเส้นทางอาจนำ product/KB data จาก Mongo ไป Gemini ภายนอก. หลังผู้ใช้อนุมัติขอบเขตชัดเจนว่าใช้เฉพาะคำถาม de-identified + ข้อเท็จจริงสินค้า/KB ที่จำเป็น ไม่ส่ง customer IDs/history/images, การยิง canary จำกัดขอบเขตได้รับอนุญาต. ใช้ shop/platform จริงเพื่อ scope, `history=[]`, `images=[]`, ไม่มี conversation ID, `simulate_assignment=true`; ไม่ลองผ่านช่องทางอื่น. GET `/health` ตอบ 200 (33 shops, 29 categories) และ GET `/shops` ตอบ 33 ร้าน.
+
+### 13.6 Test rerun และ failure ที่พบ
+
+**TEST-RERUN:**
+
+| command | result | note |
+|---|---|---|
+| `.venv/bin/python -m pytest -q docs/test/offline/test_canonical_evidence_card.py docs/test/offline/test_phase4_source_union.py docs/test/offline/test_phase4_zaapi_attribution.py docs/test/offline/test_phase4_zaapi_retrieval.py docs/test/offline/test_issue_5f_handoff.py` | **132 passed**, 5 warnings | offline owner behavior ผ่าน; ไม่ใช่ customer-answer end-to-end |
+| `.venv/bin/python -m pytest -q docs/test/live/test_phase8_composition.py docs/test/live/test_phase5_field_policy_compat.py docs/test/offline/test_issue_5f_spec_grounding.py` | **212 passed, 1 failed**, 5 warnings | fail ที่ `test_return_policy_context_excludes_description_scrape`: mock `lambda topic` ไม่รับ `shop=`/`platform=` ซึ่ง production caller ส่ง; test หยุดด้วย `TypeError` ก่อนตรวจ behavior. จัดเป็น test fixture/signature mismatch; ยังไม่ได้พิสูจน์ด้วย clean branch ว่าเป็น pre-existing |
+
+### 13.7 Filesystem / safety
+
+Branch เดิม `feature-set-branch-n-go`; production/test files ไม่มีการแก้. มีการแก้เอกสาร audit และ ledger/log เท่านั้น; `git diff --check` ต้องผ่านก่อน closeout. ไม่มี Mongo write, Product DB write หรือข้อความลูกค้าถูกส่ง; มี Gemini calls ตามขอบเขตที่ผู้ใช้อนุมัติใน §13.8. Secrets ถูกโหลดเฉพาะเพื่อเชื่อมต่อบริการตาม authorization และไม่ได้แสดงค่า.
+
+### 13.8 Bounded live API canaries — de-identified, no history/images, no customer send
+
+หลังผู้ใช้อนุมัติ bounded Gemini egress และอ่าน persisted config ล่าสุด (`kb_source=zaapi`, pool ทั้ง 4 เปิด, grouped selection=true, prompt_modular=true, shadow=false) เรียก local `POST /chat` โดยตรง 6 ครั้ง: warranty query เดียวซ้ำ 3 ครั้งที่ KingGadgets เพื่อยืนยัน deterministic failure, และหนึ่ง query ต่อร้าน CukTechThailand, BlackShark, KieslectThailand. ทุก call ตอบ HTTP 200; ไม่มี `conversation_id`; handoff simulation เปิด. ข้อความด้านล่าง redacts จำนวนเงิน; usage/cost เป็น `ai_usage.est_cost_usd` estimates ไม่ใช่ใบแจ้งหนี้ provider.
+
+| ร้าน / request ID | คำถาม | final answer/result | selected/output products | handoff / rewrite | wall time | tokens intent+answer | ai_usage estimated cost |
+|---|---|---|---|---|---:|---:|---:|
+| KingGadgets / `8783e81b-cbc` | `CUKTECH LPB200NL รับประกันกี่ปี` | “เรื่องสเปก/ตัวเลขบางส่วน…ให้แอดมินตรวจสอบ” + generic CTA; ไม่มีอายุประกัน | selector เลือก CTC315P description 1 รายการ; `products=[]` | handoff=false; `spec_claim` | 40.41s | 16,784 | $0.0055258 |
+| KingGadgets / `54704a94-74b` | คำถามเดิม | คำตอบเดิม | ไม่มี product; trace ไม่ได้เก็บ selection detail ใน call นี้ | handoff=false; `spec_claim` | 35.01s | 16,784 | $0.0055258 |
+| KingGadgets / `1c006c43-60c` | คำถามเดิม | คำตอบเดิม | selector มี selected description CTC315P; ไม่มี Zaapi record/สินค้า LPB200NL ใน final context; `products=[]`; composition unanswered `[1]` | handoff=false; `spec_claim`; `spec_measured=0` | 34.95s | 16,784 | $0.0055258 |
+| CukTechThailand / `8ac6548a-093` | `PB150S ชาร์จไม่เข้า มีวิธีแก้ยังไง` | ให้ checklist ทั่วไป, บอกสเปก/โปรโตคอล, แนะนำคุยเรื่องเคลม; มีข้อความชื่อ “abubu” ที่มาไม่ชัด และ URL `goto.in.th` ทั้งที่ prompt จำกัดโดเมนลิงก์ Shopee | selection มีหลาย CUKTECH powerbank models; `products=[]` แต่ answer prose ใส่ markdown product cards 2 ใบ | บอกให้แจ้งผู้ช่วย/แอดมินแต่ `handoff=false`; `stock_claim` | 24.30s | 22,916 | $0.0079484 |
+| BlackShark / `87b6459d-965` | `Black Shark GS3 กับ GS3 Ultra มีสีอะไรที่ยังมีสต็อกบ้าง` | ยืนยันว่า GS3 ไม่มีของ แล้วเสนอ S3 Special Edition สีดำ/เงิน | เลือกและส่ง product card S3 Special Edition; ไม่ตอบสี/stocks ของ GS3/GS3 Ultra | handoff=false; ไม่มี guard rewrite | 28.58s | 17,510 | $0.0059284 |
+| KieslectThailand / `fd1a0e26-199` | `Kieslect Actor มี GPS ในตัวไหม` | cannot-confirm/admin-review wording ทั้งที่ ShpProducts title ที่อ่านมี `มี GPS` | selector candidates มี Kieslect Actor; `products=[]` | handoff=false; `spec_claim`; `spec_measured=0` | 35.68s | 23,362 | $0.0077280 |
+
+**รวม 6 API calls:** 114,140 tokens; ai_usage estimated cost **$0.0381822**; wall time รวม 198.94s (ไม่ใช่ latency ของ conversation จริงที่มี history; เป็น bounded isolated calls). ไม่มีตัวอย่าง prose ใดใน 6 คำตอบที่มีตัวเลขตามรูปแบบ currency check; นั่นไม่ได้ลบ price-output hole ที่ยืนยันจาก code/test/transcript.
+
+**ข้อสังเกตจาก runtime:** request IDs สามครั้งของ KingGadgets มี intent/answer tokens และคำตอบเหมือนกัน. ใน call `1c006c43-60c`, composition `unanswered=[1]`, `spec_measured=0`, selector เลือกเฉพาะ description CTC315P และ final card ว่าง — exact Zaapi warranty row จาก local Mongo query ไม่ถึง final answer. BlackShark actual API ยืนยัน wrong-model substitution GS3→S3 ขณะที่ Mongo snapshot มี GS3 family stock. Kieslect title fact ไม่ผ่าน typed evidence และถูก rewrite. CukTech final answer บอกให้คุยแอดมินโดยไม่มี handoff จริง; product links appear as prose cards while response `products=[]`.
+
+**Accounting discrepancy จาก request metadata:** `ChatResponse.usage/cost` ในแต่ละ response นับเฉพาะ answer call (รวม 84,829 tokens, ประมาณ $0.0269007 จาก `ai_usage` answer rows สำหรับ 6 calls), ไม่รวม intent (29,311 tokens). `ai_usage` รวมทั้งสอง path (114,140 tokens, $0.0381822). Intent step cost ที่ API คิดด้วย `$0.25/$0.50 per million` ต่ำกว่า `ai_usage` estimates ที่ใช้ `_gemini_cost` (`$0.30/$2.50 per million`) — ต่อ request ต่างกันราว $0.00060. ห้ามใช้ top-level cost เดี่ยวเป็นค่าใช้จ่ายรวมของ turn.
+
+**Latency attribution:** KingGadgets answer LLM step 31.889s แต่ `ai_usage` provider elapsed 4.047s; `llm._generate` เรียก `_acquire` ก่อนเริ่ม provider timer และ `_acquire` อาจ sleep 2s ระหว่างรอ RPM/TPM. ส่วนต่างจึงสอดคล้องกับ quota wait ที่ไม่ถูกบันทึกใน ai_usage (ยังไม่มี exact wait metric). BlackShark/Kieslect intent step ใช้ ~15s และ ai_usage intent elapsed ~15s, จึงช้าใน provider/intent เอง ไม่ใช่แค่ retrieval. Code-level reason เป็นไปได้; ต้องแยก quota wait กับ provider latency ใน telemetry ก่อนตั้ง SLO.
+
+**QA boundary:** ผลเหล่านี้เป็น live API answer tests ด้วย synthetic/de-identified prompts แต่ใช้ product/KB facts จริงที่ model เห็น; ไม่ใช่ real customer conversations, ไม่มี history/images, ไม่มี UI/shadow inbox, ไม่มีการส่งข้อความ. กลุ่ม 3 ร้านเพิ่มมีผลเสียจริง แต่ไม่พิสูจน์ทุก branch หรือทุกข้อมูลใน 33 ร้าน.

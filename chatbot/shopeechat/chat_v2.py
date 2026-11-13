@@ -36,6 +36,7 @@ from . import (
     intent_classifier as _ic,
     knowledge_base,
     llm,
+    message_detectors,
     order_store as _order_store,
     persona,
     product_store,
@@ -413,7 +414,9 @@ def _check_order_lookup(req, ctx, history, db) -> dict | None:
     if not _order_sn and req.conversation_id:
         from . import conversation_products as _cp_order
         if _cp_order.is_order_question(req.message):
-            _anchor_sn = _cp_order.resolve_active_order_sn(req.conversation_id, req.message)
+            _anchor_sn = _cp_order.resolve_active_order_sn(
+                req.conversation_id, req.message,
+                platform=req.platform, shop=req.shop)
             if _anchor_sn:
                 _order_sn = _anchor_sn
     if not _order_sn:
@@ -556,8 +559,20 @@ def _check_warranty_state_machine(req, ctx, history, db) -> dict | None:
 
 
 def _check_general_question(req, ctx, history, db) -> dict | None:
-    """General question (policy/brands/categories) — ย้ายจาก legacy บรรทัด 1001-1029."""
-    general_qtype = knowledge_base.detect_general_question(req.message)
+    """General question (policy/brands/categories) — ย้ายจาก legacy บรรทัด 1001-1029.
+
+    qtype resolution parity legacy: intent (general_question + conf≥0.7)
+    เป็นหลัก → keyword fallback; stage 2.6 run ก่อน intent (ctx ยังไม่มี)
+    → keyword เท่านั้น; stage 3.6 run หลัง intent → provider qtype ถูกใช้
+    """
+    _intent = ctx.get("intent") or {}
+    _igq = _intent.get("general_qtype")
+    general_qtype = (
+        _igq
+        if (_intent.get("intent") == "general_question"
+            and (_intent.get("confidence") or 0) >= 0.7 and _igq)
+        else knowledge_base.detect_general_question(req.message)
+    )
     if not general_qtype:
         return None
     # ⚡ ถ้าเป็น warranty/return policy + เป็น follow-up (มี history + สั้น) → ไม่ตอบ general
@@ -626,26 +641,38 @@ def _classify_intent(req, ctx: dict, history: list[dict]) -> dict:
 
     ใช้ intent_classifier.classify_intent (มีอยู่แล้ว) แต่ไม่ override ด้วย hardcode keyword
     คืน dict: {intent, product_type, charger_subtype, target_device, confidence, needs_description, usage}
+
+    provider raise/malformed → คืน {} + ctx["intent_provider_failed"]=True
+    (operational failure ≠ semantic "other" — typed-plan gate หลัง
+    Stage 3 ตัดสิน action)
+
+    ⚡ parity legacy (app.py Pass1): รัน classification เสมอ —
+    whitespace token count ไม่ใช่ semantic gate (Thai sentence =
+    1 token แต่เป็น actionable เต็มรูปแบบ)
+
+    ⚡ pure social → ไม่เรียก provider (latency/token/cost + failure
+    surface โดยไม่จำเป็น): detect_social_turn owner เดียวตัด lexical
+    แล้ว; {} ส่งต่อให้ _check_typed_plan_turn → decide_turn เป็น
+    action owner (greeting deterministic) — actionable no-space
+    (detector=False) ยังเรียก provider ตามเดิม
     """
-    _pre_product_types = product_store._detect_product_types(req.message)
-    if not _pre_product_types:
-        _pre_product_types = product_store._detect_product_types_fuzzy(req.message)
-    _has_warranty_history = bool(history and any(
-        any(kw in h.get("text", "").lower()
-            for kw in ("รับประกัน", "ประกัน", "เคลม", "warranty", "claim"))
-        for h in history if h.get("role") == "model"
-    ))
-    from . import warranty as _w
-    _is_claim = _w.detect_claim_request(req.message)
-    if not _ic.should_run_pass1(
-        message=req.message, claim_detected=_is_claim,
-        product_types=_pre_product_types,
-        has_warranty_history=_has_warranty_history,
-    ):
-        print(f"[INTENT-V2] skip Pass1 (clear case)", file=sys.stderr)
+    if message_detectors.detect_social_turn(req.message):
         return {}
     _t_intent = _time.time()
-    _intent = _ic.classify_intent(message=req.message, history=history, shop=req.shop)
+    try:
+        _intent = _ic.classify_intent(
+            message=req.message, history=history, shop=req.shop)
+        if not isinstance(_intent, dict):
+            # malformed result = operational failure เดียวกับ raise —
+            #   ห้าม flow เป็น semantic proposal
+            raise ValueError(f"intent result non-dict: {type(_intent).__name__}")
+    except Exception:
+        # provider exception/malformed → operational failure (ctx flag) —
+        #   ห้ามแปลงเป็น semantic "other": semantic other = provider
+        #   ตอบถูกต้องแล้ว ขณะที่ failure = provider ใช้งานไม่ได้ —
+        #   gate หลัง Stage 3 (typed-plan) ตัดสินทางออกตาม legacy contract
+        _intent = {}
+        ctx["intent_provider_failed"] = True
     ctx["timing"]["pass1"] = round(_time.time() - _t_intent, 3)
     print(f"[TIMING-V2] Pass1 intent: {ctx['timing']['pass1']}s", file=sys.stderr)
     # record Intent step
@@ -680,7 +707,104 @@ def _classify_intent(req, ctx: dict, history: list[dict]) -> dict:
     if _intent.get("is_charging_spec") and _intent.get("intent") == "product_recommend":
         _intent["intent"] = "product_spec"
         print(f"[INTENT-V2] charging spec → override intent to product_spec", file=sys.stderr)
+    ctx["intent"] = _intent
     return _intent
+
+
+# ── Stage 3.5: Typed-Plan Gate ───────────────────────────────────────────────
+
+def _check_typed_plan_turn(req, ctx: dict, history: list[dict],
+                           intent: dict) -> dict | None:
+    """typed-plan gate ทุก turn — parity กับ legacy chat() action switch
+    (decide_turn รับ intent_result จริง + TurnPlan เป็น owner เดียวของ
+    action — parity กับที่ legacy รัน decide_turn ทุก turn).
+
+    ctx["intent_provider_failed"]: provider raise/malformed → operational
+    failure (≠ semantic "other" — other = provider ตอบถูกต้องแล้ว):
+    execute_needs+needs=() → shared handoff contract เดิม
+    (responses.intent_provider_failure_handoff — ห้าม copy ระหว่าง engine);
+    semantic other/needs=() ที่ไม่ใช่ failure → pipeline ต่อตามเดิม
+
+    deterministic actions: greeting / clarify / no_reply / human_wait /
+    handoff → owner เดิมตามลำดับ; execute_needs → pipeline ต่อ
+    (typed needs เป็นของ deterministic owners/intent proposal อยู่แล้ว)
+    """
+    _failed = bool(ctx.get("intent_provider_failed"))
+    from . import turn_decision as _td
+    from . import responses as _resp_mod
+    try:
+        plan = _td.decide_turn(
+            req.message or "", history=history,
+            intent_result=(intent if isinstance(intent, dict) else {}),
+            ticket_state=getattr(req, "ticket_state", None),
+            has_visual_media=bool(ctx.get("vision_context")),
+        )
+    except Exception:
+        # parity กับ legacy: planner พัง → fail closed ที่ 500 boundary
+        #   เดียวกัน ห้าม pipeline ทำงานต่อโดยไม่มี plan
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error during AI response processing")
+    _action = plan.primary_action
+    if _action == "greeting":
+        return _make_response(_resp_mod.GREETING_REPLY, [], ctx,
+            source="greeting",
+            routing=_app_module._routing(
+                "bot_reply", "turn_plan: no intent proposal + social turn "
+                "→ deterministic greeting"))
+    if _action == "clarify":
+        return _make_response(_resp_mod.CLARIFY_REPLY, [], ctx,
+            source="subject_clarify",
+            routing=_app_module._routing(
+                "bot_reply", "turn_plan: no intent proposal + unanchored "
+                "ask → clarify"))
+    if _action == "no_reply":
+        return _make_response("", [], ctx, source="no_reply",
+            routing=_app_module._routing(
+                "no_reply", "turn_plan: placeholder/noise turn → ไม่ตอบ"))
+    if _action == "human_wait":
+        from . import warranty_flow as _wf_lock
+        return _wf_lock._build_post_handoff_response(
+            req, {"steps": ctx["steps"], "total_start": ctx["total_start"],
+                  "image_desc_out": ctx.get("image_desc_out", "")},
+            _app_module, llm)
+    if _action == "handoff":
+        from . import handoffs as _handoffs
+        _hr = _handoffs.detect_human_request(
+            req, {"steps": ctx["steps"],
+                  "timing_breakdown": ctx["timing"],
+                  "total_start": ctx["total_start"],
+                  "image_desc_out": ctx.get("image_desc_out", ""),
+                  "model_name": os.environ.get(
+                      "GEMINI_MODEL", "gemini-3.5-flash-lite")},
+            plan_decided_reason=(
+                "customer_frustration"
+                if "customer_frustration" in (plan.flags or ())
+                else "human_request"))
+        if _hr is not None:
+            return _hr
+        return _make_response(_resp_mod.HANDOFF_FAILED_REPLY, [], ctx,
+            source="handoff_failed",
+            routing=_app_module._routing(
+                "bot_reply", "turn_plan: handoff transport ไม่ยืนยัน → "
+                "ตอบตรงๆ (fail closed)"))
+    if _action == "execute_needs" and not plan.needs and _failed:
+        _pf = _resp_mod.intent_provider_failure_handoff(req)
+        return _make_response(_pf["answer"], [], ctx,
+            source="intent_provider_handoff",
+            handoff=_pf["handoff_ok"],
+            handoff_reason=_pf["handoff_reason"],
+            routing=_app_module._routing(
+                "handoff" if _pf["handoff_ok"] else "bot_reply",
+                "intent_provider_failure: provider down + ไม่มี "
+                "deterministic route → ส่งแอดมิน" if _pf["handoff_ok"]
+                else "intent_provider_failure: provider down + ไม่มี "
+                "deterministic route → handoff ไม่สำเร็จ",
+                handoff_reason=_pf["handoff_reason"] or None,
+                handoff_state=_pf["handoff_state"] or None))
+    # execute_needs (deterministic owners/intent proposal ยังตอบได้) →
+    #   pipeline ต่อตาม contract เดิม
+    return None
 
 
 # ── Stage 4: Detect Anchor ───────────────────────────────────────────────────
@@ -817,7 +941,9 @@ def _detect_followup_products(req, history: list[dict], db) -> list[dict]:
         return []
     # ดึงสินค้าจาก conversation_products timeline
     try:
-        _timeline = (_cp.load_timeline(req.conversation_id) or {}
+        _timeline = (_cp.load_timeline(
+            req.conversation_id,
+            platform=req.platform, shop=req.shop) or {}
                      ).get("products") or []
         if not _timeline:
             return []
@@ -1429,6 +1555,19 @@ def chat_v2(req, snap=_gen.SNAP_UNSET) -> dict:
 
     # Stage 3: intent
     _intent = _classify_intent(req, ctx, history)
+
+    # Stage 3.5: typed-plan gate — decide_turn ทุก turn (parity legacy
+    #   action switch; deterministic actions ตัดสินก่อน retrieval)
+    _resp = _check_typed_plan_turn(req, ctx, history, _intent)
+    if _resp:
+        return _resp
+
+    # Stage 3.6: intent-derived general question — qtype จาก intent
+    #   (deterministic owner เดิม stage 2.6 — keyword miss แต่ provider
+    #   เห็น policy intent)
+    _resp = _check_general_question(req, ctx, history, db)
+    if _resp:
+        return _resp
 
     # Stage 4: anchor
     _anchor = _detect_anchor(req, ctx, history, db)

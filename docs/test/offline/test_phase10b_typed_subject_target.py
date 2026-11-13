@@ -105,12 +105,15 @@ def test_relation_miwatch_iphone15_roles():
 
 
 def test_w01_strava_no_device_target():
-    """W01=subject; Strava ไม่ใช่ device → target ว่าง (no typed evidence →
-    compat ต้อง unanswered ไม่ใช่เดา)"""
+    """W01=subject; Strava ไม่ใช่ device/code/product-type → ไม่มี typed
+    counterpart evidence → ไม่มี compat need (contract: compat เกิดเฉพาะ
+    เมื่อ owner มี counterpart/target evidence — relation ask ที่ resolve
+    counterpart ไม่ได้ตกไป product path ห้ามเดา verdict)"""
     p = _plan("w01 รองรับ strava ไหม")
-    subj, tgt = _refs(p, "compat")
-    assert subj == ("W01",), subj
-    assert tgt == (), tgt
+    n = _need(p, "compat")
+    assert n is None or n.target_refs == (), n
+    subj, _ = _refs(p, "product")
+    assert "W01" in (subj or ()), subj
 
 
 def test_spec_tokens_never_identities():
@@ -180,8 +183,11 @@ def test_relation_target_fails_closed():
     low = td.decide_turn("w01 รองรับ strava ไหม", intent_result={
         "intent": "compatibility_check", "relation_target": "strava",
         "confidence": 0.3})
-    _, tgt2 = _refs(low, "compat")
-    assert tgt2 == (), tgt2
+    n2 = _need(low, "compat")
+    # conf<0.7 → ไม่ผ่าน intent branch; "strava" ไม่มี typed counterpart
+    #   evidence → compat need ไม่เกิดตาม contract (fail closed —
+    #   หรือถ้าเกิดก็ต้อง trefs ว่าง)
+    assert n2 is None or n2.target_refs == (), n2
 
 
 # ── retrieval consumption — verbatim, need-associated ────────────────────
@@ -338,3 +344,31 @@ def test_one_turnplan_call_per_turn():
     plan = _plan("มีเคส s25 ไหม")
     _, slots, reqs = _chain("มีเคส s25 ไหม", needs=plan.needs)
     assert len(reqs) == 1
+
+
+# ─── Phase 1 Task 6 — follow-up subject continuity (owner level) ──────────
+
+from shopeechat.conversation_products import (  # noqa: E402
+    ConversationSubjectSet, resolve_subjects)
+
+
+def test_latest_single_suggestion_is_the_followup_subject():
+    """"อันที่แนะนำ" + persisted single-subject set → resolved เป็น subject
+    เดิมของ conversation เดียวกัน (ไม่เดาไม่สร้าง set ใหม่)"""
+    persisted = ConversationSubjectSet(
+        subject_ids=("i-cable",), source_turn_id="turn-1",
+        relation="single", requested_operations=("recommend",),
+        confidence=1.0,
+    )
+    got = resolve_subjects(persisted, "อันที่แนะนำใช้ด้วยกันได้ไหม")
+    assert got.outcome == "resolved", got
+    assert got.subject_set is not None
+    assert got.subject_set.subject_ids == ("i-cable",)
+
+
+def test_followup_never_reuses_subject_set_from_another_conversation():
+    """ไม่มี persisted set (conversation ใหม่/คนละ conv) → อ้างอิง "อันที่แนะนำ"
+    ต้อง clarify — ห้าม resolved จาก set ของ conversation อื่น"""
+    got = resolve_subjects(None, "อันที่แนะนำใช้ด้วยกันได้ไหม")
+    assert got.outcome == "clarify", got
+    assert got.subject_set is None

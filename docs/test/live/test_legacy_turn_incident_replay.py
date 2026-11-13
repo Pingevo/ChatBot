@@ -840,12 +840,15 @@ def _expectations_met(fx, records, captured):
         if rec["llm_calls"]:
             fails.append(f"llm called {len(rec['llm_calls'])}x during no_reply")
     elif action == "claim_collect":
-        claim = conversation_products.load_claim_state(fx.get("conversation_id"))
+        claim = conversation_products.load_claim_state(
+            fx.get("conversation_id"), platform=fx.get("platform", "shopee"),
+            shop=fx.get("shop"))
         if not claim:
             fails.append("action=claim_collect but no claim_state persisted")
     if "claim_state_exists" in exp:
         _exists = bool(conversation_products.load_claim_state(
-            fx.get("conversation_id")))
+            fx.get("conversation_id"), platform=fx.get("platform", "shopee"),
+            shop=fx.get("shop")))
         if _exists != bool(exp["claim_state_exists"]):
             fails.append(f"claim_state_exists: got {_exists} "
                          f"want {exp['claim_state_exists']}")
@@ -859,7 +862,8 @@ def _expectations_met(fx, records, captured):
     fcs = exp.get("final_claim_state")
     if fcs:
         claim = conversation_products.load_claim_state(
-            fx.get("conversation_id"))
+            fx.get("conversation_id"), platform=fx.get("platform", "shopee"),
+            shop=fx.get("shop"))
         for k, v in fcs.items():
             if not claim or claim.get(k) != v:
                 fails.append(f"claim_state.{k}={claim and claim.get(k)!r} "
@@ -1044,7 +1048,7 @@ def test_p2b5_closed_greeting_no_post_same_episode(monkeypatch):
         "closed-ticket greeting must answer, not hand off"
     assert records[-1]["handoffs"] == [], \
         f"no new handoff POST during lock-free turn: {records[-1]['handoffs']}"
-    claim = conversation_products.load_claim_state("fx-conv-p2b5-keep")
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-keep", platform="shopee", shop=_P2B5_SHOP)
     assert claim and claim.get("episode_id") == "ep-keep"
     assert claim.get("stage") == "collecting"
     assert claim.get("customer_name") == "สมชาย ใจดี"
@@ -1067,7 +1071,7 @@ def test_p2b5_active_handoff_locks_and_writes_nothing(monkeypatch):
     assert resp.handoff_reason is None
     assert (resp.routing_decision or {}).get("path") == "human_wait"
     assert records[-1]["handoffs"] == [], "lock must not POST again"
-    claim = conversation_products.load_claim_state("fx-conv-p2b5-lock")
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-lock", platform="shopee", shop=_P2B5_SHOP)
     assert claim and claim.get("episode_id") == "ep-lock"
     assert claim.get("stage") == "collecting"
     assert claim.get("customer_name") == "สมชาย ใจดี"
@@ -1091,7 +1095,7 @@ def test_p2b5_double_close_idempotent(monkeypatch):
         assert not getattr(rec["resp"], "handoff_to_admin", False), \
             f"turn {i} must answer, not hand off"
         assert rec["handoffs"] == [], f"turn {i} posted handoff"
-    claim = conversation_products.load_claim_state("fx-conv-p2b5-dbl")
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-dbl", platform="shopee", shop=_P2B5_SHOP)
     assert claim and claim.get("episode_id") == "ep-dbl"
     assert claim.get("stage") == "collecting"
 
@@ -1113,7 +1117,7 @@ def test_p2b5_handoff_failure_then_close_keeps_episode(monkeypatch):
         history=list(history), conversation_id="fx-conv-p2b5-fail",
         ticket_state="bot", limit=5, simulate_assignment=True,
         test_source="phase2b5"))
-    claim = conversation_products.load_claim_state("fx-conv-p2b5-fail")
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-fail", platform="shopee", shop=_P2B5_SHOP)
     assert claim and claim.get("episode_id") == "ep-fail"
     assert claim.get("customer_phone") == "0812345678", \
         "field merge must persist even when the handoff POST fails"
@@ -1137,7 +1141,7 @@ def test_p2b5_handoff_failure_then_close_keeps_episode(monkeypatch):
         "post-close greeting must not re-escalate"
     assert handoff_calls == [], \
         f"no handoff POST may fire on the closed+greeting turn: {handoff_calls}"
-    claim = conversation_products.load_claim_state("fx-conv-p2b5-fail")
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-fail", platform="shopee", shop=_P2B5_SHOP)
     assert claim and claim.get("episode_id") == "ep-fail"
     assert claim.get("stage") == "collecting"
     assert claim.get("customer_phone") == "0812345678"
@@ -1156,7 +1160,7 @@ def test_p2b5_stale_field_replay_same_episode(monkeypatch):
                {"text": "0812345678"}],
         synthetic_pii=["phone"])
     records, _cap, _client = _replay(monkeypatch, fx)
-    claim = conversation_products.load_claim_state("fx-conv-p2b5-stale")
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-stale", platform="shopee", shop=_P2B5_SHOP)
     assert claim and claim.get("episode_id") == "ep-stale", \
         "re-sending a stored field must stay in the same episode"
     assert claim.get("customer_phone") == "0812345678"
@@ -1189,7 +1193,7 @@ def test_p2b5_wait_response_is_not_handoff_command(monkeypatch):
     _assert_wait_only(resp)
     assert handoff_calls == [], "waiting state must not POST a new handoff"
     assert captured.calls == [], "lock must not spend LLM calls"
-    claim = conversation_products.load_claim_state("fx-conv-p2b5-wait")
+    claim = conversation_products.load_claim_state("fx-conv-p2b5-wait", platform="shopee", shop=_P2B5_SHOP)
     assert claim and claim.get("episode_id") == "ep-wait"
     assert claim.get("stage") == "collecting"
 
@@ -1277,7 +1281,7 @@ def test_p2b7_video_placeholder_persists_has_image(monkeypatch):
         turns=[{"text": "[วิดีโอ]"}],
         synthetic_pii=["name"])
     _records, _cap, _client = _replay(monkeypatch, fx)
-    claim = conversation_products.load_claim_state("fx-conv-p2b7-vid")
+    claim = conversation_products.load_claim_state("fx-conv-p2b7-vid", platform="shopee", shop=_P2B5_SHOP)
     assert claim and claim.get("episode_id") == "ep-vid", \
         "video evidence must merge into the same open episode"
     assert claim.get("stage") == "collecting"

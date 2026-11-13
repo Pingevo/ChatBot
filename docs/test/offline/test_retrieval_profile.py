@@ -447,7 +447,64 @@ def test_history_image_desc_supplies_device_on_followup():
         shop="AnyShop",
     )
     assert got.target_device == "purifier 4 lite"
+    # provenance: device มาจาก persisted image_desc (visual context) —
+    #   typed source เดิม field เดิม แต่ต้องแยกจาก text-derived history
+    assert ("target_device", "history_image_desc") in got.fact_sources
+
+
+def test_history_text_device_source_stays_history():
+    # text-derived history device → source "history" เดิม (ไม่ใช่ visual)
+    got = build_retrieval_profile(
+        "มีอะไรแนะนำไหมครับ",
+        history=[{"role": "user",
+                  "text": "ไส้กรองสำหรับ xiaomi air purifier 4 lite"}],
+        intent_result={"intent": "product_question", "confidence": 0.9},
+        shop="AnyShop",
+    )
+    assert got.target_device == "purifier 4 lite"
     assert ("target_device", "history") in got.fact_sources
+    assert ("target_device", "history_image_desc") not in got.fact_sources
+
+
+def test_history_text_device_beats_image_desc_in_entry():
+    # entry เดียวกันมีทั้ง text device และ image_desc → text ชนะ (source
+    #   ต้อง "history" ไม่ใช่ "history_image_desc")
+    got = build_retrieval_profile(
+        "มีอะไรแนะนำไหมครับ",
+        history=[{"role": "user",
+                  "text": "ใส่กับ iphone 15 ได้ไหม",
+                  "image_desc": "เครื่องฟอกอากาศ Xiaomi Air Purifier 4 Lite"}],
+        intent_result={"intent": "product_question", "confidence": 0.9},
+        shop="AnyShop",
+    )
+    assert got.target_device == "iphone 15"
+    assert ("target_device", "history") in got.fact_sources
+
+
+def test_ambiguous_history_image_desc_yields_no_target():
+    # image_desc มี >1 distinct device canonical → ห้ามเลือกเอง
+    #   (convention เดียวกับ current image_desc path)
+    got = build_retrieval_profile(
+        "รุ่นนี้ครับ",
+        history=[{"role": "user", "text": "[รูปภาพ]",
+                  "image_desc": "iphone 15 กับ xiaomi purifier 4 lite"}],
+        intent_result={"intent": "product_question", "confidence": 0.9},
+        shop="AnyShop",
+    )
+    assert got.target_device is None
+
+
+def test_current_text_device_beats_history_image_desc():
+    # current message ตั้ง device เอง → ชนะ historical image device
+    got = build_retrieval_profile(
+        "ใช้กับ iphone 15 ได้ไหม",
+        history=[{"role": "user", "text": "[รูปภาพ]",
+                  "image_desc": "เครื่องฟอกอากาศ Xiaomi Air Purifier 4 Lite"}],
+        intent_result={"intent": "compatibility_check", "confidence": 0.9},
+        shop="AnyShop",
+    )
+    assert got.target_device == "iphone 15"
+    assert ("target_device", "message") in got.fact_sources
 
 
 def test_current_image_desc_beats_history_image_desc():

@@ -192,6 +192,7 @@ cp.load_timeline = lambda cid: _tl.get(cid)
 def _save_tl(cid, platform, shop, products, active_item_id):
     _tl[cid] = {"conversation_id": cid, "platform": platform, "shop": shop,
                 "products": products, "active_item_id": active_item_id}
+    return True  # F4 — save_timeline contract: True = persisted
 
 
 cp.save_timeline = _save_tl

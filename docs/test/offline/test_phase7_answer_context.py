@@ -1098,3 +1098,420 @@ def test_executor_bucket_accepts_member_card_under_charger_request():
     assert (bucket, reason) != ("rejected", "wrong_type"), (
         f"member card ห้ามตก wrong_type ใต้ generic charger request — "
         f"{bucket}:{reason}")
+
+
+# ── Phase-1 acceptance (tee_apichap Q2–Q4): unproven device-context emit ─────
+#   candidates ที่เป็น relation context ของ target ที่พิสูจน์ไม่ได้ = carrier
+#   ไม่ใช่ coverage:
+#   · declined primary-compat (provenance intent=compatibility_check) →
+#     anonymous describe companion ที่ share tn → candidates drop ทั้ง need
+#     (history/channel ไหนก็ไม่รอด — independent coverage ต้องผ่าน need ที่
+#     pin subject ของตัวเอง)
+#   · live profile target (image_desc/history device context) โดยไม่มี compat
+#     need → non-independent needs (anonymous/deictic narration) keep เฉพาะ
+#     decided-compatible identities — visual identity ≠ compat proof
+
+def _tn(kind, op, refs=(), trefs=(), scope="none", prov=(), **kw):
+    return TurnNeed(kind=kind, operation=op, subject_refs=tuple(refs),
+                    target_refs=tuple(trefs), subject_scope=scope,
+                    provenance=tuple(prov), **kw)
+
+
+def _req_t(rid="req-0", source="slot", trefs=(), srefs=(), **kw):
+    return _dcreplace(_req(rid=rid, source=source, **kw),
+                      target_refs=tuple(trefs),
+                      subject_refs=tuple(srefs))
+
+
+def _compat_declined_fixture(prov=("intent=compatibility_check",),
+                             tn="รุ่น 6"):
+    """compat ask + anonymous describe companion sharing tn; slot carrier +
+    history candidate — returns (needs, requests, selection, pool)."""
+    compat = _tn("compat", "compat", trefs=(tn,), prov=prov)
+    descr = _tn("product", "describe", trefs=(tn,),
+                prov=("route_context.resolve_route",))
+    req0 = _req_t(trefs=(tn,), types=())
+    reqh = _req_t("req-h", source="history")
+    sc0 = _sel_card("i:9", "target", "req-0", "CTX Filter 9")
+    sc1 = _sel_card("i:1", "historical_evidence", "req-h", "Hist Filter 1")
+    sel = _selection((sc0, "req-0"), (sc1, "req-h"))
+    pool = _pool((_pooled("i:9", "9"), _pooled("i:1", "1")))
+    return (compat, descr), (req0, reqh), sel, pool
+
+
+def test_declined_primary_compat_drops_anonymous_companion():
+    """Task 2 — Q2 shape: intent-compat declined → anonymous describe
+    companion = carrier context; history candidate ก็ drop ทั้ง need."""
+    needs, reqs, sel, pool = _compat_declined_fixture()
+    ctx = _compile(needs, sel, pool, reqs, _profile())
+    assert ctx.products == (), [
+        (p.get("item_id"), p.get("need_indices")) for p in ctx.products]
+    unans = {u.need_index: u for u in ctx.unanswered_needs}
+    assert unans.get(0) and unans[0].reason == "no_evidence", unans
+    # companion = cannot-confirm (ห้าม covered/quiet — card ไม่มีจริง)
+    assert unans.get(1) and unans[1].reason == "no_evidence", unans
+
+
+def test_declined_primary_compat_companion_folds_into_compat_outcome():
+    """Task 3 — compose level: declined intent-compat + anonymous describe
+    companion (target_refs เดียวกัน) = logical ask เดียว → comp render 1
+    unresolved outcome (typed fold — need index + target_refs ไม่ใช่ text);
+    marker ทั้งสอง need ยังอยู่ใน ctx.unanswered_needs"""
+    needs, reqs, sel, pool = _compat_declined_fixture()
+    ctx = _compile(needs, sel, pool, reqs, _profile())
+    assert len(ctx.unanswered_needs) == 2  # need-level marker ไม่หาย
+    comp = acx.compose_answer(needs=needs, context=ctx, product_text="")
+    idx = [u.need_index for u in comp.unanswered_needs]
+    assert idx == [0], (
+        f"companion ต้อง fold เข้า compat outcome เดียว — got {idx}")
+
+
+def test_distinct_target_unanswered_stays_separate():
+    """Task 3.3 — anonymous need ของ target อื่น ≠ companion → independent
+    unresolved ask → comp render แยก (ห้าม over-fold)"""
+    compat = _tn("compat", "compat", trefs=("รุ่น 6",),
+                 prov=("intent=compatibility_check",))
+    descr = _tn("product", "describe", trefs=("iphone 15",),
+                prov=("route_context.resolve_route",))
+    req0 = _req_t(trefs=("รุ่น 6",), types=())
+    req2 = _req_t("req-2", trefs=("iphone 15",), types=())
+    sc0 = _sel_card("i:9", "target", "req-0", "CTX 9")
+    ctx = _compile((compat, descr),
+                   _selection((sc0, "req-0")),
+                   _pool((_pooled("i:9", "9"),)),
+                   (req0, req2), _profile())
+    comp = acx.compose_answer(needs=(compat, descr), context=ctx,
+                              product_text="")
+    idx = {u.need_index for u in comp.unanswered_needs}
+    assert idx == {0, 1}, (
+        f"independent unresolved asks ต้องยัง 2 outcomes — {idx}")
+
+
+# ── Task 7 (review correction) — fold เฉพาะ typed companion เท่านั้น ────────
+#   target_refs overlap อย่างเดียว ≠ companion: need ที่พก typed ask/identity
+#   ของตัวเอง (requested_facts / capability_asks / scope / provenance ที่ไม่
+#   ใช่ generic emit) ต้องเป็น unresolved outcome แยก — over-fold = ซ่อน ask
+
+def _fold_probe(needs, reqs, sel, pool):
+    ctx = _compile(needs, sel, pool, reqs, _profile())
+    comp = acx.compose_answer(needs=needs, context=ctx, product_text="")
+    return [u.need_index for u in comp.unanswered_needs]
+
+
+def _fold_fixture(descr_need):
+    """compat(intent) + describe variant บน target เดียวกัน 'รุ่น 6' —
+    carriers ทั้งคู่ถูก taint-drop → no_evidence ทั้งสอง need"""
+    compat = _tn("compat", "compat", trefs=("รุ่น 6",),
+                 prov=("intent=compatibility_check",))
+    req0 = _req_t(trefs=("รุ่น 6",), types=())
+    reqh = _req_t("req-h", source="history")
+    sc0 = _sel_card("i:9", "target", "req-0", "CTX 9")
+    sc1 = _sel_card("i:1", "historical_evidence", "req-h", "Hist 1")
+    sel = _selection((sc0, "req-0"), (sc1, "req-h"))
+    pool = _pool((_pooled("i:9", "9"), _pooled("i:1", "1")))
+    return (compat, descr_need), (req0, reqh), sel, pool
+
+
+def test_fold_keeps_spec_facts_need_separate():
+    """Task 7 — describe need ที่พก requested_facts (typed spec ask ของ
+    target เดียวกัน) ≠ anonymous companion → ห้าม fold"""
+    descr = _tn("product", "describe", trefs=("รุ่น 6",),
+                prov=("intent.requested_facts",),
+                requested_facts=("charging_speed",))
+    needs, reqs, sel, pool = _fold_fixture(descr)
+    idx = _fold_probe(needs, reqs, sel, pool)
+    assert set(idx) == {0, 1}, (
+        f"typed spec ask ต้อง render แยก — got {idx}")
+
+
+def test_fold_keeps_capability_ask_need_separate():
+    """Task 7 — describe need ที่พก capability_asks (typed ask) ≠
+    companion → ห้าม fold"""
+    descr = _tn("product", "describe", trefs=("รุ่น 6",),
+                prov=("route_context.resolve_route",),
+                capability_asks=("ใช้ไฟกี่วัตต์",))
+    needs, reqs, sel, pool = _fold_fixture(descr)
+    idx = _fold_probe(needs, reqs, sel, pool)
+    assert set(idx) == {0, 1}, (
+        f"capability ask ต้อง render แยก — got {idx}")
+
+
+def test_fold_keeps_partial_overlap_need_separate():
+    """Task 7 — describe need ที่ target_refs ⊋ compat target (บางส่วน
+    เป็น ask อิสระของ target อื่น) ≠ companion → ห้าม fold"""
+    descr = _tn("product", "describe", trefs=("รุ่น 6", "iphone 15"),
+                prov=("route_context.resolve_route",))
+    needs, reqs, sel, pool = _fold_fixture(descr)
+    idx = _fold_probe(needs, reqs, sel, pool)
+    assert set(idx) == {0, 1}, (
+        f"partial-overlap ask ต้อง render แยก — got {idx}")
+
+
+def test_fold_keeps_typed_provenance_need_separate():
+    """Task 7 — describe need ที่ provenance มี typed producer อื่น
+    (cert question — merged emits) ≠ companion → ห้าม fold"""
+    descr = _tn("product", "describe", trefs=("รุ่น 6",),
+                prov=("route_context.resolve_route",
+                      "warranty.detect_cert_question"))
+    needs, reqs, sel, pool = _fold_fixture(descr)
+    idx = _fold_probe(needs, reqs, sel, pool)
+    assert set(idx) == {0, 1}, (
+        f"typed-provenance ask ต้อง render แยก — got {idx}")
+
+
+def test_declined_connector_compat_keeps_companion_describe():
+    """Task 4.1 — connector-derived compat (ไม่ใช่ primary intent ask)
+    declined → describe ไม่ใช่ companion ของ primary ask → browse card
+    อยู่ได้ (independent coverage ผ่าน channel ของตัวเอง)."""
+    needs, reqs, sel, pool = _compat_declined_fixture(
+        prov=("route_context._REL_CONN_RE",))
+    ctx = _compile(needs, sel, pool, reqs, _profile())
+    ids = {str(p.get("item_id")) for p in ctx.products}
+    assert "1" in ids, (
+        f"independent browse card ต้องรอด — compat no_evidence "
+        f"ไม่ใช่ blanket suppression: {ids}")
+
+
+def test_pinned_subject_need_survives_declined_primary_compat():
+    """Task 4.3/4.5 — stock need pinned ด้วย subject_refs + declined
+    primary compat → exact item card อยู่ได้ (asked product เอง
+    ไม่ใช่ compat claim)"""
+    compat = _tn("compat", "compat", trefs=("รุ่น 6",),
+                 prov=("intent=compatibility_check",))
+    stock = _tn("product", "stock", refs=("1",), prov=("stock_ask",))
+    req0 = _req_t(trefs=("รุ่น 6",), types=())
+    reqs = _req_t("req-s", source="subjects", srefs=("1",))
+    sc0 = _sel_card("i:9", "target", "req-0", "CTX Filter 9")
+    sc1 = _sel_card("i:1", "subject", "req-s", "Shared Filter 1")
+    ctx = _compile((compat, stock),
+                   _selection((sc0, "req-0"), (sc1, "req-s")),
+                   _pool((_pooled("i:9", "9"), _pooled("i:1", "1"))),
+                   (req0, reqs), _profile())
+    ids = {str(p.get("item_id")) for p in ctx.products}
+    assert ids == {"1"}, f"exact item card ต้องอยู่คนเดียว — {ids}"
+    unans = {u.need_index: u for u in ctx.unanswered_needs}
+    assert unans.get(0) and unans[0].reason == "no_evidence", unans
+    assert not ctx.compat_verdicts, (
+        "card ที่อยู่ห้าม render เป็น compatibility endorsement")
+
+
+def test_compare_need_survives_declined_primary_compat():
+    """Task 4.2 — explicit compare + declined primary compat → compare
+    cards อยู่ได้ (kind=compare ไม่ใช่ anonymous describe companion)"""
+    compat = _tn("compat", "compat", trefs=("รุ่น 6",),
+                 prov=("intent=compatibility_check",))
+    cmp = _tn("compare", "compare", refs=("1", "2"), scope="explicit")
+    req0 = _req_t(trefs=("รุ่น 6",), types=())
+    reqh = _req_t("req-h", source="history")
+    sc0 = _sel_card("i:9", "target", "req-0", "CTX 9")
+    sc1 = _sel_card("i:1", "historical_evidence", "req-h", "Hist 1")
+    sc2 = _sel_card("i:2", "historical_evidence", "req-h", "Hist 2")
+    ctx = _compile((compat, cmp),
+                   _selection((sc0, "req-0"), (sc1, "req-h"),
+                              (sc2, "req-h")),
+                   _pool((_pooled("i:9", "9"), _pooled("i:1", "1"),
+                          _pooled("i:2", "2"))),
+                   (req0, reqh), _profile())
+    ids = {str(p.get("item_id")) for p in ctx.products}
+    assert {"1", "2"} <= ids, f"compare cards ต้องอยู่ — {ids}"
+    unans = {u.need_index: u for u in ctx.unanswered_needs}
+    assert unans.get(0) and unans[0].reason == "no_evidence", unans
+
+
+def test_declined_primary_compat_never_endorses_surviving_card():
+    """Task 4.4 — relation ยัง cannot-confirm; card ที่อยู่จาก
+    independent need ไม่ทำให้ claim กลายเป็น confirmed/compatible"""
+    compat = _tn("compat", "compat", trefs=("รุ่น 6",),
+                 prov=("intent=compatibility_check",))
+    stock = _tn("product", "stock", refs=("1",), prov=("stock_ask",))
+    req0 = _req_t(trefs=("รุ่น 6",), types=())
+    reqs = _req_t("req-s", source="subjects", srefs=("1",))
+    sc0 = _sel_card("i:9", "target", "req-0", "CTX 9")
+    sc1 = _sel_card("i:1", "subject", "req-s", "Shared 1")
+    ctx = _compile((compat, stock),
+                   _selection((sc0, "req-0"), (sc1, "req-s")),
+                   _pool((_pooled("i:9", "9"), _pooled("i:1", "1"))),
+                   (req0, reqs), _profile())
+    for v in (ctx.compat_verdicts or ()):
+        assert v.decision.outcome not in ("compatible", "incompatible"), (
+            f"ต้องไม่มี decided verdict เมื่อ no_evidence — {v}")
+    unans = {u.need_index: u for u in ctx.unanswered_needs}
+    assert unans.get(0) and unans[0].reason == "no_evidence"
+
+
+def test_task_render_merges_same_key_constraints():
+    """Task 4 — typed task render duplication: request ให้ constraint key
+    เดียวกันหลายค่า (cross-family card → product_type ×2) → render เป็น
+    key เดียวรวมค่า ไม่ซ้ำ `(product_type=..) (product_type=..)`"""
+    need = _tn("product", "stock", refs=("1",))
+    req0 = _req_t("req-s", source="subjects", srefs=("1",),
+                  hard=(("product_type", "air_filter"),
+                        ("product_type", "air_purifier")))
+    sc = _sel_card("i:1", "subject", "req-s", "F 1")
+    ctx = _compile((need,), _selection((sc, "req-s")),
+                   _pool((_pooled("i:1", "1"),)), (req0,), _profile())
+    rendered = ctx.task.render()
+    assert rendered.count("product_type=") == 1, rendered
+    assert "air_filter" in rendered and "air_purifier" in rendered
+
+
+def test_task5_candidate_names_substring_scan_removed():
+    """Task 5 (independent review) — `candidate_names` post-model substring
+    heuristic ถูกลบ: signature ไม่มี param + compose ไม่ scan/drop prose
+    ด้วย selected-candidate names (card attachment = typed products
+    boundary เท่านั้น — compose ไม่ใช่ prose police ของ answer set)."""
+    assert "candidate_names" not in inspect.signature(
+        acx.compose_answer).parameters, (
+        "candidate_names heuristic ยังอยู่ใน compose_answer signature")
+    # bubble ที่กล่าวถึงชื่อ product ที่ไม่เคย attach ต้องไม่ถูก
+    #   substring-scan drop (survive เป็น model prose ปกติ)
+    ctx = acx.AnswerContext(
+        task=acx.AnswerTask(tasks=(acx.NeedTask(
+            kind="product", operation="describe", need_index=0),)),
+        products=(), evidence=(), availability_notes=(),
+        unanswered_needs=(), estimated_tokens=0)
+    need = TurnNeed(kind="product", operation="describe")
+    comp = acx.compose_answer(
+        needs=(need,), context=ctx,
+        product_text="แนะนำรุ่น Detached Model X9 ตัวนี้เลยครับ")
+    text = " ".join(str(r.text or "") for r in comp.results)
+    assert "Detached Model X9" in text, (
+        f"compose ยัง scan/drop prose นอก typed boundary: {comp.results!r}")
+
+
+def test_live_visual_target_drops_anonymous_describe():
+    """Task 3 — Q3 shape: profile target (image_desc provenance) + ไม่มี
+    compat need → anonymous describe = compat-context → 0 cards"""
+    descr = _tn("product", "describe", prov=("real_visual_media",))
+    req0 = _dcreplace(_req_t(types=()),
+                      target_device="purifier 4 lite")
+    reqh = _req_t("req-h", source="history")
+    sc0 = _sel_card("i:9", "slot", "req-0", "CTX Filter 9")
+    sc1 = _sel_card("i:1", "historical_evidence", "req-h", "Hist 1")
+    prof = _dcreplace(_profile(), target_device="purifier 4 lite",
+                      fact_sources=(("target_device", "image_desc"),))
+    ctx = _compile((descr,),
+                   _selection((sc0, "req-0"), (sc1, "req-h")),
+                   _pool((_pooled("i:9", "9"), _pooled("i:1", "1"))),
+                   (req0, reqh), prof)
+    assert ctx.products == (), [
+        (p.get("item_id"), p.get("need_indices")) for p in ctx.products]
+
+
+def test_history_image_target_drops_anonymous_describe():
+    """Task 2 — historical image device (fs=history_image_desc) + ไม่มี
+    compat need → anonymous describe = unverified visual context → 0 cards
+    (provenance เดียวกับ current image gate)"""
+    descr = _tn("product", "describe")
+    req0 = _dcreplace(_req_t(types=()),
+                      target_device="purifier 4 lite")
+    reqh = _req_t("req-h", source="history")
+    sc0 = _sel_card("i:9", "slot", "req-0", "CTX Filter 9")
+    sc1 = _sel_card("i:1", "historical_evidence", "req-h", "Hist 1")
+    prof = _dcreplace(_profile(), target_device="purifier 4 lite",
+                      fact_sources=(("target_device", "history_image_desc"),))
+    ctx = _compile((descr,),
+                   _selection((sc0, "req-0"), (sc1, "req-h")),
+                   _pool((_pooled("i:9", "9"), _pooled("i:1", "1"))),
+                   (req0, reqh), prof)
+    assert ctx.products == (), [
+        (p.get("item_id"), p.get("need_indices")) for p in ctx.products]
+
+
+def test_history_image_target_keeps_decided_compatible():
+    """Task 2.5 — historical image target + typed compatible verdict →
+    verdict-bound primary card รอด 1 ใบ (image identity ≠ compat auth,
+    แต่ typed proof ยัง authorize ได้ตามปกติ)"""
+    descr = _tn("product", "describe")
+    req0 = _dcreplace(_req_t(types=(), cm="bluetooth_general"),
+                      target_device="purifier 4 lite")
+    sc0 = _sel_card("i:9", "slot", "req-0", "CTX Filter 9")
+    sc1 = _sel_card("i:2", "slot", "req-0", "CTX Other 2")
+    pool = _pool(
+        (_pooled("i:9", "9"), _pooled("i:2", "2")),
+        supporting=({"kind": "device_spec",
+                     "target": "purifier 4 lite",
+                     "subject_id": "i:9", "relation": "works_with",
+                     "verdict": "compatible", "source": "spec-db",
+                     "subject_refs": ("i:9",)},))
+    prof = _dcreplace(_profile(), target_device="purifier 4 lite",
+                      fact_sources=(("target_device", "history_image_desc"),))
+    ctx = _compile((descr,), _selection((sc0, "req-0"), (sc1, "req-0")),
+                   pool, (req0,), prof)
+    ids = [str(p.get("item_id")) for p in ctx.products]
+    assert ids == ["9"], (
+        f"decided-compatible card เท่านั้นที่อยู่ได้ — got {ids}")
+
+
+def test_live_visual_target_drops_deictic_describe():
+    """Task 3/Q4 — deictic describe (current_single) บน live target =
+    compat-context → 0 cards แม้จะมี pinned subject card ผ่าน channel"""
+    descr = _tn("product", "describe", refs=("1",),
+                scope="current_single",
+                prov=("route_context.resolve_route",))
+    req0 = _dcreplace(_req_t(types=()),
+                      target_device="purifier 4 lite")
+    reqs = _req_t("req-s", source="subjects", srefs=("1",))
+    sc0 = _sel_card("i:9", "slot", "req-0", "CTX 9")
+    sc1 = _sel_card("i:1", "subject", "req-s", "Deictic Filter 1")
+    prof = _dcreplace(_profile(), target_device="purifier 4 lite",
+                      fact_sources=(("target_device", "history"),))
+    ctx = _compile((descr,),
+                   _selection((sc0, "req-0"), (sc1, "req-s")),
+                   _pool((_pooled("i:9", "9"), _pooled("i:1", "1"))),
+                   (req0, reqs), prof)
+    assert ctx.products == (), [
+        (p.get("item_id"), p.get("need_indices")) for p in ctx.products]
+
+
+def test_live_visual_target_keeps_decided_compatible_card():
+    """Task 3.3 — live target + typed compatible verdict → card ที่
+    verdict bound อยู่ได้ 1 ใบ; candidates ที่ไม่มี verdict → drop"""
+    descr = _tn("product", "describe", prov=("real_visual_media",))
+    req0 = _dcreplace(_req_t(types=(), cm="bluetooth_general"),
+                      target_device="purifier 4 lite")
+    sc0 = _sel_card("i:9", "slot", "req-0", "CTX Filter 9")
+    sc1 = _sel_card("i:2", "slot", "req-0", "CTX Other 2")
+    pool = _pool(
+        (_pooled("i:9", "9"), _pooled("i:2", "2")),
+        supporting=({"kind": "device_spec",
+                     "target": "purifier 4 lite",
+                     "subject_id": "i:9", "relation": "works_with",
+                     "verdict": "compatible", "source": "spec-db",
+                     "subject_refs": ("i:9",)},))
+    prof = _dcreplace(_profile(), target_device="purifier 4 lite",
+                      fact_sources=(("target_device", "image_desc"),))
+    ctx = _compile((descr,), _selection((sc0, "req-0"), (sc1, "req-0")),
+                   pool, (req0,), prof)
+    ids = [str(p.get("item_id")) for p in ctx.products]
+    assert ids == ["9"], (
+        f"decided-compatible card เท่านั้นที่อยู่ได้ — got {ids}")
+
+
+def test_live_visual_target_keeps_pinned_subject_need():
+    """independence — exact item need (srefs + scope none) บน live visual
+    target ยัง attach ได้ — card คือ asked product เองไม่ใช่ compat claim"""
+    stock = _tn("product", "stock", refs=("1",), prov=("stock_ask",))
+    reqs = _req_t("req-s", source="subjects", srefs=("1",))
+    sc1 = _sel_card("i:1", "subject", "req-s", "Shared Filter 1")
+    prof = _dcreplace(_profile(), target_device="purifier 4 lite",
+                      fact_sources=(("target_device", "image_desc"),))
+    ctx = _compile((stock,), _selection((sc1, "req-s")),
+                   _pool((_pooled("i:1", "1"),)), (reqs,), prof)
+    ids = [str(p.get("item_id")) for p in ctx.products]
+    assert ids == ["1"], f"pinned subject card ต้องอยู่ — {ids}"
+
+
+def test_text_target_keeps_anonymous_browse():
+    """text-derived target (fs=message) + anonymous describe → browse
+    answer ยังอยู่ — visual-only gate ไม่กิน legit browse turns"""
+    descr = _tn("product", "describe")
+    req0 = _dcreplace(_req_t(types=()), target_device="iphone 15")
+    sc0 = _sel_card("i:9", "slot", "req-0", "iPhone 15 Case")
+    prof = _dcreplace(_profile(), target_device="iphone 15",
+                      fact_sources=(("target_device", "message"),))
+    ctx = _compile((descr,), _selection((sc0, "req-0")),
+                   _pool((_pooled("i:9", "9"),)), (req0,), prof)
+    ids = {str(p.get("item_id")) for p in ctx.products}
+    assert "9" in ids, (
+        f"text-derived target browse ต้องไม่ถูก visual gate ตัด — {ids}")

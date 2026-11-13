@@ -231,7 +231,12 @@ class AnswerTask:
                 parts.append("ของ " + " / ".join(what))
             if t.target:
                 parts.append(f"ใช้กับ {t.target}")
-            parts += [f"({k}={v})" for k, v in t.constraints]
+            _cvals: dict[str, list] = {}
+            for _k, _v in t.constraints:
+                if _v not in _cvals.setdefault(_k, []):
+                    _cvals[_k].append(_v)
+            parts += [f"({k}={' / '.join(vs)})"
+                      for k, vs in _cvals.items()]
             parts += [
                 (f"งบขั้นต่ำ {v} บาท" if k == "price_min"
                  else f"งบไม่เกิน {v} บาท")
@@ -1241,11 +1246,30 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             codes = {_norm_ref(x) for x in (r.model_codes or ())}
             if codes and scope_refs and not (codes & scope_refs):
                 continue  # request นี้เป็น context ของ subject อื่น
-            if codes or r.subject_refs:
-                continue  # pinned subject request — independent coverage
             if refs_i:
-                tainted_reqs.add(r.request_id)
+                # named need — request-level taint เฉพาะ carrier ที่ถูก
+                #   scope ด้วย validated device (tdev==tn = semantic
+                #   เดิม); trefs-only carrier = subject request ที่พก
+                #   unvalidated target label — candidates คือ asked
+                #   product ที่ serve sibling asks ของมันเอง (display/
+                #   spec need ฯลฯ) ไม่ใช่ compat context เพียว → รอด
+                if _norm_target(r.target_device) == tn:
+                    tainted_reqs.add(r.request_id)
             else:
+                if codes or r.subject_refs:
+                    continue  # pinned subject request — independent
+                              #   coverage (anonymous need: candidates
+                              #   ของมันคือ subject products ไม่ใช่
+                              #   compat context เพียว)
+                # carrier ที่ serve sibling recommend need = retrieval
+                #   pool ของ selection ask นั้น — candidates เป็น answer
+                #   ของ need นั้น (independent coverage) ไม่ใช่ compat
+                #   context เพียวๆ → ไม่ taint; describe/companion needs
+                #   ที่กิน compat context อยู่ยัง drop ตามเดิม
+                if any(n2 is not n and n2.kind == "product"
+                       and n2.operation == "recommend"
+                       for n2 in req_needs.get(r.request_id, ())):
+                    continue
                 # ไม่มี declared subject — unres คือ anonymous candidates ที่
                 #   verdict ไม่ได้ (missing connector evidence ฯลฯ): drop
                 #   เฉพาะ instance ของ card เหล่านั้น บน carrier นี้ —
@@ -1261,6 +1285,50 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                      + (f"unresolved={list(unres)} → partial "
                         if verdicts else "")
                      + "no_evidence → dropped")
+    # ── unproven device-context needs — candidates ที่เป็น relation
+    #   context ของ target ที่พิสูจน์ไม่ได้ (carrier ไม่ใช่ coverage):
+    #   (a) anonymous describe companion ของ primary-compat ask ที่
+    #       declined (provenance intent=compatibility_check + share tn
+    #       เดียวกัน) — history/channel candidates ของมันคือ compat
+    #       context เพียว ไม่ใช่ independent coverage ของ browse จริง;
+    #   (b) live profile target โดยไม่มี compat need (image_desc visual
+    #       context / deictic scope — device identity ไม่ใช่ compat
+    #       proof) — need ที่ไม่ได้ pin subject ของตัวเอง (scope explicit
+    #       หรือ srefs+none = asked product) keep เฉพาะ decided-
+    #       compatible identities ที่ verdict gate ด้านล่าง
+    _ctx_only: set[int] = set()
+    for i in uncovered:
+        n_i = needs[i]
+        if (n_i.kind != "compat"
+                or "intent=compatibility_check"
+                   not in (n_i.provenance or ())):
+            continue
+        tn_i = _norm_target(target_of.get(i))
+        if not tn_i:
+            continue
+        for j, n_j in enumerate(needs):
+            if (j != i and n_j.kind == "product"
+                    and n_j.operation == "describe"
+                    and not n_j.subject_refs
+                    and (getattr(n_j, "subject_scope", "none") or "none")
+                        == "none"
+                    and tn_i in {_norm_target(t)
+                                 for t in (n_j.target_refs or ())}):
+                _ctx_only.add(j)
+    _fs = dict(getattr(profile, "fact_sources", ()) or ())
+    if (profile is not None and profile.target_device
+            and not any(n.kind == "compat" for n in needs)):
+        for j, n_j in enumerate(needs):
+            if (n_j.kind not in PRODUCTISH_NEED_KINDS
+                    or n_j.kind == "compat"):
+                continue
+            _sc = getattr(n_j, "subject_scope", "none") or "none"
+            if _sc == "explicit" or (n_j.subject_refs and _sc == "none"):
+                continue   # independent — card คือ asked product เอง
+            if (_sc in ("current_single", "current_set")
+                    or _fs.get("target_device")
+                    in ("image_desc", "history_image_desc")):
+                _ctx_only.add(j)
     # serialized evidence compile ก่อน need loop — `_ev_idx` = need
     #   indices ที่มี typed-attributed evidence จริง: ตัดสิน task
     #   survival ใน not-cands/no_emit (evidence ครอบ → task คงอยู่
@@ -1683,6 +1751,14 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                     trace.append(
                         f"need[{i}] target_incompatible {s.identity}")
                     continue
+                if i in _ctx_only and oc != "compatible":
+                    # unproven device context — relation context ของ target
+                    #   ที่ยังไม่มี typed proof ไม่ใช่ coverage: keep เฉพาะ
+                    #   decided-compatible identities (undecided/unevaluated
+                    #   = carrier ไม่ใช่คำตอบ)
+                    trace.append(
+                        f"need[{i}] unproven_context {s.identity}")
+                    continue
                 if oc != "compatible" and (
                         sid in unres_ids or s.identity in unres_ids):
                     # evaluated แต่ decide ไม่ได้ (ไม่ใช่ unevaluated)
@@ -1690,7 +1766,15 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                         f"ยังไม่มีข้อมูลยืนยันว่าเข้ากันกับ {ptn}"
                         f" โดยตรง — นำเสนอเป็นตัวเลือกเท่านั้น")
                 kept.append(s)
+            if i in _ctx_only and len(kept) < len(cands):
+                tainted = True
             cands = kept
+        # ctx_only need ที่ไม่ผ่าน verdict channel (ptn ว่าง — decided
+        #   support เป็นไปไม่ได้) → relation context ล้วน → drop ทั้งหมด
+        if i in _ctx_only and n.kind != "compat" and not ptn and cands:
+            trace.append(f"need[{i}] unproven_context")
+            tainted = True
+            cands = []
         # presentation order = canonical selection order verbatim —
         #   selection (retrieval_selection) เป็น ordering owner เดียว:
         #   request-iteration precedence + pick order (subject-first
@@ -1768,6 +1852,52 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             _ask_unanswered.add(i)
         took = 0
         union_hit = False   # union ownership = emitted coverage ของ need นี้
+        _prim_cap = per_need_limit
+        _ok_ids: set = set()
+        _prim_ok = False
+        if n.operation == "recommend":
+            # Task 5 one-primary contract — eligibility ของ primary วัด
+            #   จาก card ที่ขาย/มองเห็นได้จริง (sellable + _scope_card
+            #   ผ่าน หรือ union-emitted); alternative = typed fallback
+            #   เมื่อ pool ไม่มี eligible primary เท่านั้น; หลายรายการ
+            #   เฉพาะ typed multiplicity ที่พิสูจน์ provenance ได้:
+            #   (a) `subject_count` มีความหมายเฉพาะ scope=current_set
+            #       ตาม intent contract — scope อื่นละเว้น;
+            #   (b) asked products = distinct identities ที่ subject_refs
+            #       resolve ได้ผ่าน identity-alias map เดิม (_cand_keys/
+            #       _norm_ref เหมือน evidence attribution) — resolver
+            #       stamp (apply_resolved_subject_refs) เติม id ของ item
+            #       เดียวกัน → refs หลายตัว resolve เป็น identity เดียว
+            #       → นับ 1; ref ที่ resolve ไม่ได้ = ไม่มี product
+            #       evidence → ไม่ขยาย cap (compare = op อื่น ไม่ผ่าน
+            #       gate นี้)
+            _refs = {_norm_ref(r) for r in (n.subject_refs or ())}
+            _declared = ((n.subject_count or 0)
+                         if n.subject_scope == "current_set" else 0)
+            _ref_ask = 0
+            if _refs:
+                _id_by_key: dict = {}
+                for _c in (tuple(pool.eligible or ())
+                           + tuple(pool.unavailable or ())):
+                    for _k in _cand_keys(_c.identity, _c.item_id,
+                                         _c.model_id, _c.card):
+                        _id_by_key.setdefault(_k, _c.identity)
+                for _s in cands:
+                    for _k in _cand_keys(
+                            _s.identity, (_s.card or {}).get("item_id"),
+                            (_s.card or {}).get("model_id"), _s.card):
+                        _id_by_key.setdefault(_k, _s.identity)
+                _ref_ask = len({_id_by_key[k] for k in _refs
+                                if k in _id_by_key})
+            _prim_cap = max(1, _declared, _ref_ask)
+            _ok_ids = {
+                c.identity for c in cands
+                if (c.card or {}).get("sellable", False)
+                and (c.identity in emitted
+                     or _scope_card(c.card, n, c.role))}
+            _prim_ok = any(
+                c.role != "alternative" and c.identity in _ok_ids
+                for c in cands)
         for s in cands:
             prev = emitted.get(s.identity)
             if prev is not None:
@@ -1780,6 +1910,16 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                         f"need[{i}] union {s.identity} → "
                         f"need_indices={prev['need_indices']}")
                 union_hit = True
+                continue
+            if (n.operation == "recommend"
+                    and (s.identity not in _ok_ids
+                         or (s.role == "alternative" and _prim_ok)
+                         or took >= _prim_cap)):
+                # recommendation ปกติ = first eligible primary หนึ่งใบ —
+                #   eligibility ไม่ใช่ optional แม้ _ok_ids ว่าง (ไม่มี
+                #   ตัวผ่าน → products ว่าง ไม่หยิบตัวแรกมาแทน); หลาย
+                #   รายการเฉพาะ typed multiplicity; alternative =
+                #   fallback เมื่อ pool ไม่มี eligible primary
                 continue
             if took >= per_need_limit or len(products) >= hard_cap:
                 continue  # intake ใหม่ถูก quota/cap กั้น — union ยังทำได้
@@ -2411,6 +2551,33 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
         unanswered = [u for u in ctx_unanswered
                       if u.need_index not in covered
                       or (u.reason == "no_evidence" and u.subject_refs)]
+        # one logical ask = 1 unresolved outcome: anonymous no_evidence
+        #   describe need ที่เป็น companion context ของ compat ask เดียวกัน
+        #   → fold เข้า compat outcome. companion identity = typed fields
+        #   เท่านั้น (ไม่ใช่ target overlap อย่างเดียว): product/describe +
+        #   anonymous + scope none + ไม่มี typed ask (facts/asks/features/
+        #   constraints) + provenance ⊆ generic emit + target_refs ทั้งหมด
+        #   อยู่ใน compat target — need ที่พก typed ask/identity ของตัวเอง
+        #   = ask อิสระ → render แยก (Task 7 review correction)
+        _ct = {t for u in unanswered
+               if needs[u.need_index].kind == "compat"
+               for t in (needs[u.need_index].target_refs or ())}
+        unanswered = [
+            u for u in unanswered if not (
+                u.reason == "no_evidence"
+                and u.kind == "product"
+                and u.operation == "describe"
+                and not u.subject_refs
+                and needs[u.need_index].subject_scope == "none"
+                and not needs[u.need_index].requested_facts
+                and not needs[u.need_index].capability_asks
+                and not needs[u.need_index].required_features
+                and not needs[u.need_index].spec_constraints
+                and set(needs[u.need_index].provenance) <= {
+                    "route_context.resolve_route", "media_placeholder"}
+                and needs[u.need_index].target_refs
+                and all(t in _ct
+                        for t in needs[u.need_index].target_refs))]
         if not product_text:
             # task need มี coverage แต่ไม่มี product result (answer เท่า
             # "") — ต้อง surface เป็น unanswered ไม่ให้หายทั้ง need

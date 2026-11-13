@@ -19,8 +19,12 @@ def _routing(
     assigned_admin: str | None = None,
     assigned_admin_name: str | None = None,
     handoff_reason: str | None = None,
+    handoff_state: str | None = None,
 ) -> dict:
-    """สร้าง routing_decision dict สำหรับ observability"""
+    """สร้าง routing_decision dict สำหรับ observability
+
+    handoff_state = typed outcome.state ที่ transport ยืนยัน
+    (assigned|queued) — propagate verbatim เท่านั้น ห้าม derive."""
     return {
         "path": path,
         "reason": reason,
@@ -29,6 +33,7 @@ def _routing(
         "assigned_admin": assigned_admin,
         "assigned_admin_name": assigned_admin_name,
         "handoff_reason": handoff_reason,
+        "handoff_state": handoff_state,
     }
 
 
@@ -38,6 +43,13 @@ HANDOFF_FAILED_REPLY = (
     "ขออภัยค่ะ ตอนนี้ระบบติดต่อแอดมินไม่สำเร็จชั่วคราว "
     "รบกวนลองส่งข้อความอีกครั้งในสักครู่นะคะ"
 )
+
+# deterministic reply wording กลาง — caller ทุก engine (legacy chat() /
+#   chat_v2) ใช้ชุดเดียว (verbatim move จาก app.py literals เดิม)
+GREETING_REPLY = "สวัสดีค่ะ สนใจสินค้าตัวไหนหรือมีอะไรให้ช่วยไหมคะ"
+CLARIFY_REPLY = (
+    "ขอโทษค่ะ ลูกค้าหมายถึงสินค้าตัวไหนคะ "
+    "ช่วยแจ้งชื่อรุ่นหรือส่งการ์ดสินค้าให้หน่อยนะคะ")
 
 _HANDOFF_MAX_ATTEMPTS = 3
 # retryable = 408/429/5xx + network/timeout; HTTP code อื่น (401/403/404/422/4xx) = permanent
@@ -149,3 +161,39 @@ def _send_handoff(req, ctx: dict | None = None, *, reason: str, claim_topic: str
     except Exception as _e:
         print(f"[{log_tag}] handoff setup error: {_e}", file=sys.stderr)
     return None
+
+
+def intent_provider_failure_handoff(req) -> dict:
+    """intent provider failure → operational handoff (contract owner เดียว).
+
+    Caller: legacy chat() และ chat_v2 — ห้าม copy block นี้ระหว่าง engine.
+    เมื่อ provider raise/malformed และ typed plan ไม่มี deterministic route
+    (needs=()) → ส่งต่อแอดมินผ่าน `_send_handoff` transport เดิม; wording
+    ตาม authoritative typed outcome เท่านั้น:
+      assigned → ส่งแล้ว / queued → เข้าคิว / ไม่ยืนยัน → HANDOFF_FAILED_REPLY
+
+    Returns dict: answer, handoff_ok, handoff_reason, handoff_state —
+    caller ประกอบ response/routing metadata เองตาม engine contract
+    """
+    _hs = (_send_handoff(
+               req, None, reason="intent_provider_failure",
+               claim={"topic": "ระบบ intent ขัดข้อง"},
+               simulate=True, log_tag="INTENT-PROVIDER-HANDOFF")
+           if getattr(req, "conversation_id", None) else None)
+    _ok = bool(_hs)
+    _state = str(((_hs or {}).get("outcome") or {}).get("state") or "").lower()
+    if not _ok:
+        _answer = HANDOFF_FAILED_REPLY
+    elif _state == "queued":
+        _answer = (
+            "ขออภัยค่ะ ระบบขัดข้องชั่วคราว "
+            "ตอนนี้แชทนี้เข้าคิวให้แอดมินแล้วนะคะ "
+            "รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ")
+    else:
+        _answer = (
+            "ขออภัยค่ะ ระบบขัดข้องชั่วคราว "
+            "ตอนนี้ส่งต่อแชทนี้ให้แอดมินแล้วนะคะ "
+            "รบกวนรอการติดต่อกลับจากแอดมินอีกครั้งนะคะ")
+    return {"answer": _answer, "handoff_ok": _ok,
+            "handoff_reason": "intent_provider_failure" if _ok else "",
+            "handoff_state": _state}
