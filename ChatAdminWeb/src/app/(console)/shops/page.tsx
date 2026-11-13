@@ -215,6 +215,7 @@ export default function ShopsPage() {
       title="ร้านค้า"
       helpHref="/help#shops"
       subtitle={`ร้านในเครือทั้งหมด ${total} ร้าน`}
+      stickyMobileSearch
       actions={
         <Button size="sm" variant="outline" onClick={load} disabled={loading}>
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
@@ -222,7 +223,7 @@ export default function ShopsPage() {
       }
     >
       {/* Search — full row */}
-        <div className="flex items-center gap-1.5">
+        <div className="phone-search-anchor flex items-center gap-1.5">
           <div className="relative flex-1">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
             <input
@@ -295,7 +296,7 @@ export default function ShopsPage() {
         </div>
 
         {/* Sort options */}
-        <div className="flex items-center gap-2 text-xs overflow-x-auto pb-1">
+        <div className="phone-chip-row flex items-center gap-2 text-xs overflow-x-auto pb-1">
           <span className="text-text-muted shrink-0">เรียงตาม:</span>
           {sortOptions.map((opt) => (
             <button

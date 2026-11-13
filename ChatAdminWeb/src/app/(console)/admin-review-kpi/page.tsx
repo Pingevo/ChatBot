@@ -11,6 +11,7 @@ import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/co
 import { api } from "@/lib/apiClient";
 import { useAuth } from "@/lib/authStore";
 import { BarChart3, Bot, FlaskConical, TestTube2, Star, MessageSquare, RefreshCw, ChevronDown, ChevronRight, User } from "lucide-react";
+import { MobileButton, MobileCard, MobileDataCard, MobileDataTable } from "@/components/mobile/MobilePresentation";
 
 interface KpiSummary {
   admin_id: string;
@@ -217,7 +218,7 @@ export default function AdminKpiPage() {
     >
 
       {/* Summary cards */}
-      <div className="px-6 py-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="phone-summary-section px-6 py-4 grid grid-cols-2 md:grid-cols-4 gap-3">
         <Card className="p-4">
           <div className="flex items-center gap-2 text-text-muted text-xs mb-1">
             <Bot size={14} /> ทดสอบแชท
@@ -249,7 +250,78 @@ export default function AdminKpiPage() {
       </div>
 
       {/* Admin table */}
-      <div className="px-6 pb-6">
+      <div className="phone-summary-section px-6 pb-6">
+        <div className="mobile-only-grid gap-3 pb-4">
+          <div>
+            <h2 className="text-base font-semibold text-text">รายการแอดมิน ({summary.length})</h2>
+            <p className="mt-1 text-sm text-text-muted">เปิดรายละเอียดเพื่อดูเซสชัน รีวิว และผลการรีเพลย์</p>
+          </div>
+          {summary.map((s) => {
+            const expanded = expandedAdmin === s.admin_id;
+            const assignmentComments = s.test_assignment_msg_commented + s.test_assignment_conv_commented;
+            return (
+              <div key={s.admin_id} className="grid gap-3">
+                <MobileDataCard
+                  title={s.name || s.username || s.admin_id}
+                  subtitle={`${roleLabel[s.role || ""] || s.role || "แอดมิน"} · ${s.admin_id}`}
+                  actions={(
+                    <MobileButton type="button" size="sm" variant={expanded ? "secondary" : "outline"} onClick={() => toggleAdmin(s.admin_id)}>
+                      {expanded ? "ซ่อนรายละเอียด" : "ดูรายละเอียด"}
+                    </MobileButton>
+                  )}
+                  rows={[
+                    { label: "แชท · เซสชันที่รีวิว", value: s.test_chat_sessions_rated },
+                    { label: "แชท · คำตอบที่ให้คะแนน", value: s.test_chat_messages_rated },
+                    { label: "แชท · ดาวเฉลี่ย", value: s.test_chat_avg_star > 0 ? s.test_chat_avg_star : "—" },
+                    { label: "แชท · ดี / ไม่ดี", value: `${s.test_chat_good} / ${s.test_chat_bad}` },
+                    { label: "แชท · คอมเมนต์", value: s.test_chat_commented || "—" },
+                    { label: "จ่ายงาน · รีเพลย์", value: s.test_assignment_replays || "—" },
+                    { label: "จ่ายงาน · คำตอบที่ให้คะแนน", value: s.test_assignment_msg_rated || "—" },
+                    { label: "จ่ายงาน · แชทที่ให้คะแนน", value: s.test_assignment_conv_rated || "—" },
+                    { label: "จ่ายงาน · คอมเมนต์", value: assignmentComments || "—" },
+                    { label: "Shadow · Generate", value: s.shadow_generated || "—" },
+                    { label: "Shadow · ให้คะแนน", value: (s.shadow_rated + s.shadow_star_rated) || "—" },
+                    { label: "Shadow · คอมเมนต์", value: s.shadow_commented || "—" },
+                  ]}
+                />
+                {expanded && (
+                  <MobileCard className="space-y-3">
+                    <div role="group" aria-label="เลือกประเภทข้อมูล" className="mobile-wrap-controls flex gap-2">
+                      {([
+                        { key: "test_chat", label: "เซสชันทดสอบแชท", icon: Bot },
+                        { key: "test_assignment", label: "รีเพลย์จ่ายงาน", icon: TestTube2 },
+                        { key: "shadow", label: "Shadow Inbox", icon: FlaskConical },
+                      ] as const).map((tab) => {
+                        const active = drilldownTab === tab.key;
+                        return (
+                          <button
+                            key={tab.key}
+                            type="button"
+                            aria-pressed={active}
+                            onClick={() => switchTab(tab.key)}
+                            className={`min-h-11 flex-1 rounded-lg px-3 py-2 text-sm font-medium ${active ? "bg-brand text-white" : "bg-surface-2 text-text-muted"}`}
+                          >
+                            {tab.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {drilldownLoading ? <Loading /> : drilldownTab === "test_chat" ? (
+                      <DrilldownSessionsTable sessions={drilldownData.sessions || []} />
+                    ) : drilldownTab === "test_assignment" ? (
+                      <DrilldownReplaysTable replays={drilldownData.replays || []} />
+                    ) : (
+                      <DrilldownShadowsTable shadows={drilldownData.shadows || []} />
+                    )}
+                  </MobileCard>
+                )}
+              </div>
+            );
+          })}
+          {summary.length === 0 && <EmptyState icon={User} title="ไม่มีข้อมูล" description="ยังไม่มี activity ในช่วงเวลาที่เลือก" />}
+        </div>
+
+        <div className="mobile-hidden">
         <Card className="overflow-hidden">
           <div className="px-4 py-3 border-b border-border bg-surface-subtle">
             <h2 className="text-sm font-semibold text-text">รายการแอดมิน ({summary.length})</h2>
@@ -384,6 +456,7 @@ export default function AdminKpiPage() {
             </div>
           )}
         </Card>
+        </div>
       </div>
     </PageShell>
   );
@@ -396,7 +469,28 @@ export default function AdminKpiPage() {
 function DrilldownSessionsTable({ sessions }: { sessions: DrilldownSession[] }) {
   if (sessions.length === 0) return <EmptyState icon={Bot} title="ไม่มีเซสชัน" description="ยังไม่ได้ให้คะแนนทดสอบแชทในช่วงเวลานี้" />;
   return (
-    <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+    <>
+    <div className="mobile-only-grid gap-2">
+      {sessions.map((s) => (
+        <MobileDataCard
+          key={s.session_id}
+          title={`เซสชัน ${s.session_id.slice(-12)}`}
+          subtitle={`${s.shop || "ไม่ระบุร้าน"} · ${s.platform || "ไม่ระบุแพลตฟอร์ม"}`}
+          previewCount={2}
+          rows={[
+            { label: "รหัสเซสชัน", value: <code className="break-all">{s.session_id}</code> },
+            { label: "แพลตฟอร์ม", value: s.platform || "—" },
+            { label: "ร้านค้า", value: s.shop || "—" },
+            { label: "คำตอบที่ให้คะแนน", value: s.messages_rated },
+            { label: "ดาวเฉลี่ย", value: s.avg_star > 0 ? s.avg_star : "—" },
+            { label: "คอมเมนต์", value: s.comments || "—" },
+            { label: "ให้คะแนนล่าสุด", value: fmtDate(s.last_rated_at) },
+          ]}
+        />
+      ))}
+    </div>
+    <div className="hidden md:block">
+    <MobileDataTable className="max-h-[400px] overflow-y-auto">
       <table className="w-full text-sm">
         <thead className="text-text-muted text-xs sticky top-0 bg-surface">
           <tr>
@@ -430,14 +524,39 @@ function DrilldownSessionsTable({ sessions }: { sessions: DrilldownSession[] }) 
           ))}
         </tbody>
       </table>
+    </MobileDataTable>
     </div>
+    </>
   );
 }
 
 function DrilldownReplaysTable({ replays }: { replays: DrilldownReplay[] }) {
   if (replays.length === 0) return <EmptyState icon={TestTube2} title="ไม่มีการรีเพลย์" description="ยังไม่ได้กดรีเพลย์ในช่วงเวลานี้" />;
   return (
-    <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+    <>
+    <div className="mobile-only-grid gap-2">
+      {replays.map((r) => (
+        <MobileDataCard
+          key={r.conversation_id}
+          title={`แชท ${r.conversation_id.slice(-12)}`}
+          subtitle={`${r.shop_name || "ไม่ระบุร้าน"} · ${r.platform || "ไม่ระบุแพลตฟอร์ม"}`}
+          previewCount={2}
+          rows={[
+            { label: "รหัสแชท", value: <code className="break-all">{r.conversation_id}</code> },
+            { label: "ร้านค้า", value: r.shop_name || "—" },
+            { label: "แพลตฟอร์ม", value: r.platform || "—" },
+            { label: "ประมวลผล / ทั้งหมด", value: `${r.processed_messages} / ${r.total_messages}` },
+            { label: "ให้คะแนน", value: r.msg_rated },
+            { label: "ดาว", value: r.conv_star_rating ?? "—" },
+            { label: "สถานะ", value: r.final_status },
+            { label: "คอมเมนต์", value: r.conv_comment || "—" },
+            { label: "กดรีเพลย์เมื่อ", value: fmtDate(r.replayed_at) },
+          ]}
+        />
+      ))}
+    </div>
+    <div className="hidden md:block">
+    <MobileDataTable className="max-h-[400px] overflow-y-auto">
       <table className="w-full text-sm">
         <thead className="text-text-muted text-xs sticky top-0 bg-surface">
           <tr>
@@ -485,14 +604,39 @@ function DrilldownReplaysTable({ replays }: { replays: DrilldownReplay[] }) {
           ))}
         </tbody>
       </table>
+    </MobileDataTable>
     </div>
+    </>
   );
 }
 
 function DrilldownShadowsTable({ shadows }: { shadows: DrilldownShadow[] }) {
   if (shadows.length === 0) return <EmptyState icon={FlaskConical} title="ไม่มี Shadow Reply" description="ยังไม่ได้ Generate ในช่วงเวลานี้" />;
   return (
-    <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+    <>
+    <div className="mobile-only-grid gap-2">
+      {shadows.map((s) => (
+        <MobileDataCard
+          key={s.shadow_reply_id}
+          title={`Shadow ${s.shadow_reply_id.slice(-12)}`}
+          subtitle={`${s.platform} · ${s.origin === "manual_conversation" ? "ทั้งแชท" : "ข้อความ"}`}
+          previewCount={2}
+          rows={[
+            { label: "รหัส Shadow", value: <code className="break-all">{s.shadow_reply_id}</code> },
+            { label: "รหัสแชท", value: <code className="break-all">{s.conversation_id}</code> },
+            { label: "แพลตฟอร์ม", value: s.platform },
+            { label: "ประเภท", value: s.origin === "manual_conversation" ? "Generate ทั้งแชท" : "Generate ทีละข้อความ" },
+            { label: "แหล่งบอท", value: s.bot_source || "—" },
+            { label: "คะแนน", value: s.rating ? (s.rating === "good" ? "ดี" : s.rating === "bad" ? "ไม่ดี" : s.rating) : "—" },
+            { label: "ดาว", value: s.star_rating ?? "—" },
+            { label: "คอมเมนต์", value: s.has_comment ? "มี" : "—" },
+            { label: "สร้างเมื่อ", value: fmtDate(s.created_at) },
+          ]}
+        />
+      ))}
+    </div>
+    <div className="hidden md:block">
+    <MobileDataTable className="max-h-[400px] overflow-y-auto">
       <table className="w-full text-sm">
         <thead className="text-text-muted text-xs sticky top-0 bg-surface">
           <tr>
@@ -540,6 +684,8 @@ function DrilldownShadowsTable({ shadows }: { shadows: DrilldownShadow[] }) {
           ))}
         </tbody>
       </table>
+    </MobileDataTable>
     </div>
+    </>
   );
 }

@@ -15,6 +15,7 @@ import { toast, useToastError } from "@/components/ui/Toast";
 import { FilterPresets } from "@/components/ui/FilterPresets";
 import { Pagination } from "@/components/ui/Pagination";
 import { ACTION_CATEGORIES, ACTION_TONE, actionTypeLabel } from "@/lib/actionTypes";
+import { MobileDataTable } from "@/components/mobile/MobilePresentation";
 
 // Phase 7.10 — หน้า Logs แยกจาก config
 // แสดง audit trail ของทุก action ในระบบ พร้อม filter admin + action_type
@@ -47,12 +48,21 @@ interface AdminOption {
   role: string;
 }
 
+interface ZaapiImportLogRow {
+  _id: string; op: string; file?: string; rev_from?: number; rev_to?: number;
+  status?: string; admin?: string; at?: string;
+}
+
 export default function LogsPage() {
   const searchRef = useRef<HTMLInputElement>(null);
   useSearchShortcut(searchRef);
   const handleSearchEsc = useEscToClear(() => setSearch(""));
   const { user } = useAuth();
   const [logs, setLogs] = useState<AdminLogRow[]>([]);
+  const [zaapiImportLogs, setZaapiImportLogs] = useState<ZaapiImportLogRow[]>([]);
+  const [zaapiImportLogError, setZaapiImportLogError] = useState(false);
+  const [zaapiImportLogLoading, setZaapiImportLogLoading] = useState(true);
+
   const [loading, setLoading] = useState(true);
   const [admins, setAdmins] = useState<AdminOption[]>([]);
   const [filterAdmin, setFilterAdmin] = useState<string>("all");
@@ -153,9 +163,22 @@ export default function LogsPage() {
     }
   }, [page, filterAdmin, filterCategory, filterActionType, debouncedSearch, canViewLogs]);
 
-  useEffect(() => {
-    loadLogs();
-  }, [loadLogs]);
+  const loadZaapiImportLogs = useCallback(async () => {
+    if (!canViewLogs) return;
+    setZaapiImportLogLoading(true);
+    try {
+      const r = await api().get<{ log: ZaapiImportLogRow[] }>("/zaapi-kb/import-log", { params: { limit: 100 } });
+      setZaapiImportLogs(r.data.log || []);
+      setZaapiImportLogError(false);
+    } catch {
+      setZaapiImportLogError(true);
+    } finally {
+      setZaapiImportLogLoading(false);
+    }
+  }, [canViewLogs]);
+
+  useEffect(() => { loadLogs(); }, [loadLogs]);
+  useEffect(() => { loadZaapiImportLogs(); }, [loadZaapiImportLogs]);
 
   // poll 5 วิ เฉพาะหน้า 1 — หน้า 2+ ไม่ poll เพื่อไม่ให้ตำแหน่ง log เลื่อน
   // silent: ไม่แตะ loading ไม่งั้น list ถูกแทนด้วย spinner ทุก 5 วิ → DOM หาย → scroll เด้งกลับบน
@@ -212,7 +235,16 @@ export default function LogsPage() {
       icon={ScrollText}
       title="บันทึกระบบ"
       helpHref="/help#logs"
-      subtitle={<>audit trail · {total.toLocaleString("th-TH")} รายการ · รีเฟรชทุก 5 วิ (หน้า 1) · <a href="/help#action-types" className="text-brand hover:text-brand-dark">ดูรหัส action_type ทั้งหมด →</a></>}
+      subtitle={
+        <>
+          <span className="md:hidden">
+            {total.toLocaleString("th-TH")} รายการ · <a href="/help#action-types" className="text-brand hover:text-brand-dark">action_type →</a>
+          </span>
+          <span className="hidden md:inline">
+            audit trail · {total.toLocaleString("th-TH")} รายการ · รีเฟรชทุก 5 วิ (หน้า 1) · <a href="/help#action-types" className="text-brand hover:text-brand-dark">ดูรหัส action_type ทั้งหมด →</a>
+          </span>
+        </>
+      }
       actions={
         <>
           {/* ⚡ v2 — tab สลับมุมมอง ลิสต์/ตาราง */}
@@ -232,7 +264,7 @@ export default function LogsPage() {
               <Table2 size={12} /> ตาราง
             </button>
           </div>
-          <Button size="sm" variant="outline" onClick={() => loadLogs()} disabled={loading}>
+          <Button size="sm" variant="outline" onClick={() => { loadLogs(); loadZaapiImportLogs(); }} disabled={loading}>
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
           </Button>
         </>
@@ -488,6 +520,33 @@ export default function LogsPage() {
           </>
         )}
       </div>
+      <section className="mt-6 rounded-xl border border-border bg-surface" aria-label="ประวัติ Zaapi KB Import และ Rollback">
+        <div className="px-4 py-3 border-b border-border bg-surface-2 rounded-t-xl">
+          <h2 className="text-sm font-semibold text-text">ประวัติ Zaapi KB Import / Rollback</h2>
+          <p className="text-xs text-text-muted">รายการล่าสุดสูงสุด 100 รายการ</p>
+        </div>
+        {zaapiImportLogLoading ? (
+          <div className="px-4 py-4"><Loading /></div>
+        ) : zaapiImportLogError ? (
+          <p className="px-4 py-4 text-xs text-error">โหลดประวัติ Zaapi KB ไม่สำเร็จ กดรีเฟรชเพื่อลองใหม่</p>
+        ) : zaapiImportLogs.length === 0 ? (
+          <p className="px-4 py-4 text-xs text-text-muted">ยังไม่มีประวัติ Import / Rollback</p>
+        ) : (
+          <div className="divide-y divide-border max-h-80 overflow-y-auto">
+            {zaapiImportLogs.map((entry) => (
+              <div key={entry._id} className="px-4 py-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                <span className={entry.status === "ok" ? "font-medium text-success" : "font-medium text-warning"}>
+                  {entry.op}:{entry.status}
+                </span>
+                <span className="text-text break-all flex-1 min-w-[160px]">{entry.file || "—"}</span>
+                <span className="text-text-subtle">{entry.rev_from != null && entry.rev_to != null ? `r${entry.rev_from}→r${entry.rev_to}` : entry.rev_to != null ? `→r${entry.rev_to}` : ""}</span>
+                <span className="text-text-subtle">{entry.admin || ""}</span>
+                <span className="text-text-subtle">{entry.at ? new Date(entry.at).toLocaleString("th-TH") : ""}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
     </PageShell>
   );
 }
@@ -560,7 +619,7 @@ function LogTableView({
           </button>
         )}
       </fieldset>
-      <div className="overflow-x-auto">
+      <MobileDataTable>
         <table className="w-full text-xs min-w-[640px]">
           <thead className="bg-surface-2 text-text-muted sticky top-0">
             <tr>
@@ -676,7 +735,7 @@ function LogTableView({
             })}
           </tbody>
         </table>
-      </div>
+      </MobileDataTable>
     </div>
   );
 }

@@ -12,6 +12,7 @@ import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 
 interface ShopRow {
   shop_id: string;
@@ -50,8 +51,16 @@ export function ShopDetailDrawer({ shop, onClose }: Props) {
   if (!shop) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-stretch justify-end bg-black/50" onClick={onClose}>
+    <ModalLayer
+      presentation="fullscreen"
+      className="fixed inset-0 z-50 flex items-stretch justify-end bg-black/50"
+      onClick={onClose}
+    >
       <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="shop-detail-drawer-title"
+        data-dialog-presentation="drawer"
         className="bg-surface w-full max-w-3xl h-full flex flex-col shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
@@ -59,7 +68,7 @@ export function ShopDetailDrawer({ shop, onClose }: Props) {
         <div className="flex items-center gap-3 px-5 py-4 border-b border-border shrink-0">
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-semibold text-text truncate">{shop.shopname}</h2>
+              <h2 id="shop-detail-drawer-title" className="text-base font-semibold text-text truncate">{shop.shopname}</h2>
               <Badge tone={shop.connected ? "brand" : "neutral"}>
                 {shop.connected ? "เชื่อมต่อ" : "ปิดอยู่"}
               </Badge>
@@ -73,7 +82,7 @@ export function ShopDetailDrawer({ shop, onClose }: Props) {
           </div>
           <button
             onClick={onClose}
-            className="w-8 h-8 rounded-lg hover:bg-surface-2 flex items-center justify-center transition-colors"
+            className="h-11 w-11 rounded-lg hover:bg-surface-2 flex items-center justify-center transition-colors"
             title="ปิด"
             aria-label="ปิด"
           >
@@ -82,13 +91,14 @@ export function ShopDetailDrawer({ shop, onClose }: Props) {
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-border shrink-0">
+        <div className="shop-detail-drawer-tabs flex border-b border-border shrink-0" role="group" aria-label="รายละเอียดร้าน">
           {tabs.map((t) => {
             const Icon = t.icon;
             return (
               <button
                 key={t.id}
                 onClick={() => handleTabChange(t.id)}
+                aria-pressed={tab === t.id}
                 className={`flex items-center gap-1.5 px-4 py-2.5 text-xs font-medium transition-colors ${
                   tab === t.id ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"
                 }`}
@@ -121,7 +131,7 @@ export function ShopDetailDrawer({ shop, onClose }: Props) {
           {tab === "kb" && <KBTab shop={shop} search={search} editable={editable} catchError={catchError} />}
         </div>
       </div>
-    </div>
+    </ModalLayer>
   );
 }
 

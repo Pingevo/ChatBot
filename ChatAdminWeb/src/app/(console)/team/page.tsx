@@ -7,6 +7,7 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Loading } from "@/components/ui/Loading";
 import { PageShell } from "@/components/ui/PageShell";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
+import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import {
   Users, RefreshCw, Settings,
   MessageSquare, AlertCircle, Activity, Store, Globe,
@@ -20,6 +21,7 @@ import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
 import { LeaveCalendar } from "@/components/team/LeaveCalendar";
+import { MobileInfoCard } from "@/components/mobile/MobilePresentation";
 import type { Platform } from "@/lib/types";
 
 interface AgentShopDetail {
@@ -573,7 +575,7 @@ export default function TeamPage() {
               <Badge tone="brand">{visibleAgents.length} คน</Badge>
               <span className="text-[11px] text-text-subtle hidden md:inline">กดเพื่อดูร้าน/แพลตฟอร์มที่ดูแล</span>
               {/* ⚡ filter ตามแพลตฟอร์มที่ agent ครอบคลุม */}
-              <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto sm:ml-auto pb-0.5 sm:pb-0">
+              <div className="phone-chip-row flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto sm:ml-auto pb-0.5 sm:pb-0">
                 <FilterChip
                   active={overviewPlatformFilter === "all"}
                   onClick={() => setOverviewPlatformFilter("all")}
@@ -602,72 +604,43 @@ export default function TeamPage() {
             ) : (
               <>
                 {/* Mobile / tablet — card list (<lg) */}
-                <div className="lg:hidden divide-y divide-border/60">
+                <div className="lg:hidden space-y-2.5">
                   {visibleAgents.map((a, i) => {
                     const st = statusOf(a.admin_id);
-                    const isExpanded = expandedAgent === a.admin_id;
                     const agentShops = agentShopsOf(a);
                     const agentPlatforms = platforms.filter((p) => agentPlatformValuesOf(a).includes(p.value));
                     return (
-                      <div key={`agent-card-${a.admin_id}-${i}`} className={isExpanded ? "bg-brand/5" : ""}>
-                        <button
-                          onClick={() => setExpandedAgent(isExpanded ? null : a.admin_id)}
-                          className="w-full text-left px-4 py-3.5 space-y-2.5 hover:bg-surface-2/30 transition-colors"
-                        >
-                          <div className="flex items-center gap-3">
-                            <AgentAvatar name={a.name || a.username} online={a.is_active_agent} size={36} />
-                            <div className="flex-1 min-w-0">
-                              <div className="flex items-center gap-1.5">
-                                <span className="text-sm font-semibold text-text truncate">{a.name || a.username}</span>
-                                <Badge tone={roleTone(a.role)}>{a.role}</Badge>
-                              </div>
-                              <div className="text-[11px] text-text-muted truncate flex items-center gap-1.5 mt-0.5">
-                                <span className={`inline-flex items-center gap-1 ${a.is_active_agent ? "text-success" : "text-text-subtle"}`}>
-                                  <span className={`w-1.5 h-1.5 rounded-full ${a.is_active_agent ? "bg-success" : "bg-surface-4"}`} />
-                                  {a.is_active_agent ? "ออนไลน์" : "ปิด"}
-                                </span>
-                                <span className="text-text-subtle">@{a.username}</span>
-                              </div>
-                            </div>
-                            <StatusPill st={st} />
-                            <ChevronDown size={14} className={`text-text-subtle shrink-0 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
-                          </div>
-
-                          <div className="grid grid-cols-3 gap-1.5">
-                            <MiniStat label="เปิดอยู่" value={a.workload.active} highlight={a.workload.active > 0} />
-                            <MiniStat label="ทั้งหมด" value={a.workload.all} />
-                            <MiniStat label="ปิดแล้ว" value={a.workload.closed} />
-                          </div>
-
-                          <div className="flex items-center justify-between gap-2 text-[11px]">
-                            {st ? (
-                              <span className="flex items-center gap-2.5 text-text-muted min-w-0">
-                                <span className="inline-flex items-center gap-1 whitespace-nowrap">
-                                  <Clock size={10} className="text-success" />
-                                  {formatDuration(st.accepting_ms)} รับ
-                                </span>
-                                <span className="inline-flex items-center gap-1 whitespace-nowrap">
-                                  <PauseCircle size={10} className="text-warning" />
-                                  {formatDuration(st.paused_ms)} พัก
-                                </span>
-                              </span>
-                            ) : (
-                              <span className="text-text-subtle">ไม่มีข้อมูลวันนี้</span>
-                            )}
-                            <CoverageDots agentShops={agentShops} agentPlatforms={agentPlatforms} />
-                          </div>
-                        </button>
-                        {isExpanded && (
-                          <div className="px-4 pb-4 animate-fade-in">
-                            <AgentExpandedContent
-                              hist={a.history}
-                              agentShops={agentShops}
-                              agentPlatforms={agentPlatforms}
-                              dateRange={data.date_range}
-                            />
-                          </div>
-                        )}
-                      </div>
+                      <MobileInfoCard
+                        key={`agent-card-${a.admin_id}-${i}`}
+                        title={a.name || a.username}
+                        subtitle={`@${a.username} · ${a.role}`}
+                        leading={<AgentAvatar name={a.name || a.username} online={a.is_active_agent} size={34} />}
+                        summary={<div className="flex flex-wrap items-center gap-2 text-xs">
+                          <span className={`inline-flex items-center gap-1 ${a.is_active_agent ? "text-success" : "text-text-subtle"}`}>
+                            <span className={`h-1.5 w-1.5 rounded-full ${a.is_active_agent ? "bg-success" : "bg-surface-4"}`} />
+                            {a.is_active_agent ? "ออนไลน์" : "ปิด"}
+                          </span>
+                          <StatusPill st={st} />
+                          <span className="font-medium text-text-muted">{a.workload.active} งานเปิด</span>
+                        </div>}
+                        previewCount={3}
+                        rows={[
+                          { label: "บทบาท", value: <Badge tone={roleTone(a.role)}>{a.role}</Badge> },
+                          { label: "สถานะรับแชท", value: st ? (st.current_state === "accepting" ? "รับแชท" : "พัก") : "ไม่มีข้อมูลวันนี้" },
+                          { label: "งานเปิดอยู่", value: a.workload.active },
+                          { label: "งานทั้งหมด", value: a.workload.all },
+                          { label: "ปิดแล้ว", value: a.workload.closed },
+                          { label: "เวลารับแชทวันนี้", value: st ? formatDuration(st.accepting_ms) : "—" },
+                          { label: "เวลาพักวันนี้", value: st ? formatDuration(st.paused_ms) : "—" },
+                          { label: "ขอบเขตดูแล", value: <CoverageDots agentShops={agentShops} agentPlatforms={agentPlatforms} /> },
+                        ]}
+                        details={<AgentExpandedContent
+                          hist={a.history}
+                          agentShops={agentShops}
+                          agentPlatforms={agentPlatforms}
+                          dateRange={data.date_range}
+                        />}
+                      />
                     );
                   })}
                 </div>
@@ -823,7 +796,7 @@ export default function TeamPage() {
                 {/* คอลัมน์ซ้าย — platform filter + ตัวเลือกร้าน */}
                 <div className="space-y-3 min-w-0">
                   {/* Platform filter chips */}
-                  <div className="flex lg:flex-wrap items-center gap-1.5 overflow-x-auto pb-0.5">
+                  <div className="phone-chip-row flex lg:flex-wrap items-center gap-1.5 overflow-x-auto pb-0.5">
                     <FilterChip
                       active={shopPlatformFilter === "all"}
                       onClick={() => setShopPlatformFilter("all")}
@@ -926,7 +899,7 @@ export default function TeamPage() {
                     </div>
 
                     {/* Filter sub-tabs */}
-                    <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2/50 overflow-x-auto">
+                    <div className="phone-chip-row flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2/50 overflow-x-auto">
                       <SubFilterTabs
                         value={shopFilter}
                         onChange={setShopFilter}
@@ -1091,13 +1064,13 @@ export default function TeamPage() {
                             return (
                               <td key={p.value} className={`px-4 py-3 text-center ${selectedPlatform === p.value ? "bg-brand/5" : ""}`}>
                                 <ToggleSwitch
-                                  checked={isInTeam}
-                                  disabled={!editable || busy}
+                                  enabled={isInTeam}
+                                  disabled={!editable}
                                   onChange={() => isInTeam
                                     ? handleRemoveAgentFromPlatform(a.admin_id, p.value)
                                     : handleAddAgentToPlatform(a.admin_id, p.value)}
                                   loading={busy}
-                                  label={isInTeam
+                                  ariaLabel={isInTeam
                                     ? `เอา ${a.name || a.username} ออกจากทีม ${p.label}`
                                     : `เพิ่ม ${a.name || a.username} เข้าทีม ${p.label}`}
                                 />
@@ -1116,7 +1089,7 @@ export default function TeamPage() {
 
               {/* Mobile/tablet — agent list ของแพลตฟอร์มที่เลือก (<lg) */}
               <Card className="lg:hidden overflow-hidden">
-                <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2/50 overflow-x-auto">
+                <div className="phone-chip-row flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2/50 overflow-x-auto">
                   <SubFilterTabs
                     value={platformFilter}
                     onChange={setPlatformFilter}
@@ -1269,16 +1242,6 @@ function StatusPill({ st }: { st?: ChatStatusRow }) {
   );
 }
 
-/** MiniStat — ตัวเลขงานตัวเดียวใน card list บน mobile */
-function MiniStat({ label, value, highlight = false }: { label: string; value: number; highlight?: boolean }) {
-  return (
-    <div className="rounded-lg bg-surface-2/60 px-2 py-1.5 text-center">
-      <div className={`text-sm font-bold ${highlight ? "text-vibrant-coral" : "text-text"}`}>{value}</div>
-      <div className="text-[10px] text-text-subtle">{label}</div>
-    </div>
-  );
-}
-
 /** CoverageDots — สรุป platform dots + จำนวนร้านที่ agent ดูแล (แบบย่อ) */
 function CoverageDots({ agentShops, agentPlatforms }: { agentShops: AgentShopDetail[]; agentPlatforms: { value: Platform; label: string; color: string }[] }) {
   if (agentShops.length === 0 && agentPlatforms.length === 0) {
@@ -1411,11 +1374,11 @@ function AgentToggleRow({
         </div>
       </div>
       <ToggleSwitch
-        checked={isInTeam}
-        disabled={disabled || busy}
+        enabled={isInTeam}
+        disabled={disabled}
         onChange={onToggle}
         loading={busy}
-        label={isInTeam
+        ariaLabel={isInTeam
           ? `เอา ${a.name || a.username} ออกจากทีม`
           : `เพิ่ม ${a.name || a.username} เข้าทีม`}
       />
@@ -1513,47 +1476,5 @@ function HistStat({
       <span className={`text-sm font-bold ${toneClass}`}>{value}</span>
       <span className="text-[10px] text-text-subtle">{label}</span>
     </div>
-  );
-}
-
-/** Toggle switch — ใช้ในจัดทีมร้าน/แพลตฟอร์ม แทนปุ่ม add/remove */
-function ToggleSwitch({
-  checked,
-  disabled,
-  loading,
-  onChange,
-  label,
-}: {
-  checked: boolean;
-  disabled?: boolean;
-  loading?: boolean;
-  onChange: () => void;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      title={label}
-      disabled={disabled || loading}
-      onClick={onChange}
-      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
-        checked ? "bg-brand" : "bg-surface-2 border border-border"
-      }`}
-    >
-      {loading ? (
-        <span className="absolute left-1/2 -translate-x-1/2">
-          <Loading size={10} />
-        </span>
-      ) : (
-        <span
-          className={`inline-block h-3.5 w-3.5 rounded-full bg-white shadow transition-transform ${
-            checked ? "translate-x-[18px]" : "translate-x-1"
-          }`}
-        />
-      )}
-    </button>
   );
 }

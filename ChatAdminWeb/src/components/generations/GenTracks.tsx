@@ -1,8 +1,8 @@
 "use client";
-// Fleet view — 4 หลอด (3 daily + 1 weekly ล่าสุด) หลอดละสีตามสถานะ
+// Fleet view — up to 3 daily lanes and the latest weekly lane when one exists.
 // แมว pixel อยู่ที่ตำแหน่ง progress ของแต่ละ gen (เดิน = building, ยืนสุดหลอด = เสร็จ)
 import React from "react";
-import { PixelCat } from "./BuildProgressCat";
+import { PixelCat, type PixelCatAction } from "./BuildProgressCat";
 
 type Run = {
   _id: string; build_kind?: string; status: string;
@@ -11,6 +11,7 @@ type Run = {
 };
 
 const SLOT_ORDER = 9; // จำนวน step ใน pipeline (สำหรับ overall%)
+const ROAD_LAMP_STATIONS = [14, 38, 62, 86] as const;
 
 const TUBE: Record<string, { bar: string; label: string }> = {
   active:    { bar: "bg-gradient-to-r from-emerald-400 to-emerald-500", label: "ใช้งานอยู่" },
@@ -40,30 +41,57 @@ function Lane({ run, active, slot }: {
   const t = TUBE[status] || TUBE.discarded;
   const pct = run ? Math.min(100, Math.max(4, overall(run))) : 0;
   const building = run?.status === "building";
+  const catAction: PixelCatAction = building
+    ? "walk"
+    : status === "active" ? "wave"
+      : run?.status === "published" || run?.status === "pending" ? "snack" : "idle";
   return (
-    <div className="flex items-center gap-2">
-      <span className={`w-14 text-[10px] text-right shrink-0 ${
+    <div className={`generation-track-lane flex items-center gap-2${building ? " is-building" : ""}`}>
+      <span className={`generation-track-kind w-14 text-[10px] text-right shrink-0 ${
         slot === "weekly" ? "text-violet-500 font-semibold" : "text-muted"}`}>
         {slot === "weekly" ? "weekly" : "daily"}
       </span>
-      <div className="relative flex-1 h-8">
+      <div className="generation-track-rail relative flex-1 h-8">
         {/* หลอด */}
-        <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-3 rounded-full bg-border/40 overflow-hidden">
+        <div
+          className="generation-track-progress generation-road-progress absolute inset-x-0 top-1/2 -translate-y-1/2 h-3 rounded-full bg-border/40"
+          role="progressbar"
+          aria-label={`${slot} ${t.label}`}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={pct}
+        >
           {run && (
-            <div className={`h-full rounded-full ${t.bar} ${
+            <div className={`generation-track-fill generation-road-fill h-full rounded-full ${t.bar} ${
                   building ? "animate-pulse" : ""} transition-all duration-700`}
                  style={{ width: `${pct}%` }} />
+          )}
+          <span className="generation-road-centerline md:hidden" aria-hidden="true" />
+          {run && (
+            <span className="generation-road-light-stations md:hidden" aria-hidden="true">
+              {ROAD_LAMP_STATIONS.map((station) => (
+                <span
+                  key={station}
+                  className={`generation-road-lamp${pct >= station ? " is-lit" : ""}`}
+                  style={{ left: `${station}%` }}
+                />
+              ))}
+            </span>
           )}
         </div>
         {/* แมวอยู่ตำแหน่ง progress */}
         {run && (
-          <div className="absolute -top-1 transition-all duration-700 ease-in-out"
-               style={{ left: `clamp(0px, calc(${pct}% - 32px), calc(100% - 64px))` }}>
-            <PixelCat walking={!!building} />
+          <div className="generation-track-cat-marker absolute -top-1 transition-all duration-700 ease-in-out"
+               style={{
+                 left: `clamp(0px, calc(${pct}% - 32px), calc(100% - 64px))`,
+                 "--generation-progress": `${pct}%`,
+               } as React.CSSProperties}>
+            <span className="generation-cat-spotlight md:hidden" aria-hidden="true" />
+            <PixelCat walking={!!building} action={catAction} />
           </div>
         )}
       </div>
-      <div className="w-52 shrink-0 text-[10px] text-muted truncate">
+      <div className="generation-track-detail w-52 shrink-0 text-[10px] text-muted truncate">
         {run
           ? <><code className="text-text">{run._id.slice(1, 16)}</code> · {t.label}
              {building && ` ${pct}%`}</>
@@ -83,11 +111,15 @@ export function GenTracks({ runs, active }: { runs: Run[]; active?: string }) {
   while (dailySlots.length < 3) dailySlots.push(undefined);
   const weeklySlot = weeklies[0];
   return (
-    <div className="border border-border rounded-xl p-3 bg-surface space-y-1.5">
+    <div className="generation-track-list border border-border rounded-xl p-3 bg-surface space-y-1.5">
+      <div className="generation-tracks-heading md:hidden">
+        <span>เส้นทาง build</span>
+        <small>สถานะล่าสุด</small>
+      </div>
       {dailySlots.map((r, i) => (
         <Lane key={r?._id || `d${i}`} run={r} active={active} slot="daily" />
       ))}
-      <Lane run={weeklySlot} active={active} slot="weekly" />
+      {weeklySlot && <Lane run={weeklySlot} active={active} slot="weekly" />}
     </div>
   );
 }

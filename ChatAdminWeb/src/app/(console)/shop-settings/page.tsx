@@ -14,6 +14,7 @@ import { Input } from "@/components/ui/Input";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { PageShell } from "@/components/ui/PageShell";
 import { FilterSelect } from "@/components/ui/FilterSelect";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import {
   Settings2,
   Search,
@@ -377,6 +378,14 @@ export default function ShopSettingsPage() {
           </Button>
         </>
       }
+      mobileHeaderActions={
+        <Button onClick={() => setShowLogPanel(!showLogPanel)} variant="ghost" size="icon" title="ดู log" aria-label="ดู log">
+          <History size={16} />
+        </Button>
+      }
+      mobileAddActions={[
+        { label: "เพิ่ม settings ร้าน", icon: <Plus size={17} />, onSelect: () => setShowModal(true) },
+      ]}
       filterBarBelow
       filterBar={
         <div className="flex items-center gap-2 mt-4 flex-wrap">
@@ -608,9 +617,11 @@ export default function ShopSettingsPage() {
         Modal — เพิ่ม settings (multi-select platform + shop)
       ══════════════════════════════════════════════════════════════════ */}
       {showModal && (
-        <div
+        <ModalLayer
+          presentation="workspace"
           className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4"
           onClick={closeModal}
+          onBack={closeModal}
         >
           <div
             role="dialog"
@@ -634,7 +645,7 @@ export default function ShopSettingsPage() {
               </button>
             </div>
 
-            <div className="px-5 py-4 space-y-4">
+            <div className="mobile-workspace-body px-5 py-4 space-y-4">
               {/* ── Step 1: เลือก platform (multi-select) ── */}
               <div>
                 <label className="text-xs font-medium text-text-muted">
@@ -804,7 +815,7 @@ export default function ShopSettingsPage() {
             </div>
 
             {/* Modal footer */}
-            <div className="flex gap-2 px-5 py-4 border-t border-border justify-end">
+            <div className="mobile-workspace-actions flex gap-2 px-5 py-4 border-t border-border justify-end">
               <Button onClick={closeModal} variant="ghost" size="sm">
                 ยกเลิก
               </Button>
@@ -821,7 +832,7 @@ export default function ShopSettingsPage() {
               </Button>
             </div>
           </div>
-        </div>
+        </ModalLayer>
       )}
     </PageShell>
   );

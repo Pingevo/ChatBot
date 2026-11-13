@@ -2,6 +2,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { statsService, type AdminActivityStats } from "@/lib/services";
+import { UserCog } from "lucide-react";
 import {
   ConnectedChannelsHeader,
   RankingCard,
@@ -9,8 +10,9 @@ import {
   avatarColor,
 } from "@/components/charts/ZaapiStats";
 import { ChevronDown } from "lucide-react";
-import { UnifiedDateRangePicker, rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
+import { rangeToParams, type DateRangeValue } from "@/components/ui/UnifiedDateRangePicker";
 import { AnalyticsSkeleton } from "@/components/ui/StatsSkeleton";
+import { AnalyticsPageHeading } from "@/components/charts/AnalyticsPageHeading";
 
 const roleTone: Record<string, string> = {
   superadmin: "bg-deep-space text-white",
@@ -49,16 +51,23 @@ export default function AdminActivityPage() {
       .finally(() => setLoading(false));
   }, [params]);
 
-  if (loading && !data) return <AnalyticsSkeleton />;
-  if (error && !data) return <EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} />;
+  const pageHeading = (
+    <AnalyticsPageHeading
+      icon={UserCog}
+      title="การทำงานของแอดมิน"
+      description="เปรียบเทียบปริมาณงานและความเร็วการตอบของทีม"
+      value={dateRange}
+      onChange={setDateRange}
+    />
+  );
+
+  if (loading && !data) return <div className="analytics-page-body space-y-6">{pageHeading}<AnalyticsSkeleton hideHeading /></div>;
+  if (error && !data) return <div className="analytics-page-body space-y-6">{pageHeading}<EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} /></div>;
   if (!data) return null;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between flex-wrap gap-2">
-        <h2 className="text-lg font-bold text-text">การทำงานของแอดมิน</h2>
-        <UnifiedDateRangePicker value={dateRange} onChange={setDateRange} />
-      </div>
+    <div className="analytics-page-body space-y-6">
+      {pageHeading}
 
       <ConnectedChannelsHeader connectedCount={data.connected_shops} />
       {!data.has_real_data && <p className="text-xs text-text-subtle -mt-2">ยังไม่มีข้อมูลจริง</p>}
@@ -66,7 +75,7 @@ export default function AdminActivityPage() {
       <div className={loading ? "opacity-50 pointer-events-none transition-opacity" : "transition-opacity"}>
 
       {/* ---- Ranking cards ---- */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="analytics-ranking-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <RankingCard
           title="จำนวนการสนทนาสูงสุด"
           name={data.rankings.most_conversations?.name ?? null}
@@ -99,6 +108,7 @@ export default function AdminActivityPage() {
         <MultiLineChart
           data={data.conversations_by_admin_per_day}
           seriesKeys={data.admin_series_keys}
+          seriesLabels={Object.fromEntries(data.individual_performance.map((admin) => [admin.admin_id, admin.name]))}
           colors={["#3b82c4", "#e0578a", "#4a9d6f", "#f0a13a", "#8b5fbf", "#c8912b", "#ee4d2d", "#111827"]}
         />
       </div>
@@ -117,8 +127,10 @@ export default function AdminActivityPage() {
               return (
                 <div key={row.admin_id}>
                   <button
+                    type="button"
                     onClick={() => setExpanded(isOpen ? null : row.admin_id)}
-                    className="w-full flex items-center gap-3 px-4 py-3 hover:bg-surface-2 transition-colors text-left"
+                    aria-expanded={isOpen}
+                    className="min-h-12 w-full flex items-center gap-3 px-4 py-3 hover:bg-surface-2 transition-colors text-left"
                   >
                     <div
                       className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold shrink-0"

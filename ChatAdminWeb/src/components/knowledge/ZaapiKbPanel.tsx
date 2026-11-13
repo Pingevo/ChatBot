@@ -15,6 +15,8 @@ import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
 import { useSearchShortcut, useEscToClear } from "@/lib/useKeyboardShortcuts";
 import { toast } from "@/components/ui/Toast";
+import { ModalLayer } from "@/components/ui/ModalLayer";
+import { MobileAddActions } from "@/components/mobile/MobileAddActions";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import {
   Search, ChevronDown, Database, Pencil, Trash2, Plus, X, FileSpreadsheet,
@@ -185,6 +187,7 @@ export function ZaapiKbPanel() {
   // ── file-based import (spec v4) ──
   const [files, setFiles] = useState<ZaapiFile[]>([]);
   const [importing, setImporting] = useState(false);
+  const [snapshotting, setSnapshotting] = useState(false);
   const [imp, setImp] = useState<{
     file: File; accounts: string[]; platforms: string[];
     contentType: string; sheetTypes: Record<string, string>;
@@ -195,10 +198,6 @@ export function ZaapiKbPanel() {
   const [fileDocsTotal, setFileDocsTotal] = useState(0);
   const [fileDocsPage, setFileDocsPage] = useState(0);
   const [fileDocsLoading, setFileDocsLoading] = useState(false);
-  const [log, setLog] = useState<{
-    _id: string; op: string; file?: string; rev_from?: number; rev_to?: number;
-    status?: string; admin?: string; at?: string;
-  }[]>([]);
   const [kbShops, setKbShops] = useState<{ name: string; platform: string }[]>([]);
   const [shopPeek, setShopPeek] = useState<string | null>(null);
 
@@ -214,10 +213,6 @@ export function ZaapiKbPanel() {
       .get("/zaapi-kb/files")
       .then((r) => setFiles(r.data.files || []))
       .catch(() => setFiles([]));
-    api()
-      .get("/zaapi-kb/import-log", { params: { limit: 10 } })
-      .then((r) => setLog(r.data.log || []))
-      .catch(() => setLog([]));
     api()
       .get("/zaapi-kb/mapping")
       .then((r) => setKbShops(r.data.shops || []))
@@ -262,6 +257,51 @@ export function ZaapiKbPanel() {
       toast.error(`นำเข้าไม่สำเร็จ${d ? ` — ${d}` : ""}`);
     } finally {
       setImporting(false);
+    }
+  }
+
+  async function downloadSnapshot() {
+    setSnapshotting(true);
+    try {
+      const response = await fetch("/api/zaapi-kb/snapshot", { cache: "no-store" });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const bytes = await response.arrayBuffer();
+      const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+      const lines = text.split("\n");
+      if (!text.endsWith("\n") || lines.length < 3 || lines[lines.length - 1] !== "")
+        throw new Error("incomplete snapshot");
+      const header = JSON.parse(lines[0]);
+      const footer = JSON.parse(lines[lines.length - 2]);
+      const collections = ["zaapi_kb", "zaapi_kb_files", "zaapi_kb_import_log"];
+      const collectionNames = header.collection_names || {};
+      const resolvedNames = Object.values(collectionNames);
+      if (header.kind !== "header" || header.format !== "zaapi-kb-snapshot" || header.version !== 1
+          || JSON.stringify(header.collections) !== JSON.stringify(collections)
+          || Object.keys(collectionNames).sort().join(",") !== [...collections].sort().join(",")
+          || resolvedNames.some((name) => typeof name !== "string" || !name.trim())
+          || new Set(resolvedNames).size !== collections.length
+          || footer.kind !== "footer" || footer.complete !== true
+          || Object.keys(footer.counts || {}).sort().join(",") !== [...collections].sort().join(",")
+          || Object.keys(footer.sha256 || {}).sort().join(",") !== [...collections].sort().join(","))
+        throw new Error("invalid snapshot footer");
+
+      const filename = response.headers.get("content-disposition")?.match(/filename="([^"]+)"/)?.[1]
+        || "zaapi-kb-snapshot.ndjson";
+      const blob = new Blob([bytes], { type: response.headers.get("content-type") || "application/x-ndjson" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      toast.success("ดาวน์โหลด snapshot แล้ว — ตรวจ digest ก่อน reconcile");
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "unknown error";
+      toast.error(`ดาวน์โหลด snapshot ไม่สำเร็จหรือไฟล์ไม่ครบ (${detail})`);
+    } finally {
+      setSnapshotting(false);
     }
   }
 
@@ -486,15 +526,15 @@ export function ZaapiKbPanel() {
 
   const importModal = imp && (
 
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setImp(null)}>
-          <div className="bg-surface rounded-2xl border border-border shadow-xl w-full max-w-lg flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <ModalLayer presentation="workspace" className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setImp(null)} onBack={() => { if (importing) return false; setImp(null); return true; }}>
+          <div role="dialog" aria-modal="true" aria-label="นำเข้าไฟล์ Zaapi KB" className="bg-surface rounded-2xl border border-border shadow-xl w-full max-w-lg flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border">
               <div className="text-sm font-semibold text-text">Import ไฟล์เข้า Zaapi KB</div>
               <button onClick={() => setImp(null)} className="w-8 h-8 rounded-md hover:bg-surface-2 flex items-center justify-center" aria-label="ปิด">
                 <X size={15} className="text-text-muted" />
               </button>
             </div>
-            <div className="px-5 py-4 space-y-3 text-xs">
+            <div className="mobile-workspace-body px-5 py-4 space-y-3 text-xs">
               <div>
                 <label className="text-text-muted block mb-1">ไฟล์ (ชื่อตรงทุกตัวอักษร = แหล่งเดิม → แทนทั้งชุด)</label>
                 <div className="font-mono text-text">{imp.file.name}</div>
@@ -638,7 +678,7 @@ export function ZaapiKbPanel() {
                 </div>
               )}
             </div>
-            <div className="flex justify-end gap-2 px-5 py-3 border-t border-border">
+            <div className="mobile-workspace-actions flex justify-end gap-2 px-5 py-3 border-t border-border">
               <Button size="sm" variant="outline" onClick={() => setImp(null)}>ยกเลิก</Button>
               {!imp.preview ? (
                 <Button size="sm" onClick={() => doImport("preview")} disabled={importing}>
@@ -651,19 +691,30 @@ export function ZaapiKbPanel() {
               )}
             </div>
           </div>
-        </div>
+        </ModalLayer>
 
   );
+
+  const mobileAddActions = editable ? [
+    { label: "เพิ่มเอกสาร", icon: <Plus size={17} />, onSelect: () => openCreate() },
+    { label: "Import ไฟล์", icon: <Upload size={17} />, onSelect: () => document.getElementById("zaapi-file-input")?.click() },
+    { label: "Backup snapshot", icon: <Download size={17} />, onSelect: downloadSnapshot, disabled: snapshotting },
+  ] : [];
 
   if (loading) return <div className="flex justify-center py-12"><Loading size={24} /></div>;
   if (sources.length === 0 && files.length === 0 && !imp)
     return (
-      <div className="space-y-3">
+      <div className="space-y-3 pb-20 md:pb-0">
         {editable && (
-          <div className="flex justify-end">
-            <Button size="sm" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
-              <Upload size={14} /> Import ไฟล์
+          <div className="flex justify-end gap-2">
+            <Button size="sm" variant="outline" onClick={downloadSnapshot} disabled={snapshotting}>
+              <Download size={14} /> {snapshotting ? "กำลังสำรอง..." : "Backup snapshot"}
             </Button>
+            <div className="hidden md:block">
+              <Button size="sm" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
+                <Upload size={14} /> Import ไฟล์
+              </Button>
+            </div>
             <input
               id="zaapi-file-input" type="file" accept=".xlsx,.txt" className="hidden"
               onChange={(e) => {
@@ -674,13 +725,15 @@ export function ZaapiKbPanel() {
             />
           </div>
         )}
+        <MobileAddActions actions={mobileAddActions} />
         <EmptyState icon={Database} title="ยังไม่มี Zaapi KB" description="Import ไฟล์ .xlsx/.txt หรือสร้างเอกสาร manual" />
         {imp && importModal}
       </div>
     );
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-3 pb-20 md:pb-0">
+      <MobileAddActions actions={mobileAddActions} />
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[200px] max-w-md">
           <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
@@ -705,16 +758,23 @@ export function ZaapiKbPanel() {
           options={[{ v: "name", l: "ชื่อ source" }, { v: "recent", l: "อัปเดตล่าสุด" }]}
           onChange={setSortBy} />
         <span className="text-xs text-text-muted ml-auto">{filtered.length}/{sources.length} sources</span>
-        {editable && (
-          <Button size="sm" variant="outline" onClick={() => openCreate()}>
-            <Plus size={14} /> เพิ่ม (ทุกร้าน)
-          </Button>
-        )}
-        {editable && (
-          <Button size="sm" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
-            <Upload size={14} /> Import ไฟล์
-          </Button>
-        )}
+        <div className="hidden items-center gap-2 md:flex">
+          {editable && (
+            <Button size="sm" variant="outline" onClick={() => openCreate()}>
+              <Plus size={14} /> เพิ่ม (ทุกร้าน)
+            </Button>
+          )}
+          {editable && (
+            <Button size="sm" variant="outline" onClick={downloadSnapshot} disabled={snapshotting}>
+              <Download size={14} /> {snapshotting ? "กำลังสำรอง..." : "Backup snapshot"}
+            </Button>
+          )}
+          {editable && (
+            <Button size="sm" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
+              <Upload size={14} /> Import ไฟล์
+            </Button>
+          )}
+        </div>
         <input
           id="zaapi-file-input" type="file" accept=".xlsx,.txt" className="hidden"
           onChange={(e) => {
@@ -837,29 +897,6 @@ export function ZaapiKbPanel() {
         </div>
       )}
 
-      {log.length > 0 && (
-        <div className="border border-border rounded-xl bg-surface">
-          <div className="px-4 py-2 text-[11px] font-medium text-text-subtle bg-surface-2 rounded-t-xl">
-            ประวัติ Import / Rollback ล่าสุด
-          </div>
-          <div className="divide-y divide-border max-h-40 overflow-y-auto">
-            {log.map((e) => (
-              <div key={e._id} className="px-4 py-1.5 flex items-center gap-2 text-[11px]">
-                <span className={`shrink-0 font-medium ${e.status === "ok" ? "text-success" : e.status === "conflict" ? "text-warning" : "text-error"}`}>
-                  {e.op}:{e.status}
-                </span>
-                <span className="text-text truncate flex-1">{e.file}</span>
-                <span className="text-text-subtle shrink-0">
-                  {e.rev_from != null && e.rev_to != null ? `r${e.rev_from}→r${e.rev_to}` : e.rev_to != null ? `→r${e.rev_to}` : ""}
-                </span>
-                <span className="text-text-subtle shrink-0">{e.admin || ""}</span>
-                <span className="text-text-subtle shrink-0">{e.at ? new Date(e.at).toLocaleString("th-TH") : ""}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       <div className="border border-border rounded-xl divide-y divide-border overflow-y-auto bg-surface max-h-[calc(100dvh-300px)]">
         {filtered.map((s) => {
           const platforms = [...new Set(s.accounts.map((a) => a.platform))];
@@ -955,15 +992,15 @@ export function ZaapiKbPanel() {
 
       {/* Edit / Create modal */}
       {edit && (
-        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setEdit(null)}>
-          <div className="bg-surface rounded-2xl border border-border shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <ModalLayer presentation="workspace" className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4" onClick={() => setEdit(null)} onBack={() => { if (saving) return false; setEdit(null); return true; }}>
+          <div role="dialog" aria-modal="true" aria-label={edit.id ? "แก้ไขรายการ Zaapi KB" : "เพิ่มรายการ Zaapi KB"} className="bg-surface rounded-2xl border border-border shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-3 border-b border-border">
               <div className="text-sm font-semibold text-text">{edit.id ? "แก้ไขรายการ" : "เพิ่มรายการใหม่"}</div>
               <button onClick={() => setEdit(null)} className="w-8 h-8 rounded-md hover:bg-surface-2 flex items-center justify-center" aria-label="ปิด">
                 <X size={15} className="text-text-muted" />
               </button>
             </div>
-            <div className="px-5 py-4 space-y-3 overflow-y-auto flex-1">
+            <div className="mobile-workspace-body px-5 py-4 space-y-3 overflow-y-auto flex-1">
               <div>
                 <label className="text-xs text-text-muted block mb-1">Source (กลุ่ม/ชื่อชุดความรู้)</label>
                 <input
@@ -1016,12 +1053,12 @@ export function ZaapiKbPanel() {
                 <p className="text-[11px] text-text-subtle">รายการที่สร้างเองจะใช้ได้กับทุกร้าน (unscoped)</p>
               )}
             </div>
-            <div className="flex justify-end gap-2 px-5 py-3 border-t border-border">
+            <div className="mobile-workspace-actions flex justify-end gap-2 px-5 py-3 border-t border-border">
               <Button size="sm" variant="outline" onClick={() => setEdit(null)}>ยกเลิก</Button>
               <Button size="sm" onClick={saveEdit} disabled={saving}>{saving ? "กำลังบันทึก..." : "บันทึก"}</Button>
             </div>
           </div>
-        </div>
+        </ModalLayer>
       )}
 
       {importModal}

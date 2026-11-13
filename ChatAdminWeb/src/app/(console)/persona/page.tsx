@@ -18,6 +18,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { PageShell } from "@/components/ui/PageShell";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import {
   Bot, Plus, Pencil, Trash2, X, Search, Store, Globe, ChevronDown, Save,
 } from "lucide-react";
@@ -207,6 +208,9 @@ export default function PersonaPage() {
           เพิ่ม persona
         </Button>
       }
+      mobileAddActions={[
+        { label: "เพิ่ม persona", icon: <Plus size={17} />, onSelect: openCreate, disabled: availableShops.length === 0 },
+      ]}
       filterBarBelow
       filterBar={
         <>
@@ -268,7 +272,7 @@ export default function PersonaPage() {
               description="กด 'เพิ่ม persona' เพื่อตั้งชื่อตัวแทนบอทของร้านในเครือ — บอทของร้านที่ไม่ได้ตั้ง persona จะใช้ชื่อร้านแบบเดิม"
             />
             <div className="flex justify-center mt-4">
-              <Button onClick={openCreate} disabled={availableShops.length === 0}>
+              <Button className="phone-mobile-add-hidden" onClick={openCreate} disabled={availableShops.length === 0}>
                 <Plus size={16} className="mr-1" />
                 เพิ่ม persona
               </Button>
@@ -338,10 +342,10 @@ export default function PersonaPage() {
 
       {/* Inline form modal */}
       {showForm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40">
-          <div className="bg-surface rounded-xl border border-border shadow-xl w-full max-w-md">
+        <ModalLayer presentation="workspace" className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40" onBack={() => setShowForm(false)}>
+          <div role="dialog" aria-modal="true" aria-labelledby="persona-form-title" className="bg-surface rounded-xl border border-border shadow-xl w-full max-w-md">
             <div className="px-5 py-4 border-b border-border flex items-center justify-between">
-              <h2 className="font-semibold text-text">
+              <h2 id="persona-form-title" className="font-semibold text-text">
                 {editing ? "แก้ไข persona" : "เพิ่ม persona"}
               </h2>
               <button onClick={() => setShowForm(false)} title="ปิด" aria-label="ปิด" className="p-1 rounded hover:bg-surface text-text-subtle">
@@ -349,7 +353,7 @@ export default function PersonaPage() {
               </button>
             </div>
 
-            <div className="px-5 py-4 space-y-4">
+            <div className="mobile-workspace-body px-5 py-4 space-y-4">
               {!editing && (
                 <>
                   {/* เลือกร้าน (เฉพาะตอนสร้างใหม่) */}
@@ -432,7 +436,7 @@ export default function PersonaPage() {
               />
             </div>
 
-            <div className="px-5 py-4 border-t border-border flex items-center justify-end gap-2">
+            <div className="mobile-workspace-actions px-5 py-4 border-t border-border flex items-center justify-end gap-2">
               <Button variant="ghost" onClick={() => setShowForm(false)}>ยกเลิก</Button>
               <Button onClick={handleSave} disabled={saving || !form.bot_name.trim()}>
                 <Save size={16} className="mr-1" />
@@ -440,7 +444,7 @@ export default function PersonaPage() {
               </Button>
             </div>
           </div>
-        </div>
+        </ModalLayer>
       )}
     </PageShell>
   );
