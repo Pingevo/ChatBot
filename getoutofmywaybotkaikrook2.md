@@ -14051,3 +14051,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Full offline regression on combined tree: 2248 passed, 15 skipped, 1 xfailed, exit 0.
 - ChatAdminWeb `npm ci` used its committed lockfile; production `npm run build` passed with build-only placeholder secrets. Existing warnings: middleware convention deprecation and dynamic filesystem tracing in replay/test-results routes.
 - PR to `main` and merge are the next authorized integration actions. No Mongo migration/backfill was run; census still reports 408 orphans.
+
+## 2026-11-13 — Sync PR branch with latest main — verified
+- GitHub merged UI PR #57 at `f391020`; synced that commit into `codex/phase1-chat-logic` (`e0e6f97`) before merging PR #58.
+- UI file tree now matches `origin/main` byte-for-byte. PR delta is 51 paths (16 chatbot paths plus tests/docs/census); no ChatAdminWeb paths remain in the diff.
+- Full offline regression after sync: 2248 passed, 15 skipped, 1 xfailed, exit 0. Prior production UI build passed on the identical UI tree.
+- PR #58 is open; the sync commit and this closeout still need pushing. No Mongo migration/backfill or shared-data write.
