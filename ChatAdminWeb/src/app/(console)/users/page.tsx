@@ -13,6 +13,7 @@ import { Avatar } from "@/components/ui/Avatar";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
+import { MobileInfoCard } from "@/components/mobile/MobilePresentation";
 
 interface UserRow {
   admin_id: string;
@@ -163,52 +164,29 @@ export default function UsersPage() {
           {/* ── Mobile/Tablet (<lg): card list ── */}
           <ul className="lg:hidden space-y-3">
             {users.map((u) => (
-              <li key={u.admin_id} className="bg-surface rounded-xl border border-border p-4">
-                {/* Header: avatar + ชื่อ + สถานะ */}
-                <div className="flex items-start gap-3">
-                  <Avatar name={u.name || u.username} size={40} className="flex-shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <div className="font-medium text-text truncate">{u.name || u.username}</div>
-                    <div className="text-xs text-text-subtle truncate">@{u.username}</div>
-                  </div>
-                  {u.active ? <Badge tone="brand">ใช้งาน</Badge> : <Badge tone="red">ปิดใช้งาน</Badge>}
-                </div>
-
-                {/* รายละเอียด */}
-                <dl className="mt-3 space-y-1.5 text-xs">
-                  <div className="flex gap-2">
-                    <dt className="w-28 flex-shrink-0 text-text-muted">อีเมล</dt>
-                    <dd className="min-w-0 text-text break-all">{u.email}</dd>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <dt className="w-28 flex-shrink-0 text-text-muted">บทบาท</dt>
-                    <dd>{roleCell(u)}</dd>
-                  </div>
-                  <div className="flex gap-2">
-                    <dt className="w-28 flex-shrink-0 text-text-muted">เข้าระบบล่าสุด</dt>
-                    <dd className="min-w-0 text-text-muted">
-                      {u.last_login_at ? new Date(u.last_login_at).toLocaleString("th-TH") : "—"}
-                    </dd>
-                  </div>
-                </dl>
-
-                {/* การจัดการ — ห้าม toggle ตัวเอง (เหมือนตาราง) */}
-                {canEditFlag && (
-                  <div className="mt-3 pt-3 border-t border-border flex justify-end">
-                    {u.admin_id !== user?.admin_id ? (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleToggleActive(u)}
-                        title={u.active ? "ปิดใช้งาน" : "เปิดใช้งาน"}
-                      >
-                        <Power size={14} /> {u.active ? "ปิดใช้งาน" : "เปิดใช้งาน"}
-                      </Button>
-                    ) : (
-                      <span className="text-xs text-text-subtle">—</span>
-                    )}
-                  </div>
-                )}
+              <li key={u.admin_id}>
+                <MobileInfoCard
+                  title={u.name || u.username}
+                  subtitle={`@${u.username}`}
+                  leading={<Avatar name={u.name || u.username} size={36} className="flex-shrink-0" />}
+                  summary={u.active ? <Badge tone="brand">ใช้งาน</Badge> : <Badge tone="red">ปิดใช้งาน</Badge>}
+                  previewCount={1}
+                  rows={[
+                    { label: "สถานะ", value: u.active ? "ใช้งาน" : "ปิดใช้งาน" },
+                    { label: "บทบาท", value: roleCell(u) },
+                    { label: "อีเมล", value: u.email },
+                    { label: "เข้าระบบล่าสุด", value: u.last_login_at ? new Date(u.last_login_at).toLocaleString("th-TH") : "—" },
+                  ]}
+                  modalActions={canEditFlag ? (
+                    <div className="flex justify-end">
+                      {u.admin_id !== user?.admin_id ? (
+                        <Button variant="ghost" size="sm" onClick={() => handleToggleActive(u)} title={u.active ? "ปิดใช้งาน" : "เปิดใช้งาน"}>
+                          <Power size={14} /> {u.active ? "ปิดใช้งาน" : "เปิดใช้งาน"}
+                        </Button>
+                      ) : <span className="text-xs text-text-subtle">บัญชีปัจจุบัน</span>}
+                    </div>
+                  ) : undefined}
+                />
               </li>
             ))}
           </ul>

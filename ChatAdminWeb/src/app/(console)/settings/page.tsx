@@ -1,5 +1,5 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Card } from "@/components/ui/Card";
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
@@ -10,7 +10,8 @@ import { canEdit } from "@/lib/roles";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
-import { Shield, Bell, Save, CheckCircle2 } from "lucide-react";
+import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
+import { Shield, Bell, Save, CheckCircle2, Moon, Sun } from "lucide-react";
 
 export default function SettingsPage() {
   const { user, fetchMe } = useAuth();
@@ -21,6 +22,14 @@ export default function SettingsPage() {
   const [name, setName] = useState(user?.name ?? "");
   const [savingProfile, setSavingProfile] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
+  const [themePreference, setThemePreference] = useState<"light" | "dark">(
+    user?.theme_preference === "dark" ? "dark" : "light"
+  );
+  const [savingTheme, setSavingTheme] = useState(false);
+
+  useEffect(() => {
+    setThemePreference(user?.theme_preference === "dark" ? "dark" : "light");
+  }, [user?.admin_id, user?.theme_preference]);
 
   // ⚡ Bubble color — สี bubble ของตัวเองในแชท
   const DEFAULT_BUBBLE_COLOR = "#560C0E";
@@ -62,6 +71,27 @@ export default function SettingsPage() {
       catchError(e, "บันทึกไม่สำเร็จ");
     } finally {
       setSavingProfile(false);
+    }
+  }
+
+  async function handleThemeChange(nextTheme: "light" | "dark") {
+    if (nextTheme === themePreference || savingTheme) return;
+    const previousTheme = themePreference;
+    setThemePreference(nextTheme);
+    document.documentElement.dataset.theme = nextTheme;
+    document.documentElement.style.colorScheme = nextTheme;
+    setSavingTheme(true);
+    try {
+      await api().patch("/profile", { theme_preference: nextTheme });
+      await fetchMe?.();
+      toast.success(`บันทึกโหมด${nextTheme === "dark" ? "มืด" : "สว่าง"}แล้ว`);
+    } catch (e: unknown) {
+      setThemePreference(previousTheme);
+      document.documentElement.dataset.theme = previousTheme;
+      document.documentElement.style.colorScheme = previousTheme;
+      catchError(e, "บันทึกโหมดไม่สำเร็จ");
+    } finally {
+      setSavingTheme(false);
     }
   }
 
@@ -126,6 +156,33 @@ export default function SettingsPage() {
               <span className="block text-sm font-medium text-text mb-1.5">บทบาท</span>
               <Badge tone="deep">{user?.role ?? "admin"}</Badge>
             </div>
+            <div className="profile-theme-control pt-3 border-t border-border" aria-busy={savingTheme}>
+              <span className="block text-sm font-medium text-text">โหมดการแสดงผล</span>
+              <p className="mt-1 mb-2 text-xs text-text-muted">บันทึกแยกตามบัญชีนี้และใช้กับทุกหน้า</p>
+              <div className="profile-theme-options" role="group" aria-label="เลือกโหมดการแสดงผล">
+                <button
+                  type="button"
+                  className={`profile-theme-option${themePreference === "light" ? " is-selected" : ""}`}
+                  aria-pressed={themePreference === "light"}
+                  disabled={savingTheme}
+                  onClick={() => handleThemeChange("light")}
+                >
+                  <Sun size={16} aria-hidden="true" />
+                  <span>สว่าง</span>
+                </button>
+                <button
+                  type="button"
+                  className={`profile-theme-option${themePreference === "dark" ? " is-selected" : ""}`}
+                  aria-pressed={themePreference === "dark"}
+                  disabled={savingTheme}
+                  onClick={() => handleThemeChange("dark")}
+                >
+                  <Moon size={16} aria-hidden="true" />
+                  <span>มืด</span>
+                </button>
+              </div>
+              <span className="sr-only" aria-live="polite">{savingTheme ? "กำลังบันทึกโหมดการแสดงผล" : ""}</span>
+            </div>
             {/* ⚡ สี bubble ของตัวเอง */}
             <div className="pt-2 border-t border-border">
               <label className="block text-sm font-medium text-text mb-2">สีแชทบับเบิ้ลของคุณ</label>
@@ -135,15 +192,21 @@ export default function SettingsPage() {
                     key={c}
                     type="button"
                     onClick={() => setBubbleColor(c)}
-                    className={`w-8 h-8 rounded-full border-2 transition-transform hover:scale-110 ${
-                      bubbleColor.toLowerCase() === c.toLowerCase() ? "border-text ring-2 ring-brand/30" : "border-border"
-                    }`}
-                    style={{ backgroundColor: c }}
+                    aria-label={`เลือกสี ${c}`}
+                    aria-pressed={bubbleColor.toLowerCase() === c.toLowerCase()}
+                    className="inline-flex h-11 w-11 items-center justify-center rounded-full border-2 border-transparent transition-transform hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40"
                     title={c}
-                  />
+                  >
+                    <span
+                      className={`h-8 w-8 rounded-full border-2 ${
+                        bubbleColor.toLowerCase() === c.toLowerCase() ? "border-text ring-2 ring-brand/30" : "border-border"
+                      }`}
+                      style={{ backgroundColor: c }}
+                    />
+                  </button>
                 ))}
               </div>
-              <div className="flex items-center gap-2 mb-3">
+              <div className="flex flex-wrap items-center gap-2 mb-3">
                 <input
                   type="color"
                   value={bubbleColor}
@@ -163,7 +226,7 @@ export default function SettingsPage() {
                   placeholder="#560C0E"
                 />
                 {/* Preview bubble */}
-                <div className="ml-2 flex items-center gap-1.5">
+                <div className="ml-0 md:ml-2 flex items-center gap-1.5">
                   <span className="text-[10px] text-text-subtle">ตัวอย่าง:</span>
                   <span
                     className="rounded-2xl px-3 py-1.5 text-xs text-white"
@@ -213,26 +276,37 @@ export default function SettingsPage() {
               { label: "แจ้งเตือนเมื่อบอทส่งต่อแอดมิน", value: notifHandoff, set: setNotifHandoff },
               { label: "แจ้งเตือนแชทที่ยังไม่ตอบเกิน 30 นาที", value: notifUnanswered, set: setNotifUnanswered },
             ].map((item) => (
-              <label
-                key={item.label}
-                className="flex items-center justify-between text-sm text-text cursor-pointer"
-              >
-                <span>{item.label}</span>
-                <button
-                  type="button"
-                  onClick={() => item.set(!item.value)}
-                  disabled={!editable}
-                  className={`w-10 h-5 rounded-full transition-colors ${
-                    item.value ? "bg-brand" : "bg-surface-2"
-                  } disabled:opacity-60`}
-                >
-                  <div
-                    className={`w-4 h-4 bg-white rounded-full transition-transform ${
-                      item.value ? "translate-x-5" : "translate-x-0.5"
-                    }`}
+              <div key={item.label}>
+                <div className="hidden md:flex items-center justify-between text-sm text-text">
+                  <span>{item.label}</span>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-label={item.label}
+                    aria-checked={item.value}
+                    onClick={() => item.set(!item.value)}
+                    disabled={!editable}
+                    className={`w-10 h-5 rounded-full transition-colors ${
+                      item.value ? "bg-brand" : "bg-surface-2"
+                    } disabled:opacity-60`}
+                  >
+                    <div
+                      className={`w-4 h-4 bg-white rounded-full transition-transform ${
+                        item.value ? "translate-x-5" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
+                <div className="md:hidden flex items-center justify-between gap-3 text-sm text-text">
+                  <span className="min-w-0">{item.label}</span>
+                  <ToggleSwitch
+                    enabled={item.value}
+                    onChange={() => item.set(!item.value)}
+                    disabled={!editable}
+                    ariaLabel={item.label}
                   />
-                </button>
-              </label>
+                </div>
+              </div>
             ))}
             <p className="text-[11px] text-text-subtle pt-2">
               การตั้งค่านี้ยังเก็บในเครื่อง — จะเชื่อมกับ backend ในรอบถัดไป

@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
+import { MobileInfoCard } from "@/components/mobile/MobilePresentation";
 import type { Platform } from "@/lib/types";
 
 interface ContactRow {
@@ -129,6 +130,7 @@ export default function ContactsPage() {
       title="รายชื่อลูกค้า"
       helpHref="/help#contacts"
       subtitle={`ผู้ติดต่อทั้งหมด ${total} รายการ`}
+      stickyMobileSearch
       actions={
         <Button size="sm" variant="outline" onClick={load} disabled={loading}>
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
@@ -155,7 +157,7 @@ export default function ContactsPage() {
           </div>
 
           {/* Search — full row */}
-          <div className="flex items-center gap-1.5 w-full">
+          <div className="phone-search-anchor flex items-center gap-1.5 w-full">
             <div className="relative flex-1">
               <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
               <input
@@ -175,7 +177,7 @@ export default function ContactsPage() {
         </div>
 
         {/* Sort options */}
-        <div className="flex items-center gap-2 text-xs overflow-x-auto pb-1">
+        <div className="phone-chip-row flex items-center gap-2 text-xs overflow-x-auto pb-1">
           <span className="text-text-muted shrink-0">เรียงตาม:</span>
           {sortOptions.map((opt) => (
             <button
@@ -209,22 +211,20 @@ export default function ContactsPage() {
             {/* <lg — card list (มือถือ/tablet) */}
             <div className="space-y-2 lg:hidden">
               {contacts.map((c) => (
-                <Card key={`m-${c.platform}-${c.buyer_id}`} className="p-3">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-9 h-9 rounded-full bg-brand/15 flex items-center justify-center text-xs font-medium text-brand shrink-0">
-                      {c.name?.charAt(0).toUpperCase() || "?"}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="font-medium text-text text-sm truncate">{c.name || "(ไม่มีชื่อ)"}</div>
-                      <code className="text-[10px] text-text-subtle">{c.buyer_id}</code>
-                    </div>
-                    <PlatformIcon platform={c.platform} size={20} />
-                  </div>
-                  <div className="mt-2 flex flex-wrap gap-x-4 gap-y-0.5 text-[11px] text-text-muted">
-                    <span>ใช้งานล่าสุด: {c.last_active_at ? new Date(c.last_active_at).toLocaleString("th-TH") : "-"}</span>
-                    <span>สมัครเมื่อ: {c.created_at ? new Date(c.created_at).toLocaleDateString("th-TH") : "-"}</span>
-                  </div>
-                </Card>
+                <MobileInfoCard
+                  key={`m-${c.platform}-${c.buyer_id}`}
+                  title={c.name || "(ไม่มีชื่อ)"}
+                  subtitle={c.buyer_id}
+                  leading={<div className="flex h-9 w-9 items-center justify-center rounded-full bg-brand/15 text-xs font-medium text-brand">{c.name?.charAt(0).toUpperCase() || "?"}</div>}
+                  summary={<PlatformIcon platform={c.platform} size={18} />}
+                  rows={[
+                    { label: "แพลตฟอร์ม", value: c.platform },
+                    { label: "Buyer ID", value: <code className="break-all">{c.buyer_id}</code> },
+                    { label: "ใช้งานล่าสุด", value: c.last_active_at ? new Date(c.last_active_at).toLocaleString("th-TH") : "-" },
+                    { label: "สมัครเมื่อ", value: c.created_at ? new Date(c.created_at).toLocaleDateString("th-TH") : "-" },
+                  ]}
+                  previewCount={2}
+                />
               ))}
             </div>
 

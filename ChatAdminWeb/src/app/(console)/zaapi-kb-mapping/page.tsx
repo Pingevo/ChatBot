@@ -7,6 +7,8 @@ import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
+import { MobileDataTable, MobileInfoCard } from "@/components/mobile/MobilePresentation";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 
 type PreviewRow = { row: number; fields: Record<string, string>; text?: string };
 type FileMeta = {
@@ -134,7 +136,142 @@ export default function ZaapiKbMappingPage() {
           onClick={() => setFilter("all")}>ทั้งหมด ({files.length})</Button>
         {!editable && <span className="text-xs text-text-muted ml-2">read-only — ต้องมีสิทธิ์แก้ KB</span>}
       </div>
-      <div className="overflow-x-auto">
+      <div className="mobile-only-grid gap-3">
+        {shown.map((f) => {
+          const d = draft[f.file] || {};
+          const mapped = isMapped(f);
+          const selectedAccounts = d.accounts || [];
+          const selectedPlatforms = d.platforms || [];
+          const accountSummary = selectedAccounts.length
+            ? `${selectedAccounts.slice(0, 2).join(", ")}${selectedAccounts.length > 2 ? ` +${selectedAccounts.length - 2}` : ""}`
+            : "ทุกร้าน";
+          const platformSummary = selectedPlatforms.length
+            ? selectedPlatforms.map((value) => PLATFORMS.find((platform) => platform.v === value)?.l || value).join(", ")
+            : "ทุก platform";
+
+          return (
+            <MobileInfoCard
+              key={`mobile-${f.file}`}
+              title={f.file}
+              subtitle={`${f.name || "ไม่ระบุชื่อ"} · ${f.rows} rows`}
+              summary={<span className={`text-xs font-medium ${mapped ? "text-success" : "text-warning-dark"}`}>{mapped ? "Mapped" : "ยังไม่ map"}</span>}
+              previewCount={2}
+              rows={[
+                { label: "ร้าน", value: accountSummary },
+                { label: "Platform", value: platformSummary },
+                { label: "ประเภทไฟล์", value: d.content_type || "product" },
+                { label: "จำนวน sheet", value: Object.keys(f.sheets).length },
+                ...(mapped ? [{ label: "บันทึกโดย", value: saved[f.file].mapped_by || "—" }] : []),
+              ]}
+              details={<div className="space-y-4 text-xs">
+                <section className="space-y-2">
+                  <h3 className="text-sm font-semibold text-text">ร้านที่ใช้ mapping</h3>
+                  {!selectedPlatforms.length ? (
+                    <p className="text-text-muted">เลือก platform ก่อน (เว้นว่าง platform = ทุก platform)</p>
+                  ) : shopGroups.filter((group) => selectedPlatforms.includes(group.plat)).map((group) => (
+                    <div key={group.plat}>
+                      <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-text-muted">{group.label}</div>
+                      <div className="grid gap-1 sm:grid-cols-2">
+                        {group.names.map((shop) => {
+                          const selected = selectedAccounts.includes(shop);
+                          return (
+                            <label key={shop} className={`flex min-h-9 items-center gap-2 rounded-lg border px-2 ${selected ? "border-accent/40 bg-accent/5" : "border-border"} ${!editable ? "opacity-60" : ""}`}>
+                              <input
+                                type="checkbox"
+                                className="accent-accent"
+                                disabled={!editable}
+                                checked={selected}
+                                onChange={() => setField(f.file, {
+                                  accounts: selected ? selectedAccounts.filter((value) => value !== shop) : [...selectedAccounts, shop],
+                                })}
+                              />
+                              <span className="min-w-0 truncate text-text">{shop}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                  {!shopGroups.some((group) => selectedPlatforms.includes(group.plat)) && selectedPlatforms.length > 0 && (
+                    <p className="text-text-muted">ไม่มีร้านใน platform ที่เลือก</p>
+                  )}
+                  {!selectedAccounts.length && <p className="text-warning-dark">เสิร์ฟทุกร้าน — ระวังข้อมูลเฉพาะร้านรั่ว</p>}
+                </section>
+
+                <section className="space-y-2">
+                  <h3 className="text-sm font-semibold text-text">Platform</h3>
+                  <div className="flex flex-wrap gap-1.5">
+                    {PLATFORMS.map((platform) => {
+                      const selected = selectedPlatforms.includes(platform.v);
+                      return (
+                        <button
+                          key={platform.v}
+                          type="button"
+                          disabled={!editable}
+                          onClick={() => setField(f.file, {
+                            platforms: selected ? selectedPlatforms.filter((value) => value !== platform.v) : [...selectedPlatforms, platform.v],
+                          })}
+                          className={`${CHIP} ${selected ? "border-accent bg-accent/10 text-accent" : "border-border text-text-muted"} disabled:opacity-60`}
+                        >
+                          {platform.l}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {!selectedPlatforms.length && <p className="text-text-muted">เว้นว่างเพื่อเลือกทุก platform</p>}
+                </section>
+
+                <label className="block space-y-1.5">
+                  <span className="text-sm font-semibold text-text">ประเภทข้อมูลของไฟล์</span>
+                  <select className={SEL} disabled={!editable} value={d.content_type || "product"} onChange={(event) => setField(f.file, { content_type: event.target.value })}>
+                    {TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                  </select>
+                </label>
+
+                <section className="space-y-2">
+                  <h3 className="text-sm font-semibold text-text">ประเภทข้อมูลแยกตาม sheet</h3>
+                  {Object.entries(f.sheets).map(([sheet, count]) => {
+                    const sheetType = (d.sheet_types || {})[sheet];
+                    const overridden = !!sheetType && sheetType !== d.content_type;
+                    return (
+                      <div key={sheet} className={`rounded-xl border p-3 ${overridden ? "border-accent/50 bg-accent/5" : "border-border bg-surface-1"}`}>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="min-w-0 truncate font-medium text-text">{sheet}</span>
+                          <span className="shrink-0 text-[10px] text-text-muted">{count} rows</span>
+                        </div>
+                        <div className="mt-2 flex items-center gap-2">
+                          <Button size="sm" variant="ghost" onClick={() => setPreview({ file: f.file, sheet, rows: f.preview?.[sheet] || [] })}>ดูข้อมูล</Button>
+                          <select
+                            className={SEL}
+                            disabled={!editable}
+                            value={sheetType || d.content_type || "product"}
+                            onChange={(event) => {
+                              const next = { ...(d.sheet_types || {}) };
+                              if (event.target.value === d.content_type) delete next[sheet];
+                              else next[sheet] = event.target.value;
+                              setField(f.file, { sheet_types: next });
+                            }}
+                          >
+                            {TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+                          </select>
+                        </div>
+                        {overridden && <p className="mt-1 text-[10px] text-accent">ต่างจากประเภทไฟล์ ({d.content_type})</p>}
+                      </div>
+                    );
+                  })}
+                </section>
+              </div>}
+              cardActions={editable ? (
+                <div className="flex justify-end">
+                  <Button size="sm" disabled={saving === f.file} onClick={() => save(f)}>{saving === f.file ? "กำลังบันทึก…" : "บันทึก"}</Button>
+                </div>
+              ) : undefined}
+            />
+          );
+        })}
+      </div>
+      <div className="hidden md:block">
+      <MobileDataTable>
         <table className="w-full text-xs border-collapse">
           <thead>
             <tr className="text-left text-text-muted border-b border-border">
@@ -282,19 +419,22 @@ export default function ZaapiKbMappingPage() {
             })}
           </tbody>
         </table>
+      </MobileDataTable>
       </div>
       {preview && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+        <ModalLayer presentation="workspace" className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          onBack={() => setPreview(null)}
           onClick={() => setPreview(null)}>
-          <div className="bg-surface border border-border rounded-xl max-w-4xl w-full max-h-[80vh] overflow-auto p-4"
+          <div role="dialog" aria-modal="true" aria-label={`ตัวอย่างข้อมูล ${preview.sheet}`} className="bg-surface border border-border rounded-xl max-w-4xl w-full max-h-[80vh] overflow-auto p-4 flex flex-col"
             onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between mb-3">
+            <div className="flex shrink-0 items-center justify-between px-4 pt-4 mb-3">
               <div>
                 <div className="text-sm font-semibold">{preview.sheet}</div>
                 <div className="text-xs text-text-muted">{preview.file}</div>
               </div>
               <Button size="sm" variant="secondary" onClick={() => setPreview(null)}>ปิด</Button>
             </div>
+            <div className="mobile-workspace-body px-4 pb-4">
             {preview.rows.length === 0 && <div className="text-text-muted text-sm">ไม่มีข้อมูล preview</div>}
             {preview.rows.map((r, i) => (
               <div key={i} className="border border-border rounded-lg p-3 mb-2 text-xs">
@@ -312,8 +452,9 @@ export default function ZaapiKbMappingPage() {
                 {r.text && <div className="mt-2 pt-2 border-t border-border text-text-muted whitespace-pre-wrap">{r.text}</div>}
               </div>
             ))}
+            </div>
           </div>
-        </div>
+        </ModalLayer>
       )}
     </PageShell>
   );

@@ -16,6 +16,7 @@ import {
   FileText,
 } from "lucide-react";
 import { useToastError } from "@/components/ui/Toast";
+import { MobileInfoCard } from "@/components/mobile/MobilePresentation";
 
 interface TestResult {
   i: number;
@@ -319,51 +320,27 @@ export default function TestResultsPage() {
             </div>
 
             {/* ── Results — card list on mobile/tablet, table on desktop (lg+) ── */}
-            {/* <lg — card list (แตะการ์ดเพื่อขยายรายละเอียด) */}
+            {/* <lg — concise cards with full result details on demand */}
             <div className="space-y-2 lg:hidden">
               {filtered.map((r) => {
-                const isOpen = expanded === r.i;
                 return (
-                  <div
+                  <MobileInfoCard
                     key={`m-${selectedFile}-${r.i}-${page}`}
-                    className={`rounded-xl border ${okBg(r.ok)}`}
-                  >
-                    <div
-                      role="button"
-                      tabIndex={0}
-                      aria-expanded={isOpen}
-                      className="p-3 cursor-pointer select-none"
-                      onClick={() => setExpanded(isOpen ? null : r.i)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") setExpanded(isOpen ? null : r.i);
-                      }}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-mono text-text-muted">#{r.i}</span>
-                        <span className="flex-1 min-w-0 truncate text-sm font-medium text-text">{r.shop}</span>
-                        <span className={`text-base leading-none ${okColor(r.ok)}`}>{r.ok}</span>
-                      </div>
-                      <p className="mt-1.5 text-sm text-text line-clamp-2 break-words">{r.msg}</p>
-                      <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-muted">
-                        <span className="rounded bg-surface-2 px-1.5 py-0.5">{r.cat}</span>
-                        {r.web_search === "Y" && (
-                          <span className="inline-flex items-center gap-1 text-violet-400">
-                            <Globe size={11} /> WS
-                          </span>
-                        )}
-                        <span>สินค้า {r.products}</span>
-                        <span>{r.elapsed.toFixed(1)}s</span>
-                        <span className="ml-auto inline-flex items-center gap-0.5 text-text-subtle">
-                          {isOpen ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                        </span>
-                      </div>
-                    </div>
-                    {isOpen && (
-                      <div className="border-t border-border px-3 py-3">
-                        <ResultDetail r={r} />
-                      </div>
-                    )}
-                  </div>
+                    title={r.shop}
+                    subtitle={`#${r.i} · ${r.cat}`}
+                    leading={<span className={`flex h-8 w-8 items-center justify-center rounded-full bg-surface-2 text-sm font-semibold ${okColor(r.ok)}`}>{r.ok}</span>}
+                    summary={<p className="line-clamp-1 text-xs leading-4 text-text-muted">{r.msg}</p>}
+                    rows={[
+                      { label: "ผล", value: r.ok },
+                      { label: "หมวด", value: r.cat },
+                      { label: "Source", value: r.source },
+                      { label: "Web search", value: r.web_search === "Y" ? "ใช้" : "ไม่ใช้" },
+                      { label: "สินค้า", value: r.products },
+                      { label: "เวลา", value: `${r.elapsed.toFixed(1)} วินาที` },
+                    ]}
+                    previewCount={2}
+                    details={<ResultDetail r={r} />}
+                  />
                 );
               })}
               {filtered.length === 0 && (

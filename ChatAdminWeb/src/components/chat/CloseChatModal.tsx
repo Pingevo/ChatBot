@@ -5,6 +5,7 @@ import { X } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Loading } from "@/components/ui/Loading";
 import { useFocusTrap } from "@/lib/useKeyboardShortcuts";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 import type { Conversation, ProblemCategory } from "@/lib/types";
 
 const CATEGORIES: { value: ProblemCategory; label: string }[] = [
@@ -59,7 +60,16 @@ export function CloseChatModal({ conversation, onClose, onSubmit, loading }: Pro
   }
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+    <ModalLayer
+      presentation="workspace"
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+      onBack={() => {
+        if (loading) return false;
+        onClose();
+        return true;
+      }}
+    >
       <div
         className="bg-surface rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto"
         role="dialog"
@@ -79,7 +89,7 @@ export function CloseChatModal({ conversation, onClose, onSubmit, loading }: Pro
           </button>
         </div>
 
-        <div className="p-5 space-y-4">
+        <div className="mobile-workspace-body p-5 space-y-4">
           {/* เหตุผล */}
           <div>
             <label className="block text-sm font-medium text-text mb-1.5">
@@ -161,16 +171,14 @@ export function CloseChatModal({ conversation, onClose, onSubmit, loading }: Pro
             ข้อมูลที่กรอกจะถูกบันทึกเป็นประวัติ — แอดมินคนถัดไปจะเห็นเมื่อลูกค้าทักกลับมา
           </div>
 
-          <div className="flex gap-2 pt-2">
-            <Button variant="ghost" className="flex-1" onClick={onClose} disabled={loading}>
-              ยกเลิก
-            </Button>
-            <Button className="flex-1" onClick={handleSubmit} disabled={loading || !canSubmit}>
-              {loading ? <Loading size={16} /> : "ปิดแชท"}
-            </Button>
-          </div>
+        </div>
+        <div className="mobile-workspace-actions flex gap-2 border-t border-border bg-surface px-5 py-3">
+          <Button variant="ghost" className="flex-1" onClick={onClose} disabled={loading}>ยกเลิก</Button>
+          <Button className="flex-1" onClick={handleSubmit} disabled={loading || !canSubmit}>
+            {loading ? <Loading size={16} /> : "ปิดแชท"}
+          </Button>
         </div>
       </div>
-    </div>
+    </ModalLayer>
   );
 }

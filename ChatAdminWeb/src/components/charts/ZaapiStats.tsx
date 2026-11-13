@@ -5,6 +5,7 @@ import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip, Legend, LineChar
 import { DebouncedResponsiveContainer as ResponsiveContainer } from "./DebouncedResponsiveContainer";
 import { Info, RefreshCw } from "lucide-react";
 import type { Platform } from "@/lib/types";
+import type { CSSProperties } from "react";
 
 /* ---- Connected channels header (platform icons + live status + refresh) ---- */
 
@@ -27,7 +28,7 @@ export function ConnectedChannelsHeader({
 }) {
   const platforms: Platform[] = ["shopee", "tiktok", "lazada"];
   return (
-    <div className="flex items-center justify-between flex-wrap gap-3 py-3">
+    <div className="analytics-connected-strip flex items-center justify-between flex-wrap gap-3 py-3">
       <div className="flex items-center gap-2">
         <div className="flex -space-x-1.5">
           {platforms.map((p) => (
@@ -49,13 +50,13 @@ export function ConnectedChannelsHeader({
           <div className="flex items-center gap-1.5 text-xs text-text-muted">
             <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse-soft" />
             สด
-            {lastUpdatedSeconds !== undefined && <span>· อัปเดตล่าสุด {lastUpdatedSeconds} วินาทีที่แล้ว</span>}
+            {lastUpdatedSeconds !== undefined && <span className="hidden md:inline">· อัปเดตล่าสุด {lastUpdatedSeconds} วินาทีที่แล้ว</span>}
           </div>
         )}
         {onRefresh && (
           <button
             onClick={onRefresh}
-            className="w-8 h-8 rounded-lg hover:bg-surface-2 flex items-center justify-center text-text-muted transition-colors"
+            className="phone-refresh-control w-8 h-8 rounded-lg hover:bg-surface-2 flex items-center justify-center text-text-muted transition-colors"
             title="รีเฟรช"
             aria-label="รีเฟรช"
           >
@@ -209,16 +210,19 @@ export function StackedChannelBarChart({
   colors: string[];
 }) {
   return (
-    <ResponsiveContainer width="100%" height={200}>
-      <BarChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-        <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} allowDecimals={false} />
-        <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }} />
-        {seriesKeys.map((k, i) => (
-          <Bar key={k} dataKey={k} stackId="a" fill={colors[i % colors.length]} radius={i === seriesKeys.length - 1 ? [4, 4, 0, 0] : undefined} />
-        ))}
-      </BarChart>
-    </ResponsiveContainer>
+    <>
+      <ResponsiveContainer width="100%" height={200}>
+        <BarChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} allowDecimals={false} />
+          <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }} />
+          {seriesKeys.map((k, i) => (
+            <Bar key={k} dataKey={k} stackId="a" fill={colors[i % colors.length]} radius={i === seriesKeys.length - 1 ? [4, 4, 0, 0] : undefined} />
+          ))}
+        </BarChart>
+      </ResponsiveContainer>
+      <MobileChartData data={data} seriesKeys={seriesKeys} title="ดูตัวเลขแยกตามวัน" />
+    </>
   );
 }
 
@@ -228,24 +232,69 @@ export function MultiLineChart({
   seriesKeys,
   colors,
   unit = "",
+  seriesLabels,
 }: {
   data: Record<string, unknown>[];
   seriesKeys: string[];
   colors: string[];
   unit?: string;
+  seriesLabels?: Record<string, string>;
 }) {
   return (
-    <ResponsiveContainer width="100%" height={200}>
-      <LineChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-        <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-        <Tooltip formatter={(v) => [`${v ?? 0}${unit}`, ""]} contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }} />
-        <Legend wrapperStyle={{ fontSize: 11 }} />
-        {seriesKeys.map((k, i) => (
-          <Line key={k} type="monotone" dataKey={k} stroke={colors[i % colors.length]} strokeWidth={2} dot={false} />
+    <>
+      <ResponsiveContainer width="100%" height={200}>
+        <LineChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+          <Tooltip formatter={(v) => [`${v ?? 0}${unit}`, ""]} contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 11 }} />
+          {seriesKeys.map((k, i) => (
+            <Line key={k} type="monotone" dataKey={k} name={seriesLabels?.[k] || k} stroke={colors[i % colors.length]} strokeWidth={2} dot={false} />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
+      <MobileChartData data={data} seriesKeys={seriesKeys} seriesLabels={seriesLabels} unit={unit} title="ดูตัวเลขแยกตามวัน" />
+    </>
+  );
+}
+
+function MobileChartData({
+  data,
+  seriesKeys,
+  seriesLabels,
+  unit = "",
+  title,
+}: {
+  data: Record<string, unknown>[];
+  seriesKeys: string[];
+  seriesLabels?: Record<string, string>;
+  unit?: string;
+  title: string;
+}) {
+  if (data.length === 0) return null;
+  return (
+    <details className="mobile-chart-data mobile-only mt-3 border-t border-border-subtle pt-2">
+      <summary className="min-h-11 cursor-pointer py-2 text-sm font-semibold text-navy">{title}</summary>
+      <div className="space-y-2 pt-1">
+        {data.map((point, index) => (
+          <div key={String(point.date ?? index)} className="rounded-lg bg-surface-1 px-3 py-2">
+            <p className="mb-1.5 text-xs font-semibold text-text">{String(point.date ?? `รายการ ${index + 1}`)}</p>
+            <dl className="grid min-w-0 grid-cols-2 gap-x-3 gap-y-1.5">
+              {seriesKeys.map((key) => (
+                <div key={key} className="min-w-0">
+                  <dt className="truncate text-[11px] leading-4 text-text-muted" title={seriesLabels?.[key] || key}>
+                    {seriesLabels?.[key] || key}
+                  </dt>
+                  <dd className="text-xs font-semibold tabular-nums text-text">
+                    {String(point[key] ?? 0)}{unit}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
         ))}
-      </LineChart>
-    </ResponsiveContainer>
+      </div>
+    </details>
   );
 }
 
@@ -268,8 +317,14 @@ export function Heatmap({
     return `rgba(139, 30, 40, ${alpha})`;
   }
   return (
-    <div className="overflow-x-auto">
-      <div className="grid" style={{ gridTemplateColumns: `100px repeat(${cols.length}, 1fr)` }}>
+    <div className="phone-heatmap overflow-x-auto">
+      <div
+        className="grid"
+        style={{
+          gridTemplateColumns: `100px repeat(${cols.length}, minmax(0, 1fr))`,
+          "--heatmap-columns": cols.length,
+        } as CSSProperties}
+      >
         <div />
         {cols.map((c) => (
           <div key={c} className="text-center text-[10px] text-text-subtle pb-1">
@@ -282,14 +337,32 @@ export function Heatmap({
             {cols.map((c, ci) => (
               <div
                 key={c}
-                className="h-6 m-0.5 rounded"
+                className="phone-heatmap-cell h-6 m-0.5 rounded"
                 style={{ background: colorFor(values[ri]?.[ci] ?? 0) }}
                 title={`${r} · ${c}: ${values[ri]?.[ci] ?? 0}`}
+                aria-label={`${r} · ${c}: ${values[ri]?.[ci] ?? 0}`}
               />
             ))}
           </div>
         ))}
       </div>
+      <details className="mobile-only mt-3 border-t border-border-subtle pt-2">
+        <summary className="min-h-11 cursor-pointer py-2 text-sm font-semibold text-navy">ดูตัวเลขแยกตามช่วงเวลา</summary>
+        <div className="space-y-1 pt-1">
+          {rows.map((row, rowIndex) => (
+            <div key={row} className="grid min-w-0 grid-cols-[3.5rem_minmax(0,1fr)] items-center gap-2 py-1 text-[11px]">
+              <span className="text-text-muted">{row}</span>
+              <div className="grid min-w-0" style={{ gridTemplateColumns: `repeat(${cols.length}, minmax(0, 1fr))` }}>
+                {cols.map((col, colIndex) => (
+                  <span key={col} className="text-center tabular-nums text-text" aria-label={`${col}: ${values[rowIndex]?.[colIndex] ?? 0}`}>
+                    {values[rowIndex]?.[colIndex] ?? 0}
+                  </span>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </details>
     </div>
   );
 }

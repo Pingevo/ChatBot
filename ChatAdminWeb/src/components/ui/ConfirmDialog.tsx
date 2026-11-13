@@ -8,6 +8,7 @@ import { create } from "zustand";
 import { AlertTriangle, Info } from "lucide-react";
 import { Button } from "./Button";
 import { useFocusTrap } from "@/lib/useKeyboardShortcuts";
+import { ModalLayer } from "@/components/ui/ModalLayer";
 
 interface ConfirmOptions {
   title: string;
@@ -68,8 +69,9 @@ export function ConfirmDialog() {
   const Icon = isDanger ? AlertTriangle : Info;
 
   return (
-    <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4"
+    <ModalLayer
+      presentation="center"
+      className="mobile-sheet-overlay fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4"
       onClick={() => resolve(false)}
     >
       <div
@@ -78,7 +80,7 @@ export function ConfirmDialog() {
         aria-labelledby="confirm-dialog-title"
         ref={ref}
         tabIndex={-1}
-        className="bg-surface rounded-2xl shadow-2xl max-w-sm w-full p-5 animate-toast-pop"
+        className="mobile-confirm-dialog bg-surface rounded-2xl shadow-2xl max-w-sm w-full p-5 animate-fade-in"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start gap-3">
@@ -105,6 +107,6 @@ export function ConfirmDialog() {
           </Button>
         </div>
       </div>
-    </div>
+    </ModalLayer>
   );
 }
