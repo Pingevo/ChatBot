@@ -66,6 +66,15 @@ function LoginContent() {
 
       const warp = { progress: 0 };
       const emergence = { progress: 0 };
+      let handoffState: {
+        angle: number;
+        scene: { rotationX: number; rotationY: number; rotationZ: number; x: number; y: number; scale: number };
+        shade: { opacity: number; x: number; y: number };
+        bloom: { opacity: number; x: number; y: number };
+        light: number;
+        slowBreath: number;
+        lightShimmer: number;
+      } | null = null;
       gsap.set(sceneWrap, {
         transformOrigin: "50% 45%",
         transformPerspective: 1050,
@@ -125,30 +134,41 @@ function LoginContent() {
         repeat: -1,
         onUpdate: () => {
           const angle = mistMotion.angle;
-          const floating = warp.progress >= 0.97;
           const slowBreath = Math.sin(angle * 0.62 - 0.75);
           const lightShimmer = 0.5 + 0.5 * Math.sin(angle * 1.35 + 1.1);
-          gsap.set(bloom, {
-            x: Math.sin(angle * 0.9) * 18,
-            y: Math.cos(angle * 1.1) * 26,
-            ...(floating && { opacity: 0.46 + emergence.progress * 0.08 + slowBreath * 0.14 + (lightShimmer - 0.5) * 0.08 }),
-          });
-          if (floating) {
+          if (handoffState) {
             const bob = Math.sin(angle);
+            const breathDelta = slowBreath - handoffState.slowBreath;
+            const shimmerDelta = lightShimmer - handoffState.lightShimmer;
+            gsap.set(bloom, {
+              x: handoffState.bloom.x + (Math.sin(angle * 0.9) - Math.sin(handoffState.angle * 0.9)) * 18,
+              y: handoffState.bloom.y + (Math.cos(angle * 1.1) - Math.cos(handoffState.angle * 1.1)) * 26,
+              opacity: handoffState.bloom.opacity + emergence.progress * 0.16 + breathDelta * 0.08 + shimmerDelta * 0.04,
+            });
             gsap.set(sceneWrap, {
-              rotationX: 3.97 * (1 - emergence.progress) + (Math.sin(angle * 0.52) - Math.sin(2.38 * 0.52)) * 0.5,
-              rotationY: -5.39 * (1 - emergence.progress) + (Math.sin(angle * 0.68) - Math.sin(2.38 * 0.68)) * 0.65,
-              rotationZ: 0.68 * (1 - emergence.progress) + (Math.sin(angle * 0.38) - Math.sin(2.38 * 0.38)) * 0.3,
-              x: 4.3 * (1 - emergence.progress) + (Math.sin(angle * 0.48) - Math.sin(2.38 * 0.48)) * 5,
-              y: -28.57 + (bob - Math.sin(2.38)) * 9,
-              scale: 2.22 + emergence.progress * 0.035 + Math.sin(angle + 0.4) * 0.022,
+              rotationX: handoffState.scene.rotationX * (1 - emergence.progress)
+                + (Math.sin(angle * 0.52) - Math.sin(handoffState.angle * 0.52)) * 0.5,
+              rotationY: handoffState.scene.rotationY * (1 - emergence.progress)
+                + (Math.sin(angle * 0.68) - Math.sin(handoffState.angle * 0.68)) * 0.65,
+              rotationZ: handoffState.scene.rotationZ * (1 - emergence.progress)
+                + (Math.sin(angle * 0.38) - Math.sin(handoffState.angle * 0.38)) * 0.3,
+              x: handoffState.scene.x * (1 - emergence.progress)
+                + (Math.sin(angle * 0.48) - Math.sin(handoffState.angle * 0.48)) * 5,
+              y: handoffState.scene.y + (bob - Math.sin(handoffState.angle)) * 9,
+              scale: handoffState.scene.scale + emergence.progress * 0.035
+                + (Math.sin(angle + 0.4) - Math.sin(handoffState.angle + 0.4)) * 0.022,
             });
             gsap.set(shade, {
-              opacity: 0.69 + slowBreath * 0.075,
-              "--shade-x": `${50 + Math.sin(angle * 0.31) * 3}%`,
-              "--shade-y": `${45 + Math.cos(angle * 0.27) * 3}%`,
+              opacity: handoffState.shade.opacity + emergence.progress * 0.1 + breathDelta * 0.035,
+              "--shade-x": `${handoffState.shade.x + (Math.sin(angle * 0.31) - Math.sin(handoffState.angle * 0.31)) * 3}%`,
+              "--shade-y": `${handoffState.shade.y + (Math.cos(angle * 0.27) - Math.cos(handoffState.angle * 0.27)) * 3}%`,
             });
-            portalLightRef.current = 0.98 + emergence.progress * 0.16 + slowBreath * 0.42 + (lightShimmer - 0.5) * 0.24;
+            portalLightRef.current = handoffState.light + emergence.progress * 0.12 + breathDelta * 0.32 + shimmerDelta * 0.2;
+          } else {
+            gsap.set(bloom, {
+              x: Math.sin(angle * 0.9) * 18,
+              y: Math.cos(angle * 1.1) * 26,
+            });
           }
         },
       });
@@ -162,6 +182,31 @@ function LoginContent() {
 
       timelineRef.current = gsap.timeline({
         onComplete: () => {
+          const angle = mistMotion.angle;
+          handoffState = {
+            angle,
+            scene: {
+              rotationX: Number(gsap.getProperty(sceneWrap, "rotationX")),
+              rotationY: Number(gsap.getProperty(sceneWrap, "rotationY")),
+              rotationZ: Number(gsap.getProperty(sceneWrap, "rotationZ")),
+              x: Number(gsap.getProperty(sceneWrap, "x")),
+              y: Number(gsap.getProperty(sceneWrap, "y")),
+              scale: Number(gsap.getProperty(sceneWrap, "scale")),
+            },
+            shade: {
+              opacity: Number(gsap.getProperty(shade, "opacity")),
+              x: Number.parseFloat(window.getComputedStyle(shade).getPropertyValue("--shade-x")) || 50,
+              y: Number.parseFloat(window.getComputedStyle(shade).getPropertyValue("--shade-y")) || 45,
+            },
+            bloom: {
+              opacity: Number(gsap.getProperty(bloom, "opacity")),
+              x: Number(gsap.getProperty(bloom, "x")),
+              y: Number(gsap.getProperty(bloom, "y")),
+            },
+            light: portalLightRef.current,
+            slowBreath: Math.sin(angle * 0.62 - 0.75),
+            lightShimmer: 0.5 + 0.5 * Math.sin(angle * 1.35 + 1.1),
+          };
           gsap.to(emergence, {
             progress: 1,
             duration: 1.15,
