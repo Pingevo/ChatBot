@@ -327,7 +327,7 @@ export default function ShopsPage() {
           />
         ) : (
           <>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
               {shops.map((s) => (
                 <Card
                   key={`${s.platform}-${s.shop_id}`}
@@ -345,15 +345,15 @@ export default function ShopsPage() {
                     </Badge>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2 text-center mb-3">
-                    <div className="bg-surface-2 rounded-lg p-2">
+                  <div className="grid grid-cols-2 divide-x divide-border/60 border-y border-border/60 text-center mb-3">
+                    <div className="py-2">
                       <div className="flex items-center justify-center gap-1 text-sm font-semibold text-text">
                         <Package size={12} className="text-text-muted" />
                         {s.product_count}
                       </div>
                       <div className="text-[10px] text-text-muted">สินค้า</div>
                     </div>
-                    <div className="bg-surface-2 rounded-lg p-2">
+                    <div className="py-2">
                       <div className="flex items-center justify-center gap-1 text-sm font-semibold text-text">
                         <MessageSquare size={12} className="text-text-muted" />
                         {s.conversation_count}

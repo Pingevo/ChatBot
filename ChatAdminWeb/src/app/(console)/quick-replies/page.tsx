@@ -407,7 +407,7 @@ export default function QuickRepliesPage() {
       }
       actions={
         editable && (
-          <Button size="sm" onClick={openCreate}>
+          <Button size="sm" className="phone-mobile-add-hidden" onClick={openCreate}>
             <Plus size={14} /> เพิ่มคำตอบเร็ว
           </Button>
         )
@@ -419,8 +419,8 @@ export default function QuickRepliesPage() {
       filterBar={
         <>
         {/* Filter bar — search + platform + shop + enabled + sort */}
-        <div className="flex items-center gap-2 mt-4 flex-wrap">
-          <div className="relative flex-1 min-w-[200px] max-w-md">
+        <div className="flex flex-wrap items-center gap-2 mt-3 sm:mt-4">
+          <div className="relative w-full min-w-0 sm:flex-1 sm:max-w-md">
             <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
             <input
               type="text"
@@ -429,9 +429,9 @@ export default function QuickRepliesPage() {
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={handleSearchEsc}
               placeholder="ค้นหาชื่อ เนื้อหา หมวดหมู่..."
-              className="w-full h-8 pl-8 pr-8 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+              className="w-full h-10 pl-8 pr-8 rounded-lg border border-border bg-surface text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40 pointer-coarse:h-11 pointer-coarse:text-base"
             />
-            <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
+            <kbd className="absolute right-2.5 top-1/2 hidden -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none pointer-coarse:hidden sm:block">/</kbd>
           </div>
 
           {/* Platform filter (multi) */}
@@ -441,7 +441,7 @@ export default function QuickRepliesPage() {
               aria-expanded={showPlatformDd}
               aria-haspopup="listbox"
               style={{ minWidth: "110px" }}
-              className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterPlatforms.length > 0 ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
+              className={`h-10 px-3 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterPlatforms.length > 0 ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"} pointer-coarse:h-11 pointer-coarse:text-sm`}
             >
               <span className="text-text-subtle shrink-0">แพลตฟอร์ม:</span>
               <span className="font-medium truncate" style={{ minWidth: "40px", maxWidth: "120px" }}>
@@ -452,12 +452,12 @@ export default function QuickRepliesPage() {
             {showPlatformDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowPlatformDd(false)} />
-                <div ref={(el) => { if (showPlatformDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามแพลตฟอร์ม" aria-activedescendant={`platform-option-${platformNav.activeIndex}`} onKeyDown={(e) => { platformNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                <div ref={(el) => { if (showPlatformDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามแพลตฟอร์ม" aria-activedescendant={`platform-option-${platformNav.activeIndex}`} onKeyDown={(e) => { platformNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] bg-surface border border-border rounded-lg shadow-lg z-40 max-w-[calc(100vw-1.5rem)] max-h-[min(60dvh,24rem)] overflow-y-auto py-1">
                   {["shopee", "tiktok", "lazada"].map((p, i) => {
                     const sel = filterPlatforms.includes(p);
                     return (
                       <button key={p} id={`platform-option-${i}`} role="option" aria-selected={sel} onClick={() => setFilterPlatforms(sel ? filterPlatforms.filter((x) => x !== p) : [...filterPlatforms, p])}
-                        className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${sel ? "text-brand font-medium" : "text-text"}`}>
+                        className={`w-full min-h-8 text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 pointer-coarse:min-h-11 pointer-coarse:py-2.5 pointer-coarse:text-sm ${sel ? "text-brand font-medium" : "text-text"}`}>
                         <Check size={11} className={sel ? "" : "opacity-0"} />
                         <span className="capitalize">{p}</span>
                       </button>
@@ -468,18 +468,19 @@ export default function QuickRepliesPage() {
             )}
           </div>
 
-          {/* Toggle ตัวกรองเพิ่มเติม — แสดงเฉพาะจอ <lg */}
+          {/* Toggle ตัวกรองเพิ่มเติม — แสดงเฉพาะจอ <xl */}
           <button
             onClick={() => setFiltersOpen(!filtersOpen)}
             aria-expanded={filtersOpen}
-            className="lg:hidden h-8 px-2.5 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
+            aria-controls="quick-replies-extra-filters"
+            className="xl:hidden h-10 px-3 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors pointer-coarse:h-11 pointer-coarse:text-sm"
           >
             ตัวกรองเพิ่มเติม
             <ChevronDown size={11} className={`text-text-muted shrink-0 transition-transform ${filtersOpen ? "rotate-180" : ""}`} />
           </button>
 
-          {/* ตัวกรองที่เหลือ — <lg ซ่อนไว้หลังปุ่ม toggle, lg+ แสดงตลอด */}
-          <div className={`${filtersOpen ? "flex" : "hidden"} lg:flex flex-wrap items-center gap-2`}>
+          {/* ตัวกรองที่เหลือ — <xl ซ่อนไว้หลังปุ่ม toggle, xl+ แสดงตลอด */}
+          <div id="quick-replies-extra-filters" className={`${filtersOpen ? "flex" : "hidden"} xl:flex w-full xl:w-auto flex-wrap items-center gap-2 max-xl:rounded-xl max-xl:border max-xl:border-border max-xl:bg-surface-2 max-xl:p-3 [&_button]:min-h-10 pointer-coarse:[&_button]:min-h-11 pointer-coarse:[&_button]:text-sm`}>
           {/* Shop filter (multi) */}
           <div className="relative">
             <button
@@ -488,7 +489,7 @@ export default function QuickRepliesPage() {
               aria-haspopup="listbox"
               disabled={filterShopOptions.length === 0}
               style={{ minWidth: "90px" }}
-              className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors disabled:opacity-40 ${filterShopIds.length > 0 ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
+              className={`h-10 px-3 text-xs rounded-lg border flex items-center gap-1.5 transition-colors disabled:opacity-40 ${filterShopIds.length > 0 ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"} pointer-coarse:h-11 pointer-coarse:text-sm`}
             >
               <span className="text-text-subtle shrink-0">ร้าน:</span>
               <span className="font-medium truncate" style={{ minWidth: "30px", maxWidth: "120px" }}>
@@ -501,12 +502,12 @@ export default function QuickRepliesPage() {
             {showShopDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowShopDd(false)} />
-                <div ref={(el) => { if (showShopDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามร้าน" aria-activedescendant={`shop-option-${shopNav.activeIndex}`} onKeyDown={(e) => { shopNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[180px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                <div ref={(el) => { if (showShopDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามร้าน" aria-activedescendant={`shop-option-${shopNav.activeIndex}`} onKeyDown={(e) => { shopNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[180px] max-w-[calc(100vw-1.5rem)] max-h-[min(60dvh,24rem)] overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
                   {filterShopOptions.map((s, i) => {
                     const sel = filterShopIds.includes(s.shop_id);
                     return (
                       <button key={`${s.shop_id}|${s.platform}`} id={`shop-option-${i}`} role="option" aria-selected={sel} onClick={() => setFilterShopIds(sel ? filterShopIds.filter((x) => x !== s.shop_id) : [...filterShopIds, s.shop_id])}
-                        className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${sel ? "text-brand font-medium" : "text-text"}`}>
+                        className={`w-full min-h-8 text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 pointer-coarse:min-h-11 pointer-coarse:py-2.5 pointer-coarse:text-sm ${sel ? "text-brand font-medium" : "text-text"}`}>
                         <Check size={11} className={sel ? "" : "opacity-0"} />
                         <span className="truncate">{s.shopname}</span>
                       </button>
@@ -524,7 +525,7 @@ export default function QuickRepliesPage() {
               aria-expanded={showEnabledDd}
               aria-haspopup="listbox"
               style={{ minWidth: "90px" }}
-              className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterEnabled !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
+              className={`h-10 px-3 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterEnabled !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"} pointer-coarse:h-11 pointer-coarse:text-sm`}
             >
               <span className="text-text-subtle shrink-0">สถานะ:</span>
               <span className="font-medium" style={{ minWidth: "40px" }}>
@@ -535,14 +536,14 @@ export default function QuickRepliesPage() {
             {showEnabledDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowEnabledDd(false)} />
-                <div ref={(el) => { if (showEnabledDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามสถานะ" aria-activedescendant={`enabled-option-${enabledNav.activeIndex}`} onKeyDown={(e) => { enabledNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[100px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                <div ref={(el) => { if (showEnabledDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามสถานะ" aria-activedescendant={`enabled-option-${enabledNav.activeIndex}`} onKeyDown={(e) => { enabledNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[100px] bg-surface border border-border rounded-lg shadow-lg z-40 max-w-[calc(100vw-1.5rem)] max-h-[min(60dvh,24rem)] overflow-y-auto py-1">
                   {([
                     { v: "all", l: "ทั้งหมด" },
                     { v: "enabled", l: "เปิดใช้" },
                     { v: "disabled", l: "ปิดใช้" },
                   ] as const).map((s, i) => (
                     <button key={s.v} id={`enabled-option-${i}`} role="option" aria-selected={filterEnabled === s.v} onClick={() => { setFilterEnabled(s.v); setShowEnabledDd(false); }}
-                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterEnabled === s.v ? "text-brand font-medium" : "text-text"}`}>
+                      className={`w-full min-h-8 text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 pointer-coarse:min-h-11 pointer-coarse:py-2.5 pointer-coarse:text-sm ${filterEnabled === s.v ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterEnabled === s.v ? "" : "opacity-0"} />
                       {s.l}
                     </button>
@@ -559,7 +560,7 @@ export default function QuickRepliesPage() {
               aria-expanded={showSortDd}
               aria-haspopup="listbox"
               style={{ minWidth: "90px" }}
-              className="h-8 px-2.5 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
+              className="h-10 px-3 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors pointer-coarse:h-11 pointer-coarse:text-sm"
             >
               <ArrowDownUp size={11} className="text-text-muted shrink-0" />
               <span className="font-medium" style={{ minWidth: "60px" }}>
@@ -569,7 +570,7 @@ export default function QuickRepliesPage() {
             {showSortDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowSortDd(false)} />
-                <div ref={(el) => { if (showSortDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="เรียงลำดับ" aria-activedescendant={`sort-option-${sortNav.activeIndex}`} onKeyDown={(e) => { sortNav.onKeyDown(e); }} className="absolute top-full right-0 mt-1 min-w-[120px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                <div ref={(el) => { if (showSortDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="เรียงลำดับ" aria-activedescendant={`sort-option-${sortNav.activeIndex}`} onKeyDown={(e) => { sortNav.onKeyDown(e); }} className="absolute top-full right-0 mt-1 min-w-[120px] bg-surface border border-border rounded-lg shadow-lg z-40 max-w-[calc(100vw-1.5rem)] max-h-[min(60dvh,24rem)] overflow-y-auto py-1">
                   {([
                     { v: "recent", l: "สร้างใหม่สุด" },
                     { v: "oldest", l: "สร้างเก่าสุด" },
@@ -578,7 +579,7 @@ export default function QuickRepliesPage() {
                     { v: "name", l: "ชื่อ A-Z" },
                   ] as const).map((s, i) => (
                     <button key={s.v} id={`sort-option-${i}`} role="option" aria-selected={sortBy === s.v} onClick={() => { setSortBy(s.v); setShowSortDd(false); }}
-                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${sortBy === s.v ? "text-brand font-medium" : "text-text"}`}>
+                      className={`w-full min-h-8 text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 pointer-coarse:min-h-11 pointer-coarse:py-2.5 pointer-coarse:text-sm ${sortBy === s.v ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={sortBy === s.v ? "" : "opacity-0"} />
                       {s.l}
                     </button>
@@ -595,7 +596,7 @@ export default function QuickRepliesPage() {
               aria-expanded={showCreatedDd}
               aria-haspopup="listbox"
               style={{ minWidth: "100px" }}
-              className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterCreatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
+              className={`h-10 px-3 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterCreatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"} pointer-coarse:h-11 pointer-coarse:text-sm`}
             >
               <span className="text-text-subtle shrink-0">สร้างโดย:</span>
               <span className="font-medium truncate" style={{ minWidth: "30px", maxWidth: "60px" }}>
@@ -606,13 +607,13 @@ export default function QuickRepliesPage() {
             {showCreatedDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowCreatedDd(false)} />
-                <div ref={(el) => { if (showCreatedDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามผู้สร้าง" aria-activedescendant={`created-option-${createdNav.activeIndex}`} onKeyDown={(e) => { createdNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-                  <button id="created-option-0" role="option" aria-selected={filterCreatedBy === "all"} onClick={() => { setFilterCreatedBy("all"); setShowCreatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
+                <div ref={(el) => { if (showCreatedDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามผู้สร้าง" aria-activedescendant={`created-option-${createdNav.activeIndex}`} onKeyDown={(e) => { createdNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] max-w-[calc(100vw-1.5rem)] max-h-[min(60dvh,24rem)] overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                  <button id="created-option-0" role="option" aria-selected={filterCreatedBy === "all"} onClick={() => { setFilterCreatedBy("all"); setShowCreatedDd(false); }} className={`w-full min-h-8 text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 pointer-coarse:min-h-11 pointer-coarse:py-2.5 pointer-coarse:text-sm ${filterCreatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
                     <Check size={11} className={filterCreatedBy === "all" ? "" : "opacity-0"} /> ทั้งหมด
                   </button>
                   <div className="border-t border-border my-1" />
                   {admins.map((a, i) => (
-                    <button key={a.admin_id} id={`created-option-${i + 1}`} role="option" aria-selected={filterCreatedBy === a.admin_id} onClick={() => { setFilterCreatedBy(a.admin_id); setShowCreatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
+                    <button key={a.admin_id} id={`created-option-${i + 1}`} role="option" aria-selected={filterCreatedBy === a.admin_id} onClick={() => { setFilterCreatedBy(a.admin_id); setShowCreatedDd(false); }} className={`w-full min-h-8 text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 pointer-coarse:min-h-11 pointer-coarse:py-2.5 pointer-coarse:text-sm ${filterCreatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterCreatedBy === a.admin_id ? "" : "opacity-0"} /> {a.name || a.username}
                     </button>
                   ))}
@@ -628,7 +629,7 @@ export default function QuickRepliesPage() {
               aria-expanded={showUpdatedDd}
               aria-haspopup="listbox"
               style={{ minWidth: "100px" }}
-              className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterUpdatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
+              className={`h-10 px-3 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterUpdatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"} pointer-coarse:h-11 pointer-coarse:text-sm`}
             >
               <span className="text-text-subtle shrink-0">แก้ไขโดย:</span>
               <span className="font-medium truncate" style={{ minWidth: "30px", maxWidth: "60px" }}>
@@ -639,13 +640,13 @@ export default function QuickRepliesPage() {
             {showUpdatedDd && (
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowUpdatedDd(false)} />
-                <div ref={(el) => { if (showUpdatedDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามผู้แก้ไข" aria-activedescendant={`updated-option-${updatedNav.activeIndex}`} onKeyDown={(e) => { updatedNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-                  <button id="updated-option-0" role="option" aria-selected={filterUpdatedBy === "all"} onClick={() => { setFilterUpdatedBy("all"); setShowUpdatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
+                <div ref={(el) => { if (showUpdatedDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามผู้แก้ไข" aria-activedescendant={`updated-option-${updatedNav.activeIndex}`} onKeyDown={(e) => { updatedNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] max-w-[calc(100vw-1.5rem)] max-h-[min(60dvh,24rem)] overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+                  <button id="updated-option-0" role="option" aria-selected={filterUpdatedBy === "all"} onClick={() => { setFilterUpdatedBy("all"); setShowUpdatedDd(false); }} className={`w-full min-h-8 text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 pointer-coarse:min-h-11 pointer-coarse:py-2.5 pointer-coarse:text-sm ${filterUpdatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
                     <Check size={11} className={filterUpdatedBy === "all" ? "" : "opacity-0"} /> ทั้งหมด
                   </button>
                   <div className="border-t border-border my-1" />
                   {admins.map((a, i) => (
-                    <button key={a.admin_id} id={`updated-option-${i + 1}`} role="option" aria-selected={filterUpdatedBy === a.admin_id} onClick={() => { setFilterUpdatedBy(a.admin_id); setShowUpdatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
+                    <button key={a.admin_id} id={`updated-option-${i + 1}`} role="option" aria-selected={filterUpdatedBy === a.admin_id} onClick={() => { setFilterUpdatedBy(a.admin_id); setShowUpdatedDd(false); }} className={`w-full min-h-8 text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 pointer-coarse:min-h-11 pointer-coarse:py-2.5 pointer-coarse:text-sm ${filterUpdatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterUpdatedBy === a.admin_id ? "" : "opacity-0"} /> {a.name || a.username}
                     </button>
                   ))}
@@ -681,7 +682,7 @@ export default function QuickRepliesPage() {
         )}
         </>
       }
-      contentClassName="p-6 space-y-6"
+      contentClassName="p-3 space-y-4 sm:p-4 lg:p-6 pointer-coarse:lg:p-5 sm:space-y-5 lg:space-y-6"
     >
       {loading ? (
         <Loading />
@@ -694,15 +695,15 @@ export default function QuickRepliesPage() {
       ) : (
         <div className="space-y-4">
           {editable && selectedIds.size > 0 && (
-            <div className="flex items-center gap-2 px-4 py-2 bg-warning-soft border-b border-warning/30 rounded-xl">
+            <div className="flex flex-wrap items-center gap-2 px-3 py-2 bg-warning-soft border-b border-warning/30 rounded-xl">
               <span className="text-xs text-warning-dark font-medium">เลือกแล้ว {selectedIds.size} รายการ</span>
-              <button onClick={handleBulkDelete} className="text-xs px-2 py-1 rounded-md border border-error/30 text-error hover:bg-error/5 transition-colors">ลบที่เลือก</button>
-              <button onClick={() => setSelectedIds(new Set())} className="text-xs px-2 py-1 rounded-md text-text-muted hover:bg-surface-2 transition-colors">ยกเลิกเลือก</button>
+              <button onClick={handleBulkDelete} className="min-h-8 text-xs px-2 py-1 rounded-md border border-error/30 text-error hover:bg-error/5 transition-colors pointer-coarse:min-h-11 pointer-coarse:px-3 pointer-coarse:text-sm">ลบที่เลือก</button>
+              <button onClick={() => setSelectedIds(new Set())} className="min-h-8 text-xs px-2 py-1 rounded-md text-text-muted hover:bg-surface-2 transition-colors pointer-coarse:min-h-11 pointer-coarse:px-3 pointer-coarse:text-sm">ยกเลิกเลือก</button>
             </div>
           )}
           {editable && filtered.length > 0 && (
-            <div className="flex items-center gap-2 px-1">
-              <input type="checkbox" checked={selectedIds.size === filtered.length && filtered.length > 0} onChange={toggleSelectAll} className="w-4 h-4 rounded border-border accent-brand" aria-label="เลือกทั้งหมดในหน้านี้" />
+            <div className="flex min-h-11 items-center gap-2 px-1">
+              <input type="checkbox" checked={selectedIds.size === filtered.length && filtered.length > 0} onChange={toggleSelectAll} className="w-4 h-4 rounded border-border accent-brand pointer-coarse:h-5 pointer-coarse:w-5" aria-label="เลือกทั้งหมดในหน้านี้" />
               <span className="text-xs text-text-muted">เลือกทั้งหมดในหน้านี้ ({filtered.length})</span>
             </div>
           )}
@@ -713,14 +714,14 @@ export default function QuickRepliesPage() {
                 {filtered.filter((r) => r.category === cat).map((row) => (
                   <div
                     key={row.quick_reply_id}
-                    className="bg-surface border border-border rounded-lg p-3 flex items-start gap-3"
+                    className={`bg-surface border border-border rounded-xl p-3 sm:p-4 grid items-start gap-3 ${editable ? "grid-cols-[auto_minmax(0,1fr)] sm:grid-cols-[auto_minmax(0,1fr)_auto]" : "grid-cols-1"}`}
                   >
                     {editable && (
-                      <input type="checkbox" checked={selectedIds.has(row.quick_reply_id)} onChange={() => toggleSelect(row.quick_reply_id)} className="w-4 h-4 rounded border-border accent-brand mt-1 shrink-0" aria-label={`เลือก ${row.title}`} />
+                      <input type="checkbox" checked={selectedIds.has(row.quick_reply_id)} onChange={() => toggleSelect(row.quick_reply_id)} className="w-4 h-4 rounded border-border accent-brand mt-1 shrink-0 pointer-coarse:h-5 pointer-coarse:w-5" aria-label={`เลือก ${row.title}`} />
                     )}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <span className="text-sm font-medium text-text">{row.title}</span>
+                        <span className="min-w-0 break-words text-sm font-medium text-text">{row.title}</span>
                         {row.enabled ? (
                           <Badge tone="brand">เปิดใช้</Badge>
                         ) : (
@@ -737,9 +738,9 @@ export default function QuickRepliesPage() {
                           <Badge tone="neutral">{row.shop_ids.length} ร้าน</Badge>
                         )}
                       </div>
-                      <p className="text-xs text-text-muted line-clamp-2 whitespace-pre-wrap">{row.body}</p>
+                      <p className="text-xs text-text-muted line-clamp-2 whitespace-pre-wrap break-words">{row.body}</p>
                     </div>
-                    <div className="flex items-center gap-1 shrink-0">
+                    <div className="col-start-2 flex min-w-0 items-center gap-1 shrink-0 sm:col-start-3 sm:row-start-1">
                       {editable && (
                         <ToggleSwitch
                           enabled={row.enabled}
@@ -749,7 +750,7 @@ export default function QuickRepliesPage() {
                       {editable && (
                         <button
                           onClick={() => openEdit(row)}
-                          className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center"
+                          className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center pointer-coarse:h-11 pointer-coarse:w-11"
                           title="แก้ไข"
                           aria-label="แก้ไข"
                         >
@@ -759,7 +760,7 @@ export default function QuickRepliesPage() {
                       {editable && (
                         <button
                           onClick={() => handleDelete(row.quick_reply_id)}
-                          className="w-9 h-9 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center"
+                          className="w-9 h-9 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center pointer-coarse:h-11 pointer-coarse:w-11"
                           title="ลบ"
                           aria-label="ลบ"
                         >
@@ -779,12 +780,12 @@ export default function QuickRepliesPage() {
       {showForm && (
         <ModalLayer
           presentation="workspace"
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-4"
+          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/40 p-3 sm:p-4"
           onClick={() => closeForm()}
           onBack={closeForm}
         >
           <div
-            className="bg-surface rounded-2xl shadow-xl w-full max-w-lg max-h-[85vh] overflow-y-auto"
+            className="flex w-full max-w-2xl max-h-[min(90dvh,56rem)] flex-col overflow-hidden rounded-2xl bg-surface shadow-xl pointer-coarse:sm:max-w-xl"
             role="dialog"
             aria-modal="true"
             aria-labelledby="qr-form-modal-title"
@@ -792,35 +793,36 @@ export default function QuickRepliesPage() {
             tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between p-4 border-b border-border sticky top-0 bg-surface">
+            <div className="z-10 flex shrink-0 items-center justify-between border-b border-border bg-surface p-4">
               <h2 id="qr-form-modal-title" className="text-base font-semibold text-text">
                 {editing ? "แก้ไขคำตอบเร็ว" : "เพิ่มคำตอบเร็วใหม่"}
               </h2>
               <button
                 onClick={() => closeForm()}
                 title="ปิด" aria-label="ปิด"
-                className="w-8 h-8 rounded-md hover:bg-surface-2 flex items-center justify-center"
+                className="w-8 h-8 rounded-md hover:bg-surface-2 flex items-center justify-center pointer-coarse:h-11 pointer-coarse:w-11"
               >
                 <X size={16} className="text-text-muted" />
               </button>
             </div>
-            <form className="mobile-workspace-form" onSubmit={(e) => { e.preventDefault(); handleSave(); }}>
-            <div className="mobile-workspace-body p-4 space-y-3">
+            <form className="mobile-workspace-form flex min-h-0 flex-1 flex-col" onSubmit={(e) => { e.preventDefault(); handleSave(); }}>
+            <div className="mobile-workspace-body min-h-0 flex-1 overflow-y-auto overscroll-contain p-4">
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 pointer-coarse:sm:grid-cols-1">
               <div>
-                <label htmlFor="qr-form-category" className="text-xs text-text-muted">หมวดหมู่</label>
+                <label htmlFor="qr-form-category" className="text-xs text-text-muted pointer-coarse:text-sm">หมวดหมู่</label>
                 <input
                   id="qr-form-category"
                   value={form.category}
                   onChange={(e) => setForm({ ...form, category: e.target.value })}
                   placeholder="เช่น ทั่วไป, พัสดุ, เคลม"
-                  className="w-full mt-1 h-9 rounded-lg border border-border bg-surface-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40"
+                  className="w-full mt-1 h-10 rounded-lg border border-border bg-surface-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40 pointer-coarse:h-11 pointer-coarse:text-base"
                 />
               </div>
               <FormField
                 id="qr-form-title"
                 label="ชื่อปุ่ม"
                 required
-                labelClassName="text-xs text-text-muted"
+                labelClassName="text-xs text-text-muted pointer-coarse:text-sm"
                 error={touched.title && !form.title.trim() ? "กรุณาตั้งชื่อคำตอบเร็ว" : undefined}
               >
                 <input
@@ -828,29 +830,31 @@ export default function QuickRepliesPage() {
                   onChange={(e) => setForm({ ...form, title: e.target.value })}
                   onBlur={() => setTouched({ ...touched, title: true })}
                   placeholder="เช่น ขอเลขพัสดุ"
-                  className="w-full mt-1 h-9 rounded-lg border border-border bg-surface-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40"
+                  className="w-full mt-1 h-10 rounded-lg border border-border bg-surface-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40 pointer-coarse:h-11 pointer-coarse:text-base"
                 />
               </FormField>
-              <FormField
-                id="qr-form-body"
-                label="เนื้อหาคำตอบ"
-                required
-                labelClassName="text-xs text-text-muted"
-                error={touched.body && !form.body.trim() ? "กรุณากรอกเนื้อหาคำตอบเร็ว" : undefined}
-              >
-                <textarea
-                  value={form.body}
-                  onChange={(e) => setForm({ ...form, body: e.target.value })}
-                  onBlur={() => setTouched({ ...touched, body: true })}
-                  rows={5}
-                  placeholder="พิมพ์คำตอบที่จะส่งให้ลูกค้า..."
-                  className="w-full mt-1 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40 resize-y"
-                />
-              </FormField>
+              <div className="sm:col-span-2 pointer-coarse:sm:col-span-1">
+                <FormField
+                  id="qr-form-body"
+                  label="เนื้อหาคำตอบ"
+                  required
+                  labelClassName="text-xs text-text-muted pointer-coarse:text-sm"
+                  error={touched.body && !form.body.trim() ? "กรุณากรอกเนื้อหาคำตอบเร็ว" : undefined}
+                >
+                  <textarea
+                    value={form.body}
+                    onChange={(e) => setForm({ ...form, body: e.target.value })}
+                    onBlur={() => setTouched({ ...touched, body: true })}
+                    rows={5}
+                    placeholder="พิมพ์คำตอบที่จะส่งให้ลูกค้า..."
+                    className="w-full mt-1 rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40 resize-y pointer-coarse:text-base"
+                  />
+                </FormField>
+              </div>
 
               {/* Platform selection — multi-select */}
               <div>
-                <label htmlFor="qr-form-platforms" className="text-xs text-text-muted flex items-center gap-1">
+                <label htmlFor="qr-form-platforms" className="text-xs text-text-muted flex items-center gap-1 pointer-coarse:text-sm">
                   <Globe size={12} /> แพลตฟอร์ม (ไม่เลือก = ทุกแพลตฟอร์ม)
                 </label>
                 <div className="flex gap-2 mt-1">
@@ -860,7 +864,7 @@ export default function QuickRepliesPage() {
                       type="button"
                       onClick={() => togglePlatform(p)}
                       aria-pressed={form.platforms.includes(p) ? "true" : "false"}
-                      className={`px-3 h-9 rounded-lg border text-sm capitalize transition-colors ${
+                      className={`min-w-11 px-3 h-9 rounded-lg border text-sm capitalize transition-colors pointer-coarse:h-11 pointer-coarse:text-base ${
                         form.platforms.includes(p)
                           ? "border-brand bg-brand/10 text-brand"
                           : "border-border text-text-muted hover:bg-surface-2"
@@ -874,7 +878,7 @@ export default function QuickRepliesPage() {
 
               {/* Shop selection — multi-select, filtered by platform */}
               <div>
-                <label htmlFor="qr-form-shops" className="text-xs text-text-muted flex items-center gap-1">
+                <label htmlFor="qr-form-shops" className="text-xs text-text-muted flex items-center gap-1 pointer-coarse:text-sm">
                   <Store size={12} /> ร้านค้า (ไม่เลือก = ทุกร้าน{form.platforms.length > 0 ? "ในแพลตฟอร์มที่เลือก" : ""})
                 </label>
                 {availableShops.length === 0 ? (
@@ -884,13 +888,13 @@ export default function QuickRepliesPage() {
                     {availableShops.map((shop) => (
                       <label
                         key={`${shop.shop_id}|${shop.platform}`}
-                        className="flex items-center gap-2 px-3 py-2 hover:bg-surface cursor-pointer border-b border-border last:border-0"
+                        className="flex min-h-11 items-center gap-2 px-3 py-2 hover:bg-surface cursor-pointer border-b border-border last:border-0"
                       >
                         <input
                           type="checkbox"
                           checked={form.shop_ids.includes(shop.shop_id)}
                           onChange={() => toggleShop(shop.shop_id)}
-                          className="w-4 h-4 rounded accent-brand"
+                          className="w-4 h-4 rounded accent-brand pointer-coarse:h-5 pointer-coarse:w-5"
                         />
                         <div className="flex-1 min-w-0">
                           <div className="text-sm text-text truncate">{shop.shopname}</div>
@@ -908,30 +912,32 @@ export default function QuickRepliesPage() {
               {/* ⚡ sort_order — สร้างใหม่: auto (ซ่อน input) / แก้ไข: ให้เปลี่ยนได้ */}
               {editing ? (
                 <div>
-                  <label htmlFor="qr-form-sort-order" className="text-xs text-text-muted">ลำดับ</label>
+                  <label htmlFor="qr-form-sort-order" className="text-xs text-text-muted pointer-coarse:text-sm">ลำดับ</label>
                   <input
                     id="qr-form-sort-order"
                     type="number"
                     value={form.sort_order}
                     onChange={(e) => setForm({ ...form, sort_order: Number(e.target.value) })}
-                    className="w-full mt-1 h-9 rounded-lg border border-border bg-surface-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40"
+                    className="w-full mt-1 h-10 rounded-lg border border-border bg-surface-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40 pointer-coarse:h-11 pointer-coarse:text-base"
                   />
                 </div>
               ) : (
                 <div>
-                  <label htmlFor="qr-form-sort-order" className="text-xs text-text-muted">ลำดับ</label>
-                  <div className="mt-1 h-9 rounded-lg border border-border bg-surface-2/50 px-3 flex items-center text-sm text-text-muted">
+                  <label htmlFor="qr-form-sort-order" className="text-xs text-text-muted pointer-coarse:text-sm">ลำดับ</label>
+                  <div className="mt-1 h-10 rounded-lg border border-border bg-surface-2/50 px-3 flex items-center text-sm text-text-muted pointer-coarse:h-11 pointer-coarse:text-base">
                     กำหนดอัตโนมัติ (ต่อจากอันล่าสุด)
                   </div>
                 </div>
               )}
 
+              </div>
             </div>
-              <div className="mobile-workspace-actions flex justify-end gap-2 pt-2">
-                <Button variant="ghost" onClick={() => closeForm()}>ยกเลิก</Button>
+              <div className="mobile-workspace-actions flex shrink-0 justify-end gap-2 border-t border-border bg-surface p-4">
+                <Button variant="ghost" onClick={() => closeForm()} className="pointer-coarse:min-h-11">ยกเลิก</Button>
                 <Button
                   type="submit"
                   disabled={!form.title.trim() || !form.body.trim()}
+                  className="pointer-coarse:min-h-11"
                 >
                   บันทึก
                 </Button>

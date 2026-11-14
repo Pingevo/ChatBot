@@ -11,6 +11,7 @@ import { formatDateLabel } from "@/components/shadow/DateBanner";
 import { AnnotationDot, type Annotation } from "@/components/ui/AnnotationDot";
 import { ModalLayer } from "@/components/ui/ModalLayer";
 import { useFocusTrap } from "@/lib/useKeyboardShortcuts";
+import { PageIdentityMark } from "@/components/ui/PageIdentityMark";
 
 interface Props {
   conversations: Conversation[];
@@ -326,9 +327,7 @@ export function ChatList({
         {/* Row 1: title + count + accept toggle */}
         <div className="mobile-chat-list-title-row flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
-            <div className="w-6 h-6 rounded-md bg-brand/15 flex items-center justify-center shrink-0">
-              <MessageSquare size={13} className="text-brand" />
-            </div>
+            <PageIdentityMark kind="inbox" icon={MessageSquare} className="w-7 h-7 shrink-0" />
             <h2 className="mobile-chat-list-title font-semibold text-text text-sm truncate">กล่องข้อความ</h2>
             <Badge tone="brand">{totalCount != null ? totalCount : filtered.length}</Badge>
             {activeFilterCount > 0 && (
@@ -692,10 +691,12 @@ function Dropdown({
   return (
     <div className="relative">
       <button
+        type="button"
         onClick={onToggle}
         disabled={disabled}
+        aria-expanded={open}
         style={{ minWidth: `${minLabelWidth + 24}px` }}
-        className={`h-7 px-2 text-[11px] rounded-md border border-border bg-surface flex items-center gap-1 transition-colors ${
+        className={`console-menu-trigger chat-filter-trigger h-10 px-2.5 text-xs rounded-lg border border-border bg-surface flex items-center gap-1.5 transition-colors ${
           disabled ? "opacity-40 cursor-not-allowed" : "text-text-muted hover:text-text hover:bg-surface-2"
         } ${(selectedCount || displayLabel) ? "border-brand/40 text-text" : ""}`}
       >
@@ -732,7 +733,7 @@ function FilterMenu({ label, onClose, children }: { label: string; onClose: () =
   return (
     <>
       <div className="fixed inset-0 z-20" onClick={onClose} />
-      <div className="absolute top-full left-0 mt-1 min-w-[160px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1 max-h-60 overflow-y-auto">
+      <div role="group" aria-label={`ตัวเลือก${label}`} className="console-menu-panel chat-filter-menu absolute top-full left-0 mt-1 min-w-[160px] z-40 max-h-60 overflow-y-auto">
         {children}
       </div>
     </>
@@ -777,8 +778,10 @@ function DropdownCheckItem({
 }) {
   return (
     <button
+      type="button"
       onClick={onClick}
-      className="w-full flex items-center gap-2 px-3 py-1.5 text-xs hover:bg-surface-2 transition-colors text-left"
+      aria-pressed={checked}
+      className={`console-menu-option chat-filter-option w-full flex items-center gap-2 px-3 py-1.5 text-xs transition-colors text-left ${checked ? "is-selected" : ""}`}
     >
       <span className={`w-3.5 h-3.5 rounded flex items-center justify-center shrink-0 ${checked ? "bg-brand text-white" : "border border-border"}`}>
         {checked && <Check size={10} />}

@@ -2,7 +2,7 @@
 // Fleet view — up to 3 daily lanes and the latest weekly lane when one exists.
 // แมว pixel อยู่ที่ตำแหน่ง progress ของแต่ละ gen (เดิน = building, ยืนสุดหลอด = เสร็จ)
 import React from "react";
-import { PixelCat, type PixelCatAction } from "./BuildProgressCat";
+import { getGenerationMascotState, getGenerationProgressPercent, PixelCat } from "./BuildProgressCat";
 
 type Run = {
   _id: string; build_kind?: string; status: string;
@@ -25,12 +25,9 @@ const TUBE: Record<string, { bar: string; label: string }> = {
 
 function overall(run: Run): number {
   if (run.status !== "building") return 100;
-  const steps = run.steps || {};
-  const keys = Object.keys(steps);
-  if (!keys.length) return 0;
-  return Math.round(keys.reduce((a, s) =>
-    a + (steps[s]?.status === "done" ? 100 : (steps[s]?.percent ?? 0)), 0)
-    / SLOT_ORDER);
+  const completedSteps = Object.values(run.steps || {}).reduce((sum, step) =>
+    sum + (step?.status === "done" ? 1 : (step?.percent ?? 0) / 100), 0);
+  return getGenerationProgressPercent(completedSteps, SLOT_ORDER);
 }
 
 function Lane({ run, active, slot }: {
@@ -40,11 +37,8 @@ function Lane({ run, active, slot }: {
     : active === run._id ? "active" : run.status;
   const t = TUBE[status] || TUBE.discarded;
   const pct = run ? Math.min(100, Math.max(4, overall(run))) : 0;
+  const mascot = run ? getGenerationMascotState(run.status, active === run._id) : null;
   const building = run?.status === "building";
-  const catAction: PixelCatAction = building
-    ? "walk"
-    : status === "active" ? "wave"
-      : run?.status === "published" || run?.status === "pending" ? "snack" : "idle";
   return (
     <div className={`generation-track-lane flex items-center gap-2${building ? " is-building" : ""}`}>
       <span className={`generation-track-kind w-14 text-[10px] text-right shrink-0 ${
@@ -66,9 +60,9 @@ function Lane({ run, active, slot }: {
                   building ? "animate-pulse" : ""} transition-all duration-700`}
                  style={{ width: `${pct}%` }} />
           )}
-          <span className="generation-road-centerline md:hidden" aria-hidden="true" />
+          <span className="generation-road-centerline" aria-hidden="true" />
           {run && (
-            <span className="generation-road-light-stations md:hidden" aria-hidden="true">
+            <span className="generation-road-light-stations" aria-hidden="true">
               {ROAD_LAMP_STATIONS.map((station) => (
                 <span
                   key={station}
@@ -83,11 +77,10 @@ function Lane({ run, active, slot }: {
         {run && (
           <div className="generation-track-cat-marker absolute -top-1 transition-all duration-700 ease-in-out"
                style={{
-                 left: `clamp(0px, calc(${pct}% - 32px), calc(100% - 64px))`,
                  "--generation-progress": `${pct}%`,
                } as React.CSSProperties}>
-            <span className="generation-cat-spotlight md:hidden" aria-hidden="true" />
-            <PixelCat walking={!!building} action={catAction} />
+            <span className="generation-cat-spotlight" aria-hidden="true" />
+            <PixelCat walking={false} action={mascot?.action} mood={mascot?.mood} />
           </div>
         )}
       </div>

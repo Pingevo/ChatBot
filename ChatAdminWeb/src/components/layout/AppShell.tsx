@@ -5,9 +5,9 @@
 // แต่ละหน้ามี navbar ของตัวเอง (sticky top-0) — AppShell ไม่ใส่ topbar กลาง
 //
 // Responsive strategy:
-//   - Mobile (<768px): Bottom nav bar (MobileNav) + no sidebar, content full width
-//   - Tablet (768-1024px): Icon rail sidebar (60px) by default, content gets space
-//   - Desktop (≥1024px): Full sidebar (256px) with collapse/expand
+//   - Phone: rounded bottom navigation; no persistent side rail
+//   - Coarse-touch tablet: floating tablet navigation; content fills the frame
+//   - Fine-pointer laptop/PC: draggable floating launcher; content fills the frame
 "use client";
 import { useState, useEffect } from "react";
 import { useRouter, usePathname } from "next/navigation";
@@ -19,18 +19,23 @@ import { Loading } from "@/components/ui/Loading";
 import { ToastContainer } from "@/components/ui/Toast";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { ImageViewerOverlay } from "@/components/ui/ImageViewer";
+import { getPageIdentityKind } from "@/components/ui/PageIdentityMark";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, initialized, fetchMe } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(true);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
 
   // ⚡ test-chat pages — เดิมออกแบบให้ bypass login แต่ตอนนี้ middleware บังคับ SSO ทุกหน้า
   //   (PUBLIC_PAGES = ["/login"] เท่านั้น) — flag นี้เป็น dead path ไว้เผื่อ middleware whitelist ภายหลัง
   const isTestChatPage = pathname?.startsWith("/test-chat") || false;
+
+  useEffect(() => {
+    if (window.innerWidth >= 1440) setCollapsed(false);
+  }, []);
 
   useEffect(() => {
     if (!initialized) fetchMe();
@@ -52,7 +57,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const vv = window.visualViewport;
     const phoneViewport = window.matchMedia(
-      "(max-width: 767px), (pointer: coarse) and (max-height: 500px)"
+      "(max-width: 767px), (pointer: coarse) and (max-width: 1279.98px)"
     );
     let baselineHeight = Math.max(window.innerHeight, vv?.height ?? 0);
     let baselineWidth = window.innerWidth;
@@ -116,31 +121,28 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <div
-      className="h-dvh overflow-hidden"
+      className="tablet-console-frame h-dvh overflow-hidden"
       data-mobile-keyboard-open={keyboardOpen || undefined}
       style={{ height: "var(--app-vh, 100dvh)" }}
     >
-      {/* Sidebar — position:fixed, doesn't affect layout flow
-          Desktop: full sidebar (256px or 60px collapsed)
-          Tablet: icon rail (60px) — auto-collapsed
-          Mobile: hidden (uses MobileNav bottom bar instead) */}
+      {/* Sidebar — tablet rail, expandable laptop sidebar, full wide-screen sidebar. */}
       <Sidebar
         mobileOpen={mobileOpen}
         onMobileClose={() => setMobileOpen(false)}
+        onMobileOpenChange={setMobileOpen}
         collapsed={collapsed}
         onCollapsedChange={setCollapsed}
       />
 
-      {/* Main content — margin-left transitions to make room for sidebar
-          Desktop (≥1280px): ml-64 or ml-[60px]
-          Tablet/Phone (<1280px): ml-0 (full width, bottom nav handles navigation) */}
+      {/* Keep a 60px rail at tablet widths; laptop and wide screens follow the user's collapse setting. */}
       <div
-        className={`h-full flex flex-col min-w-0 transition-[margin] duration-200 ease-in-out ${collapsed ? "lg:ml-[60px]" : "lg:ml-64"}`}
+        className={`tablet-console-content h-full flex flex-col min-w-0 transition-[margin] duration-200 ease-in-out md:ml-[60px] ${collapsed ? "lg:ml-[60px]" : "lg:ml-64"}`}
       >
-        {/* Content area — pb-14 บนมือถือ/แท็บเล็ต เผื่อที่ให้ bottom nav */}
+        {/* Reserve bottom-nav space on phones only. */}
         <main
           data-app-content
-          className={`phone-app-stage flex-1 min-h-0 overflow-hidden ${keyboardOpen ? "pb-0" : "pb-14"} lg:pb-0`}
+          data-page-identity={getPageIdentityKind(pathname || "/dashboard")}
+          className={`tablet-console-main phone-app-stage flex-1 min-h-0 overflow-hidden ${keyboardOpen ? "pb-0" : "pb-14 md:pb-0"}`}
         >
           <MobilePageNavigationProvider>{children}</MobilePageNavigationProvider>
         </main>

@@ -154,15 +154,15 @@ export default function UsersPage() {
         — dev assign ได้ทุก role · superadmin assign ได้ทุก role ยกเว้น dev · role อื่น assign ไม่ได้
       </div>
 
-      {/* User list — card บนจอ <lg, ตารางบนจอ lg+ */}
+      {/* User list — card on tablet and below, table on wide laptops */}
       {loading ? (
         <div className="flex justify-center py-12"><Loading size={24} /></div>
       ) : users.length === 0 ? (
         <EmptyState icon={Users} title="ยังไม่มีผู้ใช้" description="ผู้ใช้จะเข้ามาเองผ่าน SSO" />
       ) : (
         <>
-          {/* ── Mobile/Tablet (<lg): card list ── */}
-          <ul className="lg:hidden space-y-3">
+          {/* ── Mobile/Tablet (<xl): card list ── */}
+          <ul className="xl:hidden space-y-3">
             {users.map((u) => (
               <li key={u.admin_id}>
                 <MobileInfoCard
@@ -191,8 +191,8 @@ export default function UsersPage() {
             ))}
           </ul>
 
-          {/* ── Desktop (lg+): table ── */}
-          <div className="hidden lg:block bg-surface rounded-xl border border-border overflow-hidden">
+          {/* ── Wide laptop (xl+): table ── */}
+          <div className="hidden xl:block bg-surface rounded-xl border border-border overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead className="bg-surface-2 text-text-muted">

@@ -359,7 +359,7 @@ export function MobileEmptyState({
 }) {
   return (
     <div className="mobile-empty-state flex flex-col items-center px-5 py-10 text-center">
-      {mascot && <Image src="/mascot/cat-girl-pixel.png" width={96} height={96} alt="" aria-hidden="true" className="mb-3 h-24 w-24 object-contain [image-rendering:pixelated]" />}
+      {mascot && <Image src="/mascot/cat-girl-pixel.png" width={96} height={96} unoptimized alt="" aria-hidden="true" className="mb-3 h-24 w-24 object-contain [image-rendering:pixelated]" />}
       <h2 className="text-base font-semibold text-text">{title}</h2>
       <p className="mt-1 max-w-sm text-sm leading-6 text-text-muted">{description}</p>
       {action && <div className="mt-4">{action}</div>}

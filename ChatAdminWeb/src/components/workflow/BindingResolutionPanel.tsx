@@ -3,6 +3,7 @@
 //   + emit user events ขึ้น editor — ไม่มี fetch/validation/business decision
 //   authoritative validation อยู่ฝั่ง service (saveBindingResolutionBatch) เสมอ
 "use client";
+import { SelectField } from "@/components/ui/SelectField";
 import type { BindingResolutionView, ResolutionMapping } from "@/backend/service/workflowService";
 
 // pick ที่ user เลือกต่อ source_index — local target identity เท่านั้น
@@ -115,7 +116,7 @@ export function BindingResolutionPanel({
                     <div style={{ fontSize: 11, color: "var(--color-success)" }}>{mappingEcho(mapped)}</div>
                   ) : resolvable && b.status !== "resolved" ? (
                     b.kind === "account" ? (
-                      <select
+                      <SelectField density="compact"
                         data-bid={b.binding_id} style={inputStyle}
                         value={pick?.shop_id ?? ""}
                         onChange={(e) => {
@@ -129,9 +130,9 @@ export function BindingResolutionPanel({
                             {a.platform} · {a.shopname} ({a.shop_id})
                           </option>
                         ))}
-                      </select>
+                      </SelectField>
                     ) : b.kind === "label" ? (
-                      <select
+                      <SelectField density="compact"
                         data-bid={b.binding_id} style={inputStyle}
                         value={pick?.local_id ?? ""}
                         onChange={(e) => onPick?.(b.binding_id, s.source_index, e.target.value ? { local_id: e.target.value } : null)}
@@ -140,9 +141,9 @@ export function BindingResolutionPanel({
                         {view.candidates.labels.map((l) => (
                           <option key={l} value={l}>{l}</option>
                         ))}
-                      </select>
+                      </SelectField>
                     ) : b.kind === "user" ? (
-                      <select
+                      <SelectField density="compact"
                         data-bid={b.binding_id} style={inputStyle}
                         value={pick?.local_id ?? ""}
                         onChange={(e) => onPick?.(b.binding_id, s.source_index, e.target.value ? { local_id: e.target.value } : null)}
@@ -151,7 +152,7 @@ export function BindingResolutionPanel({
                         {view.candidates.users.map((u) => (
                           <option key={u.admin_id} value={u.admin_id}>{u.display}</option>
                         ))}
-                      </select>
+                      </SelectField>
                     ) : null
                   ) : null}
                 </div>

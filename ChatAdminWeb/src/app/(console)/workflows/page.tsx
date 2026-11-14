@@ -20,12 +20,15 @@ import { toast } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import {
   GitBranch, Plus, Trash2, Pencil, RefreshCw, Search, Check, X, Info, Upload, Download,
+  MoreHorizontal, ChevronRight, ChevronDown, SlidersHorizontal,
 } from "lucide-react";
 import { ZaapiImportDialog } from "@/components/workflow/ZaapiImportDialog";
 import { ModalLayer } from "@/components/ui/ModalLayer";
 import { useSearchShortcut, useEscToClear } from "@/lib/useKeyboardShortcuts";
 import { FilterSelect } from "@/components/ui/FilterSelect";
 import { Tooltip } from "@/components/ui/Tooltip";
+import { getNodeDef } from "@/lib/workflow/nodeRegistry";
+import type { WorkflowEdge, WorkflowNode } from "@/lib/workflow/graph";
 
 interface WorkflowRow {
   workflow_id: string;
@@ -39,8 +42,8 @@ interface WorkflowRow {
   false_branch_policy: string;
   priority: number;
   version: number;
-  nodes: unknown[];
-  edges: unknown[];
+  nodes: WorkflowNode[];
+  edges: WorkflowEdge[];
   updated_at: string;
   import?: { source?: string };
 }
@@ -79,6 +82,30 @@ const sortLabels: Record<SortKey, string> = {
   priority: "Priority สูง→ต่ำ",
   nodes: "จำนวน node",
 };
+
+function workflowPathPreview(nodes: WorkflowNode[], edges: WorkflowEdge[]) {
+  const nodeById = new Map(nodes.map((node) => [node.node_id, node]));
+  const steps: string[] = [];
+  const visited = new Set<string>();
+  let current: WorkflowNode | undefined = nodes.find((node) => node.type === "trigger") ?? nodes[0];
+  let hasBranches = false;
+  let hasMore = false;
+
+  while (current && !visited.has(current.node_id)) {
+    if (steps.length === 4) {
+      hasMore = true;
+      break;
+    }
+    visited.add(current.node_id);
+    steps.push(getNodeDef(current.subtype)?.label ?? current.subtype.replace(/_/g, " "));
+    const currentId: string = current.node_id;
+    const outgoing: WorkflowEdge[] = edges.filter((edge) => edge.source_node_id === currentId);
+    hasBranches ||= outgoing.length > 1;
+    current = outgoing[0] ? nodeById.get(outgoing[0].target_node_id) : undefined;
+  }
+
+  return { steps, hasBranches, hasMore };
+}
 
 export default function WorkflowsPage() {
   const searchRef = useRef<HTMLInputElement>(null);
@@ -264,6 +291,9 @@ export default function WorkflowsPage() {
     return list;
   }, [rows, search, sortBy, fStatus, fEnabled, fPlatform, shopNameById]);
 
+  const activeFilterCount = [sortBy !== "updated", fStatus !== "all", fEnabled !== "all", fPlatform !== "all"]
+    .filter(Boolean).length;
+
   const toggle = async (wf: WorkflowRow) => {
     // 🔒 P2a: Confirm before toggling — affects live bot routing
     const action = wf.enabled ? "ปิด" : "เปิด";
@@ -380,10 +410,10 @@ export default function WorkflowsPage() {
           <Button size="sm" variant="outline" onClick={load}>
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
           </Button>
-          <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
+          <Button size="sm" variant="outline" className="phone-mobile-add-hidden" onClick={() => setImportOpen(true)}>
             <Upload size={14} /> Import Zaapi
           </Button>
-          <Button size="sm" onClick={openCreate}>
+          <Button size="sm" className="phone-mobile-add-hidden" onClick={openCreate}>
             <Plus size={14} /> สร้างเวิร์กโฟลว์
           </Button>
         </>
@@ -399,29 +429,39 @@ export default function WorkflowsPage() {
       ]}
       filterBarBelow
       filterBar={
-        <>
-          {/* ⚡ Toolbar: search + sort + filter */}
-          <div className="flex items-center gap-2 mt-4 flex-wrap">
-            <div className="relative flex-1 min-w-[200px] max-w-md">
-              <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
+        <div className="flex min-w-0 flex-col gap-2">
+          <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
+            <div className="relative min-w-0 flex-1">
+              <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
               <input
                 ref={searchRef}
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 onKeyDown={handleSearchEsc}
-                placeholder="ค้นหาชื่อ flow หรือชื่อร้าน…"
-                className="w-full h-8 pl-8 pr-8 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+                placeholder="ค้นหาชื่อ flow หรือร้าน"
+                aria-label="ค้นหาเวิร์กโฟลว์"
+                className="h-10 w-full rounded-xl border border-border bg-surface pl-9 pr-10 text-sm text-text placeholder:text-text-subtle focus:border-brand/40 focus:outline-none focus:ring-2 focus:ring-brand/30"
               />
-              <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
+              <kbd className="absolute right-3 top-1/2 hidden -translate-y-1/2 rounded border border-border px-1.5 py-0.5 text-[10px] text-text-subtle pointer-coarse:hidden sm:block">/</kbd>
             </div>
-            <FilterSelect
-              value={sortBy}
-              onChange={(v) => setSortBy(v as SortKey)}
-              labelPrefix="เรียง: "
-              options={Object.entries(sortLabels).map(([k, v]) => ({ value: k, label: v }))}
-            />
-            <span className="inline-flex items-center gap-1">
-              <Tooltip text="สถานะเวิร์กโฟลว์ — เผยแพร่ = ใช้งานได้, ฉบับร่าง = ยังไม่เผยแพร่"><Info size={12} className="text-text-subtle" /></Tooltip>
+            <span className="shrink-0 px-1 text-xs tabular-nums text-text-muted">{visible.length} / {rows.length}</span>
+          </div>
+          <details className="group min-w-0">
+            <summary className="flex min-h-10 w-full cursor-pointer list-none items-center justify-between gap-2 rounded-xl border border-border bg-surface px-3 text-sm text-text-muted [&::-webkit-details-marker]:hidden">
+              <span className="inline-flex items-center gap-2">
+                <SlidersHorizontal size={15} />
+                <span>เรียงและกรอง</span>
+                {activeFilterCount > 0 && <span className="rounded-full bg-accent-softer px-2 py-0.5 text-xs font-semibold text-accent">{activeFilterCount}</span>}
+              </span>
+              <ChevronDown size={15} className="transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="mt-2 grid grid-cols-1 gap-2 rounded-xl border border-border bg-surface-1 p-3 sm:grid-cols-2 xl:grid-cols-4">
+              <FilterSelect
+                value={sortBy}
+                onChange={(v) => setSortBy(v as SortKey)}
+                labelPrefix="เรียง: "
+                options={Object.entries(sortLabels).map(([k, v]) => ({ value: k, label: v }))}
+              />
               <FilterSelect
                 value={fStatus}
                 onChange={(v) => setFStatus(v as typeof fStatus)}
@@ -432,9 +472,6 @@ export default function WorkflowsPage() {
                   { value: "draft", label: "ฉบับร่าง" },
                 ]}
               />
-            </span>
-            <span className="inline-flex items-center gap-1">
-              <Tooltip text="เปิด/ปิดการทำงานของเวิร์กโฟลว์"><Info size={12} className="text-text-subtle" /></Tooltip>
               <FilterSelect
                 value={fEnabled}
                 onChange={(v) => setFEnabled(v as typeof fEnabled)}
@@ -445,23 +482,31 @@ export default function WorkflowsPage() {
                   { value: "off", label: "ปิดอยู่" },
                 ]}
               />
-            </span>
-            <FilterSelect
-              value={fPlatform}
-              onChange={(v) => setFPlatform(v as typeof fPlatform)}
-              labelPrefix="แพลตฟอร์ม: "
-              options={[
-                { value: "all", label: "ทั้งหมด" },
-                { value: "shopee", label: "Shopee" },
-                { value: "tiktok", label: "TikTok" },
-                { value: "lazada", label: "Lazada" },
-              ]}
-            />
-            <span className="text-xs text-text-subtle">{visible.length}/{rows.length} flow</span>
-          </div>
-        </>
+              <FilterSelect
+                value={fPlatform}
+                onChange={(v) => setFPlatform(v as typeof fPlatform)}
+                labelPrefix="แพลตฟอร์ม: "
+                options={[
+                  { value: "all", label: "ทั้งหมด" },
+                  { value: "shopee", label: "Shopee" },
+                  { value: "tiktok", label: "TikTok" },
+                  { value: "lazada", label: "Lazada" },
+                ]}
+              />
+              {(activeFilterCount > 0 || search) && (
+                <button
+                  type="button"
+                  onClick={() => { setSearch(""); setSortBy("updated"); setFStatus("all"); setFEnabled("all"); setFPlatform("all"); }}
+                  className="min-h-10 rounded-lg px-3 text-left text-sm font-medium text-accent hover:bg-accent-softer sm:col-span-2 xl:col-span-4"
+                >
+                  ล้างการค้นหาและตัวกรอง
+                </button>
+              )}
+            </div>
+          </details>
+        </div>
       }
-      contentClassName="p-4 md:p-6 space-y-4"
+      contentClassName="p-3 sm:p-4 md:p-6 space-y-3"
     >
       {/* List */}
       {loading ? (
@@ -489,6 +534,7 @@ export default function WorkflowsPage() {
       ) : (
         <div className="space-y-3">
           {visible.map((wf) => {
+            const path = workflowPathPreview(wf.nodes || [], wf.edges || []);
             const shopBadges = (wf.shop_ids || []).length === 0
               ? null
               : (wf.shop_ids || []).slice(0, 3).map((id) => shopNameById.get(id) || id);
@@ -507,13 +553,14 @@ export default function WorkflowsPage() {
                     if (renamingId !== wf.workflow_id) router.push(`/workflows/${wf.workflow_id}`);
                   }
                 }}
-                className={`bg-surface rounded-xl border border-border p-4 hover:border-pale-sky transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 ${wf.enabled ? "" : "opacity-60"}`}
+                aria-label={`${wf.name} — เปิด editor`}
+                className="group min-w-0 cursor-pointer rounded-xl border border-border bg-surface p-3 transition-colors hover:border-pale-sky focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/40 sm:p-4"
               >
-                <div className="flex items-start justify-between gap-3">
-                  <div className="flex-1 min-w-0">
+                <div className="flex min-w-0 flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                  <div className="min-w-0 flex-1">
                     {/* Name + badges */}
                     {renamingId === wf.workflow_id ? (
-                      <div onClick={(e) => e.stopPropagation()} className="flex gap-1.5 items-center">
+                      <div onClick={(e) => e.stopPropagation()} className="flex min-w-0 items-center gap-1.5">
                         <input
                           autoFocus
                           value={renameDraft}
@@ -522,10 +569,10 @@ export default function WorkflowsPage() {
                             if (e.key === "Enter") commitRename();
                             if (e.key === "Escape") setRenamingId(null);
                           }}
-                          className="h-9 px-2.5 rounded-lg border border-border bg-surface-2 text-text text-sm font-semibold w-72 focus:outline-none focus:ring-2 focus:ring-brand/40"
+                          className="h-10 min-w-0 flex-1 rounded-lg border border-border bg-surface-2 px-2.5 text-sm font-semibold text-text focus:outline-none focus:ring-2 focus:ring-brand/40"
                         />
-                        <Button size="sm" onClick={commitRename} disabled={saving || !renameDraft.trim()}>
-                          <Check size={13} /> บันทึก
+                        <Button size="sm" onClick={commitRename} disabled={saving || !renameDraft.trim()} aria-label="บันทึกชื่อ">
+                          <Check size={13} /><span className="hidden sm:inline">บันทึก</span>
                         </Button>
                         <Button size="sm" variant="outline" onClick={() => setRenamingId(null)} title="ยกเลิก" aria-label="ยกเลิก">
                           <X size={13} />
@@ -533,73 +580,81 @@ export default function WorkflowsPage() {
                       </div>
                     ) : (
                       <div className="flex items-center gap-2 mb-2 flex-wrap">
-                        <span className="text-sm font-semibold text-text">{wf.name}</span>
+                        <span className="min-w-0 break-words text-sm font-semibold text-text">{wf.name}</span>
                         <Badge tone={wf.status === "published" ? "brand" : "neutral"}>
                           {wf.status === "published" ? "เผยแพร่" : "ฉบับร่าง"}
                         </Badge>
                         {wf.import?.source === "zaapi" && <Badge tone="info">Zaapi</Badge>}
-                        {wf.priority !== 0 && (
-                          <span className="inline-flex items-center gap-0.5">
-                            <Badge tone="deep">P{wf.priority}</Badge>
-                            <Tooltip text="ลำดับความสำคัญ — ตัวเลขยิ่งสูงยิ่งจับคู่ก่อน"><Info size={12} className="text-text-subtle" /></Tooltip>
-                          </span>
-                        )}
                         <button
                           onClick={(e) => { e.stopPropagation(); startRename(wf); }}
                           title="เปลี่ยนชื่อ"
                           aria-label="เปลี่ยนชื่อ"
-                          className="w-6 h-6 rounded-md hover:bg-surface-2 flex items-center justify-center text-text-muted hover:text-text"
+                          className="grid h-8 w-8 shrink-0 place-items-center rounded-lg text-text-muted hover:bg-surface-2 hover:text-text"
                         >
-                          <Pencil size={12} />
+                          <Pencil size={14} />
                         </button>
                       </div>
                     )}
 
-                    {/* Meta row */}
-                    <div className="flex items-center gap-3 flex-wrap text-xs text-text-muted">
-                      <span>{(wf.nodes || []).length} nodes · {(wf.edges || []).length} edges · v{wf.version}</span>
-                      <span>{freqLabels[wf.trigger_frequency] || wf.trigger_frequency}</span>
-                      <span>{policyLabels[wf.false_branch_policy] || wf.false_branch_policy}</span>
-                      <span>{(wf.platforms || []).length === 0 ? "ทุก platform" : wf.platforms.join("/")}</span>
-                      <span>
-                        {(wf.shop_ids || []).length === 0
-                          ? "ใช้ร่วมทุกร้าน"
-                          : <>ร้าน: {shopBadges!.join(", ")}{moreShops > 0 ? ` +${moreShops}` : ""}</>}
-                      </span>
+                    <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5" aria-label="ตัวอย่างเส้นทางจาก node และ edge จริง">
+                      <span className="mr-1 shrink-0 text-[11px] text-text-subtle">เส้นทาง</span>
+                      {path.steps.length > 0 ? path.steps.map((step, index) => (
+                        <span key={`${wf.workflow_id}-${index}`} className="inline-flex min-w-0 max-w-full items-center gap-1 text-xs text-text-muted">
+                          {index > 0 && <ChevronRight size={13} className="shrink-0 text-text-subtle" aria-hidden="true" />}
+                          <span className="max-w-36 truncate rounded-md bg-surface-2 px-2 py-1" title={step}>{step}</span>
+                        </span>
+                      )) : <span className="text-xs text-text-subtle">ยังไม่มี node</span>}
+                      {path.hasMore && <span className="rounded-md bg-surface-2 px-2 py-1 text-xs text-text-subtle">…</span>}
+                      {path.hasBranches && <span className="rounded-full bg-accent-softer px-2 py-1 text-[10px] font-medium text-accent">แตกแขนง</span>}
                     </div>
+
+                    <details className="mt-2 max-w-full" onClick={(e) => e.stopPropagation()}>
+                      <summary className="inline-flex min-h-8 cursor-pointer list-none items-center gap-1 rounded-lg px-2 text-xs text-text-subtle hover:bg-surface-1 hover:text-text [&::-webkit-details-marker]:hidden">
+                        รายละเอียด flow
+                        <ChevronDown size={13} className="transition-transform open:rotate-180" />
+                      </summary>
+                      <div className="mt-1 grid gap-x-4 gap-y-2 rounded-lg bg-surface-1 p-3 text-xs text-text-muted sm:grid-cols-2 xl:grid-cols-3">
+                        <span>{wf.nodes.length} nodes · {wf.edges.length} edges · v{wf.version}</span>
+                        <span>{freqLabels[wf.trigger_frequency] || wf.trigger_frequency}</span>
+                        <span>{policyLabels[wf.false_branch_policy] || wf.false_branch_policy}</span>
+                        <span>{(wf.platforms || []).length === 0 ? "ทุก platform" : wf.platforms.join(" / ")}</span>
+                        <span>
+                          {(wf.shop_ids || []).length === 0
+                            ? "ใช้ร่วมทุกร้าน"
+                            : <>ร้าน: {shopBadges!.join(", ")}{moreShops > 0 ? ` +${moreShops}` : ""}</>}
+                        </span>
+                        {wf.priority !== 0 && (
+                          <span className="inline-flex items-center gap-1">
+                            <Badge tone="deep">P{wf.priority}</Badge>
+                            <Tooltip text="ลำดับความสำคัญ — ตัวเลขยิ่งสูงยิ่งจับคู่ก่อน"><Info size={12} className="text-text-subtle" /></Tooltip>
+                          </span>
+                        )}
+                      </div>
+                    </details>
                   </div>
 
-                  {/* Actions */}
-                  <div onClick={(e) => e.stopPropagation()} className="flex items-center gap-2 shrink-0">
-                    {/* Toggle switch — เหมือน triggers page */}
+                  <div onClick={(e) => e.stopPropagation()} className="flex shrink-0 items-center justify-between gap-3 border-t border-border-subtle pt-2 md:justify-end md:border-0 md:pt-0">
+                    <span className={`text-xs font-medium ${wf.enabled ? "text-success" : "text-text-subtle"}`}>{wf.enabled ? "เปิดใช้งาน" : "ปิดอยู่"}</span>
                     <ToggleSwitch
                       enabled={wf.enabled}
                       onChange={() => toggle(wf)}
                     />
-                    <button
-                      onClick={() => router.push(`/workflows/${wf.workflow_id}`)}
-                      className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center"
-                      title="แก้ไข"
-                      aria-label="แก้ไข"
-                    >
-                      <Pencil size={13} className="text-text-muted" />
-                    </button>
-                    <button
-                      onClick={() => exportWf(wf)}
-                      className="w-9 h-9 rounded-md hover:bg-surface-2 flex items-center justify-center"
-                      title="Export canonical JSON"
-                      aria-label="Export canonical JSON"
-                    >
-                      <Download size={13} className="text-text-muted" />
-                    </button>
-                    <button
-                      onClick={() => remove(wf)}
-                      className="w-9 h-9 rounded-md hover:bg-vibrant-coral-soft flex items-center justify-center"
-                      title="ลบ"
-                      aria-label="ลบ"
-                    >
-                      <Trash2 size={13} className="text-text-muted hover:text-vibrant-coral" />
-                    </button>
+                    <details className="relative" onClick={(e) => e.stopPropagation()}>
+                      <summary className="grid h-10 w-10 cursor-pointer list-none place-items-center rounded-lg border border-border text-text-muted hover:bg-surface-2 [&::-webkit-details-marker]:hidden" aria-label={`การทำงานเพิ่มเติม ${wf.name}`} title="เพิ่มเติม">
+                        <MoreHorizontal size={17} />
+                      </summary>
+                      <div className="absolute right-0 top-full z-20 mt-1 grid w-48 gap-1 rounded-xl border border-border bg-surface p-1.5 shadow-xl">
+                        <button type="button" onClick={() => router.push(`/workflows/${wf.workflow_id}`)} className="flex min-h-10 items-center gap-2 rounded-lg px-3 text-left text-sm text-text hover:bg-surface-2">
+                          <Pencil size={14} /> เปิด editor
+                        </button>
+                        <button type="button" onClick={() => exportWf(wf)} className="flex min-h-10 items-center gap-2 rounded-lg px-3 text-left text-sm text-text hover:bg-surface-2">
+                          <Download size={14} /> Export
+                        </button>
+                        <button type="button" onClick={() => remove(wf)} className="flex min-h-10 items-center gap-2 rounded-lg px-3 text-left text-sm text-error hover:bg-error/5">
+                          <Trash2 size={14} /> ลบ workflow
+                        </button>
+                      </div>
+                    </details>
                   </div>
                 </div>
               </div>

@@ -1,57 +1,24 @@
 "use client";
-import React from "react";
+import type { CSSProperties } from "react";
 import Image from "next/image";
-// Pixel-art cat เดินไปตาม pipeline — frame สลับทุก 300ms ตอน building
-// pure CSS/SVG ไม่มี dependency — ขนาด 16px ×2 scale
-const PX = 4; // pixel size
 
-// 16x12 pixel cat (two walk frames) — o=body, e=ear/eye, t=tail, l=legs
-const F1 = [
-  "t...............",
-  "tt..e.......e...",
-  ".tt.ooo...ooo...",
-  "..tooooooooooo..",
-  "...ooooooooooo..",
-  "...ooeoooooeoo..",
-  "...ooooooooooo..",
-  "....oo.....oo...",
-  "....oo.....oo...",
-  "...ll......ll...",
-];
-const F2 = [
-  "t...............",
-  "tt..e.......e...",
-  ".tt.ooo...ooo...",
-  "..tooooooooooo..",
-  "...ooooooooooo..",
-  "...ooeoooooeoo..",
-  "...ooooooooooo..",
-  ".....oo..oo.....",
-  ".....oo..oo.....",
-  "....ll....ll....",
-];
-const COLORS: Record<string, string> = {
-  o: "#f59e0b", e: "#b45309", t: "#d97706", l: "#92400e",
-};
-
-function Frame({ rows }: { rows: string[] }) {
-  const rects: React.ReactElement[] = [];
-  rows.forEach((row, y) => {
-    [...row].forEach((c, x) => {
-      if (COLORS[c]) {
-        rects.push(
-          <rect key={`${x}-${y}`} x={x * PX} y={y * PX} width={PX} height={PX}
-                fill={COLORS[c]} />
-        );
-      }
-    });
-  });
-  return <g>{rects}</g>;
-}
-
-export type PixelCatAction = "idle" | "walk" | "wave" | "snack" | "mood";
+export type PixelCatAction = "idle" | "walk" | "wave" | "snack" | "snack-wave" | "jump-wave" | "mood";
 export type PixelCatOutfit = "classic" | "maroon" | "hoodie";
 export type PixelCatMood = "adoring" | "angry" | "happy" | "downcast";
+
+export function getGenerationMascotState(status: string, active: boolean): {
+  action: PixelCatAction;
+  mood: PixelCatMood;
+} {
+  if (status === "published" && active) return { action: "jump-wave", mood: "happy" };
+  if (status === "published" || status === "pending") return { action: "snack-wave", mood: "happy" };
+  return { action: "mood", mood: "angry" };
+}
+
+export function getGenerationProgressPercent(progress: number, total: number): number {
+  if (!Number.isFinite(progress) || !Number.isFinite(total) || total <= 0) return 0;
+  return Math.round(Math.min(100, Math.max(0, (progress / total) * 100)));
+}
 
 const OUTFIT_SPRITES: Record<PixelCatOutfit, string> = {
   classic: "/mascot/cat-girl-atlas-classic.webp",
@@ -70,54 +37,45 @@ export function PixelCat({
   outfit?: PixelCatOutfit;
   mood?: PixelCatMood;
 }) {
-  const [f, setF] = React.useState(0);
   const spriteAction = action || (walking ? "walk" : "idle");
-  React.useEffect(() => {
-    if (!walking || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const t = setInterval(() => setF((v) => 1 - v), 520);
-    return () => clearInterval(t);
-  }, [walking]);
+  const staticPose = !walking && spriteAction === "idle";
+  const spriteStyle: CSSProperties | undefined = staticPose ? { animation: "none" } : undefined;
   return (
-    <>
-      <span className={`generation-cat-sprite-window generation-cat-sprite--${spriteAction} generation-cat-mood--${mood} md:hidden`} aria-hidden="true">
-        <span className="generation-cat-sprite-frame">
-          <Image
-            src={OUTFIT_SPRITES[outfit]}
-            width={1776}
-            height={888}
-            unoptimized
-            sizes="192px"
-            alt=""
-            className="generation-cat-sprite-sheet"
-          />
-        </span>
+    <span className={`generation-cat-sprite-window generation-cat-sprite--${spriteAction} generation-cat-mood--${mood}`} aria-hidden="true">
+      <span className="generation-cat-sprite-frame">
+        <Image
+          src={OUTFIT_SPRITES[outfit]}
+          width={1776}
+          height={888}
+          unoptimized
+          sizes="192px"
+          alt=""
+          className="generation-cat-sprite-sheet"
+          style={spriteStyle}
+        />
       </span>
-      <svg
-        width={16 * PX}
-        height={10 * PX}
-        className={`${walking ? "generation-pixel-cat is-walking animate-pulse" : "generation-pixel-cat"} hidden md:block`}
-        role="img"
-        aria-label="build-cat"
-      >
-        <Frame rows={f ? F2 : F1} />
-      </svg>
-    </>
+    </span>
   );
 }
 
 /** แมวเดินบนแถบขั้นตอน — idx = step ปัจจุบัน, total = จำนวน step */
 export function BuildProgressCat(
-  { current, total, walking }: { current: number; total: number; walking: boolean },
+  { current = 0, total = 1, progressPercent, walking, action, mood }: {
+    current?: number; total?: number; progressPercent?: number;
+    walking: boolean; action?: PixelCatAction; mood?: PixelCatMood;
+  },
 ) {
-  const pct = total > 1 ? (current / (total - 1)) * 100 : 0;
+  const pct = progressPercent === undefined
+    ? (total > 1 ? getGenerationProgressPercent(current, total - 1) : 0)
+    : getGenerationProgressPercent(progressPercent, 100);
   return (
     <div
       className="generation-build-progress relative h-12"
-      style={{ "--generation-progress": `${pct}%` } as React.CSSProperties}
+      style={{ "--generation-progress": `${pct}%` } as CSSProperties}
     >
       <div className="absolute transition-all duration-700 ease-in-out"
            style={{ left: `clamp(0px, calc(${pct}% - 24px), calc(100% - 64px))` }}>
-        <PixelCat walking={walking} />
+        <PixelCat walking={walking} action={action} mood={mood} />
       </div>
     </div>
   );

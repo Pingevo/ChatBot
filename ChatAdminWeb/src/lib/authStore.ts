@@ -8,6 +8,7 @@ import { create } from "zustand";
 import { AdminUser } from "./types";
 import { authService } from "./authService";
 import { loadPermissions } from "./roles";
+import { normalizeChatTextSize } from "./chatTextSize";
 
 interface AuthState {
   user: AdminUser | null;
@@ -30,14 +31,17 @@ export const useAuth = create<AuthState>((set) => ({
     try {
       const data = await authService.me();
       const theme = data.admin.theme_preference === "dark" ? "dark" : "light";
+      const chatTextSize = normalizeChatTextSize(data.admin.chat_text_size);
       document.documentElement.dataset.theme = theme;
       document.documentElement.style.colorScheme = theme;
+      document.documentElement.dataset.chatTextSize = chatTextSize;
       set({ user: data.admin, initialized: true });
       // โหลด permission matrix ล่าสุด (fail → ใช้ DEFAULT ใน roles.ts)
       loadPermissions().catch(() => {});
     } catch {
       document.documentElement.dataset.theme = "light";
       document.documentElement.style.colorScheme = "light";
+      document.documentElement.dataset.chatTextSize = "normal";
       set({ user: null, initialized: true });
     }
   },
@@ -50,6 +54,7 @@ export const useAuth = create<AuthState>((set) => ({
     }
     document.documentElement.dataset.theme = "light";
     document.documentElement.style.colorScheme = "light";
+    document.documentElement.dataset.chatTextSize = "normal";
     set({ user: null, initialized: true });
   },
 

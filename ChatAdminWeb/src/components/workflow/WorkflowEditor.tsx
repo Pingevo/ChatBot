@@ -2,6 +2,7 @@
 // โครงสร้าง: palette ซ้าย (เพิ่ม node) / canvas กลาง (ลาก + เชื่อม edge) / panel ขวา (แก้ config + flow settings)
 // Save → POST /api/workflows (ใหม่) หรือ PATCH /api/workflows/[id] (แก้)
 "use client";
+import { SelectField } from "@/components/ui/SelectField";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import React from "react";
 import { useRouter } from "next/navigation";
@@ -12,10 +13,11 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { Button } from "@/components/ui/Button";
+import { PageIdentityMark } from "@/components/ui/PageIdentityMark";
 import { toast } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { nodeTypes, toXYFlowType, NODE_TYPE_META, SUBTYPE_META, resolveCardHandles, type FlowNodeType } from "./nodes";
-import { Plus, Settings2, X, Save, Trash2, ArrowLeft, Upload, Download, CheckCircle2, AlertTriangle } from "lucide-react";
+import { Plus, Settings2, X, Save, Trash2, ArrowLeft, Upload, Download, CheckCircle2, AlertTriangle, GitBranch } from "lucide-react";
 import {
   WORKFLOW_PLATFORMS, listByFamily, getNodeDef, nodeAvailabilityFor,
   availabilityBadge, validateCanonicalDraft, publishReadiness,
@@ -475,9 +477,11 @@ function EditorInner({ workflowId }: { workflowId: string }) {
     }
   }, [isNew, workflowId, router]);
 
-  const [paletteOpen, setPaletteOpen] = useState(true);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [settingsPanelOpen, setSettingsPanelOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [phoneLayout, setPhoneLayout] = useState(false);
+  const toolsRef = useRef<HTMLDivElement>(null);
   const [mobileSourceId, setMobileSourceId] = useState("");
   const [mobileTargetId, setMobileTargetId] = useState("");
   const [mobileBranchId, setMobileBranchId] = useState("");
@@ -495,7 +499,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
   } | null>(null);
 
   useEffect(() => {
-    const phone = window.matchMedia("(max-width: 767px), (pointer: coarse) and (max-height: 500px)");
+    const phone = window.matchMedia("(max-width: 1023.98px), (pointer: coarse) and (max-width: 1279.98px)");
     const update = () => {
       setPhoneLayout(phone.matches);
       if (phone.matches) setPaletteOpen(false);
@@ -504,6 +508,22 @@ function EditorInner({ workflowId }: { workflowId: string }) {
     phone.addEventListener("change", update);
     return () => phone.removeEventListener("change", update);
   }, []);
+
+  useEffect(() => {
+    if (!toolsOpen) return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (event.target instanceof Element && toolsRef.current && !toolsRef.current.contains(event.target)) setToolsOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setToolsOpen(false);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [toolsOpen]);
 
   /** canvas → canonical draft shape (pure — no persistence) */
   const canvasToDraft = useCallback((): CanonicalDraft => ({
@@ -651,13 +671,14 @@ function EditorInner({ workflowId }: { workflowId: string }) {
     <div className="flex flex-col h-full min-h-0">
       {/* ── Top bar — ชื่อ + status + toggle เปิดใช้งาน (บรรทัดเดียว) ── */}
       <div className="workflow-topbar flex items-center gap-2 px-3 lg:px-5 py-2.5 border-b border-border bg-surface shrink-0">
+        <PageIdentityMark kind="workflow" icon={GitBranch} className="w-8 h-8 shrink-0" />
         <input
           value={settings.name}
           onChange={(e) => { setSettings((s) => ({ ...s, name: e.target.value })); setWfVersion((v) => v + 1); }}
           placeholder="ชื่อ workflow"
           className="flex-1 min-w-0 font-semibold text-sm px-3 py-2 rounded-lg border border-border bg-surface text-text focus:outline-none focus:ring-2 focus:ring-brand/30"
         />
-        <select
+        <SelectField density="compact"
           value={settings.status}
           disabled={isImported}
           title={isImported ? "imported workflow — status เปลี่ยนไม่ได้ (activation ถูก block ฝั่ง server)" : undefined}
@@ -668,7 +689,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         >
           <option value="draft">ฉบับร่าง</option>
           <option value="published">เผยแพร่</option>
-        </select>
+        </SelectField>
         {/* switch เปิด/ปิดใช้งาน — ทั้ง pill กดได้ */}
         <button
           role="switch"
@@ -690,67 +711,84 @@ function EditorInner({ workflowId }: { workflowId: string }) {
         </button>
       </div>
 
-      {/* ── Toolbar — Node/Settings (ซ้าย) + Save/Delete/Back (ขวา, icon) ── */}
-      <div className="workflow-toolbar flex items-center gap-1.5 px-3 lg:px-5 py-2 border-b border-border bg-surface-2 shrink-0">
+      {/* ── Toolbar — Back first, editing tools left, save/publish state right ── */}
+      <div className={`workflow-toolbar ${phoneLayout ? "workflow-toolbar-compact" : "workflow-toolbar-minimal"} flex items-center gap-1.5 px-3 lg:px-5 py-2 border-b border-border bg-surface-2 shrink-0`}>
+        <button
+          onClick={goBack}
+          title="กลับไปหน้ารายการ"
+          aria-label="กลับไปหน้ารายการ"
+          className="workflow-back-control inline-flex items-center justify-center gap-1.5 w-9 h-9 lg:w-auto lg:h-auto lg:px-2.5 lg:py-1.5 rounded-lg border border-border text-text-muted hover:text-text hover:bg-surface transition-colors"
+        >
+          <ArrowLeft size={14} />
+          <span className="workflow-back-label">กลับ</span>
+        </button>
         <button
           onClick={() => setPaletteOpen(!paletteOpen)}
-          className={`inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border transition-colors ${paletteOpen ? "bg-brand text-white border-brand" : "bg-surface text-text-muted border-border hover:text-text"}`}
+          className={`workflow-toolbar-node inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border transition-colors ${paletteOpen ? "bg-brand text-white border-brand" : "bg-surface text-text-muted border-border hover:text-text"}`}
           title="เพิ่ม Node"
         >
           <Plus size={14} />
           <span>Node</span>
         </button>
-        <button
-          onClick={() => setSettingsPanelOpen(!settingsPanelOpen)}
-          className={`inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border transition-colors ${settingsPanelOpen ? "bg-brand text-white border-brand" : "bg-surface text-text-muted border-border hover:text-text"}`}
-          title="ตั้งค่า Workflow"
-        >
-          <Settings2 size={14} />
-          <span>Settings</span>
-        </button>
-        <button
-          onClick={runValidate}
-          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border bg-surface text-text-muted border-border hover:text-text transition-colors"
-          title="ตรวจ graph + capability (pure — ไม่แตะ server)"
-        >
-          <CheckCircle2 size={14} />
-          <span>Validate</span>
-        </button>
-        <button
-          onClick={() => setImportOpen(true)}
-          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border bg-surface text-text-muted border-border hover:text-text transition-colors"
-          title="Zaapi workflow import preview (dry-run — ไม่เขียน DB)"
-        >
-          <Upload size={14} />
-          <span>Import</span>
-        </button>
-        <div className="relative">
+        <div ref={toolsRef} className="workflow-compact-tools-anchor">
           <button
-            onClick={() => setExportOpen(!exportOpen)}
-            className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-medium rounded-lg border bg-surface text-text-muted border-border hover:text-text transition-colors"
-            title="Export canonical / zaapi-compatible JSON"
-            aria-haspopup="menu" aria-expanded={exportOpen}
+            type="button"
+            onClick={() => setToolsOpen((open) => !open)}
+            aria-expanded={toolsOpen}
+            aria-haspopup="menu"
+            className="workflow-toolbar-control"
+            title="เครื่องมือ Workflow"
           >
-            <Download size={14} />
-            <span>Export</span>
+            <Settings2 size={15} />
+            <span>เครื่องมือ</span>
           </button>
-          {exportOpen && (
-            <div role="menu" className="absolute left-0 top-full mt-1 z-50 bg-surface border border-border rounded-lg shadow-lg py-1 min-w-44">
-              <button role="menuitem" onClick={() => doExport("canonical")} className="w-full text-left px-3 py-2 text-xs hover:bg-surface-2">Canonical package (lossless)</button>
-              {importedDraft?.raw != null && (
-                <button role="menuitem" onClick={() => doExport("raw")} className="w-full text-left px-3 py-2 text-xs hover:bg-surface-2">Raw source (provenance — credentials masked)</button>
+          {toolsOpen && (
+            <div className={`workflow-compact-tools${phoneLayout ? "" : " workflow-compact-tools--desktop"}`} role="group" aria-label="เครื่องมือ Workflow">
+              {phoneLayout && (
+                <p className="workflow-compact-tools-status">
+                  {importedDraft ? "Draft จาก Zaapi" : dirty ? "ยังไม่บันทึก" : !isNew ? "บันทึกล่าสุดแล้ว" : "Workflow ใหม่"}
+                </p>
               )}
-              <button role="menuitem" onClick={() => doExport("zaapi")} className="w-full text-left px-3 py-2 text-xs hover:bg-surface-2">Zaapi-compatible projection</button>
+              <button type="button" onClick={() => { setSettingsPanelOpen((open) => !open); setToolsOpen(false); }} aria-expanded={settingsPanelOpen}>
+                <Settings2 size={15} /> ตั้งค่า workflow
+              </button>
+              <button type="button" onClick={() => { runValidate(); setToolsOpen(false); }}>
+                <CheckCircle2 size={15} /> ตรวจ workflow
+              </button>
+              <button type="button" onClick={() => { setImportOpen(true); setToolsOpen(false); }}>
+                <Upload size={15} /> Import
+              </button>
+              <div className="workflow-compact-export">
+                <button type="button" onClick={() => setExportOpen((open) => !open)} aria-expanded={exportOpen}>
+                  <Download size={15} /> Export
+                </button>
+                {exportOpen && (
+                  <div role="menu" className="workflow-compact-export-menu">
+                    <button type="button" role="menuitem" className="console-menu-option" onClick={() => doExport("canonical")}>Canonical package</button>
+                    {importedDraft?.raw != null && <button type="button" role="menuitem" className="console-menu-option" onClick={() => doExport("raw")}>Raw source</button>}
+                    <button type="button" role="menuitem" className="console-menu-option" onClick={() => doExport("zaapi")}>Zaapi projection</button>
+                  </div>
+                )}
+              </div>
+              <button
+                type="button"
+                disabled
+                title={publishReadiness({ ok: true, errors: [], unsupportedNodes: [], blockedNodes: [], unresolvedBindings: [] }).reason}
+              >
+                <AlertTriangle size={15} /> Publish
+                {importDetail && (importDetail.unresolved_bindings ?? 0) > 0 && <span className="ml-auto text-[10px] text-warning">{importDetail.unresolved_bindings} bindings</span>}
+              </button>
+              {!isNew && <button type="button" className="workflow-compact-delete" onClick={() => { remove(); setToolsOpen(false); }}><Trash2 size={15} /> ลบ workflow</button>}
             </div>
           )}
         </div>
         <div className="flex-1" />
-        {importedDraft && (
+        {!phoneLayout && importedDraft && (
           <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-brand/10 text-brand whitespace-nowrap" title="draft จาก zaapi import — save/publish ปิดจนกว่า bindings จะ resolve">
             ● imported draft
           </span>
         )}
-        {dirty ? (
+        {!phoneLayout && (dirty ? (
           <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-1 rounded-full bg-warning/10 text-warning whitespace-nowrap" title="มีการแก้ไขยังไม่ได้บันทึก">
             ● ยังไม่บันทึก
           </span>
@@ -758,48 +796,16 @@ function EditorInner({ workflowId }: { workflowId: string }) {
           <span className="inline-flex items-center gap-1 text-[10px] font-medium px-2 py-1 rounded-full bg-success/10 text-success whitespace-nowrap" title="บันทึกล่าสุดแล้ว">
             ✓ บันทึกแล้ว
           </span>
-        ) : null}
-        <button
-          disabled
-          title={publishReadiness({ ok: true, errors: [], unsupportedNodes: [], blockedNodes: [], unresolvedBindings: [] }).reason}
-          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-semibold rounded-lg bg-surface-2 text-text-muted opacity-50 cursor-not-allowed"
-        >
-          <AlertTriangle size={14} />
-          <span className="hidden sm:inline">Publish</span>
-          {importDetail && (importDetail.unresolved_bindings ?? 0) > 0 && (
-            <span className="hidden md:inline text-[10px] text-warning" title={(importDetail.publish_blockers || []).join("\n")}>
-              · {importDetail.unresolved_bindings} unresolved bindings
-            </span>
-          )}
-        </button>
+        ) : null)}
         <button
           onClick={save}
           disabled={saveBlocked}
           title={saveBlockReason || "บันทึก workflow"}
-          className="inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
+          className="workflow-save-button inline-flex items-center gap-1.5 px-3 py-2 lg:py-1.5 text-xs font-semibold rounded-lg bg-brand text-white hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity"
         >
           <Save size={14} />
           <span className="workflow-save-label hidden sm:inline">{saving ? "กำลังบันทึก…" : "บันทึก"}</span>
         </button>
-        {!isNew && (
-          <button
-            onClick={remove}
-            title="ลบ workflow"
-            className="inline-flex items-center justify-center w-9 h-9 lg:w-auto lg:h-auto lg:px-2.5 lg:py-1.5 rounded-lg border border-border text-error hover:bg-error/10 transition-colors"
-          >
-            <Trash2 size={14} />
-          </button>
-        )}
-        <button
-          onClick={goBack}
-          title="กลับไปหน้ารายการ"
-          className="inline-flex items-center justify-center w-9 h-9 lg:w-auto lg:h-auto lg:px-2.5 lg:py-1.5 rounded-lg border border-border text-text-muted hover:text-text hover:bg-surface transition-colors"
-        >
-          <ArrowLeft size={14} />
-        </button>
-        <span className="text-[10px] text-text-subtle hidden xl:inline ml-1">
-          ลาก node • เชื่อม edge จากจุดล่าง node • condition มี true/false
-        </span>
       </div>
 
       <div className={`${phoneLayout ? "phone-workflow-scroll flex-1 min-h-0 overflow-y-auto" : "flex flex-1 min-h-0 relative"}`}>
@@ -825,7 +831,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                 aria-label="ค้นหา node"
                 className="w-full mb-2 text-xs px-2 py-1.5 rounded-md border border-border bg-surface text-text focus:outline-none focus:ring-1 focus:ring-brand/30"
               />
-              <select
+              <SelectField density="compact"
                 value={platformFilter}
                 onChange={(e) => setPlatformFilter(e.target.value as WorkflowPlatform | "")}
                 aria-label="กรองตาม platform"
@@ -835,7 +841,7 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                 {WORKFLOW_PLATFORMS.map((p) => (
                   <option key={p} value={p}>{p}</option>
                 ))}
-              </select>
+              </SelectField>
               {PALETTE.map((group) => {
                 const meta = NODE_TYPE_META[group.type];
                 const items = group.subtypes
@@ -896,33 +902,32 @@ function EditorInner({ workflowId }: { workflowId: string }) {
               </div>
               {nodes.length === 0 ? (
                 <p className="mt-3 rounded-xl bg-surface-1 px-3 py-3 text-sm leading-6 text-text-muted">
-                  เริ่มจากเพิ่มโหนด แล้วเลือกชนิดและตั้งค่ารายละเอียดได้จากรายการด้านล่าง
+                  เพิ่ม node เพื่อเริ่มสร้างเส้นทาง
                 </p>
               ) : (
-                <ol className="mt-4 space-y-2">
-                  {nodes.map((node, index) => {
-                    const selected = selectedNodeId === node.id;
-                    const definition = getNodeDef(node.data.subtype);
-                    return (
-                      <li key={node.id} className="relative">
-                        {index > 0 && <div aria-hidden="true" className="absolute -top-2 left-5 h-2 border-l border-border-strong" />}
-                        <button
-                          type="button"
-                          onClick={() => setSelectedNodeId(selected ? null : node.id)}
-                          aria-pressed={selected}
-                          className={`flex min-h-14 w-full items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors ${selected ? "border-accent bg-accent-softer" : "border-border bg-surface-1 hover:bg-surface-2"}`}
-                        >
-                          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-navy-soft text-xs font-bold tabular-nums text-navy">{index + 1}</span>
-                          <span className="min-w-0 flex-1">
-                            <span className="block truncate text-sm font-semibold text-text">{definition?.label || SUBTYPE_META[node.data.subtype]?.label || node.data.subtype}</span>
-                            <span className="block truncate font-mono text-[11px] text-text-subtle">{node.id}</span>
-                          </span>
-                          <span className="shrink-0 text-[11px] text-text-muted">ตั้งค่า</span>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ol>
+                <div className="phone-workflow-canvas mt-3">
+                  <ReactFlow
+                    nodes={displayNodes}
+                    edges={edges}
+                    nodeTypes={nodeTypes}
+                    onNodesChange={(changes: NodeChange<Node<WFNodeData>>[]) => {
+                      onNodesChange(changes);
+                      if (changes.some((change) => change.type === "position" || change.type === "remove")) setWfVersion((version) => version + 1);
+                    }}
+                    onEdgesChange={(changes: EdgeChange<Edge>[]) => {
+                      onEdgesChange(changes);
+                      if (changes.some((change) => change.type === "remove")) setWfVersion((version) => version + 1);
+                    }}
+                    onConnect={(connection) => { onConnect(connection); setWfVersion((version) => version + 1); }}
+                    onNodeClick={(_, node) => setSelectedNodeId(node.id)}
+                    onPaneClick={() => setSelectedNodeId(null)}
+                    fitView
+                    fitViewOptions={{ padding: 0.12, minZoom: 0.2, maxZoom: 1.1 }}
+                  >
+                    <Background gap={18} size={1} />
+                    <Controls position="bottom-right" showInteractive={false} />
+                  </ReactFlow>
+                </div>
               )}
             </section>
 
@@ -953,24 +958,28 @@ function EditorInner({ workflowId }: { workflowId: string }) {
               </section>
             )}
 
-            <section className="rounded-2xl border border-border bg-surface p-4 shadow-xs">
-              <h2 className="text-sm font-semibold text-navy">เชื่อมโหนด</h2>
-              <p className="mt-1 text-xs leading-5 text-text-muted">เลือกโหนดต้นทาง ทางออก และปลายทางเพื่อเพิ่มเส้นเชื่อม</p>
-              <div className="mt-3 grid min-w-0 gap-3">
+            <section className="rounded-2xl border border-border bg-surface shadow-xs">
+              <details className="workflow-connect-details">
+                <summary className="flex min-h-12 cursor-pointer list-none items-center justify-between gap-3 rounded-2xl px-4 py-3 text-sm font-semibold text-navy">
+                  <span>เชื่อมโหนด</span>
+                  <span className="text-xs font-normal text-text-muted">{edges.length} เส้น</span>
+                </summary>
+                <div className="border-t border-border p-4">
+              <div className="grid min-w-0 gap-3">
                 <label className="grid gap-1.5 text-xs font-semibold text-text-muted">
                   จากโหนด
-                  <select
+                  <SelectField density="compact"
                     aria-label="โหนดต้นทาง"
                     value={mobileSourceNode?.id || ""}
                     onChange={(event) => { setMobileSourceId(event.target.value); setMobileBranchId(""); }}
                     className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text"
                   >
                     {nodes.map((node) => <option key={node.id} value={node.id}>{getNodeDef(node.data.subtype)?.label || node.data.subtype} · {node.id}</option>)}
-                  </select>
+                  </SelectField>
                 </label>
                 <label className="grid gap-1.5 text-xs font-semibold text-text-muted">
                   ทางออก / สาขา
-                  <select
+                  <SelectField density="compact"
                     aria-label="ทางออกของโหนด"
                     value={activeMobileBranchId}
                     onChange={(event) => setMobileBranchId(event.target.value)}
@@ -978,18 +987,18 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                     className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text disabled:opacity-50"
                   >
                     {mobileOutputHandles.map((handle) => <option key={handle.id} value={handle.id}>{handle.label} · {handle.id}</option>)}
-                  </select>
+                  </SelectField>
                 </label>
                 <label className="grid gap-1.5 text-xs font-semibold text-text-muted">
                   ไปยังโหนด
-                  <select
+                  <SelectField density="compact"
                     aria-label="โหนดปลายทาง"
                     value={mobileTargetNode?.id || ""}
                     onChange={(event) => setMobileTargetId(event.target.value)}
                     className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text"
                   >
                     {nodes.map((node) => <option key={node.id} value={node.id}>{getNodeDef(node.data.subtype)?.label || node.data.subtype} · {node.id}</option>)}
-                  </select>
+                  </SelectField>
                 </label>
                 <Button
                   type="button"
@@ -1032,24 +1041,21 @@ function EditorInner({ workflowId }: { workflowId: string }) {
                   );
                 })}
               </div>
+                </div>
+              </details>
             </section>
 
-            <section className="rounded-2xl border border-border bg-surface shadow-xs">
-              <button
-                type="button"
-                onClick={() => setSettingsPanelOpen((open) => !open)}
-                aria-expanded={settingsPanelOpen}
-                className="flex min-h-12 w-full items-center justify-between gap-3 px-4 py-3 text-left text-sm font-semibold text-navy"
-              >
-                ตั้งค่า workflow
-                <span className="text-xs font-normal text-text-muted">{settingsPanelOpen ? "ซ่อน" : "แสดง"}</span>
-              </button>
-              {settingsPanelOpen && (
-                <div className="border-t border-border p-4">
-                  <FlowSettingsPanel settings={settings} setSettings={(next) => { setSettings(next); setWfVersion((version) => version + 1); }} shops={shops} imported={isImported} />
+            {settingsPanelOpen && (
+              <section className="rounded-2xl border border-border bg-surface p-4 shadow-xs">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <h2 className="text-sm font-semibold text-navy">ตั้งค่า workflow</h2>
+                  <button type="button" onClick={() => setSettingsPanelOpen(false)} className="grid h-10 w-10 place-items-center rounded-full border border-border text-text-muted" aria-label="ปิดตั้งค่า">
+                    <X size={16} />
+                  </button>
                 </div>
-              )}
-            </section>
+                <FlowSettingsPanel settings={settings} setSettings={(next) => { setSettings(next); setWfVersion((version) => version + 1); }} shops={shops} imported={isImported} />
+              </section>
+            )}
 
             {lastValidation && (
               <section className={`rounded-xl border p-4 text-sm ${lastValidation.structural.ok && lastValidation.capability.ok ? "border-success/30 bg-success-soft text-success-dark" : "border-warning/30 bg-warning-soft text-warning-dark"}`} role="status">
@@ -1184,11 +1190,11 @@ function NodeConfigPanel({
 
       <div style={fieldGap}>
         <label style={labelStyle}>ชนิด</label>
-        <select value={subtype} onChange={(e) => onUpdateSubtype(e.target.value)} style={inputStyle}>
+        <SelectField density="compact" value={subtype} onChange={(e) => onUpdateSubtype(e.target.value)} style={inputStyle}>
           {subtypesOfSameType.map((s) => (
             <option key={s} value={s}>{SUBTYPE_META[s]?.label || s}</option>
           ))}
-        </select>
+        </SelectField>
       </div>
 
       {/* ── Registry metadata — type/version/family/availability/executor ── */}
@@ -1253,10 +1259,10 @@ function NodeConfigPanel({
       {subtype === "conversation_status" && (
         <div style={fieldGap}>
           <label style={labelStyle}>สถานะที่ต้องการ</label>
-          <select value={String(cfg.status || "open")} onChange={(e) => onUpdateConfig("status", e.target.value)} style={inputStyle}>
+          <SelectField density="compact" value={String(cfg.status || "open")} onChange={(e) => onUpdateConfig("status", e.target.value)} style={inputStyle}>
             <option value="open">เปิดอยู่</option>
             <option value="closed">ปิดแล้ว</option>
-          </select>
+          </SelectField>
         </div>
       )}
 
@@ -1316,7 +1322,7 @@ function NodeConfigPanel({
         <>
           <div style={fieldGap}>
             <label style={labelStyle}>หมวด</label>
-            <select value={String(cfg.category || "other")} onChange={(e) => onUpdateConfig("category", e.target.value)} style={inputStyle}>
+            <SelectField density="compact" value={String(cfg.category || "other")} onChange={(e) => onUpdateConfig("category", e.target.value)} style={inputStyle}>
               <option value="product">สินค้า</option>
               <option value="shipping">การจัดส่ง</option>
               <option value="payment">การชำระเงิน</option>
@@ -1325,7 +1331,7 @@ function NodeConfigPanel({
               <option value="account">บัญชี</option>
               <option value="promotion">โปรโมชั่น</option>
               <option value="other">อื่นๆ</option>
-            </select>
+            </SelectField>
           </div>
           <div style={fieldGap}>
             <label style={labelStyle}>เหตุผล</label>
@@ -1353,9 +1359,9 @@ function NodeConfigPanel({
           </div>
           <div style={fieldGap}>
             <label style={labelStyle}>วิธีส่ง</label>
-            <select value={String(cfg.method || "POST")} onChange={(e) => onUpdateConfig("method", e.target.value)} style={inputStyle}>
+            <SelectField density="compact" value={String(cfg.method || "POST")} onChange={(e) => onUpdateConfig("method", e.target.value)} style={inputStyle}>
               <option>POST</option><option>GET</option><option>PUT</option><option>PATCH</option><option>DELETE</option>
-            </select>
+            </SelectField>
           </div>
           <div style={fieldGap}>
             <label style={labelStyle}>เนื้อหา (JSON)</label>
@@ -1368,14 +1374,14 @@ function NodeConfigPanel({
         <>
           <div style={fieldGap}>
             <label style={labelStyle}>กระโดดไป node</label>
-            <select value={String(cfg.target_node_id || "")} onChange={(e) => onUpdateConfig("target_node_id", e.target.value)} style={inputStyle}>
+            <SelectField density="compact" value={String(cfg.target_node_id || "")} onChange={(e) => onUpdateConfig("target_node_id", e.target.value)} style={inputStyle}>
               <option value="">— เลือก node —</option>
               {allNodes.filter((n) => n.id !== node.id).map((n) => (
                 <option key={n.id} value={n.id}>
                   {SUBTYPE_META[String(n.data.subtype)]?.label || n.data.subtype} ({n.id})
                 </option>
               ))}
-            </select>
+            </SelectField>
           </div>
           <div style={fieldGap}>
             <label style={labelStyle}>จำนวนวนสูงสุด (กันลูปไม่รู้จบ)</label>
@@ -1473,11 +1479,11 @@ function MessageContentConfigPanel({
         </div>
         <div style={fieldGap}>
           <label style={labelStyle}>โหมดเช็ค</label>
-          <select value={String(cfg.mode || "contains")} onChange={(e) => onUpdateConfig("mode", e.target.value)} style={inputStyle}>
+          <SelectField density="compact" value={String(cfg.mode || "contains")} onChange={(e) => onUpdateConfig("mode", e.target.value)} style={inputStyle}>
             <option value="contains">ข้อความมีคำนี้</option>
             <option value="equals">ข้อความตรงกัน</option>
             <option value="not_contains">ข้อความไม่มีคำนี้</option>
-          </select>
+          </SelectField>
         </div>
         <div style={fieldGap}>
           <label style={labelStyle}>คำที่เช็ค</label>
@@ -1531,14 +1537,14 @@ function MessageContentConfigPanel({
 
       <div style={fieldGap}>
         <label style={labelStyle}>เช็คจากข้อความ</label>
-        <select
+        <SelectField density="compact"
           value={String(cfg.source || "customer_reply")}
           onChange={(e) => onUpdateConfig("source", e.target.value)}
           style={inputStyle}
         >
           <option value="customer_reply">ข้อความตอบล่าสุด (customer_reply)</option>
           <option value="initial_message">ข้อความแรกที่ทักเข้ามา (initial_message)</option>
-        </select>
+        </SelectField>
       </div>
 
       {/* list ของ branches */}
@@ -1565,7 +1571,7 @@ function MessageContentConfigPanel({
           </div>
           <div style={{ marginBottom: 8 }}>
             <label style={{ ...labelStyle, fontSize: 10 }}>ประเภทการ match</label>
-            <select
+            <SelectField density="compact"
               style={{ ...inputStyle, fontSize: 12 }}
               value={b.match_type}
               onChange={(e) => updateBranch(idx, { match_type: e.target.value as ConditionBranchDTO["match_type"] })}
@@ -1573,7 +1579,7 @@ function MessageContentConfigPanel({
               <option value="contains_any">มีคำใดคำหนึ่ง (contains any)</option>
               <option value="contains_all">มีคำครบทุกคำ (contains all)</option>
               <option value="equals">ตรงกันทุกตัว (equals)</option>
-            </select>
+            </SelectField>
           </div>
           <div>
             <label style={{ ...labelStyle, fontSize: 10 }}>Keywords (คั่นด้วย ,)</label>
@@ -1699,7 +1705,7 @@ function WaitForReplyConfigPanel({
 
       <div style={fieldGap}>
         <label style={labelStyle}>ประเภทคำตอบที่รับ</label>
-        <select
+        <SelectField density="compact"
           value={answerType}
           onChange={(e) => onUpdateConfig("answer_type", e.target.value)}
           style={inputStyle}
@@ -1707,7 +1713,7 @@ function WaitForReplyConfigPanel({
           <option value="any">อะไรก็ได้ (any)</option>
           <option value="number">ตัวเลขเท่านั้น (number)</option>
           <option value="custom_keywords">คำที่กำหนด (custom_keywords)</option>
-        </select>
+        </SelectField>
       </div>
 
       {answerType === "custom_keywords" && (
@@ -1749,7 +1755,7 @@ function WaitForReplyConfigPanel({
 
       <div style={fieldGap}>
         <label style={labelStyle}>ระยะเวลารอ (timeout)</label>
-        <select
+        <SelectField density="compact"
           style={inputStyle}
           value={timeoutPreset(timeoutMs)}
           onChange={(e) => {
@@ -1766,7 +1772,7 @@ function WaitForReplyConfigPanel({
           <option value="2h">2 ชั่วโมง</option>
           <option value="4h">4 ชั่วโมง</option>
           <option value="custom">กำหนดเอง (ms)</option>
-        </select>
+        </SelectField>
         {timeoutPreset(timeoutMs) === "custom" && (
           <input
             type="number"
@@ -2278,20 +2284,20 @@ function FlowSettingsPanel({
 
       <div style={fieldGap}>
         <label style={labelStyle}>ความถี่ที่ flow ทำงาน</label>
-        <select value={settings.trigger_frequency} onChange={(e) => setSettings({ ...settings, trigger_frequency: e.target.value as FlowSettings["trigger_frequency"] })} style={inputStyle}>
+        <SelectField density="compact" value={settings.trigger_frequency} onChange={(e) => setSettings({ ...settings, trigger_frequency: e.target.value as FlowSettings["trigger_frequency"] })} style={inputStyle}>
           <option value="every_time">ทุกครั้งที่ keyword ตรง</option>
           <option value="once_per_conversation">แชทละ 1 ครั้ง</option>
           <option value="once_per_customer">ลูกค้าละ 1 ครั้ง</option>
-        </select>
+        </SelectField>
       </div>
 
       <div style={fieldGap}>
         <label style={labelStyle}>นโยบายตอน condition ไม่ผ่าน (ไม่มี false branch)</label>
-        <select value={settings.false_branch_policy} onChange={(e) => setSettings({ ...settings, false_branch_policy: e.target.value as FlowSettings["false_branch_policy"] })} style={inputStyle}>
+        <SelectField density="compact" value={settings.false_branch_policy} onChange={(e) => setSettings({ ...settings, false_branch_policy: e.target.value as FlowSettings["false_branch_policy"] })} style={inputStyle}>
           <option value="exit_to_bot">ออก flow → ให้บอทตอบ (แนะนำ)</option>
           <option value="exit_drop">ออก flow → ทิ้งข้อความ</option>
           <option value="stay_retry">อยู่ flow → ทวงคำตอบ</option>
-        </select>
+        </SelectField>
       </div>
 
       <div style={fieldGap}>

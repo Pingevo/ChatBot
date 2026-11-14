@@ -1,4 +1,5 @@
 "use client";
+import { SelectField } from "@/components/ui/SelectField";
 import { useState, useEffect, useCallback } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -428,7 +429,7 @@ export default function ConfigPage() {
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
         </Button>
       }
-      contentClassName="p-6 space-y-4"
+      contentClassName="p-4 sm:p-6 space-y-4"
     >
         {/* Read-only banner for admin role */}
         {!editable && (
@@ -441,10 +442,10 @@ export default function ConfigPage() {
         {/* Iron Rules Banner */}
         <div className="rounded-xl border border-info-dark/50 bg-[#0a1628] p-4">
           <div className="flex items-center gap-2 mb-2.5">
-            <ShieldAlert size={16} className="text-info-soft" />
+            <ShieldAlert size={16} className="text-white/80" />
             <span className="text-sm font-semibold text-white">กฎเหล็ก (Iron Rules) — รองรับ 3 platform</span>
           </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2 text-xs">
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-x-6 gap-y-2 text-xs">
             <div className="flex items-center gap-2 text-white">
               <span className="w-1.5 h-1.5 rounded-full bg-info-soft flex-shrink-0" />
               ห้ามยิง Shopee / TikTok / Lazada API ทุก endpoint
@@ -471,12 +472,12 @@ export default function ConfigPage() {
             <h2 className="text-sm font-semibold text-text">Bot Services (3 ตัว แยก port)</h2>
             <Badge tone="brand" className="ml-auto">3 platform</Badge>
           </div>
-          <div className="space-y-2">
+          <div>
             {(["shopee", "tiktok", "lazada"] as Platform[]).map((p) => {
               const url = config?.[`${p}_bot_url` as keyof SystemConfig] as string;
               const isEditing = editingBotUrl === p;
               return (
-                <div key={p} className="rounded-lg bg-surface-2 p-3">
+                <div key={p} className="border-t border-border/60 pt-3 first:border-0 first:pt-0">
                   <div className="flex items-center justify-between mb-1.5">
                     <div className="flex items-center gap-2">
                       <Server size={13} className={platformColors[p]} />
@@ -498,24 +499,24 @@ export default function ConfigPage() {
                     )}
                   </div>
                   {isEditing ? (
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <input
                         type="text"
                         value={botUrlDraft}
                         onChange={(e) => setBotUrlDraft(e.target.value)}
                         placeholder="http://127.0.0.1:80xx"
-                        className="flex-1 rounded-md bg-surface border border-border px-2 py-1 text-xs text-text"
+                        className="min-w-0 flex-1 rounded-md bg-surface border border-border px-2 py-1 text-xs text-text"
                       />
-                      <Button size="sm" onClick={() => handleSaveBotUrl(p)} disabled={saving}>
+                      <Button size="sm" className="shrink-0" onClick={() => handleSaveBotUrl(p)} disabled={saving}>
                         {saving ? <Loading size={12} /> : "บันทึก"}
                       </Button>
-                      <Button size="sm" variant="ghost" onClick={() => setEditingBotUrl(null)}>
+                      <Button size="sm" variant="ghost" className="shrink-0" onClick={() => setEditingBotUrl(null)}>
                         ยกเลิก
                       </Button>
                     </div>
                   ) : (
-                    <div className="flex items-center gap-2 text-xs">
-                      <code className="bg-surface px-2 py-0.5 rounded text-text-muted font-mono">
+                    <div className="flex min-w-0 items-center gap-2 text-xs">
+                      <code className="min-w-0 max-w-full break-all bg-surface px-2 py-0.5 rounded text-text-muted font-mono">
                         {url}
                       </code>
                     </div>
@@ -535,24 +536,24 @@ export default function ConfigPage() {
               {config?.chat_engine === "v2" ? "v2" : "legacy"}
             </Badge>
           </div>
-          <div className="rounded-lg bg-surface-2 p-3">
+          <div className="border-t border-border/60 pt-3">
             <div className="flex items-center justify-between mb-2">
               <div className="text-xs text-text-muted">
                 มีผลทุกหน้า: shadowbot, botworker, test-assignment, live-assignment, replay-compare, testchat
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <select
+            <div className="flex flex-wrap items-center gap-2">
+              <SelectField
                 value={chatEngineDraft}
                 onChange={(e) => setChatEngineDraft(e.target.value as "legacy" | "v2" | "v3")}
                 disabled={!editable || saving}
-                className="rounded-md bg-surface border border-border px-2 py-1 text-xs text-text"
+                className="min-w-0 max-w-full flex-1 rounded-md bg-surface border border-border px-2 py-1 text-xs text-text"
               >
                 <option value="legacy">legacy — app.py chat() (default, ปลอดภัย)</option>
                 <option value="v2">v2 — chat_v2.py (pipeline ใหม่ 8 stages)</option>
                 <option value="v3">v3 — chatbotv3 (OpenRouter-first, LLM ตอบเอง + match สินค้าจริง)</option>
-              </select>
-              <Button size="sm" onClick={handleSaveChatEngine} disabled={saving || !editable || chatEngineDraft === config?.chat_engine}>
+              </SelectField>
+              <Button size="sm" className="shrink-0" onClick={handleSaveChatEngine} disabled={saving || !editable || chatEngineDraft === config?.chat_engine}>
                 {saving ? <Loading size={12} /> : "บันทึก"}
               </Button>
             </div>
@@ -581,7 +582,7 @@ export default function ConfigPage() {
             </Badge>
           </div>
           <div className="space-y-1.5">
-            <div className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-surface-2">
+            <div className="flex items-center justify-between py-3 border-b border-border/60">
               <div className="min-w-0 flex-1 mr-3">
                 <div className="text-sm font-medium text-text">Grouped Retrieval Shadow</div>
                 <div className="text-[11px] text-text-muted">
@@ -594,7 +595,7 @@ export default function ConfigPage() {
                 disabled={saving || !editable}
               />
             </div>
-            <div className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-surface-2">
+            <div className="flex items-center justify-between py-3">
               <div className="min-w-0 flex-1 mr-3">
                 <div className="text-sm font-medium text-text">Grouped Retrieval Selection</div>
                 <div className="text-[11px] text-text-muted">
@@ -619,7 +620,7 @@ export default function ConfigPage() {
         {/* ⚡ LLM Context Limit ย้ายไป /admin-config แล้ว (slider version) — ตั้งค่าที่เดียว กันสับสน */}
 
         {/* Two-column masonry — cards สูงไม่เท่ากัน → ใช้ CSS columns ให้กระจายสมดุลอัตโนมัติ */}
-        <div className="columns-1 lg:columns-2 gap-4">
+        <div className="columns-1 xl:columns-2 gap-4">
             {/* ⚡ Workstream E — Evidence Pool: 4 source toggles + strict kb selector */}
             <Card className="p-4 break-inside-avoid mb-4">
               <div className="flex items-center gap-2 mb-3">
@@ -667,7 +668,7 @@ export default function ConfigPage() {
                 {poolSourceRows.map((s) => {
                   const enabled = config?.pool_sources?.[s.key] !== false;
                   return (
-                    <div key={s.key} className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-surface-2">
+                    <div key={s.key} className="flex items-center justify-between py-3 border-b border-border/60 last:border-0">
                       <div className="min-w-0 flex-1 mr-3">
                         <div className="text-sm font-medium text-text">{s.label}</div>
                         <div className="text-[11px] text-text-muted truncate">{s.description}</div>
@@ -704,7 +705,7 @@ export default function ConfigPage() {
                     </div>
                     <div className="space-y-1.5">
                       {switches.map((sw) => (
-                        <div key={sw.key} className="flex items-center justify-between py-2 px-3 rounded-lg bg-surface-2/50">
+                        <div key={sw.key} className="flex items-center justify-between py-2 border-b border-border/50 last:border-0">
                           <div className="min-w-0">
                             <div className="text-sm text-text">{sw.label}</div>
                             <div className="text-[11px] text-text-muted truncate">{sw.description}</div>
@@ -724,7 +725,7 @@ export default function ConfigPage() {
             {/* Safe switches */}
             <Card className="p-4 break-inside-avoid mb-4">
               <div className="flex items-center gap-2 mb-3">
-                <ShieldCheck size={14} className="text-success-soft" />
+                <ShieldCheck size={14} className="text-success-dark" />
                 <h2 className="text-sm font-semibold text-text">สวิตช์ปลอดภัย</h2>
                 <Badge tone="brand" className="ml-auto">เปิด/ปิดได้</Badge>
               </div>
@@ -732,7 +733,7 @@ export default function ConfigPage() {
                 {safeSwitches.map((sw) => {
                   const enabled = config?.[sw.key] as boolean | undefined;
                   return (
-                    <div key={sw.key} className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-surface-2">
+                    <div key={sw.key} className="flex items-center justify-between py-3 border-b border-border/60 last:border-0">
                       <div className="min-w-0 flex-1 mr-3">
                         <div className="text-sm font-medium text-text">{sw.label}</div>
                         <div className="text-[11px] text-text-muted truncate">{sw.description}</div>
@@ -786,7 +787,7 @@ export default function ConfigPage() {
             {testResults?.dataActivity && (
               <Card className="p-4 break-inside-avoid mb-4">
                 <div className="flex items-center gap-2 mb-3">
-                  <Activity size={14} className="text-success-soft" />
+                  <Activity size={14} className="text-success-dark" />
                   <h2 className="text-sm font-semibold text-text">Data Activity</h2>
                 </div>
                 <TestRow label="การเข้าของ data writer" result={testResults.dataActivity} />
@@ -824,7 +825,7 @@ export default function ConfigPage() {
                           {shopsP.map((shop) => (
                             <div
                               key={shop.shop_id}
-                              className="flex items-center justify-between py-2.5 px-3 rounded-lg bg-surface-2"
+                              className="flex items-center justify-between py-3 border-b border-border/60 last:border-0"
                             >
                               <div className="min-w-0 flex-1 mr-3">
                                 <div className="text-sm font-medium text-text truncate">
@@ -879,7 +880,7 @@ export default function ConfigPage() {
                 </div>
               )}
               <div className="text-[10px] text-text-subtle mt-2 flex items-center gap-1">
-                <ShieldCheck size={10} className="text-success-soft" />
+                <ShieldCheck size={10} className="text-success-dark" />
                 ไม่ยิง API ไป platform ใดๆ — ตรวจเฉพาะ DB + health endpoint ของ bot
               </div>
             </Card>
@@ -896,7 +897,7 @@ function TestRow({ label, result }: { label: string; result: { ok: boolean; mess
         : "bg-error/5 border-error/20"
     }`}>
       <span className={`flex-shrink-0 w-5 h-5 rounded-full flex items-center justify-center text-xs ${
-        result.ok ? "bg-success/20 text-success-soft" : "bg-error/20 text-error-soft"
+        result.ok ? "bg-success/20 text-success-dark" : "bg-error/20 text-error-dark"
       }`}>
         {result.ok ? "✓" : "✗"}
       </span>

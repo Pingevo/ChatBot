@@ -2,6 +2,7 @@
 // ⚡ Phase 3B-6 — Admin Chat Result (chat layout แบบ shadow-bot)
 // หน้าสำหรับ dev ดูผลลัพธ์: แอดมินคนไหน คอมเมนต์/ให้คะแนนอะไร คำตอบบอทเป็นยังไง
 // layout: list ซ้าย (conversations) + panel ขวา (Q&A pairs + rating + comment)
+import { SelectField } from "@/components/ui/SelectField";
 import { useEffect, useState, useMemo, useCallback } from "react";
 import { useAuth } from "@/lib/authStore";
 import { canAccessPage } from "@/lib/roles";
@@ -11,6 +12,7 @@ import { toast, useToastError } from "@/components/ui/Toast";
 import { Loading } from "@/components/ui/Loading";
 import { Badge } from "@/components/ui/Badge";
 import { MessageContent } from "@/components/chat/MessageContent";
+import { PageIdentityMark } from "@/components/ui/PageIdentityMark";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 import type { ChatMessage } from "@/lib/types";
 import {
@@ -90,8 +92,8 @@ const RATING_COLORS: Record<string, string> = {
 
 const platformColors: Record<string, string> = {
   shopee: "#ee4d2d",
-  lazada: "#0f146d",
-  tiktok: "#000000",
+  lazada: "var(--color-platform-lazada-contrast)",
+  tiktok: "var(--color-platform-tiktok-contrast)",
 };
 
 function timeAgo(ts?: string): string {
@@ -271,9 +273,7 @@ export default function AdminChatResultPage() {
       <div className="h-full overflow-y-auto">
         <div className="px-6 py-5 border-b border-border bg-surface sticky top-0 z-10">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-vibrant-coral/15 flex items-center justify-center">
-              <ShieldCheck size={20} className="text-vibrant-coral" />
-            </div>
+            <PageIdentityMark kind="inbox" icon={ShieldCheck} className="w-10 h-10 shrink-0" />
             <div>
               <h1 className="text-lg font-bold text-text">Admin Chat Result</h1>
               <p className="text-xs text-text-muted">สำหรับ Dev เท่านั้น</p>
@@ -295,9 +295,7 @@ export default function AdminChatResultPage() {
         {/* Header */}
         <div className="px-3 py-3 border-b border-border bg-surface shrink-0">
           <div className="flex items-center gap-2 mb-2">
-            <div className="w-7 h-7 rounded-lg bg-brand/15 flex items-center justify-center">
-              <MessageSquare size={14} className="text-brand" />
-            </div>
+            <PageIdentityMark kind="inbox" icon={MessageSquare} className="w-8 h-8 shrink-0" />
             <div className="flex-1 min-w-0">
               <h1 className="text-sm font-bold text-text">Admin Chat Result</h1>
               <p className="text-[10px] text-text-muted truncate">ผลลัพธ์ rating/comment แยกตามแอดมิน</p>
@@ -305,12 +303,12 @@ export default function AdminChatResultPage() {
           </div>
 
           {/* Filters */}
-          <div className="flex items-center gap-1 flex-wrap mb-2">
+          <div className="flex flex-wrap items-center gap-1.5 mb-2">
             {/* Admin filter */}
-            <select
+            <SelectField
               value={adminFilter}
               onChange={(e) => setAdminFilter(e.target.value)}
-              className="text-[10px] px-1.5 py-1 rounded-md border border-border bg-surface-2 text-text focus:outline-none focus:border-brand"
+              className="min-h-11 min-w-0 max-w-full flex-1 px-2 py-2 text-xs rounded-md border border-border bg-surface-2 text-text focus:outline-none focus:border-brand"
             >
               <option value="all">ทุกแอดมิน</option>
               {admins.map((a) => (
@@ -318,25 +316,25 @@ export default function AdminChatResultPage() {
                   {a.name || a.username} ({a.role})
                 </option>
               ))}
-            </select>
+            </SelectField>
 
             {/* Scope filter */}
-            <select
+            <SelectField
               value={scopeFilter}
               onChange={(e) => setScopeFilter(e.target.value)}
-              className="text-[10px] px-1.5 py-1 rounded-md border border-border bg-surface-2 text-text focus:outline-none focus:border-brand"
+              className="min-h-11 min-w-0 max-w-full flex-1 px-2 py-2 text-xs rounded-md border border-border bg-surface-2 text-text focus:outline-none focus:border-brand"
             >
               <option value="all">ทุกระบบ</option>
               <option value="test_assignment">ทดสอบจ่ายงาน</option>
               <option value="shadow_bot">Shadow Bot</option>
               <option value="test_chat">ทดสอบแชท</option>
-            </select>
+            </SelectField>
 
             {/* Refresh */}
             <button
               onClick={load}
               disabled={loading}
-              className="text-[10px] px-2 py-1 rounded-md border border-border bg-surface-2 text-text hover:bg-surface-3 disabled:opacity-50"
+              className="min-h-11 px-3 py-2 text-xs rounded-md border border-border bg-surface-2 text-text hover:bg-surface-3 disabled:opacity-50 shrink-0"
             >
               {loading ? <Loading size={10} /> : "รีเฟรช"}
             </button>
@@ -349,7 +347,7 @@ export default function AdminChatResultPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="ค้นหา: แชท, ร้าน, แอดมิน..."
-              className="w-full pl-7 pr-2 py-1.5 text-xs bg-surface-2 border border-border rounded-md text-text focus:outline-none focus:border-brand"
+              className="w-full min-h-11 pl-8 pr-2 py-2 text-sm bg-surface-2 border border-border rounded-md text-text focus:outline-none focus:border-brand"
             />
           </div>
         </div>
@@ -463,7 +461,7 @@ export default function AdminChatResultPage() {
         {/* Mobile back button */}
         <button
           onClick={() => setMobileView("list")}
-          className="md:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+          className="md:hidden absolute top-3 left-3 z-10 w-11 h-11 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
           aria-label="กลับ"
         >

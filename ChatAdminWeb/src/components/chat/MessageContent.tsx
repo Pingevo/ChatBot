@@ -84,7 +84,7 @@ export function MessageContent({ msg, variant }: Props) {
     return (
       <div className="flex items-center gap-1.5 text-xs">
         <Bell size={11} className="text-text-muted" />
-        <span className="text-text-muted">{msg.notification_text || msg.text}</span>
+        <span className="chat-message-copy text-text-muted">{msg.notification_text || msg.text}</span>
       </div>
     );
   }
@@ -94,7 +94,7 @@ export function MessageContent({ msg, variant }: Props) {
     return (
       <div className="flex items-center gap-1.5 text-xs">
         <Headset size={11} className="text-warning" />
-        <span className="text-warning/90">{msg.text || "โอนไปยังเจ้าหน้าที่"}</span>
+        <span className="chat-message-copy text-warning/90">{msg.text || "โอนไปยังเจ้าหน้าที่"}</span>
       </div>
     );
   }
@@ -114,7 +114,7 @@ export function MessageContent({ msg, variant }: Props) {
             onClick={() => imageViewer.show(msg.media!.url!, { type: "image", alt: msg.text || "สติกเกอร์" })}
           />
           {msg.text && msg.text !== "(สติกเกอร์)" && !msg.text.startsWith("(สติกเกอร์") && (
-            <div className={`text-[10px] ${bubbleText} opacity-60`}>{msg.text}</div>
+            <div className={`chat-message-copy ${bubbleText} opacity-60`}>{msg.text}</div>
           )}
         </div>
       );
@@ -123,7 +123,7 @@ export function MessageContent({ msg, variant }: Props) {
     return (
       <div className={`flex items-center gap-1.5 ${bubbleText}`}>
         <Sticker size={16} />
-        <span className="text-sm">{msg.text}</span>
+        <span className="chat-message-copy">{msg.text}</span>
       </div>
     );
   }
@@ -155,7 +155,7 @@ export function MessageContent({ msg, variant }: Props) {
             onClick={() => imageViewer.show(msg.media!.url!, { type: "image", alt: msg.text || "รูปภาพ" })}
           />
           {msg.text && msg.text !== "(รูปภาพ)" && (
-            <div className={`text-xs ${bubbleText} opacity-80`}>{renderMarkdownInline(msg.text)}</div>
+            <div className={`chat-message-copy ${bubbleText} opacity-80`}>{renderMarkdownInline(msg.text)}</div>
           )}
         </div>
       );
@@ -164,7 +164,7 @@ export function MessageContent({ msg, variant }: Props) {
     return (
       <div className={`flex items-center gap-1.5 ${bubbleText}`}>
         <ImageIcon size={16} className={isUser ? "text-text-muted" : "text-white/60"} />
-        <span className="text-sm opacity-80">{msg.text && msg.text !== "(รูปภาพ)" ? msg.text : "รูปภาพ"}</span>
+        <span className="chat-message-copy opacity-80">{msg.text && msg.text !== "(รูปภาพ)" ? msg.text : "รูปภาพ"}</span>
       </div>
     );
   }
@@ -192,7 +192,7 @@ export function MessageContent({ msg, variant }: Props) {
             </div>
           </div>
           {msg.text && msg.text !== "(วิดีโอ)" && (
-            <div className={`text-xs ${bubbleText} opacity-80`}>{renderMarkdownInline(msg.text)}</div>
+            <div className={`chat-message-copy ${bubbleText} opacity-80`}>{renderMarkdownInline(msg.text)}</div>
           )}
         </div>
       );
@@ -201,7 +201,7 @@ export function MessageContent({ msg, variant }: Props) {
     return (
       <div className={`flex items-center gap-1.5 ${bubbleText}`}>
         <Video size={16} className={isUser ? "text-text-muted" : "text-white/60"} />
-        <span className="text-sm opacity-80">{msg.text && msg.text !== "(วิดีโอ)" ? msg.text : "วิดีโอ"}</span>
+        <span className="chat-message-copy opacity-80">{msg.text && msg.text !== "(วิดีโอ)" ? msg.text : "วิดีโอ"}</span>
       </div>
     );
   }
@@ -219,7 +219,7 @@ export function MessageContent({ msg, variant }: Props) {
           onClick={() => imageViewer.show(msg.media!.url!, { type: "image", alt: msg.text || "รูปภาพ" })}
         />
         {msg.text && (
-          <div className={`text-sm ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>
+          <div className={`chat-message-copy ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>
         )}
       </div>
     );
@@ -232,7 +232,7 @@ export function MessageContent({ msg, variant }: Props) {
       return (
         <div className="space-y-1.5">
           {msg.text && msg.text !== "(สินค้า)" && msg.text !== "(สินค้าพร้อมตัวเลือก)" && msg.text !== "[item]" && msg.text !== "[variation_card]" && (
-            <div className={`text-sm ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>
+            <div className={`chat-message-copy ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>
           )}
           {msg.products.map((p) => (
             <ProductCardView key={p.item_id} product={p} variant={variant} />
@@ -265,7 +265,7 @@ export function MessageContent({ msg, variant }: Props) {
     return (
       <div className={`flex items-center gap-1.5 ${bubbleText}`}>
         <Package size={16} className={isUser ? "text-text-muted" : "text-white/60"} />
-        <span className="text-sm opacity-80">{msg.text && msg.text !== "[bundle_message]" ? msg.text : "Bundle"}</span>
+        <span className="chat-message-copy opacity-80">{msg.text && msg.text !== "[bundle_message]" ? msg.text : "Bundle"}</span>
       </div>
     );
   }
@@ -273,7 +273,7 @@ export function MessageContent({ msg, variant }: Props) {
   // ── fallback: text + product cards (กรณี bot/admin ตอบพร้อม product) ──
   return (
     <div className="space-y-1.5">
-      {msg.text && <div className={`${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>}
+      {msg.text && <div className={`chat-message-copy ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>}
       {msg.products && msg.products.length > 0 && (
         <div className="space-y-1.5">
           {msg.products.map((p) => (

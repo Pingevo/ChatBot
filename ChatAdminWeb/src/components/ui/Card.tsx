@@ -8,8 +8,9 @@ interface Props extends HTMLAttributes<HTMLDivElement> {
 export function Card({ hover = false, className = "", children, ...props }: Props) {
   return (
     <div
-      className={`bg-surface border border-border rounded-xl shadow-[var(--shadow-sm)] ${
-        hover ? "transition-all duration-200 hover:shadow-[var(--shadow-md)] hover:border-border-strong" : ""
+      data-ui="card"
+      className={`bg-surface border border-border-subtle rounded-xl shadow-[var(--shadow-xs)] ${
+        hover ? "transition-all duration-200 hover:shadow-[var(--shadow-sm)] hover:border-border-strong" : ""
       } ${className}`}
       {...props}
     >

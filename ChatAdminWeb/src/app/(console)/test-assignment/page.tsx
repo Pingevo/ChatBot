@@ -219,7 +219,7 @@ interface Stats {
 // ─── Constants ────────────────────────────────────────────
 
 const platformLabels: Record<string, string> = { shopee: "Shopee", tiktok: "TikTok", lazada: "Lazada" };
-const platformColors: Record<string, string> = { shopee: "#ee4d2d", tiktok: "#111827", lazada: "#1a2e8c" };
+const platformColors: Record<string, string> = { shopee: "#ee4d2d", tiktok: "var(--color-platform-tiktok-contrast)", lazada: "var(--color-platform-lazada-contrast)" };
 const modeLabels: Record<string, string> = { equal_global: "Global", equal_per_shop: "Per Shop", equal_per_platform: "Per Platform" };
 
 type StatusFilter = "all" | "bot" | "admin" | "handoff" | "closed" | "error";
@@ -862,9 +862,9 @@ export default function TestAssignmentPage() {
   }
 
   return (
-    <div className="h-full flex overflow-hidden">
+    <div className="h-full min-w-0 flex overflow-hidden">
       {/* ── Panel ซ้าย: Inbox list ── */}
-      <div className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-80 min-w-0 shrink-0 border-r border-border overflow-hidden`}>
+      <div className={`${mobileView === "list" ? "flex" : "hidden"} 2xl:flex h-full flex-col w-full 2xl:w-80 min-w-0 shrink-0 border-r border-border overflow-hidden`}>
         {/* Header */}
         <div className="px-3 py-3 border-b border-border bg-surface shrink-0">
           <div className="flex items-center gap-2 mb-2">
@@ -881,7 +881,7 @@ export default function TestAssignmentPage() {
                 {/* Filter toggle button — พับ/กางตัวกรอง (เหมือน ChatList) */}
                 <button
                   onClick={() => setShowFilters(!showFilters)}
-                  className={`flex items-center gap-1 h-6 px-2 rounded text-[11px] font-medium transition-colors shrink-0 ${
+                  className={`min-h-11 2xl:min-h-0 flex items-center gap-1 px-2 rounded text-xs font-medium transition-colors shrink-0 ${
                     showFilters || activeFilterCount > 0
                       ? "bg-brand/10 text-brand"
                       : "bg-surface-2 text-text-muted hover:text-text"
@@ -1198,11 +1198,11 @@ export default function TestAssignmentPage() {
       </div>
 
       {/* ── Panel กลาง: Chat ── */}
-      <div className={`${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 flex-col min-w-0 overflow-hidden relative`}>
+      <div className={`${mobileView === "chat" ? "flex" : "hidden"} 2xl:flex flex-1 flex-col min-w-0 overflow-hidden relative`}>
         {/* Mobile back button */}
         <button
           onClick={handleBack}
-          className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+              className="2xl:hidden absolute top-3 left-3 z-10 w-11 h-11 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
           title="กลับ"
           aria-label="กลับ"
         >
@@ -1212,7 +1212,7 @@ export default function TestAssignmentPage() {
         {selectedId && (
           <button
             onClick={() => setMobileView("stat")}
-            className="lg:hidden absolute top-3 right-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+            className="2xl:hidden absolute top-3 right-3 z-10 w-11 h-11 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="สถิติ"
             aria-label="สถิติ"
           >
@@ -1220,15 +1220,15 @@ export default function TestAssignmentPage() {
           </button>
         )}
         {/* Header — min-h ให้ตรง panel ขวา (pl-12/pr-12 บน mobile/tablet กันชน floating back/stat buttons) */}
-        <div className="pl-12 pr-12 lg:px-4 py-3 min-h-[60px] flex items-center justify-between border-b border-border bg-surface shrink-0">
+        <div className="pl-12 pr-12 2xl:px-4 py-3 min-h-[60px] flex items-center justify-between border-b border-border bg-surface shrink-0">
           <div className="flex items-center gap-2 min-w-0">
             {/* Mobile/Tablet — platform icon หน้าชื่อลูกค้า */}
             {detail?.conversation && (
-              <span className="lg:hidden shrink-0 flex items-center">
+              <span className="2xl:hidden shrink-0 flex items-center">
                 <PlatformIcon platform={detail.conversation.platform as Platform} size={18} />
               </span>
             )}
-            <FlaskConical size={16} className="text-brand shrink-0 hidden lg:block" />
+            <FlaskConical size={16} className="text-brand shrink-0 hidden 2xl:block" />
             <h2 className="text-sm font-semibold text-text truncate">
               {detail?.conversation ? `${detail.conversation.to_name || detail.conversation.conversation_id}` : "เลือก conversation"}
             </h2>
@@ -1304,7 +1304,7 @@ export default function TestAssignmentPage() {
                 {replaying ? <Loading size={12} /> : <RefreshCw size={12} />} Replay
               </Button>
             )}
-            <button onClick={() => setRightCollapsed(!rightCollapsed)} className="hidden lg:block p-1.5 rounded-md hover:bg-surface-2 text-text-muted" title={rightCollapsed ? "แสดง panel สถิติ" : "ซ่อน panel สถิติ"} aria-label={rightCollapsed ? "แสดง panel สถิติ" : "ซ่อน panel สถิติ"}>
+            <button onClick={() => setRightCollapsed(!rightCollapsed)} className="hidden 2xl:block p-1.5 rounded-md hover:bg-surface-2 text-text-muted" title={rightCollapsed ? "แสดง panel สถิติ" : "ซ่อน panel สถิติ"} aria-label={rightCollapsed ? "แสดง panel สถิติ" : "ซ่อน panel สถิติ"}>
               {rightCollapsed ? <ChevronDown size={14} className="rotate-90" /> : <ChevronDown size={14} className="-rotate-90" />}
             </button>
           </div>
@@ -1368,23 +1368,23 @@ export default function TestAssignmentPage() {
               {(detail.messages.length > 0 || (replay && replay.qa.length > 0)) && (
                 <>
                 {/* Mobile/Tablet tab switcher */}
-                <div className="lg:hidden flex shrink-0 border-b border-border bg-surface">
+                <div className="2xl:hidden flex shrink-0 border-b border-border bg-surface">
                   <button
                     onClick={() => setMobileCompareTab("zaapi")}
-                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors ${mobileCompareTab === "zaapi" ? "text-text border-b-2 border-brand" : "text-text-muted"}`}
+                    className={`min-h-11 2xl:min-h-0 flex-1 flex items-center justify-center gap-1.5 py-2 text-sm font-medium transition-colors ${mobileCompareTab === "zaapi" ? "text-text border-b-2 border-brand" : "text-text-muted"}`}
                   >
                     <Bot size={12} /> Zaapi / Admin
                   </button>
                   <button
                     onClick={() => setMobileCompareTab("bot")}
-                    className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-xs font-medium transition-colors ${mobileCompareTab === "bot" ? "text-text border-b-2 border-brand" : "text-text-muted"}`}
+                    className={`min-h-11 2xl:min-h-0 flex-1 flex items-center justify-center gap-1.5 py-2 text-sm font-medium transition-colors ${mobileCompareTab === "bot" ? "text-text border-b-2 border-brand" : "text-text-muted"}`}
                   >
                     <FlaskConical size={12} /> Bot ของเรา
                   </button>
                 </div>
                 <div className="flex-1 flex min-h-0 overflow-hidden relative">
                   {/* ── ฝั่งซ้าย: Zaapi / admin / user (แชทจริง DB) ── */}
-                  <div className={`flex-1 flex flex-col border-r border-border min-w-0 lg:flex ${mobileCompareTab === "zaapi" ? "flex absolute inset-0 lg:relative" : "hidden lg:flex"}`}>
+                  <div className={`flex-1 flex flex-col border-r border-border min-w-0 2xl:flex ${mobileCompareTab === "zaapi" ? "flex absolute inset-0 2xl:relative" : "hidden 2xl:flex"}`}>
                     <div className="px-3 py-2 border-b border-border bg-surface-2 shrink-0">
                       <div className="flex items-center justify-between gap-1.5">
                         <div className="flex items-center gap-1.5">
@@ -1446,7 +1446,7 @@ export default function TestAssignmentPage() {
                   </div>
 
                   {/* ── ฝั่งขวา: Bot ของเรา (replay) ── */}
-                  <div className={`flex-1 flex flex-col min-w-0 lg:flex ${mobileCompareTab === "bot" ? "flex absolute inset-0 lg:relative" : "hidden lg:flex"}`}>
+                  <div className={`flex-1 flex flex-col min-w-0 2xl:flex ${mobileCompareTab === "bot" ? "flex absolute inset-0 2xl:relative" : "hidden 2xl:flex"}`}>
                     <div className="px-3 py-2 border-b border-border bg-brand/5 shrink-0">
                       <div className="flex items-center justify-between gap-1.5">
                         <div className="flex items-center gap-1.5">
@@ -1583,7 +1583,7 @@ export default function TestAssignmentPage() {
                                       <div className="text-[11px] text-text-muted mt-0.5">{qa.detail}</div>
                                     </div>
                                   ) : qa.status === "error" ? (
-                                    <div className="bg-error/10 border border-error/30 rounded-lg px-3 py-2 text-sm text-error-soft">{qa.detail}</div>
+                                    <div className="bg-error/10 border border-error/30 rounded-lg px-3 py-2 text-sm text-error-dark">{qa.detail}</div>
                                   ) : null}
                                 </div>
                               </div>
@@ -1602,14 +1602,14 @@ export default function TestAssignmentPage() {
       </div>
 
       {/* ── Panel ขวา: Stats ── */}
-      <div className={`${mobileView === "stat" ? "flex" : "hidden"} ${rightCollapsed ? "lg:hidden" : "lg:flex"} h-full shrink-0 overflow-hidden w-full lg:w-72 border-l border-border`}>
+      <div className={`${mobileView === "stat" ? "flex" : "hidden"} ${rightCollapsed ? "2xl:hidden" : "2xl:flex"} h-full shrink-0 overflow-hidden w-full 2xl:w-72 border-l border-border`}>
         <div className="h-full flex flex-col w-full overflow-hidden">
             {/* Tab menu — min-h + flex items-center ให้ตรง panel กลาง */}
             <div className="px-4 py-3 min-h-[60px] flex items-center border-b border-border bg-surface shrink-0">
               {/* Mobile/Tablet back button — กลับไป panel แชท */}
               <button
                 onClick={() => setMobileView("chat")}
-                className="lg:hidden -ml-2 mr-2 w-9 h-9 rounded-lg flex items-center justify-center text-text-muted hover:text-text hover:bg-surface-2 transition-colors shrink-0"
+                className="2xl:hidden -ml-2 mr-2 w-11 h-11 rounded-lg flex items-center justify-center text-text-muted hover:text-text hover:bg-surface-2 transition-colors shrink-0"
                 title="กลับ"
                 aria-label="กลับ"
               >
@@ -1689,8 +1689,8 @@ export default function TestAssignmentPage() {
                             <span className="text-text font-bold">{replay.qa.length}</span>
                           </div>
                           <div className="flex items-center justify-between">
-                            <span className="flex items-center gap-1 text-success-soft"><Bot size={10} /> บอทตอบ</span>
-                            <span className="text-success-soft font-bold">{replay.qa.filter(q => q.status === "bot_answered" || q.status === "trigger_matched").length}</span>
+                            <span className="flex items-center gap-1 text-success-dark"><Bot size={10} /> บอทตอบ</span>
+                            <span className="text-success-dark font-bold">{replay.qa.filter(q => q.status === "bot_answered" || q.status === "trigger_matched").length}</span>
                           </div>
                           <div className="flex items-center justify-between">
                             <span className="flex items-center gap-1 text-brand"><Users size={10} /> ส่งต่อแอดมิน (ข้าม)</span>
@@ -1750,7 +1750,7 @@ export default function TestAssignmentPage() {
                   <div className="flex items-center justify-between">
                     <span className="text-text-muted">Bot Worker</span>
                     {status?.config.bot_worker_enabled ? (
-                      <span className="flex items-center gap-1 text-success-soft"><CheckCircle size={12} /> เปิด</span>
+                      <span className="flex items-center gap-1 text-success-dark"><CheckCircle size={12} /> เปิด</span>
                     ) : (
                       <span className="flex items-center gap-1 text-text-subtle"><XCircle size={12} /> ปิด</span>
                     )}
@@ -1780,8 +1780,8 @@ export default function TestAssignmentPage() {
                       <span className="text-text font-bold">{stats.total}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="flex items-center gap-1 text-success-soft"><Bot size={10} /> บอทตอบ</span>
-                      <span className="text-success-soft font-bold">{stats.bot_answered}</span>
+                      <span className="flex items-center gap-1 text-success-dark"><Bot size={10} /> บอทตอบ</span>
+                      <span className="text-success-dark font-bold">{stats.bot_answered}</span>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="flex items-center gap-1 text-brand"><Users size={10} /> Handoff</span>
@@ -1792,8 +1792,8 @@ export default function TestAssignmentPage() {
                       <span className="font-bold">{stats.no_agent}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="flex items-center gap-1 text-error-soft"><AlertCircle size={10} /> Error</span>
-                      <span className="text-error-soft font-bold">{stats.error}</span>
+                      <span className="flex items-center gap-1 text-error-dark"><AlertCircle size={10} /> Error</span>
+                      <span className="text-error-dark font-bold">{stats.error}</span>
                     </div>
                     <div className="border-t border-border/50 pt-1.5 mt-1.5 space-y-1">
                       <div className="flex items-center justify-between">
@@ -1819,8 +1819,8 @@ export default function TestAssignmentPage() {
                       <span className="text-text font-bold">{stats.total_messages ?? "—"}</span>
                     </div>
                     <div className="flex items-center justify-between">
-                      <span className="flex items-center gap-1 text-success-soft"><Bot size={10} /> บอทตอบ</span>
-                      <span className="text-success-soft font-bold">{stats.total_bot_replies ?? "—"}</span>
+                      <span className="flex items-center gap-1 text-success-dark"><Bot size={10} /> บอทตอบ</span>
+                      <span className="text-success-dark font-bold">{stats.total_bot_replies ?? "—"}</span>
                     </div>
                     <div className="flex items-center justify-between">
                       <span className="flex items-center gap-1 text-brand"><Users size={10} /> ส่งต่อแอดมิน (ข้าม)</span>
@@ -1936,7 +1936,7 @@ export default function TestAssignmentPage() {
                           </div>
                           <span className="text-text truncate flex-1">{a.name || a.username}</span>
                           {a.is_accepting_chats ? (
-                            <PlayCircle size={10} className="text-success-soft shrink-0" />
+                            <PlayCircle size={10} className="text-success-dark shrink-0" />
                           ) : (
                             <PauseCircle size={10} className="text-text-subtle shrink-0" />
                           )}
@@ -1960,8 +1960,8 @@ export default function TestAssignmentPage() {
                           <span className="text-text font-bold">{stats.total}</span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className="flex items-center gap-1 text-success-soft"><Bot size={10} /> บอทตอบ</span>
-                          <span className="text-success-soft font-bold">{stats.bot_answered}</span>
+                          <span className="flex items-center gap-1 text-success-dark"><Bot size={10} /> บอทตอบ</span>
+                          <span className="text-success-dark font-bold">{stats.bot_answered}</span>
                         </div>
                         <div className="flex items-center justify-between">
                           <span className="flex items-center gap-1 text-brand"><Users size={10} /> Handoff</span>
@@ -1972,8 +1972,8 @@ export default function TestAssignmentPage() {
                           <span className="font-bold">{stats.no_agent}</span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className="flex items-center gap-1 text-error-soft"><AlertCircle size={10} /> Error</span>
-                          <span className="text-error-soft font-bold">{stats.error}</span>
+                          <span className="flex items-center gap-1 text-error-dark"><AlertCircle size={10} /> Error</span>
+                          <span className="text-error-dark font-bold">{stats.error}</span>
                         </div>
                         <div className="border-t border-border/50 pt-1.5 mt-1.5 space-y-1">
                           <div className="flex items-center justify-between">
@@ -1996,7 +1996,7 @@ export default function TestAssignmentPage() {
                       <div className="flex items-center justify-between">
                         <span className="text-text-muted">Bot Worker</span>
                         {status?.config.bot_worker_enabled ? (
-                          <span className="flex items-center gap-1 text-success-soft"><CheckCircle size={12} /> เปิด</span>
+                          <span className="flex items-center gap-1 text-success-dark"><CheckCircle size={12} /> เปิด</span>
                         ) : (
                           <span className="flex items-center gap-1 text-text-subtle"><XCircle size={12} /> ปิด</span>
                         )}
@@ -2025,7 +2025,7 @@ export default function TestAssignmentPage() {
                           </div>
                           <span className="text-text truncate flex-1">{a.name || a.username}</span>
                           {a.is_accepting_chats ? (
-                            <PlayCircle size={10} className="text-success-soft shrink-0" />
+                            <PlayCircle size={10} className="text-success-dark shrink-0" />
                           ) : (
                             <PauseCircle size={10} className="text-text-subtle shrink-0" />
                           )}

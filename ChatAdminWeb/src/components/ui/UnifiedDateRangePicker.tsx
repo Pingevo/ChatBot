@@ -1,7 +1,8 @@
 "use client";
 // UnifiedDateRangePicker — ปุ่มเดียวที่มีทั้ง preset และปฏิทิน
 // แทนที่ DateRangeSelector + CalendarDateRangePicker ที่แยกกัน
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { DayPicker } from "react-day-picker";
 import { th } from "date-fns/locale";
 import { format } from "date-fns";
@@ -93,11 +94,22 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
   const [tempEnd, setTempEnd] = useState<Date | null>(null);
   const [activePreset, setActivePreset] = useState<DateRangePreset>(value.preset);
   const [phoneLayout, setPhoneLayout] = useState(false);
+  const [host, setHost] = useState<HTMLElement | null>(null);
+  const [desktopPanelStyle, setDesktopPanelStyle] = useState<CSSProperties>({
+    position: "fixed",
+    top: 0,
+    left: 0,
+    zIndex: 125,
+    visibility: "hidden",
+  });
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const dialogRef = useFocusTrap<HTMLDivElement>(open && phoneLayout);
 
   useEffect(() => {
-    const media = window.matchMedia("(max-width: 767px), (pointer: coarse) and (max-height: 500px)");
+    setHost(document.body);
+    const media = window.matchMedia("(max-width: 767px), (pointer: coarse) and (max-width: 1279.98px)");
     const update = () => setPhoneLayout(media.matches);
     update();
     media.addEventListener("change", update);
@@ -117,20 +129,66 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
   // close on outside click
   useEffect(() => {
     function handleClick(e: MouseEvent) {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target;
+      if (!(target instanceof Node)) return;
+      if (ref.current?.contains(target) || panelRef.current?.contains(target)) return;
+      setOpen(false);
     }
-    if (open && !phoneLayout) document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
+    if (open && !phoneLayout) document.addEventListener("pointerdown", handleClick);
+    return () => document.removeEventListener("pointerdown", handleClick);
   }, [open, phoneLayout]);
 
   useEffect(() => {
-    if (!open || !phoneLayout) return;
+    if (!open) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") setOpen(false);
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, phoneLayout]);
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || phoneLayout || !host) return;
+
+    const updatePosition = () => {
+      const trigger = triggerRef.current;
+      const panel = panelRef.current;
+      if (!trigger || !panel) return;
+
+      const anchor = trigger.getBoundingClientRect();
+      if (anchor.bottom <= 0 || anchor.top >= window.innerHeight) {
+        setOpen(false);
+        return;
+      }
+
+      const margin = 12;
+      const maxHeight = Math.max(120, window.innerHeight - margin * 2);
+      const panelRect = panel.getBoundingClientRect();
+      const width = Math.min(panelRect.width, window.innerWidth - margin * 2);
+      const height = Math.min(panel.scrollHeight, maxHeight);
+      const top = Math.max(margin, Math.min(anchor.bottom + 8, window.innerHeight - height - margin));
+      const left = Math.max(margin, Math.min(anchor.right - width, window.innerWidth - width - margin));
+
+      setDesktopPanelStyle({
+        position: "fixed",
+        top,
+        left,
+        width,
+        maxHeight,
+        overflowY: "auto",
+        zIndex: 125,
+        visibility: "visible",
+      });
+    };
+
+    updatePosition();
+    window.addEventListener("resize", updatePosition);
+    window.addEventListener("scroll", updatePosition, true);
+    return () => {
+      window.removeEventListener("resize", updatePosition);
+      window.removeEventListener("scroll", updatePosition, true);
+    };
+  }, [open, phoneLayout, host, tempStart, tempEnd, activePreset, mode]);
 
   function selectPreset(preset: DateRangePreset) {
     setActivePreset(preset);
@@ -199,14 +257,15 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
   const displayLabel = rangeLabel(value);
   const pickerPanel = (
     <div
-      ref={phoneLayout ? dialogRef : undefined}
+      ref={phoneLayout ? dialogRef : panelRef}
       role="dialog"
       aria-modal={phoneLayout || undefined}
       aria-label="เลือกช่วงวันที่"
       tabIndex={phoneLayout ? -1 : undefined}
       className={phoneLayout
         ? "mobile-date-range-panel flex w-full max-w-md flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-2xl"
-        : "absolute right-0 top-full z-50 mt-1.5 w-[380px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-xl border border-border bg-surface shadow-xl"}
+        : "w-[380px] max-w-[calc(100vw-1.5rem)] overflow-x-hidden overflow-y-auto rounded-xl border border-border bg-surface shadow-xl"}
+      style={phoneLayout ? undefined : desktopPanelStyle}
       onClick={(event) => event.stopPropagation()}
     >
       {phoneLayout && (
@@ -329,6 +388,7 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
     <div className={`relative ${className}`} ref={ref}>
       {/* Trigger button */}
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((current) => !current)}
         aria-haspopup="dialog"
@@ -345,7 +405,7 @@ export function UnifiedDateRangePicker({ value, onChange, className = "" }: Prop
           <ModalLayer presentation="sheet" className="mobile-date-range-overlay fixed inset-0 z-[120] flex items-end justify-center bg-black/45" onClick={() => setOpen(false)} onBack={() => setOpen(false)}>
             {pickerPanel}
           </ModalLayer>
-        ) : pickerPanel
+        ) : host ? createPortal(pickerPanel, host) : null
       )}
     </div>
   );

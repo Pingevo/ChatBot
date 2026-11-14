@@ -11,7 +11,9 @@ import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
-import { Shield, Bell, Save, CheckCircle2, Moon, Sun } from "lucide-react";
+import { adminBubbleTextColor } from "@/lib/bubbleColors";
+import { CHAT_TEXT_SIZE_OPTIONS, normalizeChatTextSize, type ChatTextSize } from "@/lib/chatTextSize";
+import { Shield, Bell, Save, CheckCircle2, Moon, Sun, Type } from "lucide-react";
 
 export default function SettingsPage() {
   const { user, fetchMe } = useAuth();
@@ -26,10 +28,16 @@ export default function SettingsPage() {
     user?.theme_preference === "dark" ? "dark" : "light"
   );
   const [savingTheme, setSavingTheme] = useState(false);
+  const [chatTextSize, setChatTextSize] = useState<ChatTextSize>(normalizeChatTextSize(user?.chat_text_size));
+  const [savingChatTextSize, setSavingChatTextSize] = useState(false);
 
   useEffect(() => {
     setThemePreference(user?.theme_preference === "dark" ? "dark" : "light");
   }, [user?.admin_id, user?.theme_preference]);
+
+  useEffect(() => {
+    setChatTextSize(normalizeChatTextSize(user?.chat_text_size));
+  }, [user?.admin_id, user?.chat_text_size]);
 
   // ⚡ Bubble color — สี bubble ของตัวเองในแชท
   const DEFAULT_BUBBLE_COLOR = "#560C0E";
@@ -95,6 +103,25 @@ export default function SettingsPage() {
     }
   }
 
+  async function handleChatTextSizeChange(nextSize: ChatTextSize) {
+    if (nextSize === chatTextSize || savingChatTextSize) return;
+    const previousSize = chatTextSize;
+    setChatTextSize(nextSize);
+    document.documentElement.dataset.chatTextSize = nextSize;
+    setSavingChatTextSize(true);
+    try {
+      await api().patch("/profile", { chat_text_size: nextSize });
+      await fetchMe?.();
+      toast.success("บันทึกขนาดข้อความแชทแล้ว");
+    } catch (e: unknown) {
+      setChatTextSize(previousSize);
+      document.documentElement.dataset.chatTextSize = previousSize;
+      catchError(e, "บันทึกขนาดข้อความไม่สำเร็จ");
+    } finally {
+      setSavingChatTextSize(false);
+    }
+  }
+
   // ⚡ บันทึกสี bubble
   async function handleSaveBubbleColor() {
     setSavingColor(true);
@@ -114,12 +141,12 @@ export default function SettingsPage() {
   return (
     <div className="h-full overflow-y-auto">
       {/* Page header */}
-      <div className="px-4 md:px-8 pt-6 pb-4 border-b border-border bg-surface">
+      <div className="px-4 sm:px-6 pt-6 pb-4 border-b border-border bg-surface">
         <h1 className="text-xl font-bold text-text">โปรไฟล์และการตั้งค่า</h1>
         <p className="text-sm text-text-muted mt-1">จัดการบัญชีและความปลอดภัยของคุณ</p>
       </div>
 
-      <div className="p-4 md:p-8 grid grid-cols-1 lg:grid-cols-2 gap-4">
+      <div className="p-4 sm:p-6 grid grid-cols-1 xl:grid-cols-2 gap-4">
         {/* Profile */}
         <Card className="p-5">
           <div className="flex items-center gap-2 mb-4">
@@ -133,7 +160,7 @@ export default function SettingsPage() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 disabled={!editable}
-                className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:opacity-60"
+                className="w-full h-11 px-3 rounded-lg border border-border bg-surface-2 text-text focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:opacity-60"
               />
             </div>
             <div>
@@ -141,7 +168,7 @@ export default function SettingsPage() {
               <input
                 value={user?.email ?? ""}
                 disabled
-                className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text-muted"
+                className="w-full h-11 px-3 rounded-lg border border-border bg-surface-2 text-text-muted"
               />
             </div>
             <div>
@@ -149,7 +176,7 @@ export default function SettingsPage() {
               <input
                 value={user?.username ?? ""}
                 disabled
-                className="w-full h-10 px-3 rounded-lg border border-border bg-surface-2 text-text-muted"
+                className="w-full h-11 px-3 rounded-lg border border-border bg-surface-2 text-text-muted"
               />
             </div>
             <div>
@@ -183,6 +210,31 @@ export default function SettingsPage() {
               </div>
               <span className="sr-only" aria-live="polite">{savingTheme ? "กำลังบันทึกโหมดการแสดงผล" : ""}</span>
             </div>
+            <div className="profile-chat-size-control pt-3 border-t border-border" aria-busy={savingChatTextSize}>
+              <div className="flex items-start gap-2">
+                <Type size={16} className="mt-0.5 shrink-0 text-text-muted" aria-hidden="true" />
+                <div className="min-w-0">
+                  <span className="block text-sm font-medium text-text">ขนาดข้อความในแชท</span>
+                  <p className="mt-1 mb-2 text-xs text-text-muted">บันทึกแยกตามบัญชีและใช้ได้ทุกอุปกรณ์</p>
+                </div>
+              </div>
+              <div className="profile-chat-size-options" role="group" aria-label="เลือกขนาดข้อความในแชท">
+                {CHAT_TEXT_SIZE_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`profile-chat-size-option${chatTextSize === option.value ? " is-selected" : ""}`}
+                    aria-pressed={chatTextSize === option.value}
+                    disabled={savingChatTextSize}
+                    onClick={() => handleChatTextSizeChange(option.value)}
+                  >
+                    <span className="profile-chat-size-sample" style={{ fontSize: `${option.pixels}px` }}>กก</span>
+                    <span>{option.label}</span>
+                  </button>
+                ))}
+              </div>
+              <span className="sr-only" aria-live="polite">{savingChatTextSize ? "กำลังบันทึกขนาดข้อความแชท" : ""}</span>
+            </div>
             {/* ⚡ สี bubble ของตัวเอง */}
             <div className="pt-2 border-t border-border">
               <label className="block text-sm font-medium text-text mb-2">สีแชทบับเบิ้ลของคุณ</label>
@@ -212,7 +264,7 @@ export default function SettingsPage() {
                   value={bubbleColor}
                   onChange={(e) => setBubbleColor(e.target.value)}
                   disabled={!editable}
-                  className="w-10 h-10 rounded cursor-pointer border border-border bg-surface-2"
+                  className="w-11 h-11 rounded cursor-pointer border border-border bg-surface-2"
                 />
                 <input
                   type="text"
@@ -222,15 +274,15 @@ export default function SettingsPage() {
                     if (/^#[0-9a-fA-F]{0,6}$/.test(v)) setBubbleColor(v);
                   }}
                   disabled={!editable}
-                  className="w-28 h-10 px-3 rounded-lg border border-border bg-surface-2 text-text font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:opacity-60"
+                  className="w-28 h-11 px-3 rounded-lg border border-border bg-surface-2 text-text font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:opacity-60"
                   placeholder="#560C0E"
                 />
                 {/* Preview bubble */}
                 <div className="ml-0 md:ml-2 flex items-center gap-1.5">
                   <span className="text-[10px] text-text-subtle">ตัวอย่าง:</span>
                   <span
-                    className="rounded-2xl px-3 py-1.5 text-xs text-white"
-                    style={{ backgroundColor: bubbleColor }}
+                    className="rounded-2xl px-3 py-1.5 text-xs"
+                    style={{ backgroundColor: bubbleColor, color: adminBubbleTextColor(bubbleColor) }}
                   >
                     สวัสดีครับ
                   </span>
@@ -277,7 +329,7 @@ export default function SettingsPage() {
               { label: "แจ้งเตือนแชทที่ยังไม่ตอบเกิน 30 นาที", value: notifUnanswered, set: setNotifUnanswered },
             ].map((item) => (
               <div key={item.label}>
-                <div className="hidden md:flex items-center justify-between text-sm text-text">
+                <div className="hidden xl:flex items-center justify-between text-sm text-text">
                   <span>{item.label}</span>
                   <button
                     type="button"
@@ -297,7 +349,7 @@ export default function SettingsPage() {
                     />
                   </button>
                 </div>
-                <div className="md:hidden flex items-center justify-between gap-3 text-sm text-text">
+                <div className="xl:hidden flex items-center justify-between gap-3 text-sm text-text">
                   <span className="min-w-0">{item.label}</span>
                   <ToggleSwitch
                     enabled={item.value}

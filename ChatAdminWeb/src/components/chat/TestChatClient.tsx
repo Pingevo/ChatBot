@@ -1,4 +1,5 @@
 "use client";
+import { SelectField } from "@/components/ui/SelectField";
 import React, { useState, useRef, useEffect, FormEvent } from "react";
 import Link from "next/link";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
@@ -1752,7 +1753,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
               </div>
               {/* Shop filter + sort row */}
               <div className="flex items-center gap-1">
-                <select
+                <SelectField
                   value={filterShop}
                   onChange={(e) => setFilterShop(e.target.value)}
                   className="flex-1 h-7 px-1.5 text-[10px] rounded-md border border-border bg-surface-2 focus:outline-none"
@@ -1762,8 +1763,8 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                   {shops.map((s) => (
                     <option key={s} value={s}>{s}</option>
                   ))}
-                </select>
-                <select
+                </SelectField>
+                <SelectField
                   value={sortBy}
                   onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
                   className="flex-1 h-7 px-1.5 text-[10px] rounded-md border border-border bg-surface-2 focus:outline-none"
@@ -1772,7 +1773,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                   <option value="updated">ใหม่กว่า</option>
                   <option value="created">สร้างล่าสุด</option>
                   <option value="messages">จำนวนข้อความ</option>
-                </select>
+                </SelectField>
                 <button
                   onClick={() => setSortDir((d) => d === "desc" ? "asc" : "desc")}
                   className="h-7 w-7 flex items-center justify-center rounded-md border border-border bg-surface-2 hover:bg-surface text-text-muted"
@@ -2809,7 +2810,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
             {/* Settings */}
             <div className="mb-4">
               <label className="block text-xs text-text-muted mb-1">ร้านในเครือ (ถ้ารู้)</label>
-              <select
+              <SelectField
                 value={shop}
                 onChange={(e) => {
                   const newShop = e.target.value;
@@ -2825,7 +2826,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                 {shops.map((s) => (
                   <option key={s} value={s}>{s}</option>
                 ))}
-              </select>
+              </SelectField>
             </div>
             <div className="mb-4">
               <label className="block text-xs text-text-muted mb-1">จำนวนสินค้าใน context</label>

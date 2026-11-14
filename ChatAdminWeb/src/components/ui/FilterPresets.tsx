@@ -68,10 +68,11 @@ export function FilterPresets<T>({ pageKey, adminId, currentValues, onApply }: P
   return (
     <div className="relative">
       <button
+        type="button"
         onClick={() => { setOpen(!open); refresh(); }}
         aria-expanded={open}
         aria-haspopup="menu"
-        className="h-8 px-2.5 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
+        className="console-menu-trigger h-10 px-3 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
       >
         <Bookmark size={12} className="shrink-0" />
         <span className="font-medium">Preset</span>
@@ -89,7 +90,7 @@ export function FilterPresets<T>({ pageKey, adminId, currentValues, onApply }: P
             aria-label="filter presets"
             ref={(el) => { if (open && el) el.focus(); }}
             onKeyDown={(e) => { if (e.key === "Escape") setOpen(false); }}
-            className="absolute top-full left-0 mt-1 min-w-[200px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1"
+            className="console-menu-panel absolute top-full left-0 mt-1 min-w-[200px] z-40"
           >
             {presets.length === 0 ? (
               <div className="px-3 py-2 text-xs text-text-subtle">ยังไม่มี preset</div>
@@ -97,15 +98,19 @@ export function FilterPresets<T>({ pageKey, adminId, currentValues, onApply }: P
               presets.map((p) => (
                 <div key={p.name} className="flex items-center gap-1 px-1">
                   <button
+                    type="button"
+                    role="menuitem"
                     onClick={() => handleApply(p)}
-                    className="flex-1 text-left px-2 py-1.5 text-xs hover:bg-surface-2 rounded text-text truncate flex items-center gap-1.5"
+                    className="console-menu-option min-h-10 flex-1 text-left px-2 py-1.5 text-xs rounded text-text truncate flex items-center gap-1.5"
                   >
                     {activePreset === p.name && <Check size={11} className="text-brand shrink-0" />}
                     {p.name}
                   </button>
                   <button
+                    type="button"
+                    role="menuitem"
                     onClick={() => handleDelete(p.name, p.values)}
-                    className="w-6 h-6 rounded hover:bg-vibrant-coral-soft flex items-center justify-center shrink-0"
+                    className="console-menu-icon-action w-10 h-10 rounded-lg flex items-center justify-center shrink-0"
                     title="ลบ preset"
                     aria-label={`ลบ preset ${p.name}`}
                   >
@@ -127,16 +132,20 @@ export function FilterPresets<T>({ pageKey, adminId, currentValues, onApply }: P
                   className="flex-1 h-7 px-2 text-xs rounded border border-border bg-surface-2 focus:outline-none focus:ring-1 focus:ring-brand/40"
                 />
                 <button
+                  type="button"
+                  role="menuitem"
                   onClick={handleSave}
-                  className="h-7 px-2 text-xs rounded bg-brand text-white hover:bg-brand/90"
+                  className="min-h-10 px-3 text-xs rounded-lg bg-brand text-white hover:bg-brand/90"
                 >
                   บันทึก
                 </button>
               </div>
             ) : (
               <button
+                type="button"
+                role="menuitem"
                 onClick={() => setShowSave(true)}
-                className="w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-1.5 text-text"
+                className="console-menu-option min-h-10 w-full text-left px-3 py-1.5 text-xs flex items-center gap-1.5 text-text"
               >
                 <Save size={11} /> บันทึก preset ปัจจุบัน
               </button>

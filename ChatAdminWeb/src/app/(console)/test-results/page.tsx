@@ -1,4 +1,5 @@
 "use client";
+import { SelectField } from "@/components/ui/SelectField";
 import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
@@ -191,11 +192,11 @@ export default function TestResultsPage() {
 
   return (
     <div className="h-full overflow-y-auto">
-      <div className="min-h-[calc(100vh-3.5rem)] bg-surface px-3 lg:px-6 py-4 lg:py-5 space-y-4 lg:space-y-6">
+      <div className="min-h-full bg-surface px-4 md:px-5 xl:px-6 py-4 lg:py-5 space-y-4 lg:space-y-6">
         {/* ── Header ── */}
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h1 className="text-xl lg:text-2xl font-bold text-text">Test Results</h1>
+            <h1 className="text-xl 2xl:text-2xl font-bold text-text">Test Results</h1>
             <p className="text-xs lg:text-sm text-text-muted mt-0.5">
               ผลเทสบอท {stats?.total || 0} ข้อ — จาก {selectedFile}
             </p>
@@ -204,21 +205,21 @@ export default function TestResultsPage() {
             {/* file selector */}
             <div className="relative flex-1 sm:flex-none min-w-0">
               <FileText size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-muted" />
-              <select
+              <SelectField
                 value={selectedFile}
                 onChange={(e) => changeFile(e.target.value)}
-                className="w-full rounded-lg bg-surface-2 pl-8 pr-2 py-2 text-xs lg:text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="w-full min-h-11 rounded-lg bg-surface-2 pl-8 pr-2 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 {files.length === 0 && <option value={selectedFile}>{selectedFile}</option>}
                 {files.map((f) => (
                   <option key={f} value={f}>{f}</option>
                 ))}
-              </select>
+              </SelectField>
             </div>
             <button
               onClick={load}
               disabled={loading}
-              className="flex items-center gap-1.5 rounded-lg bg-surface-2 px-3 py-2 text-xs lg:text-sm text-text hover:bg-pale-sky-soft disabled:opacity-50 shrink-0"
+              className="min-h-11 flex items-center gap-1.5 rounded-lg bg-surface-2 px-3 py-2 text-sm text-text hover:bg-pale-sky-soft disabled:opacity-50 shrink-0"
             >
               <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
               <span className="hidden sm:inline">รีโหลด</span>
@@ -237,7 +238,7 @@ export default function TestResultsPage() {
         ) : stats ? (
           <>
             {/* ── Summary cards ── */}
-            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-7">
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-7">
               <StatCard label="ทั้งหมด" value={stats.total} icon={<Package size={16} />} color="text-text" />
               <StatCard label="ผ่าน" value={stats.pass} icon={<CheckCircle2 size={16} />} color="text-success" />
               <StatCard label="ไม่ผ่าน" value={stats.fail} icon={<XCircle size={16} />} color="text-error" />
@@ -252,7 +253,7 @@ export default function TestResultsPage() {
             {/* ── Category breakdown ── */}
             <div className="rounded-xl border border-border bg-surface-1 p-4">
               <h2 className="text-sm font-semibold text-text mb-3">สถิติตามหมวด</h2>
-              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6">
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-6">
                 {Object.entries(stats.cat_map).map(([cat, s]) => (
                   <div key={cat} className="rounded-lg border border-border bg-surface-2 p-2.5">
                     <div className="text-xs font-medium text-text-muted truncate">{cat}</div>
@@ -275,53 +276,53 @@ export default function TestResultsPage() {
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   placeholder="ค้นหาคำถาม/คำตอบ/source..."
-                  className="w-full rounded-lg bg-surface-2 pl-9 pr-3 py-2 text-sm text-text placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-brand"
+                  className="w-full min-h-11 rounded-lg bg-surface-2 pl-9 pr-3 py-2 text-sm text-text placeholder:text-text-muted focus:outline-none focus:ring-1 focus:ring-brand"
                 />
               </div>
-              <select
+              <SelectField
                 value={catFilter}
                 onChange={(e) => setCatFilter(e.target.value)}
-                className="w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="min-h-11 w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 <option value="all">ทุกหมวด</option>
                 {cats.map((c) => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <select
+              </SelectField>
+              <SelectField
                 value={shopFilter}
                 onChange={(e) => setShopFilter(e.target.value)}
-                className="w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="min-h-11 w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 <option value="all">ทุกร้าน</option>
                 {shops.map((s) => <option key={s} value={s}>{s}</option>)}
-              </select>
-              <select
+              </SelectField>
+              <SelectField
                 value={statusFilter}
                 onChange={(e) => setStatusFilter(e.target.value)}
-                className="w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="min-h-11 w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 <option value="all">ทุกสถานะ</option>
                 <option value="pass">✅ ผ่าน</option>
                 <option value="fail">❌ ไม่ผ่าน</option>
                 <option value="error">⚠️ Error</option>
                 <option value="unknown">— รอตรวจ</option>
-              </select>
+              </SelectField>
               {/* page size */}
-              <select
+              <SelectField
                 value={pageSize}
                 onChange={(e) => changePageSize(Number(e.target.value) as PageSize)}
-                className="w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
+                className="min-h-11 w-full sm:w-auto rounded-lg bg-surface-2 px-3 py-2 text-sm text-text focus:outline-none focus:ring-1 focus:ring-brand"
               >
                 <option value={25}>25/หน้า</option>
                 <option value={50}>50/หน้า</option>
                 <option value={100}>100/หน้า</option>
                 <option value={200}>200/หน้า</option>
-              </select>
+              </SelectField>
               <span className="text-sm text-text-muted">{filtered.length} ข้อ (ในหน้า)</span>
             </div>
 
-            {/* ── Results — card list on mobile/tablet, table on desktop (lg+) ── */}
-            {/* <lg — concise cards with full result details on demand */}
-            <div className="space-y-2 lg:hidden">
+            {/* ── Results — cards below 2xl, full table at 2xl+ ── */}
+            {/* Narrow layouts keep full result details available on demand */}
+            <div className="space-y-2 2xl:hidden">
               {filtered.map((r) => {
                 return (
                   <MobileInfoCard
@@ -350,8 +351,8 @@ export default function TestResultsPage() {
               )}
             </div>
 
-            {/* lg+ — full table */}
-            <div className="hidden lg:block overflow-x-auto rounded-xl border border-border bg-surface-1">
+            {/* 2xl+ — full table */}
+            <div className="hidden 2xl:block overflow-x-auto rounded-xl border border-border bg-surface-1">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border text-text-muted">

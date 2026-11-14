@@ -274,7 +274,7 @@ export default function AdminConfigPage() {
           )}
         </>
       }
-      contentClassName="p-4 lg:p-6 space-y-4"
+      contentClassName="p-4 sm:p-6 space-y-4"
     >
         {/* Read-only banner */}
         {!editable && (
@@ -284,8 +284,8 @@ export default function AdminConfigPage() {
           </div>
         )}
 
-        {/* ⚡ masonry — card สูงไม่เท่ากัน CSS columns กระจายสมดุลเอง (2 cols lg+, 3 cols 2xl+) */}
-        <div className="columns-1 lg:columns-2 2xl:columns-3 gap-4">
+        {/* ⚡ masonry — card สูงไม่เท่ากัน CSS columns กระจายสมดุลเอง (2 cols xl+, 3 cols 2xl+) */}
+        <div className="columns-1 xl:columns-2 2xl:columns-3 gap-4">
         {/* ─── Section: Bot Message Buffering ─── */}
         <ConfigSection
           icon={<MessageCircle size={16} />}
@@ -294,7 +294,7 @@ export default function AdminConfigPage() {
           badge={bufferEnabled ? "เปิดอยู่" : "ปิดอยู่"}
         >
           {/* Toggle */}
-          <div className="flex items-center justify-between py-2 px-3 rounded-lg bg-surface-2">
+          <div className="flex items-center justify-between py-3 border-b border-border/60">
             <div className="flex-1 mr-3">
               <div className="text-sm font-medium text-text">เปิด Buffering</div>
               <div className="text-[11px] text-text-muted mt-0.5">
@@ -309,7 +309,7 @@ export default function AdminConfigPage() {
           </div>
 
           {/* Window slider */}
-          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
+          <div className={`py-3 border-b border-border/60 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
             <div className="flex items-center gap-2">
               <Clock size={13} className="text-text-muted" />
               <span className="text-sm font-medium text-text">รอ X วินาทีหลังข้อความสุดท้าย</span>
@@ -333,7 +333,7 @@ export default function AdminConfigPage() {
           </div>
 
           {/* Max messages slider */}
-          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
+          <div className={`py-3 border-b border-border/60 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
             <div className="flex items-center gap-2">
               <MessageCircle size={13} className="text-text-muted" />
               <span className="text-sm font-medium text-text">สูงสุด X ข้อความต่อ Buffer</span>
@@ -357,7 +357,7 @@ export default function AdminConfigPage() {
           </div>
 
           {/* ⚡ Phase 1F — Media Buffer (รูป/วิดีโอ) */}
-          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
+          <div className={`py-3 border-b border-border/60 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
             <div className="flex items-center gap-2">
               <ImageIcon size={13} className="text-text-muted" />
               <span className="text-sm font-medium text-text">Buffer รูป/วิดีโอ — รอ X วินาที</span>
@@ -380,7 +380,7 @@ export default function AdminConfigPage() {
             </div>
           </div>
 
-          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
+          <div className={`py-3 border-b border-border/60 space-y-2 ${!bufferEnabled ? "pointer-events-none" : ""}`}>
             <div className="flex items-center gap-2">
               <Film size={13} className="text-text-muted" />
               <span className="text-sm font-medium text-text">Buffer รูป/วิดีโอ — สูงสุด X รูป/ข้อความ</span>
@@ -405,9 +405,9 @@ export default function AdminConfigPage() {
 
           {/* Info box */}
           <div className="flex items-start gap-2 rounded-lg bg-info/5 border border-info/15 p-3">
-            <Info size={14} className="text-info-soft flex-shrink-0 mt-0.5" />
+            <Info size={14} className="text-info-dark flex-shrink-0 mt-0.5" />
             <div className="text-[11px] text-text-muted leading-relaxed">
-              <span className="text-info-soft font-medium">ตัวอย่าง:</span> ลูกค้าพิมพ์ &quot;สนใจหัวชาร์จ&quot; → &quot;มี 220W ไหม&quot; → &quot;ส่งรูปได้ไหม&quot; รัวๆ
+              <span className="text-info-dark font-medium">ตัวอย่าง:</span> ลูกค้าพิมพ์ &quot;สนใจหัวชาร์จ&quot; → &quot;มี 220W ไหม&quot; → &quot;ส่งรูปได้ไหม&quot; รัวๆ
               ระบบจะรวมเป็น 1 คำถาม ส่งบอท 1 ครั้ง ตอบ 1 คำตอบ
             </div>
           </div>
@@ -420,7 +420,7 @@ export default function AdminConfigPage() {
           description="จำกัดจำนวน callBot ที่ยิงไป Python bot พร้อมกัน — ป้องกันบอทโอเวอร์โหลดเมื่อข้อความเข้าเยอะ"
           badge={`${concurrencyLimit} reqs`}
         >
-          <div className="py-3 px-3 rounded-lg bg-surface-2 space-y-2">
+          <div className="py-3 space-y-2">
             <div className="flex items-center gap-2">
               <Sliders size={13} className="text-text-muted" />
               <span className="text-sm font-medium text-text">ยิงบอทสูงสุด X ข้อความพร้อมกัน</span>
@@ -444,9 +444,9 @@ export default function AdminConfigPage() {
           </div>
 
           <div className="flex items-start gap-2 rounded-lg bg-info/5 border border-info/15 p-3">
-            <Info size={14} className="text-info-soft flex-shrink-0 mt-0.5" />
+            <Info size={14} className="text-info-dark flex-shrink-0 mt-0.5" />
             <div className="text-[11px] text-text-muted leading-relaxed">
-              <span className="text-info-soft font-medium">ตัวอย่าง:</span> 500 ข้อความเข้ามา → buffer รวมเป็น 200 context
+              <span className="text-info-dark font-medium">ตัวอย่าง:</span> 500 ข้อความเข้ามา → buffer รวมเป็น 200 context
               → ถ้าตั้ง 50 → ยิงบอท 50 ขนานกัน → เสร็จ → ยิง 50 ถัดไป → ใช้เวลา ~4 รอบ
             </div>
           </div>
@@ -460,7 +460,7 @@ export default function AdminConfigPage() {
           badge={workflowEnabled ? "เปิดอยู่" : "ปิดอยู่"}
         >
           {/* Toggle */}
-          <div className="flex items-center justify-between py-2 px-3 rounded-lg bg-surface-2">
+          <div className="flex items-center justify-between py-3 border-b border-border/60">
             <div className="flex-1 mr-3">
               <div className="text-sm font-medium text-text">เปิด Workflow Engine</div>
               <div className="text-[11px] text-text-muted mt-0.5">
@@ -475,7 +475,7 @@ export default function AdminConfigPage() {
           </div>
 
           {/* Timeout slider */}
-          <div className={`py-3 px-3 rounded-lg bg-surface-2 space-y-2 ${!workflowEnabled ? "pointer-events-none opacity-60" : ""}`}>
+          <div className={`py-3 space-y-2 ${!workflowEnabled ? "pointer-events-none opacity-60" : ""}`}>
             <div className="flex items-center gap-2">
               <Clock size={13} className="text-text-muted" />
               <span className="text-sm font-medium text-text">Timeout รอ reply (นาที)</span>
@@ -500,9 +500,9 @@ export default function AdminConfigPage() {
 
           {/* Info box */}
           <div className="flex items-start gap-2 rounded-lg bg-info/5 border border-info/15 p-3">
-            <Info size={14} className="text-info-soft flex-shrink-0 mt-0.5" />
+            <Info size={14} className="text-info-dark flex-shrink-0 mt-0.5" />
             <div className="text-[11px] text-text-muted leading-relaxed">
-              <span className="text-info-soft font-medium">วิธีใช้:</span> สร้าง workflow ในหน้า Workflows →
+              <span className="text-info-dark font-medium">วิธีใช้:</span> สร้าง workflow ในหน้า Workflows →
               กำหนด trigger + flow → เปิดใช้งานที่นี่เพื่อให้ engine ทำงาน ·
               ปิดได้ทุกเมื่อ — ข้อความจะกลับไป trigger/bot ตามปกติ
             </div>
@@ -534,9 +534,9 @@ export default function AdminConfigPage() {
 
             {/* Info box */}
             <div className="flex items-start gap-2 rounded-lg bg-info/5 border border-info/15 p-3">
-              <Info size={14} className="text-info-soft flex-shrink-0 mt-0.5" />
+              <Info size={14} className="text-info-dark flex-shrink-0 mt-0.5" />
               <div className="text-[11px] text-text-muted leading-relaxed">
-                <span className="text-info-soft font-medium">วิธีใช้:</span> เปิดไว้ถ้าอยากให้ลูกค้าได้คุยกับแอดมินคนเดิมตลอด ·
+                <span className="text-info-dark font-medium">วิธีใช้:</span> เปิดไว้ถ้าอยากให้ลูกค้าได้คุยกับแอดมินคนเดิมตลอด ·
                 ปิดถ้าอยากกระจายงานเท่ากัน (round-robin) ·
                 โหมด round-robin ตั้งค่าเพิ่มได้ที่หน้า Assignment Config
               </div>
@@ -551,7 +551,7 @@ export default function AdminConfigPage() {
           description="จำนวนสินค้าสูงสุดที่ส่งเป็น context ให้ LLM (แยกจาก frontend display)"
         >
           {/* slider — pattern เดียวกับ section อื่น (wrapper + label + min/max) */}
-          <div className="py-3 px-3 rounded-lg bg-surface-2 space-y-2">
+          <div className="py-3 space-y-2">
             <div className="flex items-center gap-2">
               <Sliders size={13} className="text-text-muted" />
               <span className="text-sm font-medium text-text">ส่งสินค้าเข้า LLM สูงสุด X ชิ้น</span>
@@ -580,7 +580,7 @@ export default function AdminConfigPage() {
 
         {/* ─── Save bar (sticky bottom) ─── */}
         {hasChanges && (
-          <div className="sticky bottom-0 -mx-4 px-4 lg:-mx-6 lg:px-6 py-3 bg-surface border-t border-border flex items-center justify-between">
+          <div className="sticky bottom-0 -mx-4 px-4 sm:-mx-6 sm:px-6 py-3 bg-surface border-t border-border flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-text-muted">
               <AlertCircle size={14} className="text-warning" />
               มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก
@@ -599,7 +599,7 @@ export default function AdminConfigPage() {
         {/* Last updated */}
         {config && (
           <div className="flex items-center gap-1.5 text-[10px] text-text-subtle pt-2">
-            <Check size={10} className="text-success-soft" />
+            <Check size={10} className="text-success-dark" />
             อัปเดตล่าสุดโดย {config.updated_by} · {new Date(config.updated_at).toLocaleString("th-TH")}
           </div>
         )}

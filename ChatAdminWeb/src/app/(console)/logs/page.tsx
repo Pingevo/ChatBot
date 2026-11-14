@@ -252,19 +252,19 @@ export default function LogsPage() {
             <button
               onClick={() => setViewMode("list")}
               aria-pressed={viewMode === "list" ? "true" : "false"}
-              className={`h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "list" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
+              className={`h-10 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "list" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
             >
               <List size={12} /> ลิสต์
             </button>
             <button
               onClick={() => setViewMode("table")}
               aria-pressed={viewMode === "table" ? "true" : "false"}
-              className={`h-7 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "table" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
+              className={`h-10 px-2.5 rounded-md text-xs flex items-center gap-1.5 transition-colors ${viewMode === "table" ? "bg-brand text-white" : "text-text-muted hover:text-text"}`}
             >
               <Table2 size={12} /> ตาราง
             </button>
           </div>
-          <Button size="sm" variant="outline" onClick={() => { loadLogs(); loadZaapiImportLogs(); }} disabled={loading}>
+          <Button size="sm" variant="outline" className="min-h-10" onClick={() => { loadLogs(); loadZaapiImportLogs(); }} disabled={loading}>
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
           </Button>
         </>
@@ -279,25 +279,25 @@ export default function LogsPage() {
               onClick={() => { setShowAdminDropdown(!showAdminDropdown); setShowCatDropdown(false); }}
               aria-expanded={showAdminDropdown}
               aria-haspopup="listbox"
-              className="h-8 px-3 rounded-lg border border-border bg-surface-2 text-xs text-text flex items-center gap-1.5 hover:border-brand/40 transition-colors"
+              className="console-menu-trigger h-10 px-3 rounded-lg border border-border bg-surface-2 text-xs text-text flex items-center gap-1.5 hover:border-brand/40 transition-colors"
             >
               <span className="text-text-muted">admin:</span>
-              <span className="font-medium">{selectedAdminLabel}</span>
+              <span className="max-w-[12rem] truncate font-medium" title={selectedAdminLabel}>{selectedAdminLabel}</span>
               <ChevronDown size={12} className="text-text-muted" />
             </button>
             {showAdminDropdown && (
-              <div ref={(el) => { if (showAdminDropdown && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามแอดมิน" aria-activedescendant={`admin-option-${adminNav.activeIndex}`} onKeyDown={(e) => { adminNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[180px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1 max-h-72 overflow-y-auto">
+              <div ref={(el) => { if (showAdminDropdown && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามแอดมิน" aria-activedescendant={`admin-option-${adminNav.activeIndex}`} onKeyDown={(e) => { adminNav.onKeyDown(e); }} className="console-menu-panel absolute top-full left-0 mt-1 min-w-[180px] max-w-[calc(100vw-2rem)] z-40 max-h-72 overflow-y-auto">
                 <button
                   id="admin-option-0" role="option" aria-selected={filterAdmin === "all"}
                   onClick={() => { setFilterAdmin("all"); setPage(1); setShowAdminDropdown(false); }}
-                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterAdmin === "all" ? "text-brand font-medium" : "text-text"}`}
+                  className={`console-menu-option min-h-10 w-full whitespace-normal break-words text-left px-3 py-1.5 text-xs ${filterAdmin === "all" ? "is-selected text-brand font-medium" : "text-text"}`}
                 >
                   ทุกแอดมิน
                 </button>
                 <button
                   id="admin-option-1" role="option" aria-selected={filterAdmin === "system"}
                   onClick={() => { setFilterAdmin("system"); setPage(1); setShowAdminDropdown(false); }}
-                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterAdmin === "system" ? "text-brand font-medium" : "text-text"}`}
+                  className={`console-menu-option min-h-10 w-full whitespace-normal break-words text-left px-3 py-1.5 text-xs ${filterAdmin === "system" ? "is-selected text-brand font-medium" : "text-text"}`}
                 >
                   system
                 </button>
@@ -307,7 +307,7 @@ export default function LogsPage() {
                     key={a.admin_id}
                     id={`admin-option-${i + 2}`} role="option" aria-selected={filterAdmin === a.admin_id}
                     onClick={() => { setFilterAdmin(a.admin_id); setPage(1); setShowAdminDropdown(false); }}
-                    className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterAdmin === a.admin_id ? "text-brand font-medium" : "text-text"}`}
+                    className={`console-menu-option min-h-10 w-full whitespace-normal break-words text-left px-3 py-1.5 text-xs ${filterAdmin === a.admin_id ? "is-selected text-brand font-medium" : "text-text"}`}
                   >
                     {a.name || a.username} <span className="text-text-subtle">({a.role})</span>
                   </button>
@@ -322,18 +322,18 @@ export default function LogsPage() {
               onClick={() => { setShowCatDropdown(!showCatDropdown); setShowAdminDropdown(false); }}
               aria-expanded={showCatDropdown}
               aria-haspopup="listbox"
-              className="h-8 px-3 rounded-lg border border-border bg-surface-2 text-xs text-text flex items-center gap-1.5 hover:border-brand/40 transition-colors"
+              className="console-menu-trigger h-10 px-3 rounded-lg border border-border bg-surface-2 text-xs text-text flex items-center gap-1.5 hover:border-brand/40 transition-colors"
             >
               <span className="text-text-muted">หมวด:</span>
-              <span className="font-medium">{selectedCatLabel}</span>
+              <span className="max-w-[10rem] truncate font-medium" title={selectedCatLabel}>{selectedCatLabel}</span>
               <ChevronDown size={12} className="text-text-muted" />
             </button>
             {showCatDropdown && (
-              <div ref={(el) => { if (showCatDropdown && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามหมวด" aria-activedescendant={`cat-option-${catNav.activeIndex}`} onKeyDown={(e) => { catNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[160px] bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
+              <div ref={(el) => { if (showCatDropdown && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามหมวด" aria-activedescendant={`cat-option-${catNav.activeIndex}`} onKeyDown={(e) => { catNav.onKeyDown(e); }} className="console-menu-panel absolute top-full left-0 mt-1 min-w-[160px] max-w-[calc(100vw-2rem)] z-40">
                 <button
                   id="cat-option-0" role="option" aria-selected={filterCategory === "all"}
                   onClick={() => { setFilterCategory("all"); setFilterActionType("all"); setPage(1); setShowCatDropdown(false); }}
-                  className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterCategory === "all" ? "text-brand font-medium" : "text-text"}`}
+                  className={`console-menu-option min-h-10 w-full whitespace-normal break-words text-left px-3 py-1.5 text-xs ${filterCategory === "all" ? "is-selected text-brand font-medium" : "text-text"}`}
                 >
                   ทุกหมวด
                 </button>
@@ -342,7 +342,7 @@ export default function LogsPage() {
                     key={c.label}
                     id={`cat-option-${i + 1}`} role="option" aria-selected={filterCategory === c.label}
                     onClick={() => { setFilterCategory(c.label); setFilterActionType("all"); setPage(1); setShowCatDropdown(false); }}
-                    className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 ${filterCategory === c.label ? "text-brand font-medium" : "text-text"}`}
+                    className={`console-menu-option min-h-10 w-full whitespace-normal break-words text-left px-3 py-1.5 text-xs ${filterCategory === c.label ? "is-selected text-brand font-medium" : "text-text"}`}
                   >
                     {c.label}
                   </button>
@@ -360,7 +360,7 @@ export default function LogsPage() {
               onChange={(e) => setSearch(e.target.value)}
               onKeyDown={handleSearchEsc}
               placeholder="ค้นหาคำสั่งงาน / ชื่อ / รหัสแชท..."
-              className="w-full h-8 px-3 pr-8 rounded-lg border border-border bg-surface-2 text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-1 focus:ring-brand/40"
+              className="w-full h-10 px-3 pr-8 rounded-lg border border-border bg-surface-2 text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-1 focus:ring-brand/40"
             />
             <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
           </div>
@@ -390,7 +390,7 @@ export default function LogsPage() {
           {(filterAdmin !== "all" || filterCategory !== "all" || search) && (
             <button
               onClick={() => { setFilterAdmin("all"); setFilterCategory("all"); setFilterActionType("all"); setSearch(""); setPage(1); }}
-              className="h-8 px-2 rounded-lg text-xs text-text-muted hover:text-vibrant-coral hover:bg-surface-2 flex items-center gap-1 transition-colors"
+              className="h-10 px-2 rounded-lg text-xs text-text-muted hover:text-vibrant-coral hover:bg-surface-2 flex items-center gap-1 transition-colors"
             >
               <X size={12} /> ล้าง
             </button>
@@ -423,8 +423,8 @@ export default function LogsPage() {
           <EmptyState icon={FileText} title="ยังไม่มี log ตรงเงื่อนไข" description="ลองเปลี่ยน filter หรือล้างการกรอง" />
         ) : (
           <>
-          {/* ── List view — บนจอ <lg ใช้เสมอ (แม้เลือกโหมดตาราง เพราะตารางกว้าง) ── */}
-          <div className={viewMode === "table" ? "lg:hidden" : ""}>
+          {/* ── List view — บนจอ <xl ใช้เสมอ (แม้เลือกโหมดตาราง เพราะตารางกว้าง) ── */}
+          <div className={viewMode === "table" ? "xl:hidden" : ""}>
           <div className="space-y-1.5">
             {logs.map((log) => {
               const key = log._id; // _id = identity คงที่ — poll แล้ว expanded ไม่หลุดไปคนละ row
@@ -497,9 +497,9 @@ export default function LogsPage() {
             })}
           </div>
           </div>
-          {/* ── Table view — เฉพาะ lg+ (แสดงทุก field จริงใน AdminLogDoc) ── */}
+          {/* ── Table view — เฉพาะ xl+ (แสดงทุก field จริงใน AdminLogDoc) ── */}
           {viewMode === "table" && (
-            <div className="hidden lg:block">
+            <div className="hidden xl:block">
               <LogTableView logs={logs} adminName={adminName} actionTypeLabel={actionTypeLabel} expandedId={expandedId} setExpandedId={setExpandedId} hiddenCols={hiddenCols} toggleCol={toggleCol} />
             </div>
           )}
@@ -619,7 +619,7 @@ function LogTableView({
           </button>
         )}
       </fieldset>
-      <MobileDataTable>
+      <MobileDataTable className="max-w-full overflow-x-auto">
         <table className="w-full text-xs min-w-[640px]">
           <thead className="bg-surface-2 text-text-muted sticky top-0">
             <tr>
@@ -709,7 +709,7 @@ function LogTableView({
                   {expanded && hasDetail && (
                     <tr key={`${key}-detail`} className="bg-surface-2/30">
                       <td colSpan={10} className="px-3 py-2.5">
-                        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3">
                           {metaCount(log.metadata) > 0 && (
                             <div>
                               <div className="text-text-muted mb-1 text-[11px]">metadata ({metaCount(log.metadata)} keys):</div>

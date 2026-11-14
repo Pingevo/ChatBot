@@ -3,7 +3,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
-import Image from "next/image";
 import {
   LayoutDashboard,
   MessageSquare,
@@ -17,7 +16,6 @@ import {
   Database,
   Store,
   Users,
-  Settings,
   Headset,
   Bot,
   Ghost,
@@ -48,12 +46,6 @@ import { useAuth } from "@/lib/authStore";
 import { canAccessPage, type PageKey } from "@/lib/roles";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { toast } from "@/components/ui/Toast";
-
-const roleLabel: Record<string, string> = {
-  superadmin: "SuperAdmin",
-  admin: "Admin",
-  dev: "Dev",
-};
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/);
@@ -189,7 +181,7 @@ export function MobileNav({ keyboardOpen = false }: { keyboardOpen?: boolean }) 
   const displayedGroups = isSearching
     ? visibleGroups
       .map((group) => ({ ...group, items: group.items.filter((item) => item.label.toLowerCase().includes(query)) }))
-      .filter((group) => group.items.length > 0)
+      .filter((group) => group.items.length > 0 || (user && group.label === "ทั่วไป" && "ออกจากระบบ".includes(query)))
     : selectedGroup
       ? visibleGroups.filter((group) => group.label === selectedGroup)
       : [];
@@ -240,28 +232,30 @@ export function MobileNav({ keyboardOpen = false }: { keyboardOpen?: boolean }) 
     setSelectedGroup(null);
   }
 
+  function renderPrimaryLink(item: NavItem) {
+    const active = isActive(item.href);
+    const Icon = item.icon;
+    return (
+      <Link
+        key={item.href}
+        href={item.href}
+        aria-current={active ? "page" : undefined}
+        className={`flex flex-1 flex-col items-center justify-center gap-0.5 transition-colors ${active ? "text-brand" : "text-text-muted"}`}
+      >
+        <Icon size={20} strokeWidth={active ? 2.2 : 1.8} />
+        <span className={`text-[10px] ${active ? "font-medium" : ""}`}>{item.label}</span>
+      </Link>
+    );
+  }
+
   return (
     <>
       <nav
         aria-label="เมนูหลัก"
-        className={`lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-surface border-t border-border safe-area-pb ${keyboardOpen ? "hidden" : ""}`}
+        className={`tablet-touch-nav md:hidden fixed bottom-0 left-0 right-0 z-40 bg-surface border-t border-border safe-area-pb ${keyboardOpen ? "hidden" : ""}`}
       >
         <div className="flex h-14 items-stretch">
-          {visiblePrimary.map((item) => {
-            const active = isActive(item.href);
-            const Icon = item.icon;
-            return (
-              <Link
-                key={item.href}
-                href={item.href}
-                aria-current={active ? "page" : undefined}
-                className={`flex flex-1 flex-col items-center justify-center gap-0.5 transition-colors ${active ? "text-brand" : "text-text-muted"}`}
-              >
-                <Icon size={20} strokeWidth={active ? 2.2 : 1.8} />
-                <span className={`text-[10px] ${active ? "font-medium" : ""}`}>{item.label}</span>
-              </Link>
-            );
-          })}
+          {visiblePrimary.slice(0, 2).map(renderPrimaryLink)}
           <button
             type="button"
             onClick={openMenu}
@@ -269,181 +263,173 @@ export function MobileNav({ keyboardOpen = false }: { keyboardOpen?: boolean }) 
             className={`flex flex-1 flex-col items-center justify-center gap-0.5 transition-colors ${moreOpen ? "text-brand" : "text-text-muted"}`}
           >
             <MoreHorizontal size={20} strokeWidth={moreOpen ? 2.2 : 1.8} />
-            <span className={`text-[10px] ${moreOpen ? "font-medium" : ""}`}>เพิ่มเติม</span>
+            <span className={`text-[10px] ${moreOpen ? "font-medium" : ""}`}>เมนู</span>
           </button>
+          {visiblePrimary.slice(2).map(renderPrimaryLink)}
+          {user && (
+            <Link
+              href="/settings"
+              aria-current={isActive("/settings") ? "page" : undefined}
+              aria-label={`โปรไฟล์ ${user.name || user.username}`}
+              className={`flex flex-1 flex-col items-center justify-center gap-0.5 transition-colors ${isActive("/settings") ? "text-brand" : "text-text-muted"}`}
+            >
+              <span className={`flex h-6 w-6 items-center justify-center rounded-full text-[10px] font-semibold text-white ring-2 ring-offset-1 ring-offset-surface ${isActive("/settings") ? "bg-accent ring-accent/30" : "bg-navy ring-navy/15"}`}>
+                {initials(user.name || user.username)}
+              </span>
+              <span className={`text-[10px] ${isActive("/settings") ? "font-medium" : ""}`}>โปรไฟล์</span>
+            </Link>
+          )}
         </div>
       </nav>
 
       {moreOpen && (
         <div
-          className="mobile-menu-overlay lg:hidden fixed inset-0 z-50 flex flex-col bg-surface animate-fade-in"
+          className="mobile-menu-overlay md:hidden fixed inset-0 z-50 flex items-center justify-center animate-fade-in"
           style={{ height: "var(--app-vh, 100dvh)" }}
         >
-          <header className="shrink-0 border-b border-border safe-area-pt">
-            <div className="flex items-center gap-2 px-4 pt-3 pb-2">
-              {(selectedGroup || isSearching) ? (
-                <button
-                  type="button"
-                  onClick={goToMenuBack}
-                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-2"
-                  aria-label={isSearching ? "ล้างการค้นหา" : "กลับไปหมวดหมู่"}
-                >
-                  <ArrowLeft size={19} />
-                </button>
-              ) : (
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center text-accent" aria-hidden="true">
-                  <MoreHorizontal size={20} />
-                </div>
-              )}
-              <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-text">
-                {isSearching ? "ผลการค้นหา" : selectedGroup || "เมนูทั้งหมด"}
-              </h2>
-              <button
-                type="button"
-                onClick={() => setMoreOpen(false)}
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-2"
-                aria-label="ปิดเมนู"
-              >
-                <X size={19} />
-              </button>
-            </div>
-            <div className="px-4 pb-3">
-              <div className="relative">
-                <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
-                <input
-                  type="text"
-                  value={menuQuery}
-                  onChange={(event) => {
-                    setMenuQuery(event.target.value);
-                    if (event.target.value.trim()) setSelectedGroup(null);
-                  }}
-                  placeholder="ค้นหาเมนู..."
-                  aria-label="ค้นหาเมนู"
-                  autoComplete="off"
-                  enterKeyHint="search"
-                  className="h-11 w-full rounded-lg border border-border bg-surface-2 pl-9 pr-10 text-[13px] text-text placeholder:text-text-subtle focus:border-accent/50 focus:outline-none focus:ring-2 focus:ring-accent/20"
-                />
-                {menuQuery && (
+          <button type="button" className="mobile-menu-backdrop" onClick={() => setMoreOpen(false)} aria-label="ปิดเมนู" />
+          <section className="mobile-menu-dialog" role="dialog" aria-modal="true" aria-label="เมนูหลัก">
+            <header className="shrink-0 border-b border-border safe-area-pt">
+              <div className="flex items-center gap-2 px-4 pt-3 pb-2">
+                {(selectedGroup || isSearching) ? (
                   <button
                     type="button"
-                    onClick={() => setMenuQuery("")}
-                    aria-label="ล้างการค้นหา"
-                    className="absolute right-1 top-1 flex h-9 w-9 items-center justify-center text-text-subtle hover:text-text"
+                    onClick={goToMenuBack}
+                    className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-2"
+                    aria-label={isSearching ? "ล้างการค้นหา" : "กลับไปหมวดหมู่"}
                   >
-                    <X size={15} />
+                    <ArrowLeft size={19} />
                   </button>
+                ) : (
+                  <div className="flex h-9 w-9 shrink-0 items-center justify-center text-accent" aria-hidden="true">
+                    <MoreHorizontal size={20} />
+                  </div>
                 )}
+                <h2 className="min-w-0 flex-1 truncate text-[15px] font-semibold text-text">
+                  {isSearching ? "ผลการค้นหา" : selectedGroup || "เมนูทั้งหมด"}
+                </h2>
               </div>
-            </div>
-          </header>
-
-          <div className="mobile-menu-scene" aria-hidden="true">
-            <span className="mobile-menu-orbit" />
-            <span className="mobile-menu-spark mobile-menu-spark--one" />
-            <span className="mobile-menu-spark mobile-menu-spark--two" />
-            <span className="mobile-menu-spark mobile-menu-spark--three" />
-            <span className="mobile-menu-walker">
-              <span className="mobile-menu-walker-shadow" />
-              <span className="mobile-menu-walker-sprite">
-                <Image
-                  src="/mascot/cat-girl-atlas-classic.webp"
-                  width={1776}
-                  height={888}
-                  unoptimized
-                  alt=""
-                  draggable={false}
-                  className="mobile-menu-mascot"
-                />
-              </span>
-            </span>
-          </div>
-
-          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            {!isSearching && !selectedGroup && (
-              <div className="divide-y divide-border-subtle">
-                {visibleGroups.map((group) => {
-                  const Icon = groupIcons[group.label] ?? MoreHorizontal;
-                  const activeItem = group.items.find((item) => isActive(item.href));
-                  return (
+              <div className="px-4 pb-3">
+                <div className="relative">
+                  <Search size={15} className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
+                  <input
+                    type="text"
+                    value={menuQuery}
+                    onChange={(event) => {
+                      setMenuQuery(event.target.value);
+                      if (event.target.value.trim()) setSelectedGroup(null);
+                    }}
+                    placeholder="ค้นหาเมนู..."
+                    aria-label="ค้นหาเมนู"
+                    autoComplete="off"
+                    enterKeyHint="search"
+                    className="h-11 w-full rounded-lg border border-border bg-surface-2 pl-9 pr-10 text-[13px] text-text placeholder:text-text-subtle focus:border-accent/50 focus:outline-none focus:ring-2 focus:ring-accent/20"
+                  />
+                  {menuQuery && (
                     <button
-                      key={group.label}
                       type="button"
-                      onClick={() => setSelectedGroup(group.label)}
-                      className="mobile-menu-row flex min-h-14 w-full items-center gap-3 px-5 py-2.5 text-left transition-colors hover:bg-surface-1 active:bg-surface-2"
+                      onClick={() => setMenuQuery("")}
+                      aria-label="ล้างการค้นหา"
+                      className="absolute right-1 top-1 flex h-9 w-9 items-center justify-center text-text-subtle hover:text-text"
                     >
-                      <Icon size={17} className={activeItem ? "shrink-0 text-accent" : "shrink-0 text-navy"} />
-                      <span className="min-w-0 flex-1 text-[13px] font-medium text-text">{group.label}</span>
-                      {activeItem && <span className="max-w-32 truncate text-[10px] text-text-subtle">{activeItem.label}</span>}
-                      <span className="text-[10px] tabular-nums text-text-subtle">{group.items.length}</span>
-                      <ChevronRight size={15} className="shrink-0 text-text-subtle" />
+                      <X size={15} />
                     </button>
-                  );
-                })}
+                  )}
+                </div>
               </div>
-            )}
+            </header>
 
-            {(isSearching || selectedGroup) && displayedGroups.length === 0 && (
-              <div className="px-5 py-12 text-center text-[13px] text-text-muted">
-                ไม่พบเมนู “{menuQuery.trim()}”
-              </div>
-            )}
+            <div className="mobile-menu-scene" aria-hidden="true">
+              <span className="mobile-menu-orbit" />
+              <span className="mobile-menu-spark mobile-menu-spark--one" />
+              <span className="mobile-menu-spark mobile-menu-spark--two" />
+              <span className="mobile-menu-spark mobile-menu-spark--three" />
+              <span className="mobile-menu-walker">
+                <span className="mobile-menu-walker-shadow" />
+                <span className="mobile-menu-walker-sprite mobile-menu-mascot" />
+              </span>
+            </div>
 
-            {(isSearching || selectedGroup) && displayedGroups.map((group) => (
-              <section key={group.label} aria-label={group.label}>
-                {isSearching && <h3 className="px-5 pt-4 pb-1 text-[10px] font-semibold text-text-subtle">{group.label}</h3>}
+            <div className="mobile-menu-body min-h-0 flex-1 overflow-y-auto overscroll-contain">
+              {!isSearching && !selectedGroup && (
                 <div className="divide-y divide-border-subtle">
-                  {group.items.map((item) => {
-                    const active = isActive(item.href);
-                    const Icon = item.icon;
+                  {visibleGroups.map((group) => {
+                    const Icon = groupIcons[group.label] ?? MoreHorizontal;
+                    const activeItem = group.items.find((item) => isActive(item.href));
+                    const itemCount = group.items.length + (user && group.label === "ทั่วไป" ? 1 : 0);
                     return (
-                      <Link
-                        key={item.href}
-                        href={item.href}
-                        onClick={() => setMoreOpen(false)}
-                        aria-current={active ? "page" : undefined}
-                        className={`mobile-menu-row flex min-h-12 items-center gap-3 px-5 py-2 text-[13px] transition-colors ${active ? "bg-accent-softer text-accent" : "text-text hover:bg-surface-1 active:bg-surface-2"}`}
+                      <button
+                        key={group.label}
+                        type="button"
+                        onClick={() => setSelectedGroup(group.label)}
+                        className="mobile-menu-row flex min-h-14 w-full items-center gap-3 px-5 py-2.5 text-left transition-colors hover:bg-surface-1 active:bg-surface-2"
                       >
-                        <Icon size={16} className={active ? "shrink-0 text-accent" : "shrink-0 text-text-subtle"} />
-                        <span className="min-w-0 flex-1 truncate font-medium">{item.label}</span>
-                        {active && <span className="text-[10px] text-accent">หน้านี้</span>}
-                      </Link>
+                        <Icon size={17} className={activeItem ? "shrink-0 text-accent" : "shrink-0 text-navy"} />
+                        <span className="min-w-0 flex-1 text-[13px] font-medium text-text">{group.label}</span>
+                        {activeItem && <span className="max-w-32 truncate text-[10px] text-text-subtle">{activeItem.label}</span>}
+                        <span className="text-[10px] tabular-nums text-text-subtle">{itemCount}</span>
+                        <ChevronRight size={15} className="shrink-0 text-text-subtle" />
+                      </button>
                     );
                   })}
                 </div>
-              </section>
-            ))}
-          </div>
+              )}
 
-          {user && (
-            <div className="shrink-0 border-t border-border px-4 py-2.5 safe-area-pb">
-              <div className="flex items-center gap-2">
-                <Link
-                  href="/settings"
-                  onClick={() => setMoreOpen(false)}
-                  className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-lg px-1 text-left transition-colors hover:bg-surface-1"
-                  aria-label="เปิดโปรไฟล์"
-                >
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-navy text-[10px] font-semibold text-white">
-                    {initials(user.name || user.username)}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[12px] font-medium text-text">{user.name || user.username}</span>
-                    <span className="block truncate text-[10px] text-text-subtle">{roleLabel[user.role] || user.role} · โปรไฟล์</span>
-                  </span>
-                  <Settings size={16} className="shrink-0 text-text-subtle" />
-                </Link>
-                <button
-                  type="button"
-                  onClick={handleLogout}
-                  className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-error/10 hover:text-error"
-                  title="ออกจากระบบ"
-                  aria-label="ออกจากระบบ"
-                >
-                  <LogOut size={17} />
-                </button>
-              </div>
+              {(isSearching || selectedGroup) && displayedGroups.length === 0 && (
+                <div className="px-5 py-12 text-center text-[13px] text-text-muted">
+                  ไม่พบเมนู “{menuQuery.trim()}”
+                </div>
+              )}
+
+              {(isSearching || selectedGroup) && displayedGroups.map((group) => (
+                <section key={group.label} aria-label={group.label}>
+                  {isSearching && <h3 className="px-5 pt-4 pb-1 text-[10px] font-semibold text-text-subtle">{group.label}</h3>}
+                  <div className="divide-y divide-border-subtle">
+                    {group.items.map((item) => {
+                      const active = isActive(item.href);
+                      const Icon = item.icon;
+                      return (
+                        <Link
+                          key={item.href}
+                          href={item.href}
+                          onClick={() => setMoreOpen(false)}
+                          aria-current={active ? "page" : undefined}
+                          className={`mobile-menu-row flex min-h-12 items-center gap-3 px-5 py-2 text-[13px] transition-colors ${active ? "bg-accent-softer text-accent" : "text-text hover:bg-surface-1 active:bg-surface-2"}`}
+                        >
+                          <Icon size={16} className={active ? "shrink-0 text-accent" : "shrink-0 text-text-subtle"} />
+                          <span className="min-w-0 flex-1 truncate font-medium">{item.label}</span>
+                          {active && <span className="text-[10px] text-accent">หน้านี้</span>}
+                        </Link>
+                      );
+                    })}
+                    {user && group.label === "ทั่วไป" && (!isSearching || "ออกจากระบบ".includes(query)) && (
+                      <button
+                        type="button"
+                        onClick={handleLogout}
+                        className="mobile-menu-row flex min-h-12 w-full items-center gap-3 px-5 py-2 text-left text-[13px] text-text transition-colors hover:bg-error/5 active:bg-error/10"
+                        aria-label="ออกจากระบบ"
+                      >
+                        <LogOut size={16} className="shrink-0 text-error" />
+                        <span className="min-w-0 flex-1 truncate font-medium">ออกจากระบบ</span>
+                      </button>
+                    )}
+                  </div>
+                </section>
+              ))}
             </div>
-          )}
+
+            <footer className="mobile-menu-footer shrink-0 border-t border-border px-4 py-2.5 safe-area-pb">
+              <button
+                type="button"
+                onClick={() => setMoreOpen(false)}
+                className="ml-auto flex h-10 w-10 items-center justify-center rounded-full border border-border bg-surface-1 text-text-muted shadow-sm transition-colors hover:border-accent/25 hover:bg-accent-softer hover:text-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                aria-label="ปิดเมนู"
+                title="ปิดเมนู"
+              >
+                <X size={18} />
+              </button>
+            </footer>
+          </section>
         </div>
       )}
     </>

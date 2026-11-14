@@ -369,7 +369,11 @@ export default function TicketsPage() {
   }, [selectedId]);
 
   return (
-    <div className="mobile-ticket-stage h-full flex">
+    <div
+      className="mobile-ticket-stage relative h-full min-w-0 flex"
+      data-mobile-view={mobileView}
+      data-info-collapsed={rightCollapsed ? "true" : "false"}
+    >
       {/* ── Panel ซ้าย: Conversation list (รวม title + filter + accept ใน ChatList) ── */}
       <div className={`mobile-ticket-list-panel ${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-80 shrink-0 border-r border-border`}>
         <ChatList
@@ -405,7 +409,7 @@ export default function TicketsPage() {
           onTicketChange={handleTicketChange}
           sending={sending}
           onBack={handleBack}
-          onInfo={selected ? () => setMobileView("info") : undefined}
+          onInfo={selected ? () => { setRightCollapsed(false); setMobileView("info"); } : undefined}
         />
       </div>
 
@@ -414,14 +418,14 @@ export default function TicketsPage() {
         <>
           {/* Panel เมื่อ expanded */}
           <div
-            className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "lg:hidden" : "lg:flex"} h-full w-full lg:w-auto transition-[width] duration-200 ease-in-out`}
+            className={`mobile-ticket-info-panel ${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "lg:hidden" : "lg:flex"} h-full w-full lg:w-auto transition-[width] duration-200 ease-in-out`}
           >
             <div className="relative h-full flex flex-col w-full lg:w-[340px] border-l border-border bg-surface">
               {/* Tab switcher — 3 tabs */}
               <div className="phone-info-tabs flex border-b border-border shrink-0">
                 <button
                   onClick={() => setMobileView("chat")}
-                  className="lg:hidden min-h-11 min-w-11 px-3 flex items-center justify-center gap-1 text-text-muted"
+                  className="mobile-ticket-info-back min-h-11 min-w-11 px-3 flex items-center justify-center gap-1 text-text-muted"
                   title="กลับไปแชท"
                   aria-label="กลับไปแชท"
                 >
@@ -454,8 +458,8 @@ export default function TicketsPage() {
                 </button>
                 {/* Collapse button */}
                 <button
-                  onClick={() => setRightCollapsed(true)}
-                  className="hidden md:flex px-2 text-text-muted hover:text-text transition-colors shrink-0"
+                  onClick={() => { setRightCollapsed(true); setMobileView("chat"); }}
+                  className="mobile-ticket-info-collapse hidden px-2 text-text-muted hover:text-text transition-colors shrink-0"
                   title="ซ่อน panel"
                   aria-label="ซ่อน panel"
                 >
@@ -529,7 +533,7 @@ export default function TicketsPage() {
           {/* Expand button — เมื่อ collapsed */}
           {rightCollapsed && (
             <button
-              onClick={() => setRightCollapsed(false)}
+              onClick={() => { setRightCollapsed(false); setMobileView("info"); }}
               className="hidden lg:flex absolute top-1/2 right-0 -translate-y-1/2 z-20 w-7 h-16 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors shadow-sm"
               title="แสดง panel"
               aria-label="แสดง panel"

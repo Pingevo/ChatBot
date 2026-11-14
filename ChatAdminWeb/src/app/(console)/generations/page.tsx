@@ -2,6 +2,7 @@
 // Generation pipeline — build status + admin accept (R1)
 //   header: next scheduled build (daily 09:00 / จันทร์=weekly, Asia/Bangkok) + last build
 //   cards: pixel-cat progress + per-step bars + ETA; expand = files/manifest/log + rollback
+import { SelectField } from "@/components/ui/SelectField";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Play, RotateCcw, Square, Trash2, Zap } from "lucide-react";
 import { PageShell } from "@/components/ui/PageShell";
@@ -13,7 +14,7 @@ import { api } from "@/lib/apiClient";
 import { useToastError, toast } from "@/components/ui/Toast";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
-import { BuildProgressCat, PixelCat, type PixelCatAction, type PixelCatMood, type PixelCatOutfit } from "@/components/generations/BuildProgressCat";
+import { BuildProgressCat, getGenerationMascotState, PixelCat, type PixelCatOutfit } from "@/components/generations/BuildProgressCat";
 import { GenTracks } from "@/components/generations/GenTracks";
 
 const API = "/chatbot/shopee/admin/generations";
@@ -29,8 +30,6 @@ const STEP_LABEL: Record<string, string> = {
   description_embeddings: "Description vectors", import_db: "Import DB",
   validate: "Validate + Manifest",
 };
-const MASCOT_ACTIONS: PixelCatAction[] = ["wave", "snack", "walk", "mood"];
-const MASCOT_MOODS: PixelCatMood[] = ["adoring", "angry", "happy", "downcast"];
 const MASCOT_OUTFITS: PixelCatOutfit[] = ["classic", "maroon", "hoodie"];
 
 type StepInfo = { name: string; status: string; percent?: number | null;
@@ -144,7 +143,6 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
 }) {
   const gid = run._id;
   const steps = run.steps || {};
-  const curIdx = STEP_ORDER.indexOf(run.current_step || "");
   const overall = Math.round(
     STEP_ORDER.reduce((a, s) =>
       a + (steps[s]?.status === "done" ? 100 : (steps[s]?.percent ?? 0)), 0)
@@ -179,7 +177,7 @@ function RunCard({ run, active, previous, editable, busy, onAction, expanded, on
       {run.status === "building" && (
         <>
           <div className="generation-build-cat-rail">
-            <BuildProgressCat current={Math.max(curIdx, 0)} total={STEP_ORDER.length} walking={!dead} />
+            <BuildProgressCat progressPercent={overall} walking={false} action="mood" mood="angry" />
           </div>
           <div className="space-y-1.5 mt-1">
             {STEP_ORDER.map((s) => (
@@ -258,8 +256,6 @@ export default function GenerationsPage() {
   const [busy, setBusy] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [startMode, setStartMode] = useState<"daily" | "weekly">("daily");
-  const [mascotAction, setMascotAction] = useState<PixelCatAction>("wave");
-  const [mascotMood, setMascotMood] = useState<PixelCatMood>("happy");
   const [mascotOutfit, setMascotOutfit] = useState<PixelCatOutfit>("classic");
 
   const load = useCallback(async (quiet = false) => {
@@ -283,23 +279,12 @@ export default function GenerationsPage() {
   }, [load]);
 
   useEffect(() => {
-    setMascotAction(MASCOT_ACTIONS[Math.floor(Math.random() * MASCOT_ACTIONS.length)]);
-    setMascotMood(MASCOT_MOODS[Math.floor(Math.random() * MASCOT_MOODS.length)]);
-    setMascotOutfit(MASCOT_OUTFITS[Math.floor(Math.random() * MASCOT_OUTFITS.length)]);
-    const actionTimer = window.setInterval(
-      () => setMascotAction(MASCOT_ACTIONS[Math.floor(Math.random() * MASCOT_ACTIONS.length)]), 12000,
-    );
-    const moodTimer = window.setInterval(
-      () => setMascotMood(MASCOT_MOODS[Math.floor(Math.random() * MASCOT_MOODS.length)]), 9000,
-    );
+    const changeOutfit = () => setMascotOutfit(MASCOT_OUTFITS[Math.floor(Math.random() * MASCOT_OUTFITS.length)]);
+    changeOutfit();
     const outfitTimer = window.setInterval(
-      () => setMascotOutfit(MASCOT_OUTFITS[Math.floor(Math.random() * MASCOT_OUTFITS.length)]), 30000,
+      changeOutfit, 30000,
     );
-    return () => {
-      window.clearInterval(actionTimer);
-      window.clearInterval(moodTimer);
-      window.clearInterval(outfitTimer);
-    };
+    return () => window.clearInterval(outfitTimer);
   }, []);
 
   const nxt = useMemo(nextRun, []);
@@ -309,6 +294,12 @@ export default function GenerationsPage() {
   const building = runs.find((r) => r.status === "building");
   const liveBuilding = runs.find(
     (r) => r.status === "building" && r.pid_alive !== false);
+  const activeRun = runs.find((run) => run._id === active);
+  const sceneMascot = activeRun
+    ? getGenerationMascotState(activeRun.status, true)
+    : building
+      ? getGenerationMascotState(building.status, false)
+      : { action: "idle" as const, mood: "happy" as const };
 
   const onAction = async (action: string, gid: string) => {
     const meta: Record<string, { title: string; msg: string; okText: string; danger?: boolean }> = {
@@ -377,24 +368,17 @@ export default function GenerationsPage() {
             <code className="generation-current-id">{active || "ยังไม่มี generation"}</code>
             <span className="generation-current-badge">{active ? "ACTIVE · LIVE" : "รอ generation แรก"}</span>
           </div>
-          <button
-            type="button"
-            className={`generation-cat-scene focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 ${liveBuilding ? "is-building" : ""}`}
-            aria-label={liveBuilding ? "แมวกำลังเดินตามสถานะ build" : "เปลี่ยนท่าทางแมว"}
-            title={liveBuilding ? "แมวกำลังเดินตามสถานะ build" : "แตะเพื่อเปลี่ยนท่าทางแมว"}
-            disabled={!!liveBuilding}
-            onClick={() => setMascotAction((current) => current === "wave" ? "mood" : current === "mood" ? "snack" : current === "snack" ? "walk" : "wave")}
-          >
+          <div className="generation-cat-scene" role="img" aria-label="แมวแสดงท่าทางตามสถานะ generation ที่ใช้งานอยู่">
             <span className="generation-cat-orbit" aria-hidden="true" />
             <span className="generation-cat-star generation-cat-star-one" aria-hidden="true" />
             <span className="generation-cat-star generation-cat-star-two" aria-hidden="true" />
             <PixelCat
-              walking={!!liveBuilding}
-              action={liveBuilding ? "walk" : mascotAction}
+              walking={false}
+              action={sceneMascot.action}
               outfit={mascotOutfit}
-              mood={mascotMood}
+              mood={sceneMascot.mood}
             />
-          </button>
+          </div>
         </section>
 
         <section className="generation-schedule-panel">
@@ -406,7 +390,7 @@ export default function GenerationsPage() {
           {editable && !liveBuilding && (
             <div className="generation-start-controls">
               <label className="sr-only" htmlFor="generation-start-mode">ประเภท build</label>
-              <select
+              <SelectField
                 id="generation-start-mode"
                 value={startMode}
                 onChange={(e) => setStartMode(e.target.value as "daily" | "weekly")}
@@ -414,7 +398,7 @@ export default function GenerationsPage() {
               >
                 <option value="daily">daily</option>
                 <option value="weekly">weekly</option>
-              </select>
+              </SelectField>
               <div className="generation-mode-options grid md:hidden" role="group" aria-label="ประเภท build">
                 {(["daily", "weekly"] as const).map((mode) => (
                   <button
@@ -443,41 +427,44 @@ export default function GenerationsPage() {
         </section>
       </div>
 
-      <div className="generation-desktop-summary mb-3 grid hidden md:grid md:grid-cols-3 gap-2 text-[12px]">
-        <div className="border border-border rounded-lg p-3 bg-surface">
-          <div className="text-muted">active generation</div>
-          <code className="font-semibold">{active || "-"}</code>
+      <section className="generation-desktop-summary mb-3 hidden md:grid" aria-label="สถานะ generation">
+        <div className="generation-desktop-active">
+          <span>active generation</span>
+          <code>{active || "-"}</code>
         </div>
-        <div className="border border-border rounded-lg p-3 bg-surface">
-          <div className="text-muted">build รอบถัดไป</div>
-          <div className="font-semibold">
-            {building ? "กำลัง build อยู่" :
-              `${nxt.at.toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })} · ${nxt.kind}`}
+        <div className="generation-desktop-next">
+          <div className="generation-desktop-next-copy">
+            <span>build รอบถัดไป</span>
+            <strong>{building ? "กำลัง build อยู่" :
+              `${nxt.at.toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })} · ${nxt.kind}`}</strong>
           </div>
           {editable && !liveBuilding && (
-            <div className="flex items-center gap-2 mt-2">
-              <select value={startMode}
+            <div className="generation-desktop-controls">
+              <SelectField value={startMode}
+                      aria-label="ประเภท build"
                       onChange={(e) => setStartMode(e.target.value as "daily" | "weekly")}
-                      className="text-[11px] border border-border rounded px-1.5 py-1 bg-surface">
+                      className="generation-mode-select">
                 <option value="daily">daily</option>
                 <option value="weekly">weekly</option>
-              </select>
+              </SelectField>
               <Button size="sm" disabled={busy} onClick={onStart}
-                      title="สร้าง generation ใหม่และเริ่ม build ทันที">
+                      title="สร้าง generation ใหม่และเริ่ม build ทันที"
+                      className="generation-start-button">
                 <Zap size={14} />
+                <span>เริ่ม build</span>
               </Button>
             </div>
           )}
         </div>
-        <div className="border border-border rounded-lg p-3 bg-surface">
-          <div className="text-muted">build ล่าสุด</div>
-          <div className="font-semibold">
+        <div className="generation-desktop-last">
+          <span>build ล่าสุด</span>
+          <strong>
             {lastDone
               ? `${fmtTs(lastDone.created_at)} → เสร็จ ${fmtTs(lastDone.updated_at)}`
               : "ยังไม่มี"}
-          </div>
+          </strong>
         </div>
-      </div>
+      </section>
       <GenTracks runs={runs} active={active} />
       {loading ? <Loading /> : (
         <section className="generation-run-history">

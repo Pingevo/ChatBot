@@ -218,7 +218,7 @@ export default function AdminKpiPage() {
     >
 
       {/* Summary cards */}
-      <div className="phone-summary-section px-6 py-4 grid grid-cols-2 md:grid-cols-4 gap-3">
+      <div className="phone-summary-section px-4 md:px-5 2xl:px-6 py-4 grid grid-cols-2 2xl:grid-cols-4 gap-3">
         <Card className="p-4">
           <div className="flex items-center gap-2 text-text-muted text-xs mb-1">
             <Bot size={14} /> ทดสอบแชท
@@ -250,8 +250,8 @@ export default function AdminKpiPage() {
       </div>
 
       {/* Admin table */}
-      <div className="phone-summary-section px-6 pb-6">
-        <div className="mobile-only-grid gap-3 pb-4">
+      <div className="phone-summary-section px-4 md:px-5 2xl:px-6 pb-6">
+        <div className="grid grid-cols-1 2xl:hidden gap-3 pb-4">
           <div>
             <h2 className="text-base font-semibold text-text">รายการแอดมิน ({summary.length})</h2>
             <p className="mt-1 text-sm text-text-muted">เปิดรายละเอียดเพื่อดูเซสชัน รีวิว และผลการรีเพลย์</p>
@@ -321,7 +321,7 @@ export default function AdminKpiPage() {
           {summary.length === 0 && <EmptyState icon={User} title="ไม่มีข้อมูล" description="ยังไม่มี activity ในช่วงเวลาที่เลือก" />}
         </div>
 
-        <div className="mobile-hidden">
+        <div className="hidden 2xl:block">
         <Card className="overflow-hidden">
           <div className="px-4 py-3 border-b border-border bg-surface-subtle">
             <h2 className="text-sm font-semibold text-text">รายการแอดมิน ({summary.length})</h2>
@@ -470,7 +470,7 @@ function DrilldownSessionsTable({ sessions }: { sessions: DrilldownSession[] }) 
   if (sessions.length === 0) return <EmptyState icon={Bot} title="ไม่มีเซสชัน" description="ยังไม่ได้ให้คะแนนทดสอบแชทในช่วงเวลานี้" />;
   return (
     <>
-    <div className="mobile-only-grid gap-2">
+    <div className="grid grid-cols-1 2xl:hidden gap-2">
       {sessions.map((s) => (
         <MobileDataCard
           key={s.session_id}
@@ -489,7 +489,7 @@ function DrilldownSessionsTable({ sessions }: { sessions: DrilldownSession[] }) 
         />
       ))}
     </div>
-    <div className="hidden md:block">
+    <div className="hidden 2xl:block">
     <MobileDataTable className="max-h-[400px] overflow-y-auto">
       <table className="w-full text-sm">
         <thead className="text-text-muted text-xs sticky top-0 bg-surface">
@@ -534,7 +534,7 @@ function DrilldownReplaysTable({ replays }: { replays: DrilldownReplay[] }) {
   if (replays.length === 0) return <EmptyState icon={TestTube2} title="ไม่มีการรีเพลย์" description="ยังไม่ได้กดรีเพลย์ในช่วงเวลานี้" />;
   return (
     <>
-    <div className="mobile-only-grid gap-2">
+    <div className="grid grid-cols-1 2xl:hidden gap-2">
       {replays.map((r) => (
         <MobileDataCard
           key={r.conversation_id}
@@ -555,7 +555,7 @@ function DrilldownReplaysTable({ replays }: { replays: DrilldownReplay[] }) {
         />
       ))}
     </div>
-    <div className="hidden md:block">
+    <div className="hidden 2xl:block">
     <MobileDataTable className="max-h-[400px] overflow-y-auto">
       <table className="w-full text-sm">
         <thead className="text-text-muted text-xs sticky top-0 bg-surface">
@@ -614,7 +614,7 @@ function DrilldownShadowsTable({ shadows }: { shadows: DrilldownShadow[] }) {
   if (shadows.length === 0) return <EmptyState icon={FlaskConical} title="ไม่มี Shadow Reply" description="ยังไม่ได้ Generate ในช่วงเวลานี้" />;
   return (
     <>
-    <div className="mobile-only-grid gap-2">
+    <div className="grid grid-cols-1 2xl:hidden gap-2">
       {shadows.map((s) => (
         <MobileDataCard
           key={s.shadow_reply_id}
@@ -635,7 +635,7 @@ function DrilldownShadowsTable({ shadows }: { shadows: DrilldownShadow[] }) {
         />
       ))}
     </div>
-    <div className="hidden md:block">
+    <div className="hidden 2xl:block">
     <MobileDataTable className="max-h-[400px] overflow-y-auto">
       <table className="w-full text-sm">
         <thead className="text-text-muted text-xs sticky top-0 bg-surface">

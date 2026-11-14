@@ -16,8 +16,8 @@ import {
 import { DebouncedResponsiveContainer as ResponsiveContainer } from "./DebouncedResponsiveContainer";
 
 const BRAND = "#8b1e28";
-const NAVY = "#0b2340";
-const GREY_BLUE = "#5a6b80";
+const NAVY = "var(--color-chart-navy)";
+const GREY_BLUE = "var(--color-chart-secondary)";
 const PALETTE = ["#8b1e28", "#b3253a", "#16a34a", "#d97706", "#7c3aed", "#0ea5e9"];
 
 export function TrendLineChart({
@@ -36,8 +36,8 @@ export function TrendLineChart({
   return (
     <ResponsiveContainer width="100%" height={180}>
       <LineChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} />
+        <YAxis tick={{ fontSize: 11, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} />
         <Tooltip
           formatter={(value) => [`${value ?? 0}${unit}`, ""]}
           contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
@@ -74,8 +74,8 @@ export function WeeklyBarChart({
   return (
     <ResponsiveContainer width="100%" height={180}>
       <BarChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} />
+        <YAxis tick={{ fontSize: 11, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} />
         <Tooltip
           formatter={(value) => [`${value ?? 0}${unit}`, ""]}
           contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
@@ -107,8 +107,8 @@ export function ComboBarLineChart({
   return (
     <ResponsiveContainer width="100%" height={180}>
       <ComposedChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} />
+        <YAxis tick={{ fontSize: 11, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} />
         <Tooltip
           formatter={(value) => [`${value ?? 0}${unit}`, ""]}
           contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
@@ -139,9 +139,7 @@ export function ComboBarLineChart({
   );
 }
 
-// ⚡ SmartChart — เลือก bar หรือ line อัตโนมัติตามจำนวนจุด
-//   1 จุด → กราฟแท่ง (bar)
-//   2+ จุด → กราฟเส้น (line) พร้อม animation
+// SmartChart keeps daily trends as bars so every date remains easy to compare.
 export function SmartChart({
   data,
   dataKey,
@@ -155,51 +153,25 @@ export function SmartChart({
   color?: string;
   unit?: string;
 }) {
-  const isSinglePoint = data.length <= 1;
-  if (isSinglePoint) {
-    return (
-      <ResponsiveContainer width="100%" height={180}>
-        <BarChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-          <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-          <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-          <Tooltip
-            formatter={(value) => [`${value ?? 0}${unit}`, ""]}
-            contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
-          />
-          <Bar
-            dataKey={dataKey}
-            fill={color}
-            radius={[6, 6, 0, 0]}
-            barSize={48}
-            isAnimationActive
-            animationDuration={600}
-            animationEasing="ease-in-out"
-          />
-        </BarChart>
-      </ResponsiveContainer>
-    );
-  }
   return (
     <ResponsiveContainer width="100%" height={180}>
-      <LineChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-        <YAxis tick={{ fontSize: 11, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+      <BarChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
+        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: "var(--color-text-subtle)" }} axisLine={false} tickLine={false} />
+        <YAxis tick={{ fontSize: 11, fill: "var(--color-text-subtle)" }} axisLine={false} tickLine={false} />
         <Tooltip
           formatter={(value) => [`${value ?? 0}${unit}`, ""]}
-          contentStyle={{ borderRadius: 10, border: "1px solid #e9edf2", fontSize: 12, boxShadow: "0 4px 12px -2px rgba(0,0,0,0.06)", padding: "6px 10px" }}
+          contentStyle={{ borderRadius: 10, border: "1px solid var(--color-border)", background: "var(--color-surface)", color: "var(--color-text)", fontSize: 12, boxShadow: "0 4px 12px -2px color-mix(in srgb, var(--color-navy) 16%, transparent)", padding: "6px 10px" }}
         />
-        <Line
-          type="monotone"
+        <Bar
           dataKey={dataKey}
-          stroke={color}
-          strokeWidth={2.5}
-          dot={{ r: 3 }}
-          activeDot={{ r: 5 }}
+          fill={color}
+          radius={[6, 6, 0, 0]}
+          maxBarSize={42}
           isAnimationActive
-          animationDuration={800}
+          animationDuration={600}
           animationEasing="ease-in-out"
         />
-      </LineChart>
+      </BarChart>
     </ResponsiveContainer>
   );
 }

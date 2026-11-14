@@ -400,6 +400,7 @@ export default function LlmConfigPage() {
           { label: "เพิ่ม OpenRouter key", icon: <Globe size={17} />, onSelect: () => setAddingPool("openrouter") },
         ] : []),
       ]}
+      contentClassName="p-4 sm:p-6 space-y-4"
     >
       {loading ? (
         <>
@@ -428,8 +429,8 @@ export default function LlmConfigPage() {
             </div>
           </Card>
 
-          {/* ---- key pools — 2 cols บน lg ---- */}
-          <div className="grid gap-3 lg:grid-cols-2">
+          {/* ---- key pools — 2 cols บน xl ---- */}
+          <div className="grid gap-3 xl:grid-cols-2">
             <KeyPoolCard
               title="Gemini keys"
               icon={KeyRound}
@@ -490,7 +491,7 @@ export default function LlmConfigPage() {
                       .map((v) => ({ value: v, label: v }));
                 return (
                   <div key={role}
-                    className="grid items-center gap-2 rounded-md border border-border px-3 py-2 sm:grid-cols-[160px_72px_1fr]">
+                    className="grid min-w-0 items-center gap-2 rounded-md border border-border px-3 py-2 lg:grid-cols-[160px_72px_minmax(0,1fr)]">
                     <div className="flex items-center gap-2 min-w-0">
                       <Icon size={14} className="shrink-0 text-text-muted" />
                       <div className="min-w-0">

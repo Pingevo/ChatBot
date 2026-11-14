@@ -2,12 +2,14 @@
 // Backlog distributor — จ่ายงานค้าง pending_assignment ให้ admin pool ที่เลือกเอง
 // superadmin/dev เท่านั้น (API guard: requireSuperadmin)
 // flow: เลือก source → เลือก admin pool → preview (ไม่เขียน DB) → confirm commit
+import { SelectField } from "@/components/ui/SelectField";
 import React, { useState, useEffect, useCallback } from "react";
 import { Inbox, RefreshCw, Play, CheckCheck } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 import { Badge } from "@/components/ui/Badge";
 import { useToastError } from "@/components/ui/Toast";
 import { api } from "@/lib/apiClient";
+import { PageIdentityMark } from "@/components/ui/PageIdentityMark";
 
 type BacklogSource = "ticket" | "botworker";
 type BacklogMode = "round_robin_selected" | "least_loaded_selected" | "manual_quota";
@@ -138,9 +140,9 @@ export default function BacklogPage() {
   }
 
   return (
-    <div className="backlog-page phone-page-shell h-full overflow-y-auto p-6 max-w-4xl mx-auto space-y-5">
-      <div className="backlog-header flex items-center gap-3">
-        <Inbox size={20} className="text-brand" />
+    <div className="backlog-page phone-page-shell h-full min-w-0 overflow-x-hidden overflow-y-auto p-6 max-w-4xl mx-auto space-y-5">
+      <div className="backlog-header flex min-w-0 items-center gap-3">
+        <PageIdentityMark kind="testing" icon={Inbox} className="w-8 h-8 shrink-0" />
         <h1 className="phone-page-title text-lg font-semibold text-text">งานค้างรอจ่าย (Pending Assignment)</h1>
         <Badge tone="neutral">superadmin/dev</Badge>
       </div>
@@ -170,10 +172,10 @@ export default function BacklogPage() {
       {items.length > 0 && (
         <div className="rounded-lg border border-border bg-surface max-h-48 overflow-y-auto">
           {items.slice(0, 50).map((it) => (
-            <div key={it.conversation_id} className="backlog-item flex items-center gap-3 px-3 py-1.5 text-xs border-b border-border/50 last:border-0">
-              <span className="font-mono text-text-muted">{it.conversation_id.slice(0, 12)}…</span>
+            <div key={it.conversation_id} className="backlog-item flex min-w-0 items-center gap-3 px-3 py-1.5 text-xs border-b border-border/50 last:border-0">
+              <span className="min-w-0 font-mono text-text-muted">{it.conversation_id.slice(0, 12)}…</span>
               <span className="text-text-subtle">{it.platform}</span>
-              <span className="text-text-subtle ml-auto">{it.assignment_reason || "—"}</span>
+              <span className="min-w-0 flex-1 break-words text-right text-text-subtle ml-auto">{it.assignment_reason || "—"}</span>
             </div>
           ))}
           {items.length > 50 && <div className="px-3 py-1.5 text-xs text-text-subtle text-center">…และอีก {items.length - 50} งาน</div>}
@@ -182,9 +184,9 @@ export default function BacklogPage() {
 
       {/* Admin pool */}
       <div className="rounded-lg border border-border bg-surface p-4 space-y-3">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center gap-2">
           <h2 className="text-sm font-semibold text-text">เลือก admin pool ({selected.size} คน)</h2>
-          <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer">
+          <label className="flex min-w-0 items-center gap-1.5 text-xs text-text-muted cursor-pointer sm:ml-auto">
             <input type="checkbox" checked={showPaused} onChange={(e) => setShowPaused(e.target.checked)} />
             แสดง admin ที่พักรับแชทด้วย
           </label>
@@ -212,13 +214,13 @@ export default function BacklogPage() {
 
       {/* Mode + limit */}
       <div className="backlog-mode-row flex items-center gap-3 flex-wrap">
-        <select
+        <SelectField
           value={mode}
           onChange={(e) => { setMode(e.target.value as BacklogMode); setPlan(null); }}
           className="rounded-lg border border-border bg-surface px-3 py-2 text-sm text-text"
         >
           {Object.entries(MODE_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
-        </select>
+        </SelectField>
         <label className="flex items-center gap-2 text-sm text-text-muted">
           จ่ายสูงสุด
           <input
@@ -271,7 +273,7 @@ export default function BacklogPage() {
         </div>
       )}
 
-      {lastResult && <div className="rounded-lg border border-success/30 bg-success/5 p-3 text-sm text-success-soft">{lastResult}</div>}
+      {lastResult && <div className="rounded-lg border border-success/30 bg-success/5 p-3 text-sm text-success-dark">{lastResult}</div>}
     </div>
   );
 }
