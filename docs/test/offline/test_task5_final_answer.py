@@ -1276,6 +1276,86 @@ def test_zaapi_files_conflicting_sources_both_reach_evidence():
         "conflicting file silently dropped from evidence"
 
 
+# ── Phase 1 Task 8 — one Zaapi exact-row chain end to end ───────────────────
+def test_zaapi_files_exact_row_reaches_selected_context_and_answer():
+    """แถวเดียวใน file → producer emit request_id ch:kb:0 → emitted
+    evidence ผูก need_indices (request_id ไม่ข้าม _EVIDENCE_OUT_FIELDS —
+    observability ใช้ owner-level objects ตาม plan) → answer ใช้ค่าแถว."""
+    from shopeechat import kb_zaapi as _kz
+    from shopeechat import retrieval_runtime as _rr
+    mp = MonkeyPatch()
+    prod_out, sel_out = [], []
+    _orig_ev = _kz.zaapi_kb_evidence
+    _orig_sel = _rr.select_for_llm_context
+
+    def _import_spy(admindb):
+        def _spy_ev(**kw):
+            r = _orig_ev(**kw)
+            prod_out.append(r)
+            return r
+        def _spy_sel(*a, **k):
+            r = _orig_sel(*a, **k)
+            sel_out.append(r)
+            return r
+        mp.setattr(_kz, "zaapi_kb_evidence", _spy_ev)
+        mp.setattr(_rr, "select_for_llm_context", _spy_sel)
+
+    resp, typed_ctx = _chat_files(
+        mp, file_rows=_FILE_XLSX, import_fn=_import_spy,
+        msg="สาย CTC620P รองรับกี่วัตต์",
+        intent_result={"intent": "product_recommend", "confidence": 0.9,
+                       "requested_facts": ["charging_speed"]},
+        llm_reply="สาย CTC620P รองรับสูงสุด 240W ยาว 2 เมตรค่ะ")
+    # stage 1 — producer: exact row admitted ด้วย per-need request id
+    sup = [e for r in prod_out for e in (r.supporting_evidence or ())]
+    assert sup, "zaapi_kb_evidence returned no supporting evidence"
+    assert sup[0]["request_id"] == "ch:kb:0", \
+        f"producer request_ids: {[e.get('request_id') for e in sup]!r}"
+    assert "240W" in _ev_text(sup[0])
+    # stage 2 — selection: channel ถูก process (trace shape เดิม)
+    assert sel_out and any(
+        t.startswith("ch:kb:0:") for s in sel_out for t in s.trace), \
+        f"no ch:kb:0 selection trace: {[s.trace for s in sel_out]!r}"
+    # stage 3 — emitted boundary: request_id→need_indices attribution
+    evidence = _file_evid(typed_ctx, "test-kb.xlsx")
+    assert len(evidence) == 1, f"emitted evidence: {evidence!r}"
+    assert evidence[0].get("need_indices"), \
+        f"evidence unattributed: {evidence[0]!r}"
+    assert "240W" in _ev_text(evidence[0])
+    assert "240W" in (resp.answer or "")
+
+
+def test_zaapi_files_conflicting_rows_both_reach_context():
+    """T8 control: แถว scope เดียวกันในไฟล์เดียว ค่าขัดกัน → ทั้งคู่ต้อง
+    ถึง typed evidence (retrieval ห้ามตัดฝั่งใดเงียบ ๆ); ที่ answer stage
+    deterministic contract เดิม = spec_claim guard — ค่าที่ไม่ ground ใน
+    FieldEvidence ของ subject card (kb text ไม่ใช่ grounding source)
+    ต้องไม่ถึงลูกค้า: clause rewrite → defer, ไม่เลือกค่าเดียวเงียบ ๆ."""
+    both = _xlsx_bytes([
+        ["ชื่อสินค้า", "รายละเอียดสินค้า"],
+        ["CTC620P", "สายชาร์จ CTC620P 240W ยาว 2 เมตร"],
+        ["CTC620P", "สายชาร์จ CTC620P 999W ยาว 9 เมตร"],
+    ])
+    mp = MonkeyPatch()
+    resp, typed_ctx = _chat_files(
+        mp, file_rows=both,
+        msg="สาย CTC620P รองรับกี่วัตต์",
+        intent_result={"intent": "product_recommend", "confidence": 0.9,
+                       "requested_facts": ["charging_speed"]},
+        llm_reply="ข้อมูลระบุทั้ง 240W และ 999W ไม่ตรงกันค่ะ")
+    ev = _file_evid(typed_ctx, "test-kb.xlsx")
+    texts = [_ev_text(e) for e in ev]
+    assert any("240W" in t for t in texts), \
+        f"first conflicting row missing: {texts!r}"
+    assert any("999W" in t for t in texts), \
+        f"conflicting row silently dropped: {texts!r}"
+    assert "999W" not in (resp.answer or ""), \
+        f"ungrounded conflicting value leaked to customer: {resp.answer!r}"
+    assert (resp.routing_decision or {}).get("guard_rewritten") == \
+        "spec_claim", \
+        f"spec guard did not fire on contested claim: {resp.answer!r}"
+
+
 # ── Phase 1 Task 2 — real visual media as typed turn input ──────────────────
 def test_real_image_and_describe_produce_product_reply():
     from shopeechat import llm as _llm
