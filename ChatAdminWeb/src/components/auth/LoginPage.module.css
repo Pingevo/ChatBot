@@ -79,30 +79,30 @@
   position: absolute;
   top: 45%;
   left: 50%;
-  width: min(60vmin, 85vw);
-  height: min(78vmin, 96vh);
+  width: min(104vmin, 128vw);
+  height: min(132vmin, 150vh);
   border-radius: 50%;
   background:
     radial-gradient(ellipse at 50% 50%, rgba(1, 2, 9, 0.88) 0 23%, rgba(3, 4, 16, 0.78) 39%, rgba(9, 8, 30, 0.48) 55%, rgba(30, 33, 97, 0.14) 70%, transparent 82%);
-  filter: blur(2px);
+  filter: blur(2.5px);
   opacity: 0;
   transform-origin: center;
-  box-shadow: 0 0 58px 12px rgba(19, 26, 82, 0.24);
+  box-shadow: 0 0 92px 22px rgba(19, 26, 82, 0.32);
 }
 
 .portalBloom {
   position: absolute;
   top: 45%;
   left: 50%;
-  width: min(92vmin, 112vw);
-  height: min(116vmin, 140vh);
+  width: min(148vmin, 176vw);
+  height: min(180vmin, 220vh);
   border-radius: 50%;
   background:
     radial-gradient(ellipse at 50% 50%, rgba(181, 208, 255, 0.62) 0 2%, rgba(111, 151, 236, 0.52) 11%, rgba(107, 91, 207, 0.34) 28%, rgba(99, 53, 153, 0.22) 45%, rgba(23, 47, 105, 0.14) 62%, transparent 78%),
     radial-gradient(ellipse at 35% 42%, rgba(148, 100, 226, 0.28), transparent 64%),
     radial-gradient(ellipse at 66% 56%, rgba(78, 154, 234, 0.27), transparent 62%),
     conic-gradient(from 10deg at 50% 50%, transparent 0 14%, rgba(128, 117, 255, 0.12) 19%, transparent 27%, rgba(91, 176, 255, 0.15) 35%, transparent 46%, rgba(172, 130, 255, 0.11) 57%, transparent 68%, rgba(117, 194, 255, 0.12) 81%, transparent 92%);
-  filter: blur(23px) saturate(1.2);
+  filter: blur(27px) saturate(1.35);
   mix-blend-mode: screen;
   opacity: 0;
   pointer-events: none;

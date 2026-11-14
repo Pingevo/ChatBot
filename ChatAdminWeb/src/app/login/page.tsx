@@ -68,7 +68,7 @@ function LoginContent() {
       const emergence = { progress: 0 };
       gsap.set(sceneWrap, {
         transformOrigin: "50% 45%",
-        transformPerspective: 1300,
+        transformPerspective: 1050,
         rotationX: 0,
         rotationY: 0,
         rotationZ: 0,
@@ -89,6 +89,8 @@ function LoginContent() {
         const entry = 1 - smooth(0.025, 0.20, progress);
         const exit = smooth(0.77, 1, progress);
         const middle = smooth(0.12, 0.30, progress) * (1 - smooth(0.74, 0.90, progress));
+        const cameraDive = smooth(0.025, 0.86, progress);
+        const cameraRoll = smooth(0.16, 0.72, progress) * (1 - smooth(0.90, 1, progress) * 0.42);
         const pulse = 0.5 + 0.5 * Math.sin(progress * 26 + Math.sin(progress * 8) * 0.6);
         const light = Math.max(0.065 + middle * (0.07 + pulse * 0.08), 0.72 * entry, 1.55 * exit);
         portalProgressRef.current = warp.progress;
@@ -99,19 +101,19 @@ function LoginContent() {
           "--shade-y": `${45 + Math.cos(progress * 9) * 5}%`,
         });
         gsap.set(sceneWrap, {
-          rotationX: smooth(0.86, 0.98, progress) * 2.2,
-          rotationY: smooth(0.86, 0.98, progress) * -3.2,
-          rotationZ: 0,
-          x: Math.sin(progress * 6.2) * 5,
-          y: -progress * 12 + Math.sin(progress * Math.PI * 2.4) * 6,
-          scale: 1 + progress * 0.45,
+          rotationX: cameraRoll * 5.2 + Math.sin(progress * 8.2) * 0.72 * cameraRoll,
+          rotationY: cameraRoll * -8.4 + Math.sin(progress * 6.1 + 0.8) * 0.86 * cameraRoll,
+          rotationZ: Math.sin(progress * 7.4 + 0.4) * 1.05 * cameraRoll,
+          x: Math.sin(progress * 7.2) * 10 * cameraRoll,
+          y: -cameraDive * 31 + Math.sin(progress * Math.PI * 2.1) * 9 * cameraRoll,
+          scale: 1 + cameraDive * 1.22,
           opacity: 1 - exit * 0.10,
         });
         gsap.set(bloom, {
-          opacity: 0.66 * entry + middle * (0.20 + pulse * 0.25) + 0.68 * exit,
-          scale: 0.8 + 0.32 * entry + progress * 0.45 + exit * 1.0 + middle * pulse * 0.18,
+          opacity: 0.70 * entry + middle * (0.23 + pulse * 0.28) + 0.72 * exit,
+          scale: 0.72 + 0.38 * entry + progress * 0.32 + exit * 0.82 + middle * pulse * 0.2,
         });
-        gsap.set(core, { opacity: middle * 0.14 + exit * 0.04, scale: 0.18 + progress * 3.8 });
+        gsap.set(core, { opacity: middle * 0.16 + exit * 0.05, scale: 0.16 + progress * 2.49 });
       };
 
       const mistMotion = { angle: 0 };
@@ -127,7 +129,6 @@ function LoginContent() {
           const slowBreath = Math.sin(angle * 0.62 - 0.75);
           const lightShimmer = 0.5 + 0.5 * Math.sin(angle * 1.35 + 1.1);
           gsap.set(bloom, {
-            rotation: Math.sin(angle) * 14,
             x: Math.sin(angle * 0.9) * 18,
             y: Math.cos(angle * 1.1) * 26,
             ...(floating && { opacity: 0.46 + emergence.progress * 0.08 + slowBreath * 0.14 + (lightShimmer - 0.5) * 0.08 }),
@@ -135,12 +136,12 @@ function LoginContent() {
           if (floating) {
             const bob = Math.sin(angle);
             gsap.set(sceneWrap, {
-              rotationX: 2.2 * (1 - emergence.progress) + Math.sin(angle * 0.52) * 0.7,
-              rotationY: -3.2 * (1 - emergence.progress) + Math.sin(angle * 0.68) * 0.65,
-              rotationZ: Math.sin(angle * 0.38) * 0.3,
-              x: Math.sin(angle * 0.48) * 3.5,
-              y: -12 + bob * 8,
-              scale: 1.45 + emergence.progress * 0.025 + Math.sin(angle + 0.4) * 0.018,
+              rotationX: 3.97 * (1 - emergence.progress) + (Math.sin(angle * 0.52) - Math.sin(2.38 * 0.52)) * 0.5,
+              rotationY: -5.39 * (1 - emergence.progress) + (Math.sin(angle * 0.68) - Math.sin(2.38 * 0.68)) * 0.65,
+              rotationZ: 0.68 * (1 - emergence.progress) + (Math.sin(angle * 0.38) - Math.sin(2.38 * 0.38)) * 0.3,
+              x: 4.3 * (1 - emergence.progress) + (Math.sin(angle * 0.48) - Math.sin(2.38 * 0.48)) * 5,
+              y: -28.57 + (bob - Math.sin(2.38)) * 9,
+              scale: 2.22 + emergence.progress * 0.035 + Math.sin(angle + 0.4) * 0.022,
             });
             gsap.set(shade, {
               opacity: 0.69 + slowBreath * 0.075,
@@ -169,7 +170,7 @@ function LoginContent() {
           });
         },
       })
-        .to(warp, { progress: 1, duration: 3.85, ease: "power2.inOut", onUpdate: syncDistortion }, 0);
+        .to(warp, { progress: 1, duration: 3.85, ease: "power3.inOut", onUpdate: syncDistortion }, 0);
     } catch {
       window.location.assign(href);
     }
