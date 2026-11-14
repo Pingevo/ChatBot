@@ -3,6 +3,7 @@
 //   เปิดจาก /shops card click — drawer แบบ full screen พร้อม 4 tabs
 //   แต่ละ tab: ดึงข้อมูล + filter ตาม shop + inline edit (กด edit → ขยาย card เป็นฟอร์ม)
 //   ⚡ G4-fix2 — เปลี่ยนจาก link ไปหน้าอื่น → inline edit card แทน
+import { SelectField } from "@/components/ui/SelectField";
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { X, Search, Trash2, Power, Pencil, Save, XCircle, Workflow, Zap, Bot, BookOpen } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
@@ -453,10 +454,10 @@ function TriggersTab({ shop, search, editable, catchError }: {
                   <input className={inputCls} value={form.keywords} onChange={(e) => setForm({ ...form, keywords: e.target.value })} placeholder="เช่น ราคา, ลด, โปรโมชั่น" />
                 </Field>
                 <Field label="การกระทำ">
-                  <select className={inputCls} value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value })}>
+                  <SelectField className={inputCls} value={form.action} onChange={(e) => setForm({ ...form, action: e.target.value })}>
                     <option value="bot_answer">บอทตอบ</option>
                     <option value="handoff_admin">ส่งแอดมิน</option>
-                  </select>
+                  </SelectField>
                 </Field>
                 {form.action === "bot_answer" && (
                   <Field label="Template คำตอบบอท">
@@ -464,14 +465,14 @@ function TriggersTab({ shop, search, editable, catchError }: {
                   </Field>
                 )}
                 <Field label="หัวข้อ">
-                  <select className={inputCls} value={form.topic} onChange={(e) => setForm({ ...form, topic: e.target.value })}>
+                  <SelectField className={inputCls} value={form.topic} onChange={(e) => setForm({ ...form, topic: e.target.value })}>
                     <option value="general">ทั่วไป</option>
                     <option value="product">สินค้า</option>
                     <option value="shipping">จัดส่ง</option>
                     <option value="payment">การชำระเงิน</option>
                     <option value="warranty">รับประกัน</option>
                     <option value="return">คืนสินค้า</option>
-                  </select>
+                  </SelectField>
                 </Field>
                 <EditActions onSave={handleSave} onCancel={() => setEditingId(null)} saving={saving} />
               </div>

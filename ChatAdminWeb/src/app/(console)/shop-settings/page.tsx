@@ -372,6 +372,7 @@ export default function ShopSettingsPage() {
             onClick={() => setShowModal(true)}
             variant="primary"
             size="sm"
+            className="phone-mobile-add-hidden"
           >
             <Plus size={14} className="mr-1" />
             เพิ่มร้าน
@@ -398,7 +399,7 @@ export default function ShopSettingsPage() {
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               placeholder="ค้นหาร้าน..."
-              className="w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+              className="w-full h-11 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
             />
           </div>
           {/* platform dropdown */}
@@ -434,7 +435,7 @@ export default function ShopSettingsPage() {
           <span className="text-xs text-text-subtle ml-auto">{filtered.length} ร้าน</span>
         </div>
       }
-      contentClassName="p-4 md:p-6 space-y-4"
+      contentClassName="p-4 sm:p-6 space-y-4"
     >
       <div>
           {/* ── Log panel (collapsible) ── */}
@@ -466,11 +467,11 @@ export default function ShopSettingsPage() {
                   {logs.map((log, i) => (
                     <div
                       key={i}
-                      className="flex items-start gap-2.5 rounded-lg bg-surface-2 px-3 py-2 text-xs"
+                      className="flex flex-wrap items-start gap-x-2.5 gap-y-1.5 rounded-lg bg-surface-2 px-3 py-2 text-xs"
                     >
                       <div className="flex items-center gap-1.5 shrink-0">
                         <User size={12} className="text-text-muted" />
-                        <span className="text-text font-medium">
+                        <span className="min-w-0 max-w-32 truncate text-text font-medium">
                           {log.name || log.username || log.admin_id}
                         </span>
                       </div>
@@ -485,7 +486,7 @@ export default function ShopSettingsPage() {
                       >
                         {formatLogAction(log.action_type)}
                       </Badge>
-                      <span className="text-text-muted flex-1 truncate">
+                      <span className="text-text-muted min-w-0 flex-1 basis-full truncate sm:basis-auto">
                         {formatLogMeta(log)}
                       </span>
                       <span className="text-text-subtle shrink-0 flex items-center gap-1">
@@ -572,7 +573,7 @@ export default function ShopSettingsPage() {
                   </div>
 
                   {/* Action selector */}
-                  <div className="mt-3 flex items-center gap-2">
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
                     <span className="text-xs text-text-muted flex items-center gap-1">
                       <Power size={12} />
                       faq_liveagent:

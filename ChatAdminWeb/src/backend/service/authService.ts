@@ -11,6 +11,8 @@ import {
 } from "../lib/jwt";
 import { serverConfig } from "../lib/config";
 import { logAdminEvent } from "./adminLogService";
+import { normalizeChatTextSize } from "../../lib/chatTextSize";
+import type { ChatTextSize } from "../../lib/chatTextSize";
 
 export interface AdminDoc extends Document {
   admin_id: string;
@@ -25,6 +27,7 @@ export interface AdminDoc extends Document {
   channels_access?: string[];
   bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex)
   theme_preference?: "light" | "dark";
+  chat_text_size?: ChatTextSize;
   failed_login_count?: number;
   locked_until?: Date | null;
   last_login_at?: Date | null;
@@ -48,6 +51,7 @@ export interface SafeAdmin {
   is_accepting_chats?: boolean;
   bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex)
   theme_preference: "light" | "dark";
+  chat_text_size: ChatTextSize;
   last_login_at: string | null;
   created_at: string;
 }
@@ -64,6 +68,7 @@ function safeAdmin(admin: AdminDoc): SafeAdmin {
     is_accepting_chats: admin.is_accepting_chats ?? true,
     bubble_color: admin.bubble_color,
     theme_preference: admin.theme_preference === "dark" ? "dark" : "light",
+    chat_text_size: normalizeChatTextSize(admin.chat_text_size),
     last_login_at: admin.last_login_at ? admin.last_login_at.toISOString() : null,
     created_at: admin.created_at ? admin.created_at.toISOString() : "",
   };
@@ -232,6 +237,7 @@ export async function updateAdminProfile(
     is_accepting_chats?: boolean;
     bubble_color?: string;
     theme_preference?: "light" | "dark";
+    chat_text_size?: ChatTextSize;
     role?: string;
   }
 ): Promise<boolean> {
@@ -244,6 +250,7 @@ export async function updateAdminProfile(
   if (fields.is_accepting_chats !== undefined) update.is_accepting_chats = fields.is_accepting_chats;
   if (fields.bubble_color !== undefined) update.bubble_color = fields.bubble_color;
   if (fields.theme_preference !== undefined) update.theme_preference = fields.theme_preference;
+  if (fields.chat_text_size !== undefined) update.chat_text_size = fields.chat_text_size;
   if (Object.keys(update).length === 0) return false;
   const result = await coll.updateOne({ admin_id: adminId }, { $set: update });
   if (result.modifiedCount > 0) {

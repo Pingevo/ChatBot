@@ -61,12 +61,12 @@ export default function AdminActivityPage() {
     />
   );
 
-  if (loading && !data) return <div className="analytics-page-body space-y-6">{pageHeading}<AnalyticsSkeleton hideHeading /></div>;
-  if (error && !data) return <div className="analytics-page-body space-y-6">{pageHeading}<EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} /></div>;
+  if (loading && !data) return <div className="analytics-page-body min-w-0 space-y-5">{pageHeading}<AnalyticsSkeleton hideHeading /></div>;
+  if (error && !data) return <div className="analytics-page-body min-w-0 space-y-5">{pageHeading}<EmptyState icon={UserCog} title="โหลดข้อมูลไม่สำเร็จ" description={error} /></div>;
   if (!data) return null;
 
   return (
-    <div className="analytics-page-body space-y-6">
+    <div className="analytics-page-body min-w-0 space-y-5">
       {pageHeading}
 
       <ConnectedChannelsHeader connectedCount={data.connected_shops} />
@@ -75,7 +75,7 @@ export default function AdminActivityPage() {
       <div className={loading ? "opacity-50 pointer-events-none transition-opacity" : "transition-opacity"}>
 
       {/* ---- Ranking cards ---- */}
-      <div className="analytics-ranking-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="analytics-ranking-grid grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <RankingCard
           title="จำนวนการสนทนาสูงสุด"
           name={data.rankings.most_conversations?.name ?? null}
@@ -103,20 +103,20 @@ export default function AdminActivityPage() {
       </div>
 
       {/* ---- Conversations by admin chart ---- */}
-      <div className="bg-surface rounded-xl border border-border p-5">
-        <h3 className="text-sm font-semibold text-text mb-4">จำนวนการสนทนาของแต่ละเจ้าหน้าที่</h3>
+      <div className="min-w-0 rounded-xl border border-border bg-surface p-4 sm:p-5">
+        <h3 className="mb-4 text-base font-semibold text-text">จำนวนการสนทนาของแต่ละเจ้าหน้าที่</h3>
         <MultiLineChart
           data={data.conversations_by_admin_per_day}
           seriesKeys={data.admin_series_keys}
           seriesLabels={Object.fromEntries(data.individual_performance.map((admin) => [admin.admin_id, admin.name]))}
-          colors={["#3b82c4", "#e0578a", "#4a9d6f", "#f0a13a", "#8b5fbf", "#c8912b", "#ee4d2d", "#111827"]}
+          colors={["#3b82c4", "#e0578a", "#4a9d6f", "#f0a13a", "#8b5fbf", "#c8912b", "#ee4d2d", "var(--color-chart-extra)"]}
         />
       </div>
 
       {/* ---- Individual performance table ---- */}
-      <div className="bg-surface rounded-xl border border-border overflow-hidden">
+      <div className="min-w-0 overflow-hidden rounded-xl border border-border bg-surface">
         <div className="px-4 py-3 border-b border-border">
-          <h3 className="text-sm font-semibold text-text">ประสิทธิภาพรายบุคคล</h3>
+          <h3 className="text-base font-semibold text-text">ประสิทธิภาพรายบุคคล</h3>
         </div>
         {data.individual_performance.length === 0 ? (
           <p className="text-sm text-text-muted py-8 text-center">ยังไม่มีข้อมูล</p>

@@ -203,7 +203,7 @@ export default function PersonaPage() {
       helpHref="/help#persona"
       subtitle="ตั้งชื่อตัวแทนบอทของแต่ละร้าน — บุคลิกหลัก (ค่ะ/นะคะ) เหมือนกันทุกร้าน · ถ้าร้านยังไม่ได้ตั้ง persona บอทจะใช้ชื่อร้านแบบเดิม"
       actions={
-        <Button onClick={openCreate} disabled={availableShops.length === 0} size="sm">
+        <Button onClick={openCreate} disabled={availableShops.length === 0} size="sm" className="phone-mobile-add-hidden">
           <Plus size={14} className="mr-1" />
           เพิ่ม persona
         </Button>
@@ -212,6 +212,7 @@ export default function PersonaPage() {
         { label: "เพิ่ม persona", icon: <Plus size={17} />, onSelect: openCreate, disabled: availableShops.length === 0 },
       ]}
       filterBarBelow
+      contentClassName="p-4 sm:p-6"
       filterBar={
         <>
           <div className="flex items-center gap-2 mt-4 flex-wrap">
@@ -222,7 +223,7 @@ export default function PersonaPage() {
                 placeholder="ค้นหาด้วยชื่อร้านหรือชื่อตัวแทน..."
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                className="w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+                className="w-full h-11 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
               />
             </div>
 
@@ -230,7 +231,7 @@ export default function PersonaPage() {
             <div className="relative">
               <button
                 onClick={() => setShowPlatformDd(!showPlatformDd)}
-                className="h-8 px-2.5 rounded-lg border border-border bg-surface text-xs text-text flex items-center gap-1.5 hover:bg-surface"
+                className="h-11 px-2.5 rounded-lg border border-border bg-surface text-xs text-text flex items-center gap-1.5 hover:bg-surface"
               >
                 <Globe size={12} className="text-text-subtle" />
                 {filterPlatform === "all" ? "ทุกแพลตฟอร์ม" : platformLabel(filterPlatform)}
@@ -240,13 +241,13 @@ export default function PersonaPage() {
                 <div className="absolute top-full left-0 mt-1 z-10 w-44 rounded-lg border border-border bg-surface shadow-lg">
                   <button
                     onClick={() => { setFilterPlatform("all"); setShowPlatformDd(false); }}
-                    className="w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 rounded-t-lg"
+                    className="w-full text-left px-3 py-3 text-xs hover:bg-surface-2 rounded-t-lg"
                   >ทุกแพลตฟอร์ม</button>
                   {ALL_PLATFORMS.map((p) => (
                     <button
                       key={p.value}
                       onClick={() => { setFilterPlatform(p.value); setShowPlatformDd(false); }}
-                      className="w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2"
+                      className="w-full text-left px-3 py-3 text-xs hover:bg-surface-2"
                     >{p.label}</button>
                   ))}
                 </div>
@@ -279,7 +280,7 @@ export default function PersonaPage() {
             </div>
           </>
         ) : (
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
             {rows.map((row) => (
               <div
                 key={row.persona_id}

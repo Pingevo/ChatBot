@@ -115,18 +115,18 @@ export default function HelpPage() {
             onBlur={() => setSearchFocused(false)}
             placeholder="ค้นหาคำศัพท์ ขั้นตอน ฟีเจอร์..."
             aria-label="ค้นหาในคู่มือ"
-            className="w-full pl-9 pr-3 py-2 text-sm rounded-lg border border-border bg-surface focus:outline-none focus:border-brand/40"
+            className="w-full min-h-11 pl-9 pr-3 py-2 text-sm rounded-lg border border-border bg-surface focus:outline-none focus:border-brand/40"
           />
         </div>
       </div>
 
       {/* Getting Started */}
       <section id="getting-started" className="mb-8 scroll-mt-20">
-        <h2 className="text-base font-semibold text-text mb-3 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-text mb-3 flex items-center gap-2">
           <Zap size={16} className="text-brand" />
           เริ่มต้นใช้งาน
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-3">
           {filteredSteps.map((step, i) => {
             const Icon = step.icon;
             return (
@@ -142,7 +142,7 @@ export default function HelpPage() {
                   <h3 className="text-sm font-semibold text-text">{step.title}</h3>
                   <ArrowRight size={14} className="text-text-subtle ml-auto opacity-0 group-hover:opacity-100 transition-opacity" />
                 </div>
-                <p className="text-xs text-text-muted leading-relaxed">{step.desc}</p>
+                <p className="text-sm text-text-muted leading-relaxed">{step.desc}</p>
               </Link>
             );
           })}
@@ -154,11 +154,11 @@ export default function HelpPage() {
 
       {/* Features */}
       <section id="features" className="mb-8 scroll-mt-20">
-        <h2 className="text-base font-semibold text-text mb-3 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-text mb-3 flex items-center gap-2">
           <Bot size={16} className="text-brand" />
           ฟีเจอร์หลัก
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {filteredFeatures.map((f, i) => {
             const Icon = f.icon;
             return (
@@ -172,7 +172,7 @@ export default function HelpPage() {
                 </div>
                 <div className="flex-1">
                   <h3 className="text-sm font-semibold text-text mb-1">{f.title}</h3>
-                  <p className="text-xs text-text-muted leading-relaxed">{f.desc}</p>
+                  <p className="text-sm text-text-muted leading-relaxed">{f.desc}</p>
                 </div>
                 <ArrowRight size={14} className="text-text-subtle shrink-0 mt-1 opacity-0 group-hover:opacity-100 transition-opacity" />
               </Link>
@@ -186,7 +186,7 @@ export default function HelpPage() {
 
       {/* Glossary */}
       <section id="glossary" className="mb-8 scroll-mt-20">
-        <h2 className="text-base font-semibold text-text mb-3 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-text mb-3 flex items-center gap-2">
           <BookOpen size={16} className="text-brand" />
           คำศัพท์ (Glossary)
         </h2>
@@ -194,15 +194,15 @@ export default function HelpPage() {
           {filteredGlossary.map((g, i) => (
             <div
               key={i}
-              className={`flex items-start gap-4 px-4 py-3 ${
+              className={`flex flex-wrap items-start gap-x-4 gap-y-2 px-4 py-3 ${
                 i < filteredGlossary.length - 1 ? "border-b border-border/50" : ""
               }`}
             >
-              <div className="w-32 shrink-0">
+              <div className="w-32 max-w-full shrink-0">
                 <div className="text-sm font-semibold text-text">{g.term}</div>
                 <div className="text-[10px] text-text-subtle">{g.en}</div>
               </div>
-              <p className="text-xs text-text-muted leading-relaxed flex-1">{g.desc}</p>
+              <p className="min-w-0 flex-1 text-sm text-text-muted leading-relaxed">{g.desc}</p>
               {g.link && (
                 <Link
                   href={g.link}
@@ -222,11 +222,11 @@ export default function HelpPage() {
 
       {/* Per-page help anchors */}
       <section className="mb-8">
-        <h2 className="text-base font-semibold text-text mb-3 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-text mb-3 flex items-center gap-2">
           <BookOpen size={16} className="text-brand" />
           คู่มือแต่ละหน้า
         </h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {filteredPageAnchors.map((p) => (
             <div key={p.id} id={p.id} className="rounded-xl border border-border bg-surface p-4 scroll-mt-20">
               <div className="flex items-center justify-between mb-1">
@@ -235,7 +235,7 @@ export default function HelpPage() {
                   ไปที่หน้า →
                 </Link>
               </div>
-              <p className="text-xs text-text-muted leading-relaxed">{p.desc}</p>
+              <p className="text-sm text-text-muted leading-relaxed">{p.desc}</p>
             </div>
           ))}
           {filteredPageAnchors.length === 0 && (
@@ -246,11 +246,11 @@ export default function HelpPage() {
 
       {/* Action type reference (Logs) */}
       <section id="action-types" className="mb-8 scroll-mt-20">
-        <h2 className="text-base font-semibold text-text mb-3 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-text mb-3 flex items-center gap-2">
           <BookOpen size={16} className="text-brand" />
           ประเภทการกระทำ (Action Types)
         </h2>
-        <p className="text-xs text-text-muted mb-3">รหัส action_type ที่ใช้ในหน้า Logs — แสดงเป็นภาษาไทยในหน้า Logs แล้ว แต่นี่คือรหัสจริงสำหรับอ้างอิง <Link href="/logs" className="text-brand hover:text-brand-dark">ไปที่หน้า Logs →</Link></p>
+        <p className="text-sm text-text-muted mb-3">รหัส action_type ที่ใช้ในหน้า Logs — แสดงเป็นภาษาไทยในหน้า Logs แล้ว แต่นี่คือรหัสจริงสำหรับอ้างอิง <Link href="/logs" className="text-brand hover:text-brand-dark">ไปที่หน้า Logs →</Link></p>
         <div className="rounded-xl border border-border bg-surface overflow-hidden">
           {filteredActionTypes.map((row, i) => (
             <div key={row.cat} className={`flex items-start gap-4 px-4 py-2.5 ${i < filteredActionTypes.length - 1 ? "border-b border-border/50" : ""}`}>
@@ -266,21 +266,21 @@ export default function HelpPage() {
 
       {/* Tips */}
       <section>
-        <h2 className="text-base font-semibold text-text mb-3 flex items-center gap-2">
+        <h2 className="text-lg font-semibold text-text mb-3 flex items-center gap-2">
           <HelpCircle size={16} className="text-brand" />
           ทิปส์และคำแนะนำ
         </h2>
         <div className="rounded-xl border border-info/15 bg-info/5 p-4 space-y-2">
-          <p className="text-xs text-text-muted leading-relaxed">
+          <p className="text-sm text-text-muted leading-relaxed">
             <span className="text-info-dark font-medium">ลัดแป้นพิมพ์:</span> กด <kbd className="px-1.5 py-0.5 rounded border border-border bg-surface-2 text-[10px] font-mono">Ctrl+B</kbd> (หรือ <kbd className="px-1.5 py-0.5 rounded border border-border bg-surface-2 text-[10px] font-mono">⌘+B</kbd>) เพื่อย่อ/ขยาย Sidebar
           </p>
-          <p className="text-xs text-text-muted leading-relaxed">
+          <p className="text-sm text-text-muted leading-relaxed">
             <span className="text-info-dark font-medium">ค้นหาใน Sidebar:</span> พิมพ์ในช่องค้นหาด้านบน Sidebar เพื่อกรองเมนู
           </p>
-          <p className="text-xs text-text-muted leading-relaxed">
+          <p className="text-sm text-text-muted leading-relaxed">
             <span className="text-info-dark font-medium">ทดสอบก่อนใช้จริง:</span> ใช้ <Link href="/shadow-inbox" className="text-brand hover:text-brand-dark">Shadow Inbox</Link> ทดสอบบอทก่อนเปิดใช้งานจริง — คำตอบบอทไม่ส่งถึงลูกค้า
           </p>
-          <p className="text-xs text-text-muted leading-relaxed">
+          <p className="text-sm text-text-muted leading-relaxed">
             <span className="text-info-dark font-medium">เปรียบเทียบคุณภาพ:</span> ใช้ <Link href="/replay-compare" className="text-brand hover:text-brand-dark">Replay Compare</Link> เปรียบเทียบคำตอบบอทกับแอดมินเก่า เพื่อวัดและปรับปรุง
           </p>
         </div>

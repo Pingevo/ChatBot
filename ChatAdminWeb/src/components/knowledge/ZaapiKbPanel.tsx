@@ -3,6 +3,7 @@
 // docs ข้างในแก้/ลบ/เปิด-ปิดได้ · แก้แล้ว mark manual_edit (importer ไม่ทับ)
 // "เพิ่มในกลุ่มนี้" inherit accounts ของ source (scope เดียวกัน)
 // "เพิ่ม" ทั่วไป → unscoped ใช้ได้ทุกร้าน
+import { SelectField } from "@/components/ui/SelectField";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -625,7 +626,7 @@ export function ZaapiKbPanel() {
               </div>
               <div>
                 <label className="text-text-muted block mb-1">ชนิดเนื้อหาของไฟล์ (admin เลือกเอง — แถวที่ไม่จัดชนิดจะถูก hold การใช้ตอบ)</label>
-                <select
+                <SelectField
                   value={imp.contentType}
                   onChange={(e) => setImp({ ...imp, contentType: e.target.value })}
                   className="w-full h-8 px-2 rounded-lg border border-border bg-surface text-xs focus:outline-none focus:ring-2 focus:ring-brand/40"
@@ -633,7 +634,7 @@ export function ZaapiKbPanel() {
                   {CONTENT_TYPES.map((t) => (
                     <option key={t.v} value={t.v}>{t.l}</option>
                   ))}
-                </select>
+                </SelectField>
               </div>
               {imp.preview && (
                 <div className="rounded-lg border border-border bg-surface-2/60 p-3 space-y-2">
@@ -655,7 +656,7 @@ export function ZaapiKbPanel() {
                     {Object.keys(imp.preview.sheets).map((s) => (
                       <div key={s} className="flex items-center gap-2">
                         <span className="w-40 truncate text-text-muted" title={s}>{s}</span>
-                        <select
+                        <SelectField
                           value={imp.sheetTypes[s] ?? ""}
                           onChange={(e) => setImp({
                             ...imp,
@@ -668,7 +669,7 @@ export function ZaapiKbPanel() {
                           {CONTENT_TYPES.map((t) => (
                             <option key={t.v} value={t.v}>{t.l}</option>
                           ))}
-                        </select>
+                        </SelectField>
                       </div>
                     ))}
                   </div>
@@ -698,20 +699,19 @@ export function ZaapiKbPanel() {
   const mobileAddActions = editable ? [
     { label: "เพิ่มเอกสาร", icon: <Plus size={17} />, onSelect: () => openCreate() },
     { label: "Import ไฟล์", icon: <Upload size={17} />, onSelect: () => document.getElementById("zaapi-file-input")?.click() },
-    { label: "Backup snapshot", icon: <Download size={17} />, onSelect: downloadSnapshot, disabled: snapshotting },
   ] : [];
 
   if (loading) return <div className="flex justify-center py-12"><Loading size={24} /></div>;
   if (sources.length === 0 && files.length === 0 && !imp)
     return (
-      <div className="space-y-3 pb-20 md:pb-0">
+      <div className="zaapi-kb-mobile-add-space space-y-3 pb-20 md:pb-0">
         {editable && (
           <div className="flex justify-end gap-2">
-            <Button size="sm" variant="outline" onClick={downloadSnapshot} disabled={snapshotting}>
+              <Button size="sm" variant="outline" onClick={downloadSnapshot} disabled={snapshotting}>
               <Download size={14} /> {snapshotting ? "กำลังสำรอง..." : "Backup snapshot"}
             </Button>
             <div className="hidden md:block">
-              <Button size="sm" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
+              <Button size="sm" className="phone-mobile-add-hidden" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
                 <Upload size={14} /> Import ไฟล์
               </Button>
             </div>
@@ -732,7 +732,7 @@ export function ZaapiKbPanel() {
     );
 
   return (
-    <div className="space-y-3 pb-20 md:pb-0">
+    <div className="zaapi-kb-mobile-add-space space-y-3 pb-20 md:pb-0">
       <MobileAddActions actions={mobileAddActions} />
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[200px] max-w-md">
@@ -758,9 +758,9 @@ export function ZaapiKbPanel() {
           options={[{ v: "name", l: "ชื่อ source" }, { v: "recent", l: "อัปเดตล่าสุด" }]}
           onChange={setSortBy} />
         <span className="text-xs text-text-muted ml-auto">{filtered.length}/{sources.length} sources</span>
-        <div className="hidden items-center gap-2 md:flex">
+        <div className="flex items-center gap-2">
           {editable && (
-            <Button size="sm" variant="outline" onClick={() => openCreate()}>
+            <Button size="sm" variant="outline" className="phone-mobile-add-hidden" onClick={() => openCreate()}>
               <Plus size={14} /> เพิ่ม (ทุกร้าน)
             </Button>
           )}
@@ -770,7 +770,7 @@ export function ZaapiKbPanel() {
             </Button>
           )}
           {editable && (
-            <Button size="sm" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
+            <Button size="sm" className="phone-mobile-add-hidden" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
               <Upload size={14} /> Import ไฟล์
             </Button>
           )}

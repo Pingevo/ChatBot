@@ -1,6 +1,7 @@
 "use client";
 // Replay Compare — เปรียบเทียบ Bot เรา vs Zaapi/Admin จาก replay_compare.py
 // Layout 3 คอลัมน์: list | chat comparison | analysis summary
+import { SelectField } from "@/components/ui/SelectField";
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { Card } from "@/components/ui/Card";
@@ -21,6 +22,7 @@ import {
   Inbox, ListFilter, History, HelpCircle,
 } from "lucide-react";
 import { api } from "@/lib/apiClient";
+import { PageIdentityMark } from "@/components/ui/PageIdentityMark";
 import type { Conversation, Platform, ChatMessage } from "@/lib/types";
 import { useSharedConversations } from "@/lib/useSharedConversations";
 
@@ -168,8 +170,8 @@ type MobileView = "list" | "chat" | "stat";
 // ─── Helpers ──────────────────────────────────────────────
 
 const verdictIcon = {
-  bot_better: <ThumbsUp className="w-4 h-4 text-success-soft" />,
-  zaapi_better: <ThumbsDown className="w-4 h-4 text-error-soft" />,
+  bot_better: <ThumbsUp className="w-4 h-4 text-success-dark" />,
+  zaapi_better: <ThumbsDown className="w-4 h-4 text-error-dark" />,
   both_good: <CheckCircle className="w-4 h-4 text-warning" />,
   both_bad: <XCircle className="w-4 h-4 text-text-muted" />,
   judge_error: <AlertCircle className="w-4 h-4 text-warning" />,
@@ -630,13 +632,13 @@ export default function ReplayComparePage() {
 
   // ─── Render ──────────────────────────────────────────────
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden">
       {/* Header — 2 rows: title+tabs / status+actions */}
       <div className="border-b border-border bg-surface">
         {/* Row 1: title + tabs */}
         <div className="replay-header-main flex items-center justify-between px-4 pt-3 overflow-x-auto">
           <div className="replay-header-group flex items-center gap-3 shrink-0">
-            <Scale className="w-5 h-5 text-info" />
+            <PageIdentityMark kind="testing" icon={Scale} className="w-8 h-8 shrink-0" />
             <div className="flex items-center gap-1.5">
               <h1 className="text-lg font-semibold">เปรียบเทียบรีเพลย์</h1>
               <Link
@@ -651,7 +653,7 @@ export default function ReplayComparePage() {
             <div className="replay-mode-tabs flex items-center gap-1 ml-2">
               <button
                 onClick={() => setMode("inbox")}
-                className={`px-2.5 py-1 text-xs rounded font-medium transition ${
+                className={`min-h-11 2xl:min-h-0 px-2.5 py-1 text-xs rounded font-medium transition ${
                   mode === "inbox" ? "bg-info/10 text-info-dark" : "text-text-muted hover:bg-surface-2"
                 }`}
               >
@@ -659,7 +661,7 @@ export default function ReplayComparePage() {
               </button>
               <button
                 onClick={() => setMode("history")}
-                className={`px-2.5 py-1 text-xs rounded font-medium transition ${
+                className={`min-h-11 2xl:min-h-0 px-2.5 py-1 text-xs rounded font-medium transition ${
                   mode === "history" ? "bg-info/10 text-info-dark" : "text-text-muted hover:bg-surface-2"
                 }`}
               >
@@ -670,7 +672,7 @@ export default function ReplayComparePage() {
               </button>
               <button
                 onClick={() => setMode("files")}
-                className={`px-2.5 py-1 text-xs rounded font-medium transition ${
+                className={`min-h-11 2xl:min-h-0 px-2.5 py-1 text-xs rounded font-medium transition ${
                   mode === "files" ? "bg-info/10 text-info-dark" : "text-text-muted hover:bg-surface-2"
                 }`}
               >
@@ -761,10 +763,10 @@ export default function ReplayComparePage() {
         <div className="flex items-center gap-2 px-4 py-2 border-b bg-surface-2 text-xs">
           <FileText className="w-3.5 h-3.5 text-text-subtle" />
           <span className="text-text-muted">ไฟล์:</span>
-          <select
+          <SelectField
             value={selectedFile}
             onChange={e => { setSelectedFile(e.target.value); loadData(e.target.value); }}
-            className="px-2 py-1 border rounded text-xs min-w-0 flex-1 lg:flex-none"
+            className="min-h-11 px-2 py-2 border rounded text-sm min-w-0 flex-1 2xl:flex-none"
           >
             <option value="">ล่าสุด (default)</option>
             {files.map(f => (
@@ -772,7 +774,7 @@ export default function ReplayComparePage() {
                 {f.path.split("/").pop()} ({fmtSize(f.size)}, {timeAgo(f.mtime)})
               </option>
             ))}
-          </select>
+          </SelectField>
         </div>
       )}
 
@@ -780,7 +782,7 @@ export default function ReplayComparePage() {
       <div className="flex flex-1 overflow-hidden">
         {/* Left: Conversation list — inbox หรือ files แล้วแต่ mode */}
         <div
-          className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex w-full lg:w-72 shrink-0 border-r overflow-y-auto bg-surface flex-col`}
+          className={`${mobileView === "list" ? "flex" : "hidden"} 2xl:flex w-full 2xl:w-72 shrink-0 border-r overflow-y-auto bg-surface flex-col`}
           onScroll={mode === "inbox" ? (e) => {
             const el = e.currentTarget;
             if (el.scrollTop + el.clientHeight >= el.scrollHeight - 200) {
@@ -800,30 +802,30 @@ export default function ReplayComparePage() {
                     value={inboxSearch}
                     onChange={e => setInboxSearch(e.target.value)}
                     placeholder="ค้นหา ชื่อ/ข้อความ/conv_id..."
-                    className="w-full pl-7 pr-2 py-1.5 text-xs border rounded"
+                    className="w-full min-h-11 pl-7 pr-2 py-2 text-sm border rounded"
                   />
                 </div>
                 <div className="flex items-center gap-1">
-                  <select
+                  <SelectField
                     value={inboxPlatform}
                     onChange={e => setInboxPlatform(e.target.value as "all" | Platform)}
-                    className="flex-1 px-1.5 py-1 text-xs border rounded"
+                    className="min-h-11 flex-1 px-2 py-2 text-sm border rounded"
                   >
                     <option value="all">ทุกแพลตฟอร์ม</option>
                     <option value="shopee">Shopee</option>
                     <option value="tiktok">TikTok</option>
                     <option value="lazada">Lazada</option>
-                  </select>
-                  <select
+                  </SelectField>
+                  <SelectField
                     value={inboxShop}
                     onChange={e => setInboxShop(e.target.value)}
-                    className="flex-1 px-1.5 py-1 text-xs border rounded"
+                    className="min-h-11 flex-1 px-2 py-2 text-sm border rounded"
                   >
                     <option value="">ทุกร้าน</option>
                     {inboxShops.map(s => (
                       <option key={s} value={s}>{s}</option>
                     ))}
-                  </select>
+                  </SelectField>
                 </div>
                 <div className="flex items-center justify-between text-[10px] text-text-subtle">
                   <span>{filteredInbox.length}{inboxTotalCount ? ` จาก ${inboxTotalCount}` : ""}</span>
@@ -1010,9 +1012,9 @@ export default function ReplayComparePage() {
         </div>
 
         {/* Center: Chat comparison */}
-        <div className={`${mobileView === "chat" ? "block" : "hidden"} lg:block flex-1 min-w-0 overflow-y-auto bg-surface-2`}>
-          {/* ⚡ Mobile/Tablet (<lg) header — back "<" + ชื่อแชท/platform + ปุ่มสถิติ */}
-          <div className="lg:hidden sticky top-0 z-10 flex items-center justify-between gap-1 px-2 py-2 bg-surface/95 backdrop-blur border-b border-border">
+        <div className={`${mobileView === "chat" ? "block" : "hidden"} 2xl:block flex-1 min-w-0 overflow-y-auto bg-surface-2`}>
+          {/* Mobile/tablet header — back, conversation, and statistics actions */}
+          <div className="2xl:hidden sticky top-0 z-10 flex items-center justify-between gap-1 px-2 py-2 bg-surface/95 backdrop-blur border-b border-border">
             <button
               onClick={() => setMobileView("list")}
               className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-text transition-colors shrink-0"
@@ -1099,7 +1101,7 @@ export default function ReplayComparePage() {
                               : "bg-success text-white"
                           }`}
                         >
-                          <div className={`text-[10px] mb-0.5 ${m.role === "user" ? "text-text-muted" : "text-success-soft"}`}>
+                          <div className={`text-[10px] mb-0.5 ${m.role === "user" ? "text-text-muted" : "text-white/80"}`}>
                             {m.role === "user" ? (
                               <><User className="w-3 h-3 inline mr-1" />ลูกค้า</>
                             ) : (
@@ -1325,7 +1327,7 @@ export default function ReplayComparePage() {
                   {/* Bot answer */}
                   <Card className="p-3">
                     <div className="flex items-start gap-2">
-                      <Bot className="w-4 h-4 text-success-soft mt-0.5" />
+                      <Bot className="w-4 h-4 text-success-dark mt-0.5" />
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
                           <span className="text-xs font-semibold text-success-dark">Bot เรา</span>
@@ -1432,7 +1434,7 @@ export default function ReplayComparePage() {
                     {showDebug && (
                       <div className="mt-2 space-y-2">
                         {selectedQa.bot_log && (
-                          <pre className="text-xs bg-gray-900 text-success-soft p-2 rounded overflow-x-auto max-h-48">
+                          <pre className="text-xs bg-gray-900 text-[#86efac] p-2 rounded overflow-x-auto max-h-48">
                             {selectedQa.bot_log}
                           </pre>
                         )}
@@ -1470,12 +1472,12 @@ export default function ReplayComparePage() {
         </div>
 
         {/* Right: Analysis summary */}
-        <div className={`${mobileView === "stat" ? "flex" : "hidden"} lg:flex flex-col w-full lg:w-80 shrink-0 border-l bg-surface`}>
-          {/* ⚡ Mobile/Tablet (<lg) header — back ไปที่หน้าเปรียบเทียบ */}
-          <div className="lg:hidden flex items-center gap-1 px-2 py-2.5 border-b border-border shrink-0">
+        <div className={`${mobileView === "stat" ? "flex" : "hidden"} 2xl:flex flex-col w-full 2xl:w-80 shrink-0 border-l bg-surface`}>
+          {/* Mobile/tablet header — return to comparison */}
+          <div className="2xl:hidden flex items-center gap-1 px-2 py-2.5 border-b border-border shrink-0">
             <button
               onClick={() => setMobileView("chat")}
-              className="w-8 h-8 rounded-lg flex items-center justify-center text-text-muted hover:text-text transition-colors"
+              className="w-11 h-11 rounded-lg flex items-center justify-center text-text-muted hover:text-text transition-colors"
               title="กลับ"
               aria-label="กลับ"
             >

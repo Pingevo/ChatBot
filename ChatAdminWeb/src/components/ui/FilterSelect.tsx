@@ -1,94 +1,138 @@
-// FilterSelect — shared custom dropdown for filter bars
-// ⚡ ใช้ custom dropdown แทน native <select> เพื่อควบคุมทิศทาง — เปิดลงล่างเสมอ
-// ใช้: <FilterSelect value={x} onChange={setX} labelPrefix="สถานะ: " options={[{value:"all",label:"ทั้งหมด"},...]} />
+// Shared filter picker: anchored popover for pointer input, contained dialog for touch.
 "use client";
-import { useState, useRef, useEffect } from "react";
-import { ChevronDown, Check } from "lucide-react";
-
-interface FilterSelectOption {
-  value: string;
-  label: string;
-}
+import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import { ChevronDown, X } from "lucide-react";
+import { SelectOptions, type SelectOption } from "./SelectOptions";
 
 interface FilterSelectProps {
   value: string;
   onChange: (value: string) => void;
-  options: FilterSelectOption[];
-  /** Optional label prefix shown before the selected option (e.g. "สถานะ: ") */
+  options: SelectOption[];
   labelPrefix?: string;
   className?: string;
 }
 
-export function FilterSelect({
-  value,
-  onChange,
-  options,
-  labelPrefix,
-  className = "",
-}: FilterSelectProps) {
+export function _getFilterDialogTabStops(buttons: Iterable<HTMLButtonElement>): HTMLButtonElement[] {
+  return Array.from(buttons).filter((button) => !button.disabled && button.tabIndex >= 0);
+}
+
+export function FilterSelect({ value, onChange, options, labelPrefix, className = "" }: FilterSelectProps) {
   const [open, setOpen] = useState(false);
+  const [touchLayout, setTouchLayout] = useState(false);
+  const [host, setHost] = useState<HTMLElement | null>(null);
   const ref = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const listId = useId();
+  const selectedLabel = options.find((option) => option.value === value)?.label || value;
 
-  // close on outside click
+  const close = useCallback(() => {
+    setOpen(false);
+    requestAnimationFrame(() => triggerRef.current?.focus());
+  }, []);
+
+  const choose = useCallback((option: SelectOption) => {
+    onChange(option.value);
+    close();
+  }, [close, onChange]);
+
+  useEffect(() => {
+    setHost(document.body);
+    const media = window.matchMedia("(max-width: 767.98px), (pointer: coarse) and (max-width: 1279.98px)");
+    const update = () => setTouchLayout(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  useEffect(() => {
+    if (!open || touchLayout) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) close();
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    return () => document.removeEventListener("pointerdown", onPointerDown);
+  }, [open, touchLayout, close]);
+
   useEffect(() => {
     if (!open) return;
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
     };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [open, close]);
 
-  // close on Escape
-  useEffect(() => {
-    if (!open) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [open]);
-
-  const selectedLabel = options.find((o) => o.value === value)?.label || "";
+  const optionsList = (
+    <SelectOptions
+      id={listId}
+      label={labelPrefix ? labelPrefix.replace(/[:\s]+$/, "") : "ตัวเลือก"}
+      value={value}
+      options={options}
+      labelPrefix={labelPrefix}
+      onSelect={choose}
+      onEscape={close}
+    />
+  );
 
   return (
-    <div ref={ref} className={`relative ${className}`}>
+    <div ref={ref} className={`filter-select relative ${className}`}>
       <button
+        ref={triggerRef}
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}
         aria-expanded={open}
         aria-haspopup="listbox"
-        className={`h-8 px-2.5 rounded-lg border border-border bg-surface text-text text-xs focus:outline-none focus:ring-2 focus:ring-brand/40 cursor-pointer flex items-center gap-1.5 transition-colors hover:border-brand/40 ${open ? "border-brand/40" : ""}`}
+        aria-controls={listId}
+        className={`filter-select-trigger ${touchLayout ? "is-touch" : ""} ${open ? "is-open" : ""}`}
       >
-        <span className="truncate">
-          {labelPrefix ? `${labelPrefix}${selectedLabel}` : selectedLabel}
-        </span>
-        <ChevronDown size={11} className={`text-text-muted shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
+        <span className="truncate">{labelPrefix ? `${labelPrefix}${selectedLabel}` : selectedLabel}</span>
+        <ChevronDown size={14} className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
-      {open && (
-        <div
-          role="listbox"
-          className="absolute top-full left-0 mt-1 min-w-full bg-surface border border-border rounded-lg shadow-lg z-50 py-0.5 max-h-60 overflow-y-auto"
-        >
-          {options.map((opt) => {
-            const sel = opt.value === value;
-            return (
-              <button
-                key={opt.value}
-                role="option"
-                aria-selected={sel}
-                onClick={() => { onChange(opt.value); setOpen(false); }}
-                className={`w-full text-left px-2.5 py-1.5 text-xs flex items-center gap-1.5 hover:bg-surface-2 transition-colors ${sel ? "text-brand font-medium" : "text-text"}`}
-              >
-                {sel && <Check size={11} className="shrink-0" />}
-                <span className={`truncate ${sel ? "" : "pl-[15px]"}`}>
-                  {labelPrefix ? `${labelPrefix}${opt.label}` : opt.label}
-                </span>
+
+      {open && touchLayout && host ? createPortal(
+        <div className="filter-select-overlay" onPointerDown={(event) => event.target === event.currentTarget && close()}>
+          <section
+            className="filter-select-dialog"
+            role="dialog"
+            aria-modal="true"
+            aria-label={labelPrefix ? labelPrefix.replace(/[:\s]+$/, "") : "เลือกตัวกรอง"}
+            onKeyDown={(event) => {
+              if (event.key !== "Tab") return;
+              const focusable = _getFilterDialogTabStops(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not(:disabled)"));
+              const first = focusable[0];
+              const last = focusable[focusable.length - 1];
+              if (event.shiftKey && document.activeElement === first) {
+                event.preventDefault();
+                last?.focus();
+              } else if (!event.shiftKey && document.activeElement === last) {
+                event.preventDefault();
+                first?.focus();
+              }
+            }}
+          >
+            <header className="filter-select-dialog-header">
+              <div className="min-w-0">
+                <p className="filter-select-dialog-eyebrow">ตัวกรอง</p>
+                <h2 className="truncate">{labelPrefix ? labelPrefix.replace(/[:\s]+$/, "") : "เลือกตัวเลือก"}</h2>
+              </div>
+              <button type="button" className="filter-select-close" onClick={close} aria-label="ปิดตัวเลือก">
+                <X size={17} />
               </button>
-            );
-          })}
+            </header>
+            <div className="filter-select-options">{optionsList}</div>
+          </section>
+        </div>,
+        host
+      ) : open && (
+        <div className="filter-select-popover">
+          {optionsList}
         </div>
       )}
     </div>

@@ -11,8 +11,8 @@ import type { CSSProperties } from "react";
 
 const platformDots: Record<Platform, string> = {
   shopee: "#ee4d2d",
-  tiktok: "#111827",
-  lazada: "#1a2e8c",
+  tiktok: "var(--color-platform-tiktok-contrast)",
+  lazada: "var(--color-platform-lazada-contrast)",
 };
 
 export function ConnectedChannelsHeader({
@@ -213,8 +213,8 @@ export function StackedChannelBarChart({
     <>
       <ResponsiveContainer width="100%" height={200}>
         <BarChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-          <YAxis tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} allowDecimals={false} />
+          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 10, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} allowDecimals={false} />
           <Tooltip contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }} />
           {seriesKeys.map((k, i) => (
             <Bar key={k} dataKey={k} stackId="a" fill={colors[i % colors.length]} radius={i === seriesKeys.length - 1 ? [4, 4, 0, 0] : undefined} />
@@ -244,8 +244,8 @@ export function MultiLineChart({
     <>
       <ResponsiveContainer width="100%" height={200}>
         <LineChart data={data} margin={{ top: 8, right: 8, left: -20, bottom: 0 }}>
-          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
-          <YAxis tick={{ fontSize: 10, fill: "#98a2b3" }} axisLine={false} tickLine={false} />
+          <XAxis dataKey="date" tick={{ fontSize: 10, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} />
+          <YAxis tick={{ fontSize: 10, fill: "var(--color-chart-axis)" }} axisLine={false} tickLine={false} />
           <Tooltip formatter={(v) => [`${v ?? 0}${unit}`, ""]} contentStyle={{ borderRadius: 8, border: "1px solid #e3e6eb", fontSize: 12 }} />
           <Legend wrapperStyle={{ fontSize: 11 }} />
           {seriesKeys.map((k, i) => (

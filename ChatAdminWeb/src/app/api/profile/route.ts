@@ -4,6 +4,7 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { auth } from "@/backend/service/authService";
+import { isChatTextSize, type ChatTextSize } from "@/lib/chatTextSize";
 
 export async function PATCH(req: NextRequest) {
   const r = await requireAuth(req);
@@ -14,6 +15,7 @@ export async function PATCH(req: NextRequest) {
     channels_access?: string[];
     bubble_color?: string;
     theme_preference?: "light" | "dark";
+    chat_text_size?: unknown;
   }>(req).catch(() => null);
   if (!body) return error("invalid body", 400);
 
@@ -22,6 +24,7 @@ export async function PATCH(req: NextRequest) {
     channels_access?: string[];
     bubble_color?: string;
     theme_preference?: "light" | "dark";
+    chat_text_size?: ChatTextSize;
   } = {};
   if (typeof body.name === "string" && body.name.trim()) updates.name = body.name.trim();
   if (Array.isArray(body.channels_access)) updates.channels_access = body.channels_access;
@@ -39,6 +42,12 @@ export async function PATCH(req: NextRequest) {
       return error("invalid theme_preference", 400);
     }
     updates.theme_preference = body.theme_preference;
+  }
+  if (body.chat_text_size !== undefined) {
+    if (!isChatTextSize(body.chat_text_size)) {
+      return error("invalid chat_text_size", 400);
+    }
+    updates.chat_text_size = body.chat_text_size;
   }
 
   if (Object.keys(updates).length === 0) return error("no fields to update", 400);

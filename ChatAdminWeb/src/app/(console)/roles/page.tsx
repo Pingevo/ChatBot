@@ -1,6 +1,7 @@
 "use client";
 // หน้าจัดการ roles + permission matrix — dev only (hardcode ทั้งฝั่ง client และ API)
 // matrix ถูกเก็บใน system_configs.role_permissions — server cache 30s
+import { SelectField } from "@/components/ui/SelectField";
 import { useState, useEffect, useCallback } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -176,9 +177,11 @@ export default function RolesPage() {
                 </span>
               ))}
             </div>
-            <div className="flex gap-2 max-w-lg">
-              <Input value={newKey} onChange={(e) => setNewKey(e.target.value)} placeholder="key เช่น viewer" className="w-40 font-mono" />
-              <Input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="ชื่อแสดง (optional)" className="flex-1" />
+            <div className="flex max-w-lg flex-col gap-2 sm:flex-row sm:items-center">
+              <div className="grid min-w-0 flex-1 grid-cols-1 gap-2 sm:grid-cols-[10rem_minmax(0,1fr)]">
+                <Input value={newKey} onChange={(e) => setNewKey(e.target.value)} placeholder="key เช่น viewer" className="min-w-0 font-mono" />
+                <Input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="ชื่อแสดง (optional)" className="min-w-0" />
+              </div>
               <Button className="phone-mobile-add-hidden" variant="secondary" onClick={addRole}><UserPlus size={15} /> เพิ่ม</Button>
             </div>
             <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-warning-dark">
@@ -219,7 +222,7 @@ export default function RolesPage() {
                                   {role.key === "dev" ? (
                                     <span className={`text-xs font-semibold ${LEVEL_TONE.edit}`}>edit</span>
                                   ) : (
-                                    <select
+                                    <SelectField
                                       value={level}
                                       onChange={(event) => setLevel(page.key, role.key, event.target.value as AccessLevel)}
                                       className={`w-full rounded-md border border-border bg-surface px-2 py-1.5 text-xs font-medium ${LEVEL_TONE[level]}`}
@@ -227,7 +230,7 @@ export default function RolesPage() {
                                       <option value="none">none</option>
                                       <option value="read">read</option>
                                       <option value="edit">edit</option>
-                                    </select>
+                                    </SelectField>
                                   )}
                                 </label>
                               );
@@ -241,7 +244,7 @@ export default function RolesPage() {
               })}
             </div>
             <div className="hidden md:block">
-            <MobileDataTable>
+            <MobileDataTable className="max-w-full overflow-x-auto">
             <table className="w-full min-w-[560px] text-sm">
               <thead>
                 <tr className="border-b border-border text-left">
@@ -307,7 +310,7 @@ function GroupRows({
                 {r.key === "dev" ? (
                   <span className={`text-xs font-medium ${LEVEL_TONE.edit}`}>edit</span>
                 ) : (
-                  <select
+                  <SelectField
                     value={lvl}
                     onChange={(e) => setLevel(p.key, r.key, e.target.value as AccessLevel)}
                     className={`rounded-md border border-border bg-surface px-1.5 py-1 text-xs font-medium ${LEVEL_TONE[lvl]}`}
@@ -315,7 +318,7 @@ function GroupRows({
                     <option value="none">none</option>
                     <option value="read">read</option>
                     <option value="edit">edit</option>
-                  </select>
+                  </SelectField>
                 )}
               </td>
             );

@@ -92,6 +92,7 @@ export function DashboardCompanion() {
         src="/mascot/cat-girl-pixel.png"
         width={96}
         height={96}
+        unoptimized
         alt=""
         className={`absolute inset-0 h-full w-full object-contain [image-rendering:pixelated] transition-opacity duration-300 ${sceneReady ? "opacity-0" : "opacity-100"}`}
       />

@@ -2,8 +2,10 @@
 // ⚡ ใช้ position: fixed + getBoundingClientRect เพื่อไม่ถูกตัดจาก overflow ของ modal
 // ใช้: <ModalSelect value={x} onChange={setX} options={[{value:"all",label:"ทั้งหมด"},...]} />
 "use client";
-import { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { ChevronDown, Check } from "lucide-react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, useId } from "react";
+import { ChevronDown } from "lucide-react";
+import { createPortal } from "react-dom";
+import { SelectOptions } from "./SelectOptions";
 
 interface ModalSelectOption {
   value: string;
@@ -34,66 +36,77 @@ export function ModalSelect({
   const [open, setOpen] = useState(false);
   const btnRef = useRef<HTMLButtonElement>(null);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
+  const [portalHost, setPortalHost] = useState<HTMLElement | null>(null);
+  const generatedId = useId();
+  const selectId = id || generatedId;
 
-  // calculate menu position relative to viewport (fixed positioning)
-  useLayoutEffect(() => {
-    if (!open || !btnRef.current) return;
+  useEffect(() => setPortalHost(document.body), []);
+
+  const close = useCallback(() => {
+    setOpen(false);
+    requestAnimationFrame(() => btnRef.current?.focus());
+  }, []);
+
+  const updateMenuPosition = useCallback(() => {
+    if (!btnRef.current) return;
     const rect = btnRef.current.getBoundingClientRect();
+    const margin = 8;
+    const width = Math.min(Math.max(rect.width, 176), window.innerWidth - margin * 2);
+    const left = Math.min(Math.max(margin, rect.left), window.innerWidth - width - margin);
+    const below = Math.max(0, window.innerHeight - rect.bottom - margin);
+    const above = Math.max(0, rect.top - margin);
+    const openAbove = below < Math.min(240, above);
+    const maxHeight = Math.min(280, openAbove ? above : below);
     setMenuStyle({
       position: "fixed",
-      top: rect.bottom + 4,
-      left: rect.left,
-      width: rect.width,
+      top: openAbove ? Math.max(margin, rect.top - maxHeight - 4) : rect.bottom + 4,
+      left,
+      width,
+      maxHeight,
       zIndex: 9999,
     });
-  }, [open]);
+  }, []);
+
+  useLayoutEffect(() => {
+    if (open) updateMenuPosition();
+  }, [open, updateMenuPosition]);
 
   // close on outside click
   useEffect(() => {
     if (!open) return;
-    const handler = (e: MouseEvent) => {
+    const handler = (e: PointerEvent) => {
       const target = e.target as Node;
       if (btnRef.current?.contains(target)) return;
       // check if click is inside the menu (which is fixed, not a child of btnRef)
-      const menu = document.getElementById(`${id || "modal-select"}-menu`);
+      const menu = document.getElementById(`${selectId}-menu`);
       if (menu?.contains(target)) return;
-      setOpen(false);
+      close();
     };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open, id]);
+    document.addEventListener("pointerdown", handler);
+    return () => document.removeEventListener("pointerdown", handler);
+  }, [open, selectId, close]);
 
   // close on Escape
   useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        close();
+      }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [open]);
+  }, [open, close]);
 
-  // recalc position on scroll/resize
   useEffect(() => {
-    if (!open || !btnRef.current) return;
-    const recalc = () => {
-      if (!btnRef.current) return;
-      const rect = btnRef.current.getBoundingClientRect();
-      setMenuStyle({
-        position: "fixed",
-        top: rect.bottom + 4,
-        left: rect.left,
-        width: rect.width,
-        zIndex: 9999,
-      });
-    };
-    window.addEventListener("scroll", recalc, true);
-    window.addEventListener("resize", recalc);
+    if (!open) return;
+    window.addEventListener("scroll", updateMenuPosition, true);
+    window.addEventListener("resize", updateMenuPosition);
     return () => {
-      window.removeEventListener("scroll", recalc, true);
-      window.removeEventListener("resize", recalc);
+      window.removeEventListener("scroll", updateMenuPosition, true);
+      window.removeEventListener("resize", updateMenuPosition);
     };
-  }, [open]);
+  }, [open, updateMenuPosition]);
 
   const selectedLabel = options.find((o) => o.value === value)?.label || "";
 
@@ -101,41 +114,40 @@ export function ModalSelect({
     <>
       <button
         ref={btnRef}
-        id={id}
+        id={selectId}
         type="button"
         disabled={disabled}
-        onClick={() => !disabled && setOpen(!open)}
+        onClick={() => !disabled && setOpen((current) => !current)}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            setOpen(true);
+          }
+        }}
         aria-expanded={open}
         aria-haspopup="listbox"
-        className={`${fullWidth ? "w-full" : ""} mt-1 h-9 rounded-lg border border-border bg-surface-2 px-3 text-sm focus:outline-none focus:ring-1 focus:ring-brand/40 flex items-center justify-between gap-2 transition-colors disabled:opacity-60 ${open ? "border-brand/40" : ""} ${className}`}
+        aria-controls={`${selectId}-options`}
+        className={`${fullWidth ? "w-full" : ""} mt-1 filter-select-trigger ${open ? "is-open" : ""} ${className}`}
       >
         <span className="truncate">{selectedLabel}</span>
         <ChevronDown size={14} className={`text-text-muted shrink-0 transition-transform ${open ? "rotate-180" : ""}`} />
       </button>
-      {open && (
+      {open && portalHost && createPortal(
         <div
-          id={`${id || "modal-select"}-menu`}
-          role="listbox"
+          id={`${selectId}-menu`}
           style={menuStyle}
-          className="bg-surface border border-border rounded-lg shadow-lg py-0.5 max-h-60 overflow-y-auto"
+          className="filter-select-popover"
         >
-          {options.map((opt) => {
-            const sel = opt.value === value;
-            return (
-              <button
-                key={opt.value}
-                role="option"
-                aria-selected={sel}
-                disabled={opt.disabled}
-                onClick={() => { if (!opt.disabled) { onChange(opt.value); setOpen(false); } }}
-                className={`w-full text-left px-3 py-1.5 text-sm flex items-center gap-2 transition-colors ${sel ? "text-brand font-medium" : "text-text"} ${opt.disabled ? "opacity-40 cursor-not-allowed" : "hover:bg-surface-2"}`}
-              >
-                {sel && <Check size={14} className="shrink-0" />}
-                <span className={`truncate ${sel ? "" : "pl-[18px]"}`}>{opt.label}</span>
-              </button>
-            );
-          })}
-        </div>
+          <SelectOptions
+            id={`${selectId}-options`}
+            label="ตัวเลือก"
+            value={value}
+            options={options}
+            onSelect={(option) => { onChange(option.value); close(); }}
+            onEscape={close}
+          />
+        </div>,
+        portalHost
       )}
     </>
   );

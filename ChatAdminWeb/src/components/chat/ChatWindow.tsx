@@ -9,7 +9,7 @@ import { Button } from "@/components/ui/Button";
 import type { Conversation, ChatMessage, Topic } from "@/lib/types";
 import { MessageContent } from "./MessageContent";
 import { DateSeparatedList } from "./DateSeparator";
-import { adminBubbleColor, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
+import { adminBubbleColor, adminBubbleStyle, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
 import { useAuth } from "@/lib/authStore";
 
 interface Props {
@@ -90,7 +90,7 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
     : isBot
     ? { backgroundColor: BOT_COLOR }
     : isAdmin
-    ? { backgroundColor: adminColor }
+    ? adminBubbleStyle(adminColor)
     : undefined;
 
   const avatarBg = "";
@@ -99,7 +99,7 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
     : isBot
     ? { backgroundColor: BOT_COLOR }
     : isAdmin
-    ? { backgroundColor: adminColor }
+    ? adminBubbleStyle(adminColor)
     : undefined;
 
   return (
@@ -116,7 +116,7 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
             {isZaapi ? "Zaapi" : isBot ? "Bot" : isAdmin ? "Admin" : ""}
           </div>
         )}
-        <div className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleCls}`} style={bubbleStyle}>
+        <div className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleCls} ${isAdmin ? "admin-bubble-contrast" : ""}`} style={bubbleStyle}>
           <MessageContent msg={msg} variant={isUser ? "user" : "out"} />
         </div>
 
@@ -130,7 +130,7 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
         </div>
       </div>
       {!isUser && !isSystem && (
-        <div className={`mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarBg}`} style={avatarStyle}>
+        <div className={`mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarBg} ${isAdmin ? "admin-bubble-contrast" : ""}`} style={avatarStyle}>
           {isZaapi ? <Zap size={16} className="text-white" /> : isBot ? <Bot size={16} className="text-white" /> : <Headset size={16} className="text-white" />}
         </div>
       )}

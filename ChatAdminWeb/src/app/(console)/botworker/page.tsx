@@ -9,6 +9,7 @@
 //   - admin reply เก็บใน botworker_messages (ไม่ส่ง Shopee ไม่เขียน messages_shp)
 //   - แสดง 4 สี: user (เทา) + zaapi (เขียว) + admin (สี profile) + bot เรา (ฟ้า)
 //   - ข้อความ bot มาจาก shadow_replies (ไม่ใช่ messages_shp)
+import { SelectField } from "@/components/ui/SelectField";
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { ArrowLeft, Info, X, PanelRightClose, PanelRightOpen, Bot, AlertCircle, Headset, RotateCcw, Lock, UserCog, ChevronDown } from "lucide-react";
 import { ChatList } from "@/components/chat/ChatList";
@@ -29,7 +30,7 @@ import { chatService } from "@/lib/services";
 import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
 import { useAuth } from "@/lib/authStore";
-import { adminBubbleColor, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
+import { adminBubbleColor, adminBubbleTextColor, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
 import type { Conversation, ChatMessage, CloseHistoryRecord, AdminUser, ProblemCategory } from "@/lib/types";
 
 type MobileView = "list" | "chat" | "info";
@@ -413,9 +414,9 @@ export default function BotWorkerPage() {
   }, [acceptingChats]);
 
   return (
-    <div className="h-full flex">
+    <div className="relative h-full min-w-0 flex overflow-hidden">
       {/* ── Panel ซ้าย: ChatList (เหมือน tickets) ── */}
-      <div className={`${mobileView === "list" ? "flex" : "hidden"} md:flex h-full flex-col w-full md:w-80 shrink-0 border-r border-border`}>
+      <div className={`${mobileView === "list" ? "flex" : "hidden"} 2xl:flex h-full min-w-0 flex-col w-full 2xl:w-80 shrink-0 border-r border-border`}>
         <ChatList
           conversations={allConversations}
           selectedId={selectedId}
@@ -436,7 +437,7 @@ export default function BotWorkerPage() {
       </div>
 
       {/* ── Panel กลาง: BotWorkerChatPanel (3 สี ไม่มี composer) ── */}
-      <div className={`${mobileView === "chat" ? "flex" : "hidden"} md:flex flex-1 h-full min-w-0 relative`}>
+      <div className={`${mobileView === "chat" ? "flex" : "hidden"} 2xl:flex flex-1 h-full min-w-0 relative`}>
         <BotWorkerChatPanel
           conversation={selected}
           messages={messages}
@@ -458,12 +459,12 @@ export default function BotWorkerPage() {
       {selected && (
         <>
           <div
-            className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "md:hidden" : "md:flex"} h-full w-full md:w-auto transition-[width] duration-200 ease-in-out`}
+            className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "2xl:hidden" : "2xl:flex"} h-full w-full 2xl:w-auto transition-[width] duration-200 ease-in-out`}
           >
-            <div className="relative h-full flex flex-col w-full md:w-[340px] border-l border-border bg-surface">
+            <div className="relative h-full flex flex-col w-full 2xl:w-[340px] border-l border-border bg-surface">
               <button
                 onClick={() => setMobileView("chat")}
-                className="md:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+                className="2xl:hidden absolute top-3 left-3 z-10 w-11 h-11 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
                 title="กลับ"
                 aria-label="กลับ"
               >
@@ -474,25 +475,25 @@ export default function BotWorkerPage() {
               <div className="flex border-b border-border shrink-0">
                 <button
                   onClick={() => setRightTab("info")}
-                  className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${rightTab === "info" ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"}`}
+                  className={`min-h-11 2xl:min-h-0 flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${rightTab === "info" ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"}`}
                 >
                   ข้อมูล
                 </button>
                 <button
                   onClick={() => setRightTab("chatlog")}
-                  className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${rightTab === "chatlog" ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"}`}
+                  className={`min-h-11 2xl:min-h-0 flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${rightTab === "chatlog" ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"}`}
                 >
                   ประวัติแชท
                 </button>
                 <button
                   onClick={() => setRightTab("products")}
-                  className={`flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${rightTab === "products" ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"}`}
+                  className={`min-h-11 2xl:min-h-0 flex-1 px-3 py-2.5 text-xs font-medium transition-colors ${rightTab === "products" ? "text-brand border-b-2 border-brand" : "text-text-muted hover:text-text"}`}
                 >
                   สินค้า
                 </button>
                 <button
                   onClick={() => setRightCollapsed(true)}
-                  className="px-2 text-text-muted hover:text-text transition-colors shrink-0"
+                  className="hidden 2xl:block px-2 text-text-muted hover:text-text transition-colors shrink-0"
                   title="ซ่อน panel"
                   aria-label="ซ่อน panel"
                 >
@@ -528,7 +529,7 @@ export default function BotWorkerPage() {
           {rightCollapsed && (
             <button
               onClick={() => setRightCollapsed(false)}
-              className="hidden md:flex absolute right-0 top-1/2 -translate-y-1/2 z-10 w-6 h-12 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors"
+              className="hidden 2xl:flex absolute right-0 top-1/2 -translate-y-1/2 z-10 w-6 h-12 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors"
               title="แสดง panel"
               aria-label="แสดง panel"
             >
@@ -616,7 +617,7 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
             onClick={onBack}
             title="กลับ"
             aria-label="กลับ"
-            className="md:hidden absolute top-3 left-3 w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center text-text hover:bg-surface-2 transition-colors"
+            className="2xl:hidden absolute top-3 left-3 w-11 h-11 rounded-lg border border-border bg-surface flex items-center justify-center text-text hover:bg-surface-2 transition-colors"
           >
             <ArrowLeft size={17} />
           </button>
@@ -633,15 +634,15 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
   return (
     <div className="flex-1 flex flex-col h-full min-w-0">
       {/* ── Header (topbar) — มือถือแยก 2 แถว (nav+identity / actions) desktop แถวเดียว ── */}
-      <div className="px-3 md:px-4 py-2.5 border-b border-border bg-surface shrink-0">
-        <div className="flex flex-wrap md:flex-nowrap items-center gap-x-2 md:gap-x-3 gap-y-2">
+      <div className="px-3 2xl:px-4 py-2.5 border-b border-border bg-surface shrink-0">
+        <div className="flex flex-wrap 2xl:flex-nowrap items-center gap-x-2 2xl:gap-x-3 gap-y-2">
           {/* Mobile back — เข้า flow header ไม่ทับ avatar */}
           {onBack && (
             <button
               onClick={onBack}
               title="กลับ"
               aria-label="กลับ"
-              className="md:hidden -ml-1 w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text hover:bg-surface-2 transition-colors"
+              className="2xl:hidden -ml-1 w-11 h-11 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text hover:bg-surface-2 transition-colors"
             >
               <ArrowLeft size={17} />
             </button>
@@ -661,14 +662,14 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
               onClick={onInfo}
               title="รายละเอียด"
               aria-label="รายละเอียด"
-              className="md:hidden w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text-muted hover:bg-surface-2 transition-colors"
+              className="2xl:hidden w-11 h-11 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text-muted hover:bg-surface-2 transition-colors"
             >
               <Info size={17} />
             </button>
           )}
 
           {/* Controls — มือถือขึ้นแถวใหม่เต็มกว้าง (basis-full) / desktop ต่อท้ายแถวเดียว */}
-          <div className="flex items-center gap-2 md:gap-3 basis-full md:basis-auto shrink-0">
+          <div className="flex items-center gap-2 2xl:gap-3 basis-full 2xl:basis-auto shrink-0">
             {/* Admin responsible — แสดงว่าใครรับผิดชอบ (หรือ "บอท") */}
             <div className="flex items-center gap-1.5 text-xs text-text-muted shrink-0">
               <Headset size={12} />
@@ -687,19 +688,19 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
             )}
 
             {conversation.status === "bot" && onHandoff && (
-              <Button size="sm" variant="outline" onClick={onHandoff} className="shrink-0 ml-auto md:ml-0">
+              <Button size="sm" variant="outline" onClick={onHandoff} className="shrink-0 ml-auto 2xl:ml-0">
                 <Headset size={14} /> รับเรื่อง
               </Button>
             )}
             {conversation.status === "closed" ? (
               onReopen && (
-                <Button size="sm" variant="outline" onClick={onReopen} className="shrink-0 ml-auto md:ml-0">
+                <Button size="sm" variant="outline" onClick={onReopen} className="shrink-0 ml-auto 2xl:ml-0">
                   <RotateCcw size={14} /> เปิดแชทใหม่
                 </Button>
               )
             ) : (
               onResolve && (
-                <Button size="sm" onClick={onResolve} className="shrink-0 ml-auto md:ml-0">
+                <Button size="sm" onClick={onResolve} className="shrink-0 ml-auto 2xl:ml-0">
                   <Lock size={14} /> ปิดสนทนา
                 </Button>
               )
@@ -735,9 +736,9 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
 
             {/* Safety notice */}
             <div className="flex items-start gap-2 rounded-lg bg-success/5 border border-success/15 p-3 mt-4">
-              <AlertCircle size={14} className="text-success-soft flex-shrink-0 mt-0.5" />
+              <AlertCircle size={14} className="text-success-dark flex-shrink-0 mt-0.5" />
               <div className="text-[11px] text-text-muted leading-relaxed">
-                <span className="text-success-soft font-medium">ปลอดภัย:</span> คำตอบ bot (ฟ้า) เก็บใน shadow_replies
+                <span className="text-success-dark font-medium">ปลอดภัย:</span> คำตอบ bot (ฟ้า) เก็บใน shadow_replies
                 ไม่ส่งถึงลูกค้า ไม่ยิง Shopee API — zaapi (เขียว) คือข้อความจริงที่ sellcenter dump มา
               </div>
             </div>
@@ -885,7 +886,7 @@ function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewA
           <ReviewBubbleList msg={msg} canReview={!!canReview} onAction={onReviewAction} toChatMsg={toChatMsg} bubbleClass={bubbleClass} />
         ) : (
           segmentMsgs.map((segMsg, i) => (
-            <div key={i} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleClass}`} style={isZaapi ? { backgroundColor: ZAAPI_COLOR } : isBot ? { backgroundColor: BOT_COLOR } : isAdmin ? { backgroundColor: adminColor } : undefined}>
+            <div key={i} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleClass} ${isAdmin ? "admin-bubble-contrast" : ""}`} style={isZaapi ? { backgroundColor: ZAAPI_COLOR } : isBot ? { backgroundColor: BOT_COLOR } : isAdmin ? { backgroundColor: adminColor, color: adminBubbleTextColor(adminColor) } : undefined}>
               <MessageContent msg={toChatMsg(segMsg)} variant={isUser ? "user" : "out"} />
             </div>
           ))
@@ -906,7 +907,7 @@ function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewA
         </div>
       </div>
       {!isUser && (
-        <div className={`mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarClass}`} style={isZaapi ? { backgroundColor: ZAAPI_COLOR } : isBot ? { backgroundColor: BOT_COLOR } : isAdmin ? { backgroundColor: adminColor } : undefined}>
+        <div className={`mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarClass} ${isAdmin ? "admin-bubble-contrast" : ""}`} style={isZaapi ? { backgroundColor: ZAAPI_COLOR } : isBot ? { backgroundColor: BOT_COLOR } : isAdmin ? { backgroundColor: adminColor, color: adminBubbleTextColor(adminColor) } : undefined}>
           {isZaapi ? <Zap size={16} className="text-white" /> : isAdmin ? <Headset size={16} className="text-white" /> : <BotIcon size={16} className="text-white" />}
         </div>
       )}
@@ -1119,7 +1120,7 @@ function ReviewBubbleList({
                   >ลองส่งใหม่</button>
                 )}
                 {products.length > 0 && (
-                  <select
+                  <SelectField
                     disabled={!sendable || busy}
                     defaultValue=""
                     onChange={(e) => { if (e.target.value) act(b.bubble_id, "send_card", { card_item_id: e.target.value }); e.target.value = ""; }}
@@ -1131,7 +1132,7 @@ function ReviewBubbleList({
                         {p.name} ({p.item_id}){p.verifiable ? "" : " — ยืนยัน shop ไม่ได้"}
                       </option>
                     ))}
-                  </select>
+                  </SelectField>
                 )}
               </div>
             )}

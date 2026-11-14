@@ -4,6 +4,7 @@ import { ReactNode, ComponentType } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { MobileAddActions, type MobileAddAction } from "@/components/mobile/MobileAddActions";
+import { getPageIdentityKind, PageIdentityMark } from "@/components/ui/PageIdentityMark";
 import {
   ArrowLeft, BarChart3, BookOpen, Bot, ClipboardCheck, ContactIcon, Gauge,
   GitBranch, HelpCircle, Inbox, KeyRound, LayoutDashboard, MessageSquare,
@@ -43,11 +44,13 @@ export function PageShell({
   const pathname = usePathname() ?? "/";
   const { goBack } = useMobilePageNavigation();
   const MobileIcon = Icon ?? getMobilePageIcon(pathname);
+  const identityKind = getPageIdentityKind(pathname);
   const canGoBack = pathname !== "/dashboard" && pathname !== "/login";
 
   return (
-    <div className={`h-full min-w-0 overflow-y-auto phone-page-shell ${stickyMobileSearch ? "phone-sticky-search-page" : ""} ${mobileAddActions?.length ? "phone-has-mobile-add-actions" : ""}`}>
+    <div data-ui="page-frame" className={`h-full min-w-0 overflow-y-auto phone-page-shell ${stickyMobileSearch ? "phone-sticky-search-page" : ""} ${mobileAddActions?.length ? "phone-has-mobile-add-actions" : ""}`}>
       <div
+        data-ui="page-header"
         className={`phone-page-header px-4 sm:px-6 py-4 sm:py-5 border-b border-border bg-surface/95 backdrop-blur-sm ${
           filterBarBelow ? "" : "sticky top-0 z-10"
         }`}
@@ -65,20 +68,14 @@ export function PageShell({
                 <ArrowLeft size={18} />
               </button>
             )}
-            {Icon && (
-              <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-accent-soft flex items-center justify-center shrink-0">
-                <Icon size={18} className="text-accent sm:hidden" />
-                <Icon size={20} className="text-accent hidden sm:block" />
-              </div>
-            )}
-            {!Icon && (
-              <div className="phone-page-fallback-icon md:hidden">
-                <MobileIcon size={18} />
-              </div>
-            )}
+            <PageIdentityMark
+              kind={identityKind}
+              icon={Icon ?? MobileIcon}
+              className="w-9 h-9 sm:w-10 sm:h-10 shrink-0"
+            />
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
-                <h1 className="phone-page-title text-base sm:text-lg font-bold text-text tracking-tight truncate">{title}</h1>
+                <h1 className="phone-page-title text-base sm:text-lg font-bold text-text tracking-tight">{title}</h1>
                 {helpHref && (
                   <Link
                     href={helpHref}
@@ -89,7 +86,7 @@ export function PageShell({
                   </Link>
                 )}
               </div>
-              {subtitle && <p className="phone-page-subtitle text-xs text-text-muted mt-0.5 truncate">{subtitle}</p>}
+              {subtitle && <p className="phone-page-subtitle text-xs text-text-muted mt-0.5">{subtitle}</p>}
             </div>
           </div>
           {actions && (
@@ -111,7 +108,7 @@ export function PageShell({
           {filterBar}
         </div>
       )}
-      <div className={`phone-page-content min-w-0 ${contentClassName}`}>{children}</div>
+      <div data-ui="page-content" className={`phone-page-content min-w-0 ${contentClassName}`}>{children}</div>
     </div>
   );
 }

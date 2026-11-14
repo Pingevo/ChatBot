@@ -1,4 +1,5 @@
 "use client";
+import { SelectField } from "@/components/ui/SelectField";
 import { useState, useEffect, useCallback, Fragment, useMemo } from "react";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
@@ -114,8 +115,8 @@ const modeDescriptions: Record<AssignmentMode, string> = {
 
 const platforms: { value: Platform; label: string; color: string }[] = [
   { value: "shopee", label: "Shopee", color: "#ee4d2d" },
-  { value: "tiktok", label: "TikTok", color: "#111827" },
-  { value: "lazada", label: "Lazada", color: "#1a2e8c" },
+  { value: "tiktok", label: "TikTok", color: "var(--color-platform-tiktok-contrast)" },
+  { value: "lazada", label: "Lazada", color: "var(--color-platform-lazada-contrast)" },
 ];
 
 type Tab = "overview" | "shop-team" | "platform-team" | "calendar";
@@ -465,7 +466,7 @@ export default function TeamPage() {
       )}
 
       {/* Tabs — segmented control */}
-      <div role="tablist" aria-label="มุมมองทีม" className="grid grid-cols-4 gap-1 rounded-xl border border-border bg-surface-2/70 p-1">
+      <div role="tablist" aria-label="มุมมองทีม" className="grid grid-cols-2 gap-1 rounded-xl border border-border bg-surface-2/70 p-1 xl:grid-cols-4">
         <TabButton active={tab === "overview"} onClick={() => setTab("overview")} icon={Activity} label="ภาพรวม" desc="สถานะ & งานค้าง" />
         <TabButton active={tab === "shop-team"} onClick={() => setTab("shop-team")} icon={Store} label="จัดทีมร้าน" desc="แยกตามร้าน" />
         <TabButton active={tab === "platform-team"} onClick={() => setTab("platform-team")} icon={Globe} label="จัดทีมแพลตฟอร์ม" desc="แยกตามแพลตฟอร์ม" />
@@ -505,9 +506,10 @@ export default function TeamPage() {
           )}
 
           {/* Summary cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-3">
-            <SummaryCard icon={Users} label="Agent ทั้งหมด" value={data.total_agents} sub={`${data.active_agents} ทำงาน`} />
+          <div className="grid grid-cols-2 xl:grid-cols-4 rounded-xl border border-border bg-surface overflow-hidden">
+            <SummaryCard className="border-r border-b border-border/60 xl:border-b-0" icon={Users} label="Agent ทั้งหมด" value={data.total_agents} sub={`${data.active_agents} ทำงาน`} />
             <SummaryCard
+              className="border-b border-border/60 xl:border-b-0 xl:border-r"
               icon={MessageSquare}
               label="งานเปิดอยู่"
               value={data.total_open_conversations}
@@ -515,6 +517,7 @@ export default function TeamPage() {
               tone={data.unassigned > 0 ? "coral" : "brand"}
             />
             <SummaryCard
+              className="border-r border-border/60 xl:border-r"
               icon={PlayCircle}
               label="กำลังรับแชท"
               value={acceptingCount}
@@ -531,15 +534,15 @@ export default function TeamPage() {
 
           {/* Assignment mode config */}
           {editable && (
-            <Card className="p-4">
-              <div className="flex items-center gap-2 mb-3">
+            <section className="space-y-3">
+              <div className="flex items-center gap-2">
                 <Settings size={14} className="text-text-muted" />
                 <h2 className="text-sm font-semibold text-text">โหมดการมอบหมายงาน (Round-Robin)</h2>
               </div>
-              <p className="text-xs text-text-muted mb-3">
+              <p className="text-xs text-text-muted">
                 เลือกวิธีแบ่งงาน — แล้วไปที่แท็บ "จัดทีมร้าน" หรือ "จัดทีมแพลตฟอร์ม" เพื่อกำหนด agent
               </p>
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-2">
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 xl:grid-cols-3">
                 {(Object.keys(modeLabels) as AssignmentMode[]).map((mode) => (
                   <button
                     key={mode}
@@ -564,10 +567,10 @@ export default function TeamPage() {
                   </button>
                 ))}
               </div>
-            </Card>
+            </section>
           )}
 
-          {/* Agent list — card list บน mobile/tablet, table บน lg+ */}
+          {/* Agent list — card list on tablet and below, table on wide laptops */}
           <Card className="overflow-hidden">
             <div className="px-3 sm:px-4 py-3 border-b border-border flex flex-wrap items-center gap-x-2 gap-y-2">
               <Users size={14} className="text-text-muted" />
@@ -603,8 +606,8 @@ export default function TeamPage() {
               />
             ) : (
               <>
-                {/* Mobile / tablet — card list (<lg) */}
-                <div className="lg:hidden space-y-2.5">
+                {/* Mobile / tablet — card list (<xl) */}
+                <div className="xl:hidden space-y-2.5">
                   {visibleAgents.map((a, i) => {
                     const st = statusOf(a.admin_id);
                     const agentShops = agentShopsOf(a);
@@ -645,8 +648,8 @@ export default function TeamPage() {
                   })}
                 </div>
 
-                {/* Desktop — table (lg+) */}
-                <div className="hidden lg:block overflow-x-auto">
+                {/* Wide laptop — table (xl+) */}
+                <div className="hidden xl:block overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="bg-surface-2/50 text-[10px] uppercase tracking-wide text-text-subtle">
@@ -792,11 +795,11 @@ export default function TeamPage() {
             <EmptyState icon={Store} title="ไม่มีร้านค้า" description="ยังไม่มีร้านในระบบ" />
           ) : (
             <>
-              <div className="grid grid-cols-1 lg:grid-cols-[300px_minmax(0,1fr)] gap-4 items-start">
+              <div className="grid grid-cols-1 xl:grid-cols-[300px_minmax(0,1fr)] gap-4 items-start">
                 {/* คอลัมน์ซ้าย — platform filter + ตัวเลือกร้าน */}
                 <div className="space-y-3 min-w-0">
                   {/* Platform filter chips */}
-                  <div className="phone-chip-row flex lg:flex-wrap items-center gap-1.5 overflow-x-auto pb-0.5">
+                  <div className="phone-chip-row flex xl:flex-wrap items-center gap-1.5 overflow-x-auto pb-0.5">
                     <FilterChip
                       active={shopPlatformFilter === "all"}
                       onClick={() => setShopPlatformFilter("all")}
@@ -816,10 +819,10 @@ export default function TeamPage() {
                   </div>
 
                   {/* Mobile/tablet — shop dropdown */}
-                  <Card className="p-3 lg:hidden">
+                  <Card className="p-3 xl:hidden">
                     <label className="text-[11px] font-medium text-text-muted">ร้าน</label>
                     <div className="relative mt-1.5">
-                      <select
+                      <SelectField
                         value={selectedShopId}
                         onChange={(e) => setSelectedShopId(e.target.value)}
                         className="w-full appearance-none bg-surface-2 border border-border rounded-lg px-3 py-2 pr-9 text-sm text-text focus:outline-none focus:border-brand cursor-pointer"
@@ -832,13 +835,13 @@ export default function TeamPage() {
                             </option>
                           );
                         })}
-                      </select>
+                      </SelectField>
                       <ChevronDown size={14} className="absolute right-3 top-1/2 -translate-y-1/2 text-text-muted pointer-events-none" />
                     </div>
                   </Card>
 
                   {/* Desktop — รายการร้าน grouped by platform */}
-                  <Card className="hidden lg:block overflow-hidden">
+                  <Card className="hidden xl:block overflow-hidden">
                     <div className="px-3 py-2.5 border-b border-border bg-surface-2/50 flex items-center justify-between">
                       <span className="text-xs font-semibold text-text">ร้านค้า</span>
                       <span className="text-[11px] text-text-subtle">{filteredShops.length} ร้าน</span>
@@ -1015,8 +1018,8 @@ export default function TeamPage() {
                 })}
               </div>
 
-              {/* Desktop — matrix view: agents × platforms (lg+) */}
-              <Card className="hidden lg:block overflow-hidden">
+              {/* Wide laptop — matrix view: agents × platforms (xl+) */}
+              <Card className="hidden xl:block overflow-hidden">
                 <div className="px-4 py-3 border-b border-border flex items-center gap-2">
                   <LayoutGrid size={14} className="text-text-muted" />
                   <h3 className="text-sm font-semibold text-text">เมทริกซ์ทีม — agent × แพลตฟอร์ม</h3>
@@ -1087,8 +1090,8 @@ export default function TeamPage() {
                 )}
               </Card>
 
-              {/* Mobile/tablet — agent list ของแพลตฟอร์มที่เลือก (<lg) */}
-              <Card className="lg:hidden overflow-hidden">
+              {/* Mobile/tablet — agent list ของแพลตฟอร์มที่เลือก (<xl) */}
+              <Card className="xl:hidden overflow-hidden">
                 <div className="phone-chip-row flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2/50 overflow-x-auto">
                   <SubFilterTabs
                     value={platformFilter}
@@ -1173,7 +1176,7 @@ function TabButton({ active, onClick, icon: Icon, label, desc }: { active: boole
         <Icon size={14} className={active ? "text-brand" : "text-text-subtle"} />
         {label}
       </span>
-      {desc && <span className="hidden lg:block text-[10px] font-normal text-text-subtle">{desc}</span>}
+      {desc && <span className="hidden xl:block text-[10px] font-normal text-text-subtle">{desc}</span>}
     </button>
   );
 }
@@ -1421,6 +1424,7 @@ function SubFilterTabs({
 }
 
 function SummaryCard({
+  className = "",
   icon: Icon,
   label,
   value,
@@ -1428,6 +1432,7 @@ function SummaryCard({
   sub,
   tone = "neutral",
 }: {
+  className?: string;
   icon: typeof Users;
   label: string;
   value?: number;
@@ -1442,7 +1447,7 @@ function SummaryCard({
       ? "bg-vibrant-coral-soft text-vibrant-coral"
       : "bg-surface-2 text-text-muted";
   return (
-    <Card className="p-3 sm:p-3.5">
+    <div className={`p-3 sm:p-3.5 ${className}`}>
       <div className="flex items-center gap-2 mb-2">
         <span className={`w-6 h-6 rounded-md flex items-center justify-center shrink-0 ${iconTone}`}>
           <Icon size={13} />
@@ -1453,7 +1458,7 @@ function SummaryCard({
         {valueText !== undefined ? valueText : value ?? 0}
       </div>
       {sub && <div className="text-[10px] sm:text-[11px] text-text-subtle mt-0.5 truncate" title={sub}>{sub}</div>}
-    </Card>
+    </div>
   );
 }
 

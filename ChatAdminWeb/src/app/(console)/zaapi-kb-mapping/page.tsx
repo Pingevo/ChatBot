@@ -1,4 +1,5 @@
 "use client";
+import { SelectField } from "@/components/ui/SelectField";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { PageShell } from "@/components/ui/PageShell";
 import { Loading } from "@/components/ui/Loading";
@@ -129,14 +130,14 @@ export default function ZaapiKbMappingPage() {
   return (
     <PageShell title="Zaapi KB Mapping"
       subtitle={`map แล้ว ${mappedCount}/${files.length} ไฟล์ — ข้อมูลนี้ใช้ตอน import เข้าระบบ`}>
-      <div className="mb-3 flex items-center gap-2">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <Button size="sm" variant={filter === "unmapped" ? "primary" : "secondary"}
           onClick={() => setFilter("unmapped")}>ยังไม่ map ({files.length - mappedCount})</Button>
         <Button size="sm" variant={filter === "all" ? "primary" : "secondary"}
           onClick={() => setFilter("all")}>ทั้งหมด ({files.length})</Button>
         {!editable && <span className="text-xs text-text-muted ml-2">read-only — ต้องมีสิทธิ์แก้ KB</span>}
       </div>
-      <div className="mobile-only-grid gap-3">
+      <div className="grid grid-cols-1 2xl:hidden gap-3">
         {shown.map((f) => {
           const d = draft[f.file] || {};
           const mapped = isMapped(f);
@@ -223,9 +224,9 @@ export default function ZaapiKbMappingPage() {
 
                 <label className="block space-y-1.5">
                   <span className="text-sm font-semibold text-text">ประเภทข้อมูลของไฟล์</span>
-                  <select className={SEL} disabled={!editable} value={d.content_type || "product"} onChange={(event) => setField(f.file, { content_type: event.target.value })}>
+                  <SelectField className={SEL} disabled={!editable} value={d.content_type || "product"} onChange={(event) => setField(f.file, { content_type: event.target.value })}>
                     {TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
-                  </select>
+                  </SelectField>
                 </label>
 
                 <section className="space-y-2">
@@ -241,7 +242,7 @@ export default function ZaapiKbMappingPage() {
                         </div>
                         <div className="mt-2 flex items-center gap-2">
                           <Button size="sm" variant="ghost" onClick={() => setPreview({ file: f.file, sheet, rows: f.preview?.[sheet] || [] })}>ดูข้อมูล</Button>
-                          <select
+                          <SelectField
                             className={SEL}
                             disabled={!editable}
                             value={sheetType || d.content_type || "product"}
@@ -253,7 +254,7 @@ export default function ZaapiKbMappingPage() {
                             }}
                           >
                             {TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
-                          </select>
+                          </SelectField>
                         </div>
                         {overridden && <p className="mt-1 text-[10px] text-accent">ต่างจากประเภทไฟล์ ({d.content_type})</p>}
                       </div>
@@ -270,7 +271,7 @@ export default function ZaapiKbMappingPage() {
           );
         })}
       </div>
-      <div className="hidden md:block">
+      <div className="hidden 2xl:block">
       <MobileDataTable>
         <table className="w-full text-xs border-collapse">
           <thead>
@@ -357,12 +358,12 @@ export default function ZaapiKbMappingPage() {
                     )}
                   </td>
                   <td className="pr-3 py-2">
-                    <select className={SEL}
+                    <SelectField className={SEL}
                       disabled={!editable}
                       value={d.content_type || "product"}
                       onChange={(e) => setField(f.file, { content_type: e.target.value })}>
                       {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                    </select>
+                    </SelectField>
                   </td>
                   <td className="pr-3 py-2">
                     <div className="flex flex-col gap-1.5">
@@ -386,7 +387,7 @@ export default function ZaapiKbMappingPage() {
                                 onClick={() => setPreview({ file: f.file, sheet: s, rows: f.preview?.[s] || [] })}>
                                 ดูข้อมูล
                               </Button>
-                              <select className={SEL}
+                              <SelectField className={SEL}
                                 disabled={!editable}
                                 value={st || d.content_type || "product"}
                                 onChange={(e) => {
@@ -396,7 +397,7 @@ export default function ZaapiKbMappingPage() {
                                   setField(f.file, { sheet_types: next });
                                 }}>
                                 {TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-                              </select>
+                              </SelectField>
                             </div>
                             {overridden && (
                               <div className="text-[10px] text-accent mt-0.5">ต่างจาก type ไฟล์ ({d.content_type})</div>

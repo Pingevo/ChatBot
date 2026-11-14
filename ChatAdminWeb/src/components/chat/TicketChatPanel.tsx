@@ -27,7 +27,7 @@ import { quickReplyService, type QuickReplyRow } from "@/lib/services";
 import type { Conversation, ChatMessage, Topic } from "@/lib/types";
 import { MessageContent } from "./MessageContent";
 import { DateSeparatedList } from "./DateSeparator";
-import { adminBubbleColor, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
+import { adminBubbleColor, adminBubbleStyle, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
 import { useAuth } from "@/lib/authStore";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 
@@ -185,7 +185,7 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
     : isBot
     ? { backgroundColor: BOT_COLOR }
     : isAdmin
-    ? { backgroundColor: adminColor }
+    ? adminBubbleStyle(adminColor)
     : undefined;
 
   const avatarBg = "";
@@ -194,7 +194,7 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
     : isBot
     ? { backgroundColor: BOT_COLOR }
     : isAdmin
-    ? { backgroundColor: adminColor }
+    ? adminBubbleStyle(adminColor)
     : undefined;
 
   return (
@@ -212,7 +212,7 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
           </div>
         )}
         {segmentMsgs.map((segMsg, i) => (
-          <div key={i} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleCls}`} style={bubbleStyle}>
+          <div key={i} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleCls} ${isAdmin ? "admin-bubble-contrast" : ""}`} style={bubbleStyle}>
             <MessageContent msg={segMsg} variant={isUser ? "user" : "out"} />
           </div>
         ))}
@@ -227,7 +227,7 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
         </div>
       </div>
       {!isUser && !isSystem && (
-        <div className={`mobile-chat-speaker-avatar mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarBg}`} style={avatarStyle}>
+        <div className={`mobile-chat-speaker-avatar mt-1 w-8 h-8 rounded-full flex items-center justify-center shrink-0 ${avatarBg} ${isAdmin ? "admin-bubble-contrast" : ""}`} style={avatarStyle}>
           {isZaapi ? <Zap size={16} className="mobile-chat-speaker-icon text-white" /> : isBot ? <Bot size={16} className="mobile-chat-speaker-icon text-white" /> : <Headset size={16} className="mobile-chat-speaker-icon text-white" />}
         </div>
       )}
@@ -478,7 +478,7 @@ export function TicketChatPanel({
     <div className="mobile-ticket-chat flex-1 flex flex-col min-w-0 bg-bg">
       {/* ── Header (topbar) — มือถือแยกเป็น 2 แถว (nav+identity / actions) desktop แถวเดียว ── */}
       <div className="mobile-ticket-chat-header px-3 lg:px-4 py-2.5 border-b border-border bg-surface shrink-0">
-        <div className="mobile-ticket-chat-head-row flex flex-wrap lg:flex-nowrap items-center gap-x-2 lg:gap-x-3 gap-y-2">
+        <div className="mobile-ticket-chat-head-row flex flex-wrap items-center gap-x-2 lg:gap-x-3 gap-y-2">
           {/* Mobile back — เข้า flow header ไม่ทับ avatar */}
           {onBack && (
             <button
@@ -505,14 +505,14 @@ export function TicketChatPanel({
               onClick={onInfo}
               title="รายละเอียด"
               aria-label="รายละเอียด"
-              className="mobile-ticket-info-button lg:hidden w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text-muted hover:bg-surface-2 transition-colors"
+              className="mobile-ticket-info-button w-10 h-10 rounded-lg border border-border bg-surface flex items-center justify-center shrink-0 text-text-muted hover:bg-surface-2 transition-colors"
             >
               <Info size={17} />
             </button>
           )}
 
           {/* Controls — มือถือขึ้นแถวใหม่เต็มกว้าง (basis-full) / desktop ต่อท้ายแถวเดียว */}
-          <div className="mobile-ticket-actions flex items-center gap-2 lg:gap-3 basis-full lg:basis-auto shrink-0">
+          <div className="mobile-ticket-actions flex items-center gap-2 lg:gap-3 basis-full shrink-0 rounded-xl border border-border bg-surface-2/60 px-2 py-1.5">
             {/* Admin responsible — แสดงว่าใครรับผิดชอบ (หรือ "บอท") */}
             <div className="mobile-ticket-control-status flex items-center gap-1.5 text-xs text-text-muted shrink-0">
               <span

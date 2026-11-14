@@ -60,14 +60,14 @@ export default function LiveStatsPage() {
     />
   );
 
-  if (loading && !data) return <div className="analytics-page-body space-y-5">{pageHeading}<LiveSkeleton hideHeading /></div>;
-  if (error && !data) return <div className="analytics-page-body space-y-5">{pageHeading}<EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} /></div>;
+  if (loading && !data) return <div className="analytics-page-body min-w-0 space-y-5">{pageHeading}<LiveSkeleton hideHeading /></div>;
+  if (error && !data) return <div className="analytics-page-body min-w-0 space-y-5">{pageHeading}<EmptyState icon={Activity} title="โหลดข้อมูลไม่สำเร็จ" description={error} /></div>;
   if (!data) return null;
 
   const maxWorkload = Math.max(...data.workload_by_admin.map((w) => w.count), 1);
 
   return (
-    <div className="analytics-page-body space-y-5">
+    <div className="analytics-page-body min-w-0 space-y-5">
       {pageHeading}
 
       <ConnectedChannelsHeader
@@ -80,9 +80,9 @@ export default function LiveStatsPage() {
 
       <div className={loading ? "opacity-50 pointer-events-none transition-opacity" : "transition-opacity"}>
 
-      {/* Two big stat cards */}
-      <div className="analytics-live-stat-grid grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-surface rounded-xl border border-border p-5">
+      {/* Primary metrics */}
+      <div className="analytics-live-stat-grid grid min-w-0 grid-cols-1 gap-3 md:grid-cols-2 md:gap-4 xl:grid-cols-3">
+        <div className="min-w-0 rounded-xl border border-border bg-surface p-4 md:p-5">
           <div className="flex items-center gap-1 mb-2">
             <span className="text-sm text-text-muted">แชทที่เปิดอยู่ทั้งหมด</span>
             <Info size={12} className="text-text-subtle" />
@@ -93,7 +93,7 @@ export default function LiveStatsPage() {
             <span className="text-text-muted">ยังไม่ได้มอบหมาย {data.open_unassigned}</span>
           </div>
         </div>
-        <div className="bg-surface rounded-xl border border-border p-5">
+        <div className="min-w-0 rounded-xl border border-border bg-surface p-4 md:p-5">
           <div className="flex items-center gap-1 mb-2">
             <span className="text-sm text-text-muted">แชทที่ยังไม่ได้ตอบกลับ</span>
             <Info size={12} className="text-text-subtle" />
@@ -103,63 +103,63 @@ export default function LiveStatsPage() {
             รอการตอบกลับนานกว่า {data.unanswered_threshold_minutes} นาที
           </div>
         </div>
-      </div>
 
-      {/* Closed chats card */}
-      <div className="analytics-live-closed-card bg-surface rounded-xl border border-border p-5 mt-1">
-        <div className="flex items-center gap-1 mb-2">
-          <span className="text-sm text-text-muted">แชทที่ปิดไปแล้ว</span>
-        </div>
-        <div className="text-3xl font-bold text-text mb-3">{data.closed_total}</div>
-        {/* Breakdown by status */}
-        {data.breakdown_by_status.length > 0 && (
-          <div className="flex flex-wrap gap-2">
-            {data.breakdown_by_status.map((s) => (
-              <span
-                key={s.status}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-2 text-sm text-text"
-              >
-                <span className="capitalize">{s.status}</span>
-                <span className="font-semibold text-brand">{s.count}</span>
-              </span>
-            ))}
+        {/* Closed chats metric */}
+        <div className="analytics-live-closed-card col-span-2 min-w-0 rounded-xl border border-border bg-surface p-4 md:p-5 xl:col-span-1">
+          <div className="flex items-center gap-1 mb-2">
+            <span className="text-sm text-text-muted">แชทที่ปิดไปแล้ว</span>
           </div>
-        )}
+          <div className="text-3xl font-bold text-text mb-3">{data.closed_total}</div>
+          {/* Breakdown by status */}
+          {data.breakdown_by_status.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {data.breakdown_by_status.map((s) => (
+                <span
+                  key={s.status}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-surface-2 text-sm text-text"
+                >
+                  <span className="capitalize">{s.status}</span>
+                  <span className="font-semibold text-brand">{s.count}</span>
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Two panels */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <div className="bg-surface rounded-xl border border-border p-5">
-          <h3 className="text-sm font-semibold text-text">แชทที่เปิดอยู่ตามเจ้าหน้าที่</h3>
+      <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 lg:items-start lg:gap-4">
+        <div className="min-w-0 w-full rounded-xl border border-border bg-surface p-4 md:p-5">
+          <h3 className="text-base font-semibold text-text">แชทที่เปิดอยู่ตามเจ้าหน้าที่</h3>
           <p className="text-xs text-text-subtle mb-4">ภาระงานปัจจุบัน เรียงตามแชทที่ใช้งานอยู่</p>
           {data.workload_by_admin.length === 0 ? (
             <p className="analytics-chart-empty py-8 text-center text-sm text-text-muted">ยังไม่มีข้อมูลภาระงานของเจ้าหน้าที่</p>
           ) : (
             <div className="space-y-3">
               {data.workload_by_admin.map((w) => (
-              <div key={w.admin_id} className="flex items-center gap-3">
-                <div
-                  className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0"
-                  style={{ background: w.admin_id === "__unassigned__" ? "#98a2b3" : avatarColor(w.name) }}
-                >
-                  {w.admin_id === "__unassigned__" ? "?" : w.name.slice(0, 1)}
-                </div>
-                <span className="text-sm text-text w-32 truncate shrink-0">{w.name}</span>
-                <div className="flex-1 h-1.5 bg-surface-2 rounded-full overflow-hidden">
+                <div key={w.admin_id} className="flex min-w-0 items-center gap-3">
                   <div
-                    className="h-full bg-success rounded-full"
-                    style={{ width: `${(w.count / maxWorkload) * 100}%` }}
-                  />
+                    className="w-6 h-6 rounded-full flex items-center justify-center text-white text-[10px] font-bold shrink-0"
+                    style={{ background: w.admin_id === "__unassigned__" ? "var(--color-avatar-unassigned)" : avatarColor(w.name) }}
+                  >
+                    {w.admin_id === "__unassigned__" ? "?" : w.name.slice(0, 1)}
+                  </div>
+                  <span className="text-sm text-text w-32 truncate shrink-0">{w.name}</span>
+                  <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-surface-2">
+                    <div
+                      className="h-full bg-success rounded-full"
+                      style={{ width: `${(w.count / maxWorkload) * 100}%` }}
+                    />
+                  </div>
+                  <span className="text-sm font-medium text-text w-4 text-right shrink-0">{w.count}</span>
                 </div>
-                <span className="text-sm font-medium text-text w-4 text-right shrink-0">{w.count}</span>
-              </div>
               ))}
             </div>
           )}
         </div>
 
-        <div className="bg-surface rounded-xl border border-border p-5">
-          <h3 className="text-sm font-semibold text-text">แชทที่เปิดอยู่ตามการเชื่อมต่อ</h3>
+        <div className="min-w-0 w-full rounded-xl border border-border bg-surface p-4 md:p-5">
+          <h3 className="text-base font-semibold text-text">แชทที่เปิดอยู่ตามการเชื่อมต่อ</h3>
           <p className="text-xs text-text-subtle mb-4">การกระจายตามการเชื่อมต่อ</p>
           {data.breakdown_by_connection.length === 0 ? (
             <p className="text-sm text-text-muted py-8 text-center">ยังไม่มีข้อมูล</p>

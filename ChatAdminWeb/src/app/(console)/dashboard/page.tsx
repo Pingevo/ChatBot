@@ -16,7 +16,7 @@ import { DashboardMotion } from "@/components/dashboard/DashboardMotion";
 const platformColors: Record<string, string> = {
   shopee: "#ee4d2d",
   tiktok: "#fe2c55",
-  lazada: "#0f146d",
+  lazada: "var(--color-platform-lazada-contrast)",
 };
 
 // ⚡ แปลงวินาที → "X ชม Y นาที Z วิ" หรือ "Y นาที Z วิ" หรือ "Z วิ"
@@ -63,6 +63,15 @@ export default function DashboardPage() {
   if (loading && !stats) return <DashboardSkeleton />;
   if (error && !stats) return <EmptyState icon={MessageSquare} title="โหลดข้อมูลไม่สำเร็จ" description={error} />;
   if (!stats) return <EmptyState icon={MessageSquare} title="ไม่มีข้อมูล" />;
+
+  const messagesReceived = stats.messages_received ?? 0;
+  const messagesSent = stats.messages_sent ?? 0;
+  const messageTotal = messagesReceived + messagesSent;
+  const replyRatio = messagesReceived > 0 ? (messagesSent / messagesReceived) * 100 : null;
+  const replyRatioScale = Math.max(200, replyRatio ?? 0);
+  const replyRatioFill = replyRatio === null ? 0 : (replyRatio / replyRatioScale) * 100;
+  const replyRatioTarget = (100 / replyRatioScale) * 100;
+  const platformScale = Math.max(1, ...stats.platform_breakdown.map((platform) => platform.count));
 
   return (
     <PageShell
@@ -116,11 +125,46 @@ export default function DashboardPage() {
           </section>
 
           <section className="dashboard-mobile-messages" aria-labelledby="dashboard-mobile-message-title" data-dashboard-mobile-reveal>
-            <h2 id="dashboard-mobile-message-title">ข้อความ</h2>
-            <dl>
-              <div><dt>รับเข้า</dt><dd>{(stats.messages_received ?? 0).toLocaleString()}</dd></div>
-              <div><dt>ตอบกลับ</dt><dd>{(stats.messages_sent ?? 0).toLocaleString()}</dd></div>
+            <div className="dashboard-message-section-heading">
+              <h2 id="dashboard-mobile-message-title">ข้อความ</h2>
+              <span>{messageTotal.toLocaleString()} ข้อความรวม</span>
+            </div>
+            <dl className="dashboard-message-metrics">
+              <div className="dashboard-message-metric dashboard-message-metric-inbound">
+                <dt>รับเข้า</dt>
+                <dd>{messagesReceived.toLocaleString()}</dd>
+              </div>
+              <div className="dashboard-message-metric dashboard-message-metric-outbound">
+                <dt>ตอบกลับ</dt>
+                <dd>{messagesSent.toLocaleString()}</dd>
+              </div>
             </dl>
+            <div className="dashboard-message-total-progress">
+              <div><span>อัตราตอบกลับต่อรับเข้า</span><b>{replyRatio === null ? "—" : `${Math.round(replyRatio)}%`}</b></div>
+              <small className="dashboard-message-ratio-note">100% = ตอบกลับเท่าข้อความรับเข้า</small>
+              <div className="dashboard-message-meter" role="meter" aria-label="อัตราตอบกลับต่อข้อความที่ได้รับ" aria-valuemin={0} aria-valuemax={replyRatioScale} aria-valuenow={replyRatio ?? 0} aria-valuetext={replyRatio === null ? "ไม่มีข้อความที่ได้รับ" : `${Math.round(replyRatio)} เปอร์เซ็นต์`}>
+                <span style={{ width: `${replyRatioFill}%` }} />
+                <i aria-hidden="true" style={{ left: `${replyRatioTarget}%` }} />
+              </div>
+            </div>
+            <div className="dashboard-platform-chart-block">
+              <h3>แพลตฟอร์ม</h3>
+              {stats.platform_breakdown.length === 0 ? <p>ยังไม่มีข้อมูล</p> : (
+                <dl className="dashboard-platform-chart">
+                  {stats.platform_breakdown.map((platform) => {
+                    const percent = (platform.count / platformScale) * 100;
+                    return (
+                      <div className="dashboard-platform-chart-row" key={platform.platform}>
+                        <dt><span>{platform.platform}</span><b>{platform.count.toLocaleString()}</b></dt>
+                        <dd className="dashboard-platform-bar" role="meter" aria-label={`${platform.platform} ${platform.count.toLocaleString()}`} aria-valuemin={0} aria-valuemax={platformScale} aria-valuenow={platform.count}>
+                          <span style={{ width: `${percent}%`, background: platformColors[platform.platform] || "#8b1e28" }} />
+                        </dd>
+                      </div>
+                    );
+                  })}
+                </dl>
+              )}
+            </div>
           </section>
 
           <section className="dashboard-mobile-trend" aria-labelledby="dashboard-mobile-trend-title" data-dashboard-mobile-reveal>
@@ -148,23 +192,7 @@ export default function DashboardPage() {
             </details>
           </section>
 
-          <section className="dashboard-mobile-breakdowns" aria-label="แยกตามช่องทางและหัวข้อ" data-dashboard-mobile-reveal>
-            <div>
-              <h2>แพลตฟอร์ม</h2>
-              {stats.platform_breakdown.length === 0 ? <p>ยังไม่มีข้อมูล</p> : (
-                <dl>
-                  {stats.platform_breakdown.map((platform) => {
-                    const percent = stats.total_conversations ? (platform.count / stats.total_conversations) * 100 : 0;
-                    return (
-                      <div key={platform.platform}>
-                        <dt><span>{platform.platform}</span><b>{platform.count.toLocaleString()}</b></dt>
-                        <dd><span style={{ transform: `scaleX(${Math.max(0, Math.min(100, percent)) / 100})`, background: platformColors[platform.platform] || "#8b1e28" }} /></dd>
-                      </div>
-                    );
-                  })}
-                </dl>
-              )}
-            </div>
+          <section className="dashboard-mobile-breakdowns" aria-label="แยกตามหัวข้อ" data-dashboard-mobile-reveal>
             <div>
               <h2>หัวข้อ</h2>
               {stats.topic_breakdown.length === 0 ? <p>ยังไม่มีข้อมูล</p> : (
@@ -182,87 +210,38 @@ export default function DashboardPage() {
         </div>
 
         <div className="dashboard-desktop-view">
-        {/* KPI cards — 5 การ์ดหลัก */}
-        <div className="mobile-kpi-grid dashboard-main-kpis grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3 md:gap-4 mb-6">
-          <Card data-dashboard-reveal className="dashboard-kpi-primary dashboard-kpi-card p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-text-muted">แชททั้งหมด</span>
-              <div className="w-8 h-8 rounded-lg bg-surface-2 flex items-center justify-center">
-                <MessageSquare size={15} className="text-text-muted" />
-              </div>
+        <section className="dashboard-desktop-overview" data-dashboard-reveal aria-labelledby="dashboard-desktop-overview-title">
+          <div className="dashboard-desktop-focus">
+            <div className="dashboard-desktop-focus-copy">
+              <span className="dashboard-desktop-eyebrow">ภาพรวมการทำงาน</span>
+              <h2 id="dashboard-desktop-overview-title">แชททั้งหมด</h2>
+              <p className="dashboard-desktop-total tabular-nums">{stats.total_conversations.toLocaleString()}</p>
+              <span className="dashboard-desktop-caption">บทสนทนาในช่วงเวลาที่เลือก</span>
             </div>
-            <div className="text-2xl font-bold text-text tabular-nums tracking-tight">{stats.total_conversations.toLocaleString()}</div>
-            <div className="dashboard-kpi-description text-[11px] text-text-subtle mt-1">conversation ทั้งหมดในช่วงเวลา</div>
-          </Card>
-          <Card data-dashboard-reveal className="dashboard-kpi-card p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-text-muted">บอทตอบ</span>
-              <div className="w-8 h-8 rounded-lg bg-accent-soft flex items-center justify-center">
-                <Bot size={15} className="text-accent" />
-              </div>
+            <DashboardCompanion />
+          </div>
+          <dl className="dashboard-desktop-status" aria-label="สถานะการตอบแชท">
+            <div>
+              <dt><span className="dashboard-status-mark dashboard-status-bot"><Bot size={13} aria-hidden="true" /></span>บอทตอบ</dt>
+              <dd className="text-accent tabular-nums">{(stats.bot_answered ?? 0).toLocaleString()}</dd>
+              <small>ยังไม่ส่งแอดมิน</small>
             </div>
-            <div className="text-2xl font-bold text-accent tabular-nums tracking-tight">{(stats.bot_answered ?? 0).toLocaleString()}</div>
-            <div className="dashboard-kpi-description text-[11px] text-text-subtle mt-1">บอทกำลังตอบ ยังไม่ส่งแอดมิน</div>
-          </Card>
-          <Card data-dashboard-reveal className="dashboard-kpi-card p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-text-muted">กำลังตอบอยู่</span>
-              <div className="w-8 h-8 rounded-lg bg-warning-soft flex items-center justify-center">
-                <span className="w-2 h-2 rounded-full bg-warning animate-pulse-soft" />
-              </div>
+            <div>
+              <dt><span className="dashboard-status-mark dashboard-status-active" aria-hidden="true" />กำลังตอบอยู่</dt>
+              <dd className="tabular-nums">{(stats.with_admin ?? stats.active_now ?? 0).toLocaleString()}</dd>
+              <small>รอแอดมินตอบ</small>
             </div>
-            <div className="text-2xl font-bold text-text tabular-nums tracking-tight">{(stats.with_admin ?? stats.active_now ?? 0).toLocaleString()}</div>
-            <div className="dashboard-kpi-description text-[11px] text-text-subtle mt-1">ส่งแอดมินแล้ว รอตอบ</div>
-          </Card>
-          <Card data-dashboard-reveal className="dashboard-kpi-card p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-text-muted">ปิดแล้ว</span>
-              <div className="w-8 h-8 rounded-lg bg-success-soft flex items-center justify-center">
-                <Headset size={15} className="text-success" />
-              </div>
+            <div>
+              <dt><span className="dashboard-status-mark dashboard-status-closed"><Headset size={13} aria-hidden="true" /></span>ปิดแล้ว</dt>
+              <dd className="text-success tabular-nums">{(stats.closed ?? 0).toLocaleString()}</dd>
+              <small>ปิดแชทแล้ว</small>
             </div>
-            <div className="text-2xl font-bold text-success tabular-nums tracking-tight">{(stats.closed ?? 0).toLocaleString()}</div>
-            <div className="dashboard-kpi-description text-[11px] text-text-subtle mt-1">แอดมินปิดแชทแล้ว</div>
-          </Card>
-          <Card data-dashboard-reveal className="dashboard-kpi-card dashboard-response-time p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-text-muted">เวลาตอบเฉลี่ย</span>
-              <div className="w-8 h-8 rounded-lg bg-surface-2 flex items-center justify-center">
-                <Clock size={15} className="text-text-muted" />
-              </div>
+            <div>
+              <dt><span className="dashboard-status-mark dashboard-status-time"><Clock size={13} aria-hidden="true" /></span>เวลาตอบเฉลี่ย</dt>
+              <dd className="tabular-nums">{stats.avg_response_time > 0 ? formatDuration(stats.avg_response_time) : "—"}</dd>
+              <small>ต่อข้อความ</small>
             </div>
-            <div className="text-2xl font-bold text-text tabular-nums tracking-tight">
-              {stats.avg_response_time > 0 ? formatDuration(stats.avg_response_time) : "—"}
-            </div>
-            <div className="dashboard-kpi-description text-[11px] text-text-subtle mt-1">เฉลี่ย ลูกค้าถาม → ตอบ ต่อ message</div>
-          </Card>
-        </div>
-
-        {/* ⚡ Message stats — ข้อความเข้า/ออก */}
-        <section aria-labelledby="dashboard-message-stats-title" className="dashboard-message-section mb-6">
-        <h2 id="dashboard-message-stats-title" className="mobile-only mb-3 text-sm font-semibold text-text">ข้อความ</h2>
-        <div className="dashboard-message-grid grid grid-cols-1 sm:grid-cols-2 gap-3 md:gap-4">
-          <Card data-dashboard-reveal className="dashboard-message-card p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-text-muted">ข้อความเข้า (ลูกค้าส่ง)</span>
-              <div className="w-8 h-8 rounded-lg bg-surface-2 flex items-center justify-center">
-                <MessageSquare size={15} className="text-text-muted" />
-              </div>
-            </div>
-            <div className="text-2xl font-bold text-text tabular-nums tracking-tight">{(stats.messages_received ?? 0).toLocaleString()}</div>
-            <div className="dashboard-kpi-description text-[11px] text-text-subtle mt-1">message ที่ลูกค้าส่งเข้ามาในช่วงเวลานี้</div>
-          </Card>
-          <Card data-dashboard-reveal className="dashboard-message-card p-4 hover:shadow-[var(--shadow-md)] transition-shadow">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-xs font-medium text-text-muted">ข้อความตอบกลับ (บอท/แอดมิน)</span>
-              <div className="w-8 h-8 rounded-lg bg-accent-soft flex items-center justify-center">
-                <Bot size={15} className="text-accent" />
-              </div>
-            </div>
-            <div className="text-2xl font-bold text-accent tabular-nums tracking-tight">{(stats.messages_sent ?? 0).toLocaleString()}</div>
-            <div className="dashboard-kpi-description text-[11px] text-text-subtle mt-1">message ที่บอท/แอดมินตอบกลับในช่วงเวลานี้</div>
-          </Card>
-        </div>
+          </dl>
         </section>
 
         <div className="dashboard-chart-grid grid grid-cols-1 lg:grid-cols-2 gap-3 md:gap-4 mb-6">
@@ -288,29 +267,39 @@ export default function DashboardPage() {
             </div>
           </Card>
 
-          <Card data-dashboard-reveal className="dashboard-chart-card p-4">
-            <h3 className="font-semibold text-text mb-4 tracking-tight">แยกตามแพลตฟอร์ม</h3>
-            <div className="space-y-3">
-              {stats.platform_breakdown.length === 0 ? (
-                <p className="text-sm text-text-subtle">ยังไม่มีข้อมูล</p>
-              ) : (
-                stats.platform_breakdown.map((p) => {
-                  const pct = stats.total_conversations ? (p.count / stats.total_conversations) * 100 : 0;
-                  return (
-                    <div key={p.platform}>
-                      <div className="flex justify-between text-sm mb-1.5">
-                        <span className="capitalize text-text font-medium">{p.platform}</span>
-                        <span className="text-text-muted tabular-nums">{p.count}</span>
+          <Card data-dashboard-reveal className="dashboard-chart-card dashboard-message-platform-card p-4">
+            <div className="dashboard-message-section-heading">
+              <h3>ข้อความ</h3>
+              <span>{messageTotal.toLocaleString()} ข้อความรวม</span>
+            </div>
+            <dl className="dashboard-message-metrics">
+              <div className="dashboard-message-metric dashboard-message-metric-inbound"><dt>รับเข้า</dt><dd>{messagesReceived.toLocaleString()}</dd></div>
+              <div className="dashboard-message-metric dashboard-message-metric-outbound"><dt>ตอบกลับ</dt><dd>{messagesSent.toLocaleString()}</dd></div>
+            </dl>
+            <div className="dashboard-message-total-progress">
+              <div><span>อัตราตอบกลับต่อรับเข้า</span><b>{replyRatio === null ? "—" : `${Math.round(replyRatio)}%`}</b></div>
+              <small className="dashboard-message-ratio-note">100% = ตอบกลับเท่าข้อความรับเข้า</small>
+              <div className="dashboard-message-meter" role="meter" aria-label="อัตราตอบกลับต่อข้อความที่ได้รับ" aria-valuemin={0} aria-valuemax={replyRatioScale} aria-valuenow={replyRatio ?? 0} aria-valuetext={replyRatio === null ? "ไม่มีข้อความที่ได้รับ" : `${Math.round(replyRatio)} เปอร์เซ็นต์`}>
+                <span style={{ width: `${replyRatioFill}%` }} />
+                <i aria-hidden="true" style={{ left: `${replyRatioTarget}%` }} />
+              </div>
+            </div>
+            <div className="dashboard-platform-chart-block">
+              <h4>แพลตฟอร์ม</h4>
+              {stats.platform_breakdown.length === 0 ? <p className="text-sm text-text-subtle">ยังไม่มีข้อมูล</p> : (
+                <dl className="dashboard-platform-chart">
+                  {stats.platform_breakdown.map((platform) => {
+                    const percent = (platform.count / platformScale) * 100;
+                    return (
+                      <div className="dashboard-platform-chart-row" key={platform.platform}>
+                        <dt><span>{platform.platform}</span><b>{platform.count.toLocaleString()}</b></dt>
+                        <dd className="dashboard-platform-bar" role="meter" aria-label={`${platform.platform} ${platform.count.toLocaleString()}`} aria-valuemin={0} aria-valuemax={platformScale} aria-valuenow={platform.count}>
+                          <span style={{ width: `${percent}%`, background: platformColors[platform.platform] || "#8b1e28" }} />
+                        </dd>
                       </div>
-                      <div className="h-2 bg-surface-2 rounded-full overflow-hidden">
-                        <div
-                          className="h-full rounded-full transition-all duration-500"
-                          style={{ width: `${pct}%`, background: platformColors[p.platform] || "#8b1e28" }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })
+                    );
+                  })}
+                </dl>
               )}
             </div>
           </Card>

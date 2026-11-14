@@ -34,6 +34,22 @@ export function adminBubbleColor(
   return ADMIN_PALETTE[hash % ADMIN_PALETTE.length];
 }
 
+export function adminBubbleTextColor(color: string): string {
+  const match = /^#([\da-f]{6})$/i.exec(color.trim());
+  if (!match) return "var(--color-text)";
+  const channels = [0, 2, 4].map((offset) => parseInt(match[1].slice(offset, offset + 2), 16) / 255);
+  const [r, g, b] = channels.map((channel) => channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  const whiteContrast = 1.05 / (luminance + 0.05);
+  const navyLuminance = 0.015;
+  const navyContrast = (luminance + 0.05) / (navyLuminance + 0.05);
+  return whiteContrast >= navyContrast ? "#ffffff" : "#0b2340";
+}
+
+export function adminBubbleStyle(color: string): { backgroundColor: string; color: string } {
+  return { backgroundColor: color, color: adminBubbleTextColor(color) };
+}
+
 // สีคงที่สำหรับแต่ละฝั่ง
 export const ZAAPI_COLOR = "#11302e"; // เขียวเข้มมาก
 export const BOT_COLOR = "#0b2340"; // navy (sidebar)

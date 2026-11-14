@@ -21,7 +21,7 @@ function fmtDuration(seconds: number): string {
   return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
 }
 
-const CHANNEL_COLORS = ["#ee4d2d", "#111827", "#1a2e8c"];
+const CHANNEL_COLORS = ["#ee4d2d", "var(--color-platform-tiktok-contrast)", "var(--color-platform-lazada-contrast)"];
 const CHANNEL_KEYS = ["shopee", "tiktok", "lazada"];
 
 export default function PerformanceStatsPage() {
@@ -58,25 +58,25 @@ export default function PerformanceStatsPage() {
     />
   );
 
-  if (loading && !data) return <div className="analytics-page-body space-y-6">{pageHeading}<AnalyticsSkeleton hideHeading /></div>;
-  if (error && !data) return <div className="analytics-page-body space-y-6">{pageHeading}<EmptyState icon={undefined as never} title="โหลดข้อมูลไม่สำเร็จ" description={error} /></div>;
+  if (loading && !data) return <div className="analytics-page-body min-w-0 space-y-5">{pageHeading}<AnalyticsSkeleton hideHeading /></div>;
+  if (error && !data) return <div className="analytics-page-body min-w-0 space-y-5">{pageHeading}<EmptyState icon={TrendingUp} title="โหลดข้อมูลไม่สำเร็จ" description={error} /></div>;
   if (!data) return null;
 
   const maxHeat = Math.max(...data.heatmap.values.flat(), 1);
 
   return (
-    <div className="analytics-page-body space-y-6">
+    <div className="analytics-page-body min-w-0 space-y-5">
       {pageHeading}
 
       <ConnectedChannelsHeader connectedCount={data.connected_shops} />
       {!data.has_real_data && <p className="text-xs text-text-subtle -mt-2">ยังไม่มีข้อมูลจริง — แสดงค่า 0</p>}
 
-      <div className={loading ? "opacity-50 pointer-events-none transition-opacity" : "transition-opacity"}>
+      <div className={loading ? "min-w-0 opacity-50 pointer-events-none transition-opacity" : "min-w-0 transition-opacity"}>
       {/* ---- Overview KPI grid ---- */}
-      <div>
-        <h3 className="text-sm font-semibold text-text mb-3">ภาพรวม</h3>
-        <div className="analytics-performance-kpi-grid grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          <div className="bg-surface rounded-xl border border-border p-4">
+      <div className="min-w-0">
+        <h3 className="text-base font-semibold text-text mb-3">ภาพรวม</h3>
+        <div className="analytics-performance-kpi-grid grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="min-w-0 rounded-xl border border-border bg-surface p-4">
             <div className="flex items-center gap-1 mb-2">
               <span className="text-xs text-text-muted">จำนวนลูกค้าใหม่ vs ลูกค้าปัจจุบัน</span>
             </div>
@@ -100,31 +100,31 @@ export default function PerformanceStatsPage() {
       </div>
 
       {/* ---- Insight charts ---- */}
-      <div>
-        <h3 className="text-sm font-semibold text-text mb-3">อินไซต์</h3>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-surface rounded-xl border border-border p-4">
-            <h4 className="text-xs font-medium text-text mb-2">จำนวนลูกค้าของแต่ละช่องทาง</h4>
+      <div className="min-w-0 mt-5">
+        <h3 className="text-base font-semibold text-text mb-3">อินไซต์</h3>
+        <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 lg:gap-4">
+          <div className="min-w-0 rounded-xl border border-border bg-surface p-4">
+            <h4 className="mb-2 text-sm font-medium text-text">จำนวนลูกค้าของแต่ละช่องทาง</h4>
             <StackedChannelBarChart data={data.insight.customers_by_channel} seriesKeys={CHANNEL_KEYS} colors={CHANNEL_COLORS} />
           </div>
-          <div className="bg-surface rounded-xl border border-border p-4">
-            <h4 className="text-xs font-medium text-text mb-2">จำนวนการสนทนาที่ไม่ได้ตอบกลับภายใน 12 ชั่วโมงของแต่ละช่องทาง</h4>
+          <div className="min-w-0 rounded-xl border border-border bg-surface p-4">
+            <h4 className="mb-2 text-sm font-medium text-text">จำนวนการสนทนาที่ไม่ได้ตอบกลับภายใน 12 ชั่วโมงของแต่ละช่องทาง</h4>
             <StackedChannelBarChart data={data.insight.unanswered_by_channel} seriesKeys={CHANNEL_KEYS} colors={CHANNEL_COLORS} />
           </div>
-          <div className="bg-surface rounded-xl border border-border p-4">
-            <h4 className="text-xs font-medium text-text mb-2">อัตราการตอบกลับภายใน 12 ชั่วโมง</h4>
+          <div className="min-w-0 rounded-xl border border-border bg-surface p-4">
+            <h4 className="mb-2 text-sm font-medium text-text">อัตราการตอบกลับภายใน 12 ชั่วโมง</h4>
             <MultiLineChart data={data.insight.response_rate_12h_by_channel} seriesKeys={CHANNEL_KEYS} colors={CHANNEL_COLORS} unit="%" />
           </div>
-          <div className="bg-surface rounded-xl border border-border p-4">
-            <h4 className="text-xs font-medium text-text mb-2">อัตราการตอบกลับภายใน 10 นาที</h4>
+          <div className="min-w-0 rounded-xl border border-border bg-surface p-4">
+            <h4 className="mb-2 text-sm font-medium text-text">อัตราการตอบกลับภายใน 10 นาที</h4>
             <MultiLineChart data={data.insight.response_rate_10min_by_channel} seriesKeys={CHANNEL_KEYS} colors={CHANNEL_COLORS} unit="%" />
           </div>
-          <div className="bg-surface rounded-xl border border-border p-4">
-            <h4 className="text-xs font-medium text-text mb-2">ระยะเวลาการตอบกลับเฉลี่ย</h4>
+          <div className="min-w-0 rounded-xl border border-border bg-surface p-4">
+            <h4 className="mb-2 text-sm font-medium text-text">ระยะเวลาการตอบกลับเฉลี่ย</h4>
             <MultiLineChart data={data.insight.avg_response_time_by_channel} seriesKeys={CHANNEL_KEYS} colors={CHANNEL_COLORS} unit="s" />
           </div>
-          <div className="bg-surface rounded-xl border border-border p-4">
-            <h4 className="text-xs font-medium text-text mb-2">ปริมาณลูกค้าในแต่ละช่วงเวลาต่อวัน</h4>
+          <div className="min-w-0 rounded-xl border border-border bg-surface p-4">
+            <h4 className="mb-2 text-sm font-medium text-text">ปริมาณลูกค้าในแต่ละช่วงเวลาต่อวัน</h4>
             <Heatmap rows={data.heatmap.rows} cols={data.heatmap.cols} values={data.heatmap.values} maxValue={maxHeat} />
           </div>
         </div>

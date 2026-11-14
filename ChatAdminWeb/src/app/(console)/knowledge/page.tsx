@@ -452,12 +452,12 @@ export default function KnowledgePage() {
             <Button size="sm" variant="outline" onClick={handleDownloadTemplate}>
               <Download size={14} /> ดาวน์โหลด Template
             </Button>
-            <label className="inline-flex items-center gap-1.5 px-3 h-8 text-xs rounded-lg border border-border bg-surface-2 text-text-muted hover:bg-pale-sky-soft cursor-pointer">
+            <label className="phone-mobile-add-hidden inline-flex min-h-11 2xl:h-8 items-center gap-1.5 px-3 text-sm rounded-lg border border-border bg-surface-2 text-text-muted hover:bg-pale-sky-soft cursor-pointer">
               <Upload size={14} />
               {uploading ? "กำลังอัปโหลด..." : "อัปโหลด Excel"}
               <input ref={uploadInputRef} type="file" accept=".xlsx" onChange={handleUpload} className="hidden" disabled={uploading} />
             </label>
-            <Button size="sm" onClick={openCreate}>
+            <Button size="sm" className="phone-mobile-add-hidden" onClick={openCreate}>
               <Plus size={14} /> เพิ่ม
             </Button>
           </>
@@ -486,7 +486,7 @@ export default function KnowledgePage() {
               onChange={(e) => { setSearch(e.target.value); setPage(0); }}
               onKeyDown={handleSearchEsc}
               placeholder="ค้นหาหัวข้อ คำตอบ คำถาม ยี่ห้อ รุ่น..."
-              className="w-full h-8 pl-8 pr-8 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
+              className="w-full min-h-11 2xl:h-8 pl-8 pr-8 rounded-lg border border-border bg-surface text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
             />
             <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[10px] text-text-subtle border border-border rounded px-1 py-0.5 pointer-events-none">/</kbd>
           </div>
@@ -498,7 +498,7 @@ export default function KnowledgePage() {
               aria-expanded={showPlatformDd}
               aria-haspopup="listbox"
               style={{ minWidth: "110px" }}
-              className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterPlatform !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
+              className={`min-h-11 2xl:min-h-0 2xl:h-8 px-2.5 text-sm rounded-lg border flex items-center gap-1.5 transition-colors ${filterPlatform !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
             >
               <span className="text-text-subtle shrink-0">แพลตฟอร์ม:</span>
               <span className="font-medium truncate" style={{ minWidth: "40px", maxWidth: "120px" }}>
@@ -517,7 +517,7 @@ export default function KnowledgePage() {
                     { v: "lazada", l: "Lazada" },
                   ].map((s, i) => (
                     <button key={s.v} id={`platform-option-${i}`} role="option" aria-selected={filterPlatform === s.v} onClick={() => { setFilterPlatform(s.v); setShowPlatformDd(false); setPage(0); }}
-                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterPlatform === s.v ? "text-brand font-medium" : "text-text"}`}>
+                      className={`min-h-11 2xl:min-h-0 w-full text-left px-3 py-1.5 text-sm hover:bg-surface-2 flex items-center gap-2 ${filterPlatform === s.v ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterPlatform === s.v ? "" : "opacity-0"} />
                       {s.l}
                     </button>
@@ -527,18 +527,18 @@ export default function KnowledgePage() {
             )}
           </div>
 
-          {/* Toggle ตัวกรองเพิ่มเติม — แสดงเฉพาะจอ <lg */}
+          {/* Toggle ตัวกรองเพิ่มเติม — แสดงก่อนจอ 2xl */}
           <button
             onClick={() => setFiltersOpen(!filtersOpen)}
             aria-expanded={filtersOpen}
-            className="lg:hidden h-8 px-2.5 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
+            className="2xl:hidden min-h-11 px-2.5 text-sm rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
           >
             ตัวกรองเพิ่มเติม
             <ChevronDown size={11} className={`text-text-muted shrink-0 transition-transform ${filtersOpen ? "rotate-180" : ""}`} />
           </button>
 
-          {/* ตัวกรองที่เหลือ — <lg ซ่อนไว้หลังปุ่ม toggle, lg+ แสดงตลอด */}
-          <div className={`${filtersOpen ? "flex" : "hidden"} lg:flex flex-wrap items-center gap-2`}>
+          {/* ตัวกรองที่เหลือ — ซ่อนไว้หลังปุ่ม toggle ก่อนจอ 2xl */}
+          <div className={`${filtersOpen ? "flex" : "hidden"} 2xl:flex flex-wrap items-center gap-2`}>
           {/* Active filter */}
           <div className="relative">
             <button
@@ -546,7 +546,7 @@ export default function KnowledgePage() {
               aria-expanded={showActiveDd}
               aria-haspopup="listbox"
               style={{ minWidth: "90px" }}
-              className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterActive !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
+              className={`min-h-11 2xl:min-h-0 2xl:h-8 px-2.5 text-sm rounded-lg border flex items-center gap-1.5 transition-colors ${filterActive !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
             >
               <span className="text-text-subtle shrink-0">สถานะ:</span>
               <span className="font-medium" style={{ minWidth: "40px" }}>
@@ -564,7 +564,7 @@ export default function KnowledgePage() {
                     { v: "inactive", l: "ปิดใช้" },
                   ] as const).map((s, i) => (
                     <button key={s.v} id={`active-option-${i}`} role="option" aria-selected={filterActive === s.v} onClick={() => { setFilterActive(s.v); setShowActiveDd(false); setPage(0); }}
-                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterActive === s.v ? "text-brand font-medium" : "text-text"}`}>
+                      className={`min-h-11 2xl:min-h-0 w-full text-left px-3 py-1.5 text-sm hover:bg-surface-2 flex items-center gap-2 ${filterActive === s.v ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterActive === s.v ? "" : "opacity-0"} />
                       {s.l}
                     </button>
@@ -581,7 +581,7 @@ export default function KnowledgePage() {
               aria-expanded={showCreatedDd}
               aria-haspopup="listbox"
               style={{ minWidth: "100px" }}
-              className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterCreatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
+              className={`min-h-11 2xl:min-h-0 2xl:h-8 px-2.5 text-sm rounded-lg border flex items-center gap-1.5 transition-colors ${filterCreatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
             >
               <span className="text-text-subtle shrink-0">สร้างโดย:</span>
               <span className="font-medium truncate" style={{ minWidth: "30px", maxWidth: "60px" }}>
@@ -593,12 +593,12 @@ export default function KnowledgePage() {
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowCreatedDd(false)} />
                 <div ref={(el) => { if (showCreatedDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามผู้สร้าง" aria-activedescendant={`created-option-${createdNav.activeIndex}`} onKeyDown={(e) => { createdNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-                  <button id="created-option-0" role="option" aria-selected={filterCreatedBy === "all"} onClick={() => { setFilterCreatedBy("all"); setShowCreatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
+                  <button id="created-option-0" role="option" aria-selected={filterCreatedBy === "all"} onClick={() => { setFilterCreatedBy("all"); setShowCreatedDd(false); }} className={`min-h-11 2xl:min-h-0 w-full text-left px-3 py-1.5 text-sm hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
                     <Check size={11} className={filterCreatedBy === "all" ? "" : "opacity-0"} /> ทั้งหมด
                   </button>
                   <div className="border-t border-border my-1" />
                   {admins.map((a, i) => (
-                    <button key={a.admin_id} id={`created-option-${i + 1}`} role="option" aria-selected={filterCreatedBy === a.admin_id} onClick={() => { setFilterCreatedBy(a.admin_id); setShowCreatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
+                    <button key={a.admin_id} id={`created-option-${i + 1}`} role="option" aria-selected={filterCreatedBy === a.admin_id} onClick={() => { setFilterCreatedBy(a.admin_id); setShowCreatedDd(false); }} className={`min-h-11 2xl:min-h-0 w-full text-left px-3 py-1.5 text-sm hover:bg-surface-2 flex items-center gap-2 ${filterCreatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterCreatedBy === a.admin_id ? "" : "opacity-0"} /> {a.name || a.username}
                     </button>
                   ))}
@@ -614,7 +614,7 @@ export default function KnowledgePage() {
               aria-expanded={showUpdatedDd}
               aria-haspopup="listbox"
               style={{ minWidth: "100px" }}
-              className={`h-8 px-2.5 text-xs rounded-lg border flex items-center gap-1.5 transition-colors ${filterUpdatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
+              className={`min-h-11 2xl:min-h-0 2xl:h-8 px-2.5 text-sm rounded-lg border flex items-center gap-1.5 transition-colors ${filterUpdatedBy !== "all" ? "border-brand/40 bg-brand/5 text-text" : "border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky"}`}
             >
               <span className="text-text-subtle shrink-0">แก้ไขโดย:</span>
               <span className="font-medium truncate" style={{ minWidth: "30px", maxWidth: "60px" }}>
@@ -626,12 +626,12 @@ export default function KnowledgePage() {
               <>
                 <div className="fixed inset-0 z-20" onClick={() => setShowUpdatedDd(false)} />
                 <div ref={(el) => { if (showUpdatedDd && el) el.focus(); }} role="listbox" tabIndex={-1} aria-label="กรองตามผู้แก้ไข" aria-activedescendant={`updated-option-${updatedNav.activeIndex}`} onKeyDown={(e) => { updatedNav.onKeyDown(e); }} className="absolute top-full left-0 mt-1 min-w-[140px] max-h-60 overflow-y-auto bg-surface border border-border rounded-lg shadow-lg z-40 py-1">
-                  <button id="updated-option-0" role="option" aria-selected={filterUpdatedBy === "all"} onClick={() => { setFilterUpdatedBy("all"); setShowUpdatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
+                  <button id="updated-option-0" role="option" aria-selected={filterUpdatedBy === "all"} onClick={() => { setFilterUpdatedBy("all"); setShowUpdatedDd(false); }} className={`min-h-11 2xl:min-h-0 w-full text-left px-3 py-1.5 text-sm hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === "all" ? "text-brand font-medium" : "text-text"}`}>
                     <Check size={11} className={filterUpdatedBy === "all" ? "" : "opacity-0"} /> ทั้งหมด
                   </button>
                   <div className="border-t border-border my-1" />
                   {admins.map((a, i) => (
-                    <button key={a.admin_id} id={`updated-option-${i + 1}`} role="option" aria-selected={filterUpdatedBy === a.admin_id} onClick={() => { setFilterUpdatedBy(a.admin_id); setShowUpdatedDd(false); }} className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
+                    <button key={a.admin_id} id={`updated-option-${i + 1}`} role="option" aria-selected={filterUpdatedBy === a.admin_id} onClick={() => { setFilterUpdatedBy(a.admin_id); setShowUpdatedDd(false); }} className={`min-h-11 2xl:min-h-0 w-full text-left px-3 py-1.5 text-sm hover:bg-surface-2 flex items-center gap-2 ${filterUpdatedBy === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={filterUpdatedBy === a.admin_id ? "" : "opacity-0"} /> {a.name || a.username}
                     </button>
                   ))}
@@ -647,7 +647,7 @@ export default function KnowledgePage() {
               aria-expanded={showSortDd}
               aria-haspopup="listbox"
               style={{ minWidth: "90px" }}
-              className="h-8 px-2.5 text-xs rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
+              className="min-h-11 2xl:min-h-0 2xl:h-8 px-2.5 text-sm rounded-lg border border-border bg-surface text-text-muted hover:text-text hover:border-pale-sky flex items-center gap-1.5 transition-colors"
             >
               <ArrowDownUp size={11} className="text-text-muted shrink-0" />
               <span className="font-medium" style={{ minWidth: "60px" }}>
@@ -666,7 +666,7 @@ export default function KnowledgePage() {
                     { v: "name", l: "ชื่อ A-Z" },
                   ] as const).map((s, i) => (
                     <button key={s.v} id={`sort-option-${i}`} role="option" aria-selected={sortBy === s.v} onClick={() => { setSortBy(s.v); setShowSortDd(false); }}
-                      className={`w-full text-left px-3 py-1.5 text-xs hover:bg-surface-2 flex items-center gap-2 ${sortBy === s.v ? "text-brand font-medium" : "text-text"}`}>
+                      className={`min-h-11 2xl:min-h-0 w-full text-left px-3 py-1.5 text-sm hover:bg-surface-2 flex items-center gap-2 ${sortBy === s.v ? "text-brand font-medium" : "text-text"}`}>
                       <Check size={11} className={sortBy === s.v ? "" : "opacity-0"} />
                       {s.l}
                     </button>
@@ -703,7 +703,7 @@ export default function KnowledgePage() {
 
           {/* Clear */}
           {(activeFilterCount > 0 || search) && (
-            <button onClick={clearFilters} className="h-8 px-2 text-xs text-text-muted hover:text-vibrant-coral hover:bg-surface-2 rounded-lg flex items-center gap-1 transition-colors">
+            <button onClick={clearFilters} className="min-h-11 2xl:min-h-0 2xl:h-8 px-2 text-sm text-text-muted hover:text-vibrant-coral hover:bg-surface-2 rounded-lg flex items-center gap-1 transition-colors">
               <X size={11} /> ล้าง
             </button>
           )}
@@ -727,7 +727,7 @@ export default function KnowledgePage() {
         )}
         </>
       }
-      contentClassName="p-4 md:p-6"
+      contentClassName="p-4 md:p-5 2xl:p-6"
     >
       {uploadMsg && (
         <div
@@ -752,7 +752,7 @@ export default function KnowledgePage() {
             onClick={() => setCorpus(c.v)}
             role="tab"
             aria-selected={corpus === c.v ? "true" : "false"}
-            className={`px-4 py-1.5 text-xs font-medium rounded-lg transition-colors ${
+            className={`min-h-11 2xl:min-h-0 px-4 py-1.5 text-sm font-medium rounded-lg transition-colors ${
               corpus === c.v ? "bg-surface text-text shadow-sm" : "text-text-muted hover:text-text"
             }`}
           >
@@ -777,7 +777,7 @@ export default function KnowledgePage() {
             aria-controls="kb-tabpanel"
             id={`kb-tab-${t.v}`}
             tabIndex={tab === t.v ? 0 : -1}
-            className={`px-3 py-1 text-xs rounded-lg transition-colors ${
+            className={`min-h-11 2xl:min-h-0 px-3 py-1 text-sm rounded-lg transition-colors ${
               tab === t.v ? "bg-brand text-white" : "bg-surface-2 text-text-muted hover:bg-pale-sky-soft"
             }`}
           >

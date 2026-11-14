@@ -208,8 +208,8 @@ export default function ContactsPage() {
           />
         ) : (
           <>
-            {/* <lg — card list (มือถือ/tablet) */}
-            <div className="space-y-2 lg:hidden">
+            {/* <xl — card list (มือถือ/tablet) */}
+            <div className="space-y-3 xl:hidden">
               {contacts.map((c) => (
                 <MobileInfoCard
                   key={`m-${c.platform}-${c.buyer_id}`}
@@ -228,8 +228,8 @@ export default function ContactsPage() {
               ))}
             </div>
 
-            {/* lg+ — table */}
-            <Card className="hidden lg:block overflow-x-auto">
+            {/* xl+ — table */}
+            <Card className="hidden xl:block overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-surface-2/50">

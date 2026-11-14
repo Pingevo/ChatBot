@@ -3,6 +3,7 @@
 // UI/UX เหมือน /tickets ทุกอย่าง — ใช้ components เดียวกัน (ChatList, TicketChatPanel, InfoTab, ChatLogTab, ProductsTab, CloseChatModal)
 // ข้อมูลจาก test_assignment collection (เหมือน test-assignment แต่เพิ่ม admin_reply + close + reopen)
 // เพิ่ม: ปุ่ม "จ่ายงาน N chat" ด้านบน ChatList
+import { SelectField } from "@/components/ui/SelectField";
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { ArrowLeft, Info, PanelRightClose, PanelRightOpen, Zap } from "lucide-react";
 import { ChatList } from "@/components/chat/ChatList";
@@ -602,7 +603,7 @@ export default function LiveAssignmentPage() {
   }, [batchCount, batchMode, batchPlatform, batchRunning, loadList]);
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="h-full min-w-0 flex flex-col overflow-hidden">
       {/* ── Batch controls bar (ด้านบนสุด — เหนือ panel 3 คอลัมน์) ── */}
       <div className="shrink-0 px-4 py-3 border-b border-border bg-surface">
         <div className="flex items-center gap-3 flex-wrap">
@@ -624,31 +625,31 @@ export default function LiveAssignmentPage() {
                 value={batchCount}
                 onChange={(e) => setBatchCount(Math.min(Math.max(parseInt(e.target.value) || 1, 1), 1000))}
                 disabled={batchRunning}
-                className="w-20 h-8 text-xs rounded-lg border border-border bg-surface-2 px-2 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand/40 text-text"
+                className="w-20 h-10 text-xs rounded-lg border border-border bg-surface-2 px-2 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand/40 text-text"
                 placeholder="500"
               />
             </label>
-            <select
+            <SelectField
               value={batchPlatform}
               onChange={(e) => setBatchPlatform(e.target.value as "all" | Platform)}
               disabled={batchRunning}
-              className="h-8 text-xs rounded-lg border border-border bg-surface-2 px-2 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand/40 text-text"
+              className="h-10 text-xs rounded-lg border border-border bg-surface-2 px-2 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand/40 text-text"
             >
               <option value="all">ทุก platform</option>
               <option value="shopee">Shopee</option>
               <option value="tiktok">TikTok</option>
               <option value="lazada">Lazada</option>
-            </select>
-            <select
+            </SelectField>
+            <SelectField
               value={batchMode}
               onChange={(e) => setBatchMode(e.target.value as "overwrite" | "resume")}
               disabled={batchRunning}
-              className="h-8 text-xs rounded-lg border border-border bg-surface-2 px-2 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand/40 text-text"
+              className="h-10 text-xs rounded-lg border border-border bg-surface-2 px-2 focus:outline-none focus:ring-2 focus:ring-brand/30 focus:border-brand/40 text-text"
             >
               <option value="overwrite">ทำใหม่</option>
               <option value="resume">resume</option>
-            </select>
-            <Button size="sm" onClick={handleBatchReplay} disabled={batchRunning}>
+            </SelectField>
+            <Button size="sm" className="min-h-10" onClick={handleBatchReplay} disabled={batchRunning}>
               <Zap size={14} />
               {batchRunning ? `กำลังรัน...` : `จ่ายงาน ${batchCount} chat`}
             </Button>
@@ -674,9 +675,9 @@ export default function LiveAssignmentPage() {
       </div>
 
       {/* ── 3-column layout (เหมือน tickets) ── */}
-      <div className="flex-1 flex min-h-0">
+      <div className="flex-1 flex min-h-0 min-w-0">
         {/* ── Panel ซ้าย: ChatList ── */}
-        <div className={`${mobileView === "list" ? "flex" : "hidden"} lg:flex h-full flex-col w-full lg:w-80 shrink-0 border-r border-border`}>
+        <div className={`${mobileView === "list" ? "flex" : "hidden"} xl:flex h-full flex-col w-full xl:w-80 shrink-0 border-r border-border`}>
           <ChatList
             conversations={conversations}
             selectedId={selectedId}
@@ -697,10 +698,10 @@ export default function LiveAssignmentPage() {
         </div>
 
         {/* ── Panel กลาง: TicketChatPanel ── */}
-        <div className={`${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 h-full min-w-0 relative`}>
+        <div className={`${mobileView === "chat" ? "flex" : "hidden"} xl:flex flex-1 h-full min-w-0 relative`}>
           <button
             onClick={handleBack}
-            className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+            className="xl:hidden absolute top-3 left-3 z-10 w-10 h-10 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
             title="กลับ"
             aria-label="กลับ"
           >
@@ -709,7 +710,7 @@ export default function LiveAssignmentPage() {
           {selected && (
             <button
               onClick={() => setMobileView("info")}
-              className="lg:hidden absolute top-3 right-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+              className="xl:hidden absolute top-3 right-3 z-10 w-10 h-10 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
               title="รายละเอียด"
               aria-label="รายละเอียด"
             >
@@ -735,12 +736,12 @@ export default function LiveAssignmentPage() {
         {selected && (
           <>
             <div
-              className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "lg:hidden" : "lg:flex"} h-full w-full lg:w-auto transition-[width] duration-200 ease-in-out`}
+              className={`${mobileView === "info" ? "flex" : "hidden"} ${rightCollapsed ? "xl:hidden" : "xl:flex"} h-full w-full xl:w-auto transition-[width] duration-200 ease-in-out`}
             >
-              <div className="relative h-full flex flex-col w-full lg:w-[340px] border-l border-border bg-surface">
+              <div className="relative h-full flex flex-col w-full xl:w-[340px] border-l border-border bg-surface">
                 <button
                   onClick={() => setMobileView("chat")}
-                  className="lg:hidden absolute top-3 left-3 z-10 w-9 h-9 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
+                  className="xl:hidden absolute top-3 left-3 z-10 w-10 h-10 rounded-lg bg-surface border border-border flex items-center justify-center shadow-sm"
                   title="กลับ"
                   aria-label="กลับ"
                 >
@@ -840,7 +841,7 @@ export default function LiveAssignmentPage() {
             {rightCollapsed && (
               <button
                 onClick={() => setRightCollapsed(false)}
-                className="hidden lg:flex absolute top-1/2 right-0 -translate-y-1/2 z-20 w-7 h-16 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors shadow-sm"
+                className="hidden xl:flex absolute top-1/2 right-0 -translate-y-1/2 z-20 w-7 h-16 bg-surface border border-border rounded-l-lg items-center justify-center hover:bg-surface-2 transition-colors shadow-sm"
                 title="แสดง panel"
                 aria-label="แสดง panel"
               >
