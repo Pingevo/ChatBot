@@ -166,6 +166,56 @@ Contract ที่อนุมัติ: direct product-spec need ใช้ desc
 
 หลังผู้ใช้อนุมัติแต่ละ correction ให้สร้าง RED ที่ boundary จริง, แก้ owner เดิม, รัน regression locks ที่เกี่ยว และเก็บ GREEN พร้อม Q/A ก่อนเริ่มหัวข้อถัดไป. ห้ามรวมหลาย root causes เป็น patch เดียว.
 
+## Phase 1 Tasks 8–10 verification closeout (2026-11-14)
+
+### Step 1 — offline/TS verification (นับแยกทุก suite)
+
+| Suite | ผล |
+|---|---|
+| `pytest docs/test/offline -q` | 2250 passed, 15 skipped, 1 xfailed (69.88s) |
+| `cd ChatAdminWeb && npx tsc --noEmit` | clean (exit 0) |
+| `test-botworker-boundary.ts` | 25/25 passed |
+| `test-botworker-review.ts` | 35/35 passed |
+| `test-phase9-buffer.ts` | 16/16 passed |
+| `test-botworker-idempotency.ts` | 71/71 passed |
+
+### Step 2 — bounded live canary (isolated :8012, write-block active, handoff→local stub :8013)
+
+Environment deviation ที่ต้องบันทึก: `EMBEDDING_DEVICE=cpu` (mps stall เมื่อโหลด BGE-M3 คู่กับ production :8010 — compute device ต่างแต่ retrieval path เดียวกัน; latency ไม่ representative) และ `HF_HUB_OFFLINE=1`. Provider (Gemini) ช้าผิดปกติช่วงรัน — serial LLM ~40–170s (A-211 median 4.3s); concurrency-5 ไม่จบภายใน 600s/req — รายงานเป็น environmental ไม่ใช่ defect ที่พิสูจน์ได้
+
+| Case | Route | Evidence/channel | Products | Answer | Handoff | LLM calls | Tokens | เวลา |
+|---|---|---|---|---|---|---|---|---|
+| image-only (r2) | `product_store` | image_desc 143 chars + retrieval | 4 × CukTechThailand | 1887 chars, ไม่ว่าง | — | 4 | 29352 | 20.2s |
+| shipping | `general:shipping_policy` | — | — | policy answer | — | 1 | 4873 | 41.7s |
+| explicit-admin | `human_request_handoff` | — | — | รับส่งแอดมิน | `queued` confirmed (stub) | 1 | 4880 | 2.5s |
+| admin-fail-control | `human_request_handoff` | — | — | "ติดต่อแอดมินไม่สำเร็จชั่วคราว" | `failed` → `handoff_to_admin=false` | 1 | 4880 | 1.8s |
+| exact-product-spec (r2) | `product_store` | retrieval; `spec_claim` guard rewrite clause ไม่ grounded ('620W' จากชื่อรุ่น) | 4 × CUKTECH | ตอบ '240W' grounded | — | 3 | 25687 | 97.5s |
+| recommendation (r2) | `product_store` | retrieval | 5 × CUKTECH | recommend + alternatives | — | 3 | 27701 | 83.8s |
+| zaapi-exact-row (r2) | `product_store` | **zaapi 5 rows → typed ctx (replay proof)** | 3× item 40963905453 + 1 alt | '300W' + port details จาก spec row | — | 3 | 25554 | 167.2s |
+| post-handoff-lock | `warranty_claim_flow` | ticket_state silence | — | post-handoff behavior | — | 1 | 0 | 1.3s |
+| quota-burst ×5 (r1/r2) | — | — | — | client timeout 150s/600s ทั้งหมด | — | — | — | unobserved |
+
+### Step 3 — before/after gates
+
+| Gate | ผล |
+|---|---|
+| image→blank `no_reply` = 0 | **0** (vision ผลิต image_desc จริง, answer ไม่ว่าง) |
+| provider error→semantic `other` = 0 | **0 ที่สังเกตได้** (ไม่มี provider error ใน requests ที่จบ; quota burst สังเกตไม่ได้ภายใน 600s) |
+| wrong-shop product = 0 | **0** (17 cards ทุกใบ `product_shop=CukTechThailand`) |
+| wrong-subject product/card mismatch = 0 | **0** (คำตอบอ้าง subject ถูกรุ่น; alternatives เป็น list แยก) |
+| handoff-success wording without persisted outcome = 0 | **0** (fail control → ข้อความล้มเหลวซื่อตรง + flag false) |
+| Zaapi exact-row canary reaches final answer | **PASS** — in-process replay production chain เดียวกัน: `zaapi_search` 5 hits → `pool.supporting_evidence` 5 (request_id `ch:kb:0`, file/sheet/row provenance) → `ctx.evidence` ครบทั้ง 5 `need_indices=(0,)` รวม `116 - CUKTECH Spec (9).xlsx::spec::34` ที่มี `กำลังไฟสูงสุด: 300W`; live answer มี 300W + port details ที่มีเฉพาะใน spec row |
+| price markers in prohibited payload = 0 | **0** (answer prose 0 markers ทุกเคส; card `price` field = open policy question เดิม A-211 — ยังไม่ proven prohibited → residual #5) |
+
+ขยายความ A-211 residual: `GroupedRetrievalSelection.by_request["ch:kb:N"]=0` **ไม่ใช่ evidence drop** — counter นับเฉพาะ selected candidates; zaapi evidence ไหลผ่าน `supporting_evidence` คนละช่อง (พิสูจน์ด้วย replay + T8 offline suite 8/8)
+
+### Residuals
+
+- quota/concurrency behavior ไม่ได้สังเกตจริง (provider ช้า — client timeout ก่อนคำตอบ)
+- card `price` field policy ยังเปิด (งานต่อ #5) — prose สะอาดแล้ว
+- sellable=false พร้อม positive stock (งานต่อ #5) ไม่ได้ทดสอบรอบนี้
+- ไม่มี cross-shop adversarial same-item_id test (งานต่อ #8)
+
 ## Integrity
 
 รายงานนี้ไม่รวมข้อมูลลูกค้าดิบ. รายละเอียด Q/A และ LLM input ทั้งหมดเก็บในไฟล์ ignored ข้างต้นเพื่อให้ตรวจรายเคสในเครื่องได้. สถานะ ledger/active log อ้างอิง A-211. Branch ณ ปิดงาน: `feature-set-branch-n-go` @ `f84a3fb`; UI working-tree changes เป็นงานอื่นและคงไว้; ไม่มี stage/commit/push/PR/deploy.

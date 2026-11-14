@@ -658,6 +658,138 @@ async function main() {
     assert(claim?.status === "bot_failed", `claim status=${claim?.status}`);
   });
 
+  // ══════════════════════════════════════════════════════════
+  // T9 — Phase 1 Task 9: buffer → workflow AI → admin review → persisted handoff
+  //   isolated e2e scenario + negative controls — engine/handoff/buffer จริง
+  //   (mock เฉพาะ leaf เหมือน suite นี้)
+  // ══════════════════════════════════════════════════════════
+
+  const t9Scope = () => ({
+    config: mocks.state.config,
+    global_enabled_since: new Date(0),
+    pairs: [{ platform: "shopee", shop_id: "shop_1", config_shop_key: "shop_1",
+              shopname: "shop_1", cutoff: new Date(0) }],
+  });
+  const seedWf = (wfId: string, assignCfg: Record<string, unknown>) => {
+    mocks.fakeColl("workflows").push({
+      workflow_id: wfId, name: `t9 ${wfId}`, enabled: true, status: "published",
+      shop_ids: ["shop_1"], platforms: ["shopee"], priority: 10,
+      nodes: [
+        { node_id: "t1", type: "trigger", subtype: "message_received",
+          config: { keywords: ["แอดมิน"] }, position: { x: 0, y: 0 } },
+        { node_id: "a1", type: "action", subtype: "send_message",
+          config: { text: "รับทราบค่ะ เดี๋ยวแอดมินตรวจสอบให้" }, position: { x: 0, y: 0 } },
+        { node_id: "a2", type: "action", subtype: "assign_ticket",
+          config: assignCfg, position: { x: 0, y: 0 } },
+      ],
+      edges: [
+        { edge_id: "e1", source_node_id: "t1", target_node_id: "a1" },
+        { edge_id: "e2", source_node_id: "a1", target_node_id: "a2" },
+      ],
+    });
+  };
+
+  await test("T9 buffer → workflow AI → admin review → persisted handoff outcome", async () => {
+    const conv = "conv_t9";
+    mocks.state.config.bot_buffer_enabled = true;
+    mocks.state.config.bot_buffer_window_ms = 80;
+    mocks.state.config.workflow_enabled = true;
+    // flush re-resolves scope จาก shops coll จริง + platform enabled edge
+    //   (resolver contract) — ไม่มี row/edge → pair miss → scope_superseded
+    //   settle (production fail-closed)
+    (mocks.state.config as Record<string, unknown>).bot_worker_platform_enabled_at =
+      { shopee: new Date(0) };
+    mocks.fakeColl("shops").push({
+      shop_id: "shop_1", platform: "shopee", shopname: "shop_1",
+      connected: true, bot_worker_enabled: true, bot_worker_enabled_at: new Date(0),
+    });
+    seedConv(conv);
+    seedUserMsg(conv, "m_t9", "ขอให้แอดมินตรวจสอบรุ่นนี้");
+    seedWf("wf_t9", { admin_id: "adm_1" });
+    const r1 = await svc.pollNewMessages(t9Scope() as never);
+    assert(r1.results.some((x) => x.status === "fired"), "worker did not claim input");
+    // buffer stage — claim child inserts row async; transient row lives ~window
+    let buf: any;
+    for (let i = 0; i < 30 && !buf; i++) {
+      await sleep(5);
+      buf = mocks.fakeColl("buffer_messages").find((x: any) => x.message_id === "m_t9");
+    }
+    assert(buf?.status === "buffered", `inbound was not buffered: ${JSON.stringify(buf)}`);
+    // artifact-driven wait — debounce timer → flush → dispatch (bounded)
+    let reply: any, status: any;
+    for (let i = 0; i < 40 && !(reply && status); i++) {
+      await sleep(25);
+      await svc.waitForInFlight();
+      reply = reply || mocks.fakeColl("shadow_replies").find((x: any) => x.conversation_id === conv);
+      status = status || mocks.fakeColl("test_status_conversation").find((x: any) => x.conversation_id === conv);
+    }
+    assert(reply, "no shadow reply persisted");
+    assert(reply.origin === "workflow", `origin=${reply.origin} want workflow`);
+    assert(reply.review_bubbles?.length > 0, "proposed answer not reviewable");
+    assert(status && (status.status === "handoff" || status.status === "open"),
+      `handoff not persisted: ${JSON.stringify(status)}`);
+    assert(status.assigned_to === "adm_1", `assigned_to=${status?.assigned_to} want adm_1`);
+    const claim = mocks.fakeColl("chat_processing").find((x: any) => x.message_id === "m_t9");
+    assert(claim?.outcome_type === "handed_off", `outcome_type=${claim?.outcome_type} want handed_off`);
+    assert(mocks.fakeColl("buffer_messages").filter((x: any) => x.message_id === "m_t9").length === 0,
+      "buffer row must be consumed after processing");
+  });
+
+  await test("T9 same operation key → one run doc, one assignment", async () => {
+    const conv = "conv_t9op";
+    mocks.state.config.workflow_enabled = true;
+    seedConv(conv);
+    seedUserMsg(conv, "m_t9op", "ขอคุยกับแอดมิน");
+    mocks.fakeColl("admins").push({
+      admin_id: "adm_a", role: "admin", active: true,
+      is_accepting_chats: true, created_at: new Date(0),
+    });
+    seedWf("wf_t9op", {});   // auto assign → handoffToAdminTest op-key path
+    const eng = await import("../src/backend/service/workflowEngine");
+    const msg = {
+      message_id: "m_t9op", conversation_id: conv, shop_id: "shop_1",
+      config_shop_key: "shop_1", shopname: "shop_1", platform: "shopee",
+      text: "ขอคุยกับแอดมิน", testSource: "botworker",
+      operation_key: "op_t9_1",
+    } as never;
+    const r1 = await eng.matchAndRun(msg);
+    const r2 = await eng.matchAndRun(msg);
+    assert(r1.run_id === r2.run_id, `same op → different run: ${r1.run_id} vs ${r2.run_id}`);
+    const runs = mocks.fakeColl("workflow_runs").filter((x: any) => x.operation_key === "op_t9_1");
+    assert(runs.length === 1, `run docs=${runs.length} want 1`);
+    const assignOps = mocks.fakeColl("botworker_events").filter(
+      (x: any) => String(x._id).startsWith("op_t9_1:assign:"));
+    assert(assignOps.length === 1, `assign op docs=${assignOps.length} want 1`);
+    const st = mocks.fakeColl("test_status_conversation").filter((x: any) => x.conversation_id === conv);
+    assert(st.length === 1 && st[0].assigned_to === "adm_a",
+      `test_status rows=${st.length} assigned=${st[0]?.assigned_to} want 1×adm_a`);
+    assert(r2.handoff?.agentId === "adm_a", "op retry must return committed assignee");
+  });
+
+  await test("T9 failed assignment → no success wording (empty admin pool)", async () => {
+    const conv = "conv_t9fail";
+    mocks.state.config.workflow_enabled = true;
+    seedConv(conv);
+    seedUserMsg(conv, "m_t9f", "ขอคุยกับแอดมิน");
+    seedWf("wf_t9f", {});     // auto — admins coll ว่าง → pool empty
+    const eng = await import("../src/backend/service/workflowEngine");
+    const r = await eng.matchAndRun({
+      message_id: "m_t9f", conversation_id: conv, shop_id: "shop_1",
+      config_shop_key: "shop_1", shopname: "shop_1", platform: "shopee",
+      text: "ขอคุยกับแอดมิน", testSource: "botworker",
+      operation_key: "op_t9_2",
+    } as never);
+    if (!r.handoff) throw new Error(`no handoff surfaced: ${JSON.stringify(r)}`);
+    assert(r.handoff.agentId === null,
+      `handoff=${JSON.stringify(r.handoff)} want agentId null`);
+    assert(r.handoff.state === "queued",
+      `handoff.state=${r.handoff.state} want queued (not success)`);
+    const st = mocks.fakeColl("test_status_conversation").find((x: any) => x.conversation_id === conv);
+    assert(!st?.assigned_to, `assigned_to must stay empty: ${JSON.stringify(st)}`);
+    assert(st?.pending_assignment === true,
+      `pending_assignment must be marked: ${JSON.stringify(st)}`);
+  });
+
   // ── summary ──────────────────────────────────────────────
 
   const passed = results.filter((r) => r.ok).length;

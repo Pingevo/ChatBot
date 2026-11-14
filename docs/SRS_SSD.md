@@ -1505,6 +1505,9 @@ module ใหม่ที่แยก pure detectors ออกจาก `knowled
 - ✅ Output guard `guards.enforce` ครอบทุก engine (+ observe-only `check_output` ใน model_post_init)
 - ✅ Web search fallback + URL strip + uncertainty detect + spec-db gate
 - ✅ Shadow isolation: `shadow:` conv id + `simulate_assignment` → `test_status_conversation`
+- ✅ Typed answer boundary: grouped retrieval (`retrieval_runtime`) → typed `AnswerContext` เป็น owner ของ product context; evidence attribution ผ่าน `need_indices` (verified offline + isolated live replay)
+- ✅ Zaapi file-backed KB (`kb_source="zaapi"`): `zaapi_kb_files` registry (file→active_rev/active_apply) → `zaapi_search` → `kind="kb"` supporting evidence พร้อม file/sheet/row provenance → ถึง typed ctx + answer (verified canary)
+- ✅ Bot-worker workflow chain: buffer debounce → workflow AI → `shadow_replies.review_bubbles` → handoff persist `test_status_conversation` + op-key dedupe + failed-assignment no-success (verified isolated)
 - ✅ ChatAdminWeb: inbox cursor pagination, dashboard index+cache, `/roles` matrix, `/llm` AES-GCM key pool + per-role models, test/live assignment, shadow inbox, annotations, KPI, workflow builder, bot-worker + buffer debounce
 - ✅ `refresh_data.sh` cron pipeline (incremental OCR, mtime reload ไม่ต้อง restart)
 
