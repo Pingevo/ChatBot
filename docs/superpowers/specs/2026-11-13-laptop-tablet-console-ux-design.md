@@ -1,6 +1,7 @@
 # Full-Device Console UX — Design Spec
 
 **Date:** 2026-11-13
+
 **Status:** Expanded scope approved by user; implementation underway
 **Scope:** All 40 authenticated ChatAdminWeb routes and shared states on phone, tablet, and laptop/desktop.
 

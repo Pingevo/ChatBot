@@ -29,6 +29,7 @@
 - `check_flow.py` (เดิม test_flow.py), `check_compat_mode_filter.py`, `check_handoff_transport.py`, `check_pool_sources_admission.py` — live checks แบบ script
 - `run_daily_tests.py` อยู่ใน `live/` (orchestrator ของ testQA2)
 - `check_progress.py` — ดูความคืบหน้า testQA2
+- `diagnose_chat_latency.py` — วัด `/chat` แบบ sequential/concurrent พร้อมเวลา embedding/retrieval/quota/provider; เรียก provider จริงและเขียน `ai_usage` ลง Admin Mongo (ค่าปริยาย 100+100 turns อาจมีค่าใช้จ่าย) ใช้เฉพาะ QA input/config ที่ได้รับอนุญาต; เขียนผล aggregate ลง `results/`
 - `analyze_*.py`, `bench_*.py`, `diag_*.py`, `eval_*.py`, `canary_*` ที่เป็น offline, `build_unit_reg_corpus.py`, `push_unit_reg_to_admin.py`, `find_qa_conversations.py`, `mongo_doubles.py`, `zaapi_phase4_helpers.py`
 - data: `gold_retrieval*.jsonl/.js`, `gold_review.html`, `index.html`
 
