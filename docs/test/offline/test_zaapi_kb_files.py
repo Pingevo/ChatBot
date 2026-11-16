@@ -1245,17 +1245,81 @@ def test_search_semantic_below_lexical_rank_still_found(db, monkeypatch):
         [f"รุ่น {i}", f"สายชาร์จ ไทป์ซี หูฟัง บลูทูธ {i}" * 3]
         for i in range(45)]
     rows.append(["รุ่น X9", f"{target} สายชาร์จ"])
-    zkf.apply_import(db, filename="sem.xlsx",
-                     data=_xlsx_bytes({"s": rows}),
-                     content_type="product", admin="t")
+    # patch ก่อน import — vec ถูกเตรียมตอน apply_import (precomputed index)
     monkeypatch.setattr(emb, "embed_query", lambda *a, **k: [1.0, 0.0])
     monkeypatch.setattr(emb, "embed_texts", lambda texts, *a, **k: [
         [1.0, 0.0] if target in t else [0.0, 1.0] for t in texts])
+    monkeypatch.setattr(emb, "model_identity",
+                        lambda: {"name": "test-m3", "dim": 2})
+    zkf.apply_import(db, filename="sem.xlsx",
+                     data=_xlsx_bytes({"s": rows}),
+                     content_type="product", admin="t")
     hits, trace = zkf.zaapi_search(
         db, query="สายชาร์จ ไทป์ซี หูฟัง บลูทูธ", limit=5)
     assert hits and target in hits[0]["a"], (
         f"semantic-best row ต้องชนะ cosine แม้ prefilter rank ต่ำ "
         f"(hits={[h['meta'] for h in hits]}, trace={trace})")
+
+
+def test_search_uses_precomputed_row_vectors(db, monkeypatch):
+    """import เตรียม vec+vec_model ต่อแถวล่วงหน้า — search ไม่ re-embed
+    แถวที่มี pin ตรง (ranking = stored vec dot product เท่านั้น)."""
+    from shopeechat import embedding as emb
+    calls = {"texts": 0}
+
+    def fake_texts(texts, *a, **k):
+        calls["texts"] += 1
+        return [[1.0, 0.0] if "AC65B" in t else [0.0, 1.0] for t in texts]
+
+    monkeypatch.setattr(emb, "embed_texts", fake_texts)
+    monkeypatch.setattr(emb, "embed_query", lambda *a, **k: [1.0, 0.0])
+    monkeypatch.setattr(emb, "model_identity",
+                        lambda: {"name": "test-m3", "dim": 2})
+    zkf.apply_import(db, filename="vi.xlsx",
+                     data=_xlsx_bytes({"s": [["q", "a"],
+                                           ["r1", "สาย AC65B ชาร์จเร็ว"],
+                                           ["r2", "หูฟัง บลูทูธ"]]}),
+                     content_type="product", admin="t")
+    row = db["zaapi_kb"].find_one(
+        {"source_file": "vi.xlsx", "text": {"$regex": "AC65B"}})
+    assert row.get("vec") and row.get("vec_model") == {"name": "test-m3", "dim": 2}, \
+        "apply_import ต้องเก็บ vec + model pin ต่อแถว"
+    calls["texts"] = 0
+    hits, _ = zkf.zaapi_search(db, query="สายชาร์จ", limit=5)
+    assert calls["texts"] == 0, \
+        f"search ต้องไม่ re-embed แถวที่มี vec pin ตรง (calls={calls['texts']})"
+    assert hits and "AC65B" in hits[0]["a"], \
+        f"stored vec ranking ต้องให้แถว AC65B ชนะ (hits={[h['meta'] for h in hits]})"
+
+
+def test_search_reembeds_rows_with_stale_vector_pin(db, monkeypatch):
+    """vec_model ไม่ตรง model ปัจจุบัน → fallback embed_texts เฉพาะแถวนั้น
+    (ห้ามปน vector space ข้าม model revision)."""
+    from shopeechat import embedding as emb
+    calls = {"texts": 0}
+    monkeypatch.setattr(emb, "embed_query", lambda *a, **k: [1.0, 0.0])
+    monkeypatch.setattr(emb, "model_identity",
+                        lambda: {"name": "new-m3", "dim": 2})
+
+    def fake_texts(texts, *a, **k):
+        calls["texts"] += 1
+        return [[1.0, 0.0] if "ZX900" in t else [0.0, 1.0] for t in texts]
+
+    monkeypatch.setattr(emb, "embed_texts", fake_texts)
+    zkf.apply_import(db, filename="stale.xlsx",
+                     data=_xlsx_bytes({"s": [["q", "a"],
+                                           ["r1", "ZX900 เครื่องเสียง"],
+                                           ["r2", "เมาส์ เกมมิ่ง"]]}),
+                     content_type="product", admin="t")
+    # บังคับ pin ให้ stale ทั้งสองแถว (จำลอง model upgrade หลัง import)
+    for r in db["zaapi_kb"].find({"source_file": "stale.xlsx"}):
+        db["zaapi_kb"].update_one(
+            {"_id": r["_id"]}, {"$set": {"vec_model": {"name": "old", "dim": 2}}})
+    calls["texts"] = 0
+    hits, _ = zkf.zaapi_search(db, query="เครื่องเสียง", limit=5)
+    assert calls["texts"] == 1, \
+        f"stale-pin rows ต้อง fallback embed_texts (calls={calls['texts']})"
+    assert hits and "ZX900" in hits[0]["a"]
 
 
 def test_export_txt_roundtrip_verbatim(db):

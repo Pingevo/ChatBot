@@ -14174,3 +14174,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ผล: deterministic acceptance ทั้งคู่ GREEN (subject=1 ปีถึง final/spec_measured={12}, missing ไม่ใช้ 5 ปี), focused 243 passed, full offline 2318 passed/17 skipped/1 xfailed exit 0, syntax+diff check ผ่าน
 - Real provider app.chat รอบสุดท้าย (Gemini, 2 calls/24,290 tokens): subject_missing ไม่กล่าว 5 ปีของ target; subject_present ตอบ "มีระยะเวลารับประกัน 1 ปี" และ final คง "1 ปี" ไม่มี "5 ปี" — spec_measured=[{identity i:i-ct, warranty 12, source kb_zaapi_files}]. Artifact /tmp/zaapi_provider_app_chat_results_warranty_bound.json
 - ขอบเขตยังเหลือ: corpus bindings จริงยังไม่ curate (fixture ระดับ test), canonical refs/alias ambiguity/index/multi-need attribution/API-Admin wiring/live authenticated QA เป็นงานถัดไป; ไม่มี shared DB/customer/deploy/push/publish
+
+### ผ่านแล้ว — precomputed row vectors (zaapi_search index) (2026-11-16)
+- Error ก่อนแก้: zaapi_search embed_texts ทุก candidate ซ้ำต่อคำถาม (recompute ทุก query) — audit เดิม flag ว่าควรเตรียมล่วงหน้า
+- Fix: apply_import embed_texts ครั้งเดียวต่อ revision → stamp `vec`+`vec_model` (model_identity pin, derived ไม่เข้า digest/ไม่ export package); zaapi_search ใช้ stored vec เมื่อ pin ตรง, แถวไม่มี/stale pin → embed_texts เฉพาะแถวนั้น
+- RED→GREEN: vec/pin เก็บตอน import, search ไม่ re-embed (calls=0), stale-pin rows fallback recompute เฉพาะตัว; semantic-below-lexical-rank test ย้าย patch ไว้ก่อน import (contract ใหม่) — ยังพิสูจน์ cosine ชนะ prefilter
+- ผลกระทบ: legacy rows ไม่มี vec → fallback เดิม; manual_edit/rollback ปลอดภัยเพราะ vec อยู่กับ row+revision เดียวกัน; embed ไม่พร้อมตอน import → ข้าม field (degrade เดิม); test suite ไม่ช้าลง (patch ก่อน import)
+- 2320 passed/17 skipped/1 xfailed exit 0; syntax+diff ผ่าน; ยังไม่มี shared DB/customer/deploy/push

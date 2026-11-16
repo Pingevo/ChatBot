@@ -1716,6 +1716,8 @@ vector (`gen/<gid>/unit_embeddings.npz` ใน snapshot เดียวกัน
 
 **Subject fields:** `subject_refs: string[]` (operator-declared refs from selected positional columns, sheet refs, or row assignments; casefold/whitespace normalization only), `subject_digest: string` (SHA-256 of fields/text/cells/subject_refs + facts when bound), **`facts?: [{key:"warranty", value:int months>0}]`** (declared fact column per sheet via `subject_bindings.<sheet>.facts.warranty={column_index,header}`; normalized by `warranty.warranty_value_months`; emitted only on rows with bound subject refs; inside digest so replacement/rollback/stale-proof rules identical). Empty/missing refs are unknown, not model authority. Model-bound requests require an exact declared-ref match and current digest; arbitrary comparison mentions cannot bind the row. Manual content/ref edits invalidate proof until reviewed/rebuilt. No inferred aliases, catalogue replacement, or automatic migration.
 
+**Derived index fields:** `vec?: float[]`, `vec_model?: dict` — embedding เตรียมตอน apply ครั้งเดียวต่อ revision (pin = `embedding.model_identity()`; search ใช้เฉพาะเมื่อ pin ตรง model ปัจจุบัน มิฉะนั้น re-embed เฉพาะแถวนั้น; derived artifact ไม่เข้า subject_digest, ไม่ export ผ่าน package/export keys)
+
 **Visibility contract:** มองเห็นได้ก็ต่อเมื่อ `(source_file, file_rev, apply_id)` ตรง registry `zaapi_kb_files` triple — staged/orphan/CAS-loser rows ไม่มีทางหลุดมา
 
 **Fields (manual docs):** `kind:"manual"`, `source_id`/`source_name`, `manual_edit:true` (importer ไม่ทับ), `unscoped`/`accounts` (scope check เหมือน file rows)

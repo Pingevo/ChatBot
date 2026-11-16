@@ -564,6 +564,19 @@ def apply_import(db, *, filename: str, data: bytes,
         "imported_at": now,
         "expire_at": expire_at,  # staged: ไม่ commit → sweep เก็บเอง
     } for d in docs]
+    # เตรียม vector ล่วงหน้าต่อ revision (row เปลี่ยน = rev ใหม่เสมอ —
+    #   pin model_identity ไว้กับ vec; search เทียบ pin ก่อนใช้)
+    vecs, vec_model = None, None
+    try:
+        from . import embedding as _emb
+        vecs = _emb.embed_texts([r["text"] for r in rows])
+        vec_model = _emb.model_identity()
+    except Exception:
+        vecs = None
+    if vecs is not None:
+        for r, v in zip(rows, vecs):
+            r["vec"] = [float(x) for x in v]
+            r["vec_model"] = vec_model
     committed = False
     try:
         if scope["source_id"] is not None:
@@ -1076,7 +1089,8 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
              "file_rev": 1, "sheet": 1, "row_index": 1,
              "content_type": 1, "kind": 1, "accounts": 1,
              "unscoped": 1, "active": 1, "cells": 1,
-             "subject_refs": 1, "subject_digest": 1, "facts": 1}))
+             "subject_refs": 1, "subject_digest": 1, "facts": 1,
+             "vec": 1, "vec_model": 1}))
     except Exception:
         return [], ("zaapi_files_read_err",)
     docs = [d for d in docs
@@ -1113,8 +1127,20 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
     try:
         from . import embedding as _emb
         qv = _emb.embed_query(query)
-        tvs = _emb.embed_texts([d.get("text") or "" for _, d in cands])
-        sims = [_cosine(qv, tv) for tv in tvs]
+        mid = _emb.model_identity()
+        sims = [0.0] * len(cands)
+        pending = []
+        for i, (_, d) in enumerate(cands):
+            v = d.get("vec")
+            if isinstance(v, list) and v and d.get("vec_model") == mid:
+                sims[i] = _cosine(qv, v)
+            else:
+                pending.append(i)
+        if pending:
+            tvs = _emb.embed_texts(
+                [cands[i][1].get("text") or "" for i in pending])
+            for j, i in enumerate(pending):
+                sims[i] = _cosine(qv, tvs[j])
     except Exception:
         sims = None
     hits: list[dict] = []
