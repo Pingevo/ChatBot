@@ -1069,3 +1069,186 @@ def test_manual_platform_scope_case_fold(db, monkeypatch):
     hits, _ = zkf.zaapi_search(db, shop="ShopA", platform="shopee",
                                query="answer", include_manual=True)
     assert hits and hits[0]["a"] == "shopA only answer"
+
+
+def test_parse_duplicate_and_unnamed_cells_keep_positions():
+    data = _xlsx_bytes({"ข้อมูล": [
+        ["รุ่น", "ฟีเจอร์", "ฟีเจอร์", None, "จำนวน", "เปิด"],
+        ["AUD100", "first value", "second value", "unnamed value", 0, False],
+    ]})
+    row = zkf.parse_upload("cells.xlsx", data)[0]
+    assert row["cells"] == [
+        {"column_index": 1, "header": "รุ่น", "value": "AUD100"},
+        {"column_index": 2, "header": "ฟีเจอร์", "value": "first value"},
+        {"column_index": 3, "header": "ฟีเจอร์", "value": "second value"},
+        {"column_index": 4, "header": "", "value": "unnamed value"},
+        {"column_index": 5, "header": "จำนวน", "value": "0"},
+        {"column_index": 6, "header": "เปิด", "value": "False"},
+    ]
+    assert all(s in row["text"] for s in (
+        "first value", "second value", "unnamed value", "จำนวน: 0", "เปิด: False"))
+
+
+def test_parse_headerless_nonempty_row_is_not_discarded():
+    data = _xlsx_bytes({"ข้อมูล": [[None, None], ["AUD100", "รับประกัน 2 ปี"]]})
+    row = zkf.parse_upload("no-header.xlsx", data)[0]
+    assert row["source_row"] == 2
+    assert [c["value"] for c in row["cells"]] == ["AUD100", "รับประกัน 2 ปี"]
+
+
+def test_duplicate_cells_survive_apply_export_reimport(db):
+    data = _xlsx_bytes({"ข้อมูล": [
+        ["รุ่น", "ฟีเจอร์", "ฟีเจอร์", None],
+        ["AUD100", "first value", "second value", "unnamed value"],
+        [None, None, None, None],
+        ["AUD200", "other first", "other second", None],
+    ]})
+    zkf.apply_import(db, filename="cells.xlsx", data=data)
+    before = list(db[zkf._COLL].find({"source_file": "cells.xlsx", "file_rev": 1}))
+    out = zkf.export_file(db, filename="cells.xlsx")
+    after = zkf.parse_upload("cells.xlsx", out)
+    assert [r["cells"] for r in before] == [r["cells"] for r in after]
+    assert [r["text"] for r in before] == [r["text"] for r in after]
+    assert [r["source_row"] for r in after] == [2, 4]
+
+
+def test_preview_reports_duplicate_and_unnamed_columns(db):
+    data = _xlsx_bytes({"ข้อมูล": [["h", "h", None], ["a", "b", "c"]]})
+    result = zkf.preview_import(db, filename="cells.xlsx", data=data)
+    assert result["duplicate_columns"] == [{"sheet": "ข้อมูล", "header": "h", "columns": [1, 2]}]
+    assert result["unnamed_columns"] == [{"sheet": "ข้อมูล", "columns": [3]}]
+    assert result["warnings"]
+    assert db[zkf._COLL].count_documents({}) == 0
+
+
+@pytest.mark.parametrize("suffix", ["xlsx", "txt"])
+def test_original_bytes_follow_active_disabled_and_rollback(db, suffix):
+    first = F1_DATA if suffix == "xlsx" else "  รับประกัน 1 ปี\r\n\r\n".encode()
+    second = F1_EDITED if suffix == "xlsx" else "\ufeffรับประกัน 2 ปี\n".encode()
+    fn = f"original.{suffix}"
+    zkf.apply_import(db, filename=fn, data=first)
+    zkf.apply_import(db, filename=fn, data=second)
+    assert zkf.export_file(db, filename=fn, original=True) == second
+    zkf.set_file_enabled(db, filename=fn, enabled=False)
+    assert zkf.export_file(db, filename=fn, original=True) == second
+    zkf.set_file_enabled(db, filename=fn, enabled=True)
+    assert zkf.rollback_import(db, filename=fn)["ok"]
+    assert zkf.export_file(db, filename=fn, original=True) == first
+
+
+def test_original_export_legacy_revision_is_explicitly_unavailable(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA)
+    db[zkf._SOURCES_COLL].delete_many({})
+    assert zkf.export_file(db, filename=F1, original=True) is None
+    assert zkf.export_file(db, filename=F1)
+
+
+def test_export_cell_text_is_not_reinterpreted_as_formula(db):
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["value"])
+    ws.append(["=1+1"])
+    ws.cell(2, 1).data_type = "s"
+    buf = io.BytesIO()
+    wb.save(buf)
+    wb.close()
+    zkf.apply_import(db, filename="literal.xlsx", data=buf.getvalue())
+    out = zkf.export_file(db, filename="literal.xlsx")
+    parsed = zkf.parse_upload("literal.xlsx", out)
+    assert parsed[0]["fields"]["value"] == "=1+1"
+    wb2 = load_workbook(io.BytesIO(out), data_only=False)
+    assert wb2.active.cell(2, 1).data_type == "s"
+    wb2.close()
+
+
+def test_original_export_checks_stored_checksum(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA)
+    db[zkf._SOURCES_COLL].update_many({}, {"$set": {"data": b"corrupt"}})
+    with pytest.raises(ValueError, match="checksum"):
+        zkf.export_file(db, filename=F1, original=True)
+
+
+def test_original_sources_are_attempt_scoped_and_swept(db, monkeypatch):
+    zkf.apply_import(db, filename=F1, data=F1_DATA)
+    files = db[zkf._FILES_COLL]
+    monkeypatch.setattr(type(files), "find_one", lambda *a, **k: None)
+    assert zkf.apply_import(db, filename=F1, data=F1_EDITED)["conflict"]
+    monkeypatch.undo()
+    assert db[zkf._SOURCES_COLL].count_documents({}) == 1
+    assert zkf.export_file(db, filename=F1, original=True) == F1_DATA
+    zkf.apply_import(db, filename=F1, data=F1_EDITED)
+    past = datetime.now(timezone.utc) - timedelta(seconds=10)
+    db[zkf._SOURCES_COLL].update_many({}, {"$set": {"expire_at": past}})
+    zkf.sweep_expired(db)
+    assert db[zkf._SOURCES_COLL].count_documents({}) == 1
+    assert zkf.export_file(db, filename=F1, original=True) == F1_EDITED
+
+
+def test_original_sources_stay_exportable_when_disabled_and_expired(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA)
+    zkf.set_file_enabled(db, filename=F1, enabled=False)
+    past = datetime.now(timezone.utc) - timedelta(seconds=10)
+    db[zkf._SOURCES_COLL].update_many({}, {"$set": {"expire_at": past}})
+    zkf.sweep_expired(db)
+    assert zkf.export_file(db, filename=F1, original=True) == F1_DATA
+
+
+def test_source_write_failure_does_not_publish_rows(db, monkeypatch):
+    original = type(db[zkf._SOURCES_COLL]).insert_one
+    sources = db[zkf._SOURCES_COLL]
+    def fail(self, doc, **kwargs):
+        if self is sources:
+            raise RuntimeError("source storage unavailable")
+        return original(self, doc, **kwargs)
+    monkeypatch.setattr(type(sources), "insert_one", fail)
+    with pytest.raises(RuntimeError, match="source storage"):
+        zkf.apply_import(db, filename=F1, data=F1_DATA)
+    assert db[zkf._FILES_COLL].count_documents({}) == 0
+    assert db[zkf._COLL].count_documents({}) == 0
+
+
+def test_human_export_retains_manual_field_edits_and_original_source(db):
+    data = _xlsx_bytes({"ข้อมูล": [["รุ่น", "ฟีเจอร์", "ฟีเจอร์"],
+                                     ["AUD100", "first", "second"]]})
+    zkf.apply_import(db, filename="edited.xlsx", data=data)
+    db[zkf._COLL].update_many({}, {"$set": {
+        "manual_edit": True,
+        "fields": {"รุ่น": "AUD100", "ฟีเจอร์": "edited", "เพิ่ม": "new"},
+    }})
+    exported = zkf.parse_upload("edited.xlsx", zkf.export_file(db, filename="edited.xlsx"))[0]
+    assert exported["fields"]["ฟีเจอร์"] == "edited"
+    assert exported["fields"]["เพิ่ม"] == "new"
+    assert exported["cells"][1]["value"] == "first"
+    assert zkf.export_file(db, filename="edited.xlsx", original=True) == data
+
+
+def test_corpus_positional_cells_and_original_bytes_roundtrip():
+    root = os.environ.get("ZAAPI_CORPUS_DIR")
+    if not root:
+        pytest.skip("set ZAAPI_CORPUS_DIR to a local knowledge-files directory")
+    files = sorted(p for p in Path(root).iterdir() if p.suffix.lower() in zkf._EXTS)
+    assert files
+    for path in files:
+        data = path.read_bytes()
+        parsed = zkf.parse_upload(path.name, data)
+        db = MemoryDb()
+        zkf.apply_import(db, filename=path.name, data=data)
+        assert zkf.export_file(db, filename=path.name, original=True) == data, path.name
+        exported = zkf.parse_upload(path.name, zkf.export_file(db, filename=path.name))
+        view = lambda rows: [(r.get("sheet"), r.get("source_row"), r.get("cells"),
+                              r["fields"], r["text"]) for r in rows]
+        assert view(parsed) == view(exported), path.name
+        if path.suffix.lower() != ".xlsx":
+            continue
+        wb = load_workbook(io.BytesIO(data), data_only=True)
+        try:
+            actual = {(r["sheet"], r["source_row"]): r for r in parsed}
+            for ws in wb.worksheets:
+                for rownum, values in enumerate(ws.iter_rows(values_only=True), 1):
+                    if rownum == 1 or not any(zkf._clean(v) for v in values):
+                        continue
+                    row = actual[(ws.title, rownum)]
+                    assert [c["value"] for c in row["cells"]] == [
+                        "" if v is None else str(v) for v in values], (path.name, rownum)
+        finally:
+            wb.close()

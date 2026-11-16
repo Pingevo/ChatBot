@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 14059 |
-| active_integrity_prefix_sha256 | `d28ac6704401cb5fdb0329628dddcba6aca4a10efa3cb650cd02af5eb0b779f1` |
-| active_line_count_at_baseline | 14059 |
-| active_integrity_recorded_at | 2026-11-13 (+0700), PR branch synced with latest main and reverified (A-269); semantic coverage remains partial |
+| active_integrity_prefix_lines | 14076 |
+| active_integrity_prefix_sha256 | `21da3e9bbe5867c2b7c65455146c2978865ffa8c40e3361862896212c1029775` |
+| active_line_count_at_baseline | 14076 |
+| active_integrity_recorded_at | 2026-11-16 (+0700), isolated Zaapi raw-integrity checkpoint verified (A-270); semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -318,6 +318,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 14049–14053 | read + indexed (A-268 combined verification and PR-ready state) |
 | 14054–14054 | read + indexed (A-269 pre-work; separator) |
 | 14055–14059 | read + indexed (A-269 latest-main sync and regression verification) |
+| 14060–14076 | read + indexed (A-270 isolated Zaapi raw-integrity checkpoint; not full KB rollout) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -709,3 +710,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-267 | 14038–14041, 14042–14047 | Phase 1 branch isolation and read-only scope census / 2026-11-13 | pending/deferred work | Transferred 51 candidate paths from main checkout into `codex/phase1-chat-logic` based at c4f4bcd; UI commit excluded, source work preserved. Full offline worktree suite passed: 2248 passed, 15 skipped, 1 xfailed, exit 0. Read-only admin Mongo census corrected the join to `conversations_shp.conversation_id` and timeline shop comparison to `shop_name`; batch read removed per-doc query. Counts: 3261 total, 492 scoped, 2769 unscoped; 2361 derivable, 408 orphan, 0 ambiguous/conflict. Backfill plan updated; no Mongo write or migration. | verified | First sandboxed suite run failed solely on denied fixture writes; authorized rerun passed. 408 orphans remain unresolved and must not be assigned by inference. No stage/commit/push/PR/deploy. Semantic coverage remains partial. |
 | A-268 | 14048–14048, 14049–14053 | Phase 1 + responsive UI integration verification / 2026-11-13 | passed behavior | Committed the 51-path Phase 1 candidate as `8ca2331` on `codex/phase1-chat-logic`, then merged UI commit `bf37843` as `a076bec`; combined tree contains 92 ChatAdminWeb paths and 16 chatbot paths. Full offline regression: 2248 passed/15 skipped/1 xfailed, exit 0. Next production build passed after `npm ci` from the committed lockfile and build-only placeholder secrets; warns about middleware convention deprecation and dynamic filesystem tracing in replay/test-results routes. No Mongo writes; the 408 orphan timeline docs remain unassigned. | verified | PR to `main` and merge are authorized and pending execution; semantic ledger coverage remains partial. |
 | A-269 | 14054–14054, 14055–14059 | Sync PR branch with latest main / 2026-11-13 | regression lock | UI PR #57 had already merged into main at `f391020`; merged that current main commit into `codex/phase1-chat-logic` at `e0e6f97`. UI tree is byte-identical to `origin/main`; PR delta is 51 paths and contains 16 chatbot paths with no ChatAdminWeb paths. Full offline suite after sync: 2248 passed/15 skipped/1 xfailed, exit 0. Prior UI build passed on the same UI tree. No Mongo writes. | verified | Updated branch still needs push; PR #58 is open. 408 orphan scope records remain unresolved. Semantic ledger coverage remains partial. |
+| A-270 | 14060–14076 | Zaapi KB hardening checkpoint 1 / 2026-11-16 (isolated branch) | regression lock | User approved hardening and isolated worktree from main; original UX dirty checkout untouched. File owner now retains positional XLSX cells/duplicate and unnamed values, keeps field compatibility/manual edit export, preserves source row/sheet order and literal strings, reports preview anomalies. Original bytes stored in attempt-scoped source snapshots before CAS; original export checks SHA and active/disabled triple, legacy absence returns None. Rollback/conflict/sweep lifecycle includes snapshots and protects disabled revisions. Initial 8 controls failed before fixes; corpus 118-file positional/original roundtrip passed. Fresh full offline suite with corpus: 2262 passed/15 skipped/1 xfailed (58.52s), diff check clean. | verified | Only raw-integrity data-layer step verified; mapping/scope/source package/index/evidence/Admin/live QA pending. Docker daemon unavailable: no real Mongo integration. No shared DB/provider/customer/production write, deploy, push or commit. Await first commit approval; historical coverage remains partial. |

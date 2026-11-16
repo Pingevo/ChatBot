@@ -37,6 +37,7 @@ _COLL = os.environ.get(
     "ADMIN_MONGO_COLLECTION_ZAAPI_KB", "zaapi_kb").strip()
 _FILES_COLL = os.environ.get(
     "ADMIN_MONGO_COLLECTION_ZAAPI_KB_FILES", "zaapi_kb_files").strip()
+_SOURCES_COLL = f"{_FILES_COLL}_sources"
 _LOG_COLL = os.environ.get(
     "ADMIN_MONGO_COLLECTION_ZAAPI_KB_IMPORT_LOG",
     "zaapi_kb_import_log").strip()
@@ -105,18 +106,22 @@ def parse_upload(filename: str, data: bytes) -> list[dict]:
             rows = ws.iter_rows(values_only=True)
             header = [_clean(c) for c in next(rows, [])]
             for idx, row in enumerate(rows, start=2):
-                fields = {
-                    header[i]: _clean(v)
-                    for i, v in enumerate(row)
-                    if i < len(header) and header[i] and _clean(v)
-                }
-                if not fields:
+                cells = [{"column_index": i + 1,
+                          "header": header[i] if i < len(header) else "",
+                          "value": "" if v is None else str(v)}
+                         for i, v in enumerate(row)]
+                fields = {c["header"]: _clean(c["value"]) for c in cells
+                          if c["header"] and _clean(c["value"])}
+                if not any(_clean(c["value"]) for c in cells):
                     continue
                 docs.append({
                     "kind": "xlsx_row", "sheet": ws.title,
                     "row_index": len(docs), "source_row": idx,
-                    "fields": fields,
-                    "text": "\n".join(f"{k}: {v}" for k, v in fields.items()),
+                    "cells": cells, "fields": fields,
+                    "text": "\n".join(
+                        f"{c['header'] or 'column_' + str(c['column_index'])}: "
+                        f"{_clean(c['value'])}" for c in cells
+                        if _clean(c["value"])),
                 })
     finally:
         wb.close()
@@ -206,13 +211,23 @@ def preview_import(db, *, filename: str, data: bytes,
     sheets: dict[str, int] = {}
     sheet_type_map: dict[str, str] = {}
     untyped = 0
+    columns: dict[tuple[str, str], set[int]] = {}
+    unnamed: dict[str, set[int]] = {}
     for d in docs:
         sname = _sheet_key(d)
+        for c in d.get("cells") or ():
+            if c["header"]:
+                columns.setdefault((sname, c["header"]), set()).add(c["column_index"])
+            elif _clean(c["value"]):
+                unnamed.setdefault(sname, set()).add(c["column_index"])
         sheets[sname] = sheets.get(sname, 0) + 1
         rt = _row_content_type(d, ctype, stypes)
         sheet_type_map[sname] = rt
         if not rt:
             untyped += 1
+    duplicate_columns = [
+        {"sheet": s, "header": h, "columns": sorted(cs)}
+        for (s, h), cs in columns.items() if len(cs) > 1]
     return {
         "filename": fn, "new_rev": old_rev + 1,
         "replaces_rev": old_rev or None, "old_rows": old_rows,
@@ -224,10 +239,17 @@ def preview_import(db, *, filename: str, data: bytes,
                                    or ()),
         "content_type": ctype, "sheet_types": stypes,
         "untyped_rows": untyped,
+        "duplicate_columns": duplicate_columns,
+        "unnamed_columns": [{"sheet": s, "columns": sorted(cs)}
+                            for s, cs in unnamed.items()],
         "warnings": ([
             "การอัปโหลดชื่อเดิมจะแทนข้อมูลของไฟล์นี้ทั้งชุด "
             "(manual edit บนแถวของไฟล์จะถูกแทน)"
-        ] if old_rev else []),
+        ] if old_rev else []) + (
+            ["Duplicate headers preserved by column position"]
+            if duplicate_columns else []) + (
+            ["Unnamed nonempty columns preserved by column position"]
+            if unnamed else []),
     }
 
 
@@ -271,12 +293,17 @@ def apply_import(db, *, filename: str, data: bytes,
         "kind": d["kind"], "sheet": d.get("sheet"),
         "row_index": d["row_index"], "source_row": d.get("source_row", 0),
         "fields": d.get("fields") or {}, "text": d.get("text") or "",
+        "cells": d.get("cells") or [],
         "content_type": _row_content_type(d, ctype, stypes),
         "imported_at": now,
         "expire_at": expire_at,  # staged: ไม่ commit → sweep เก็บเอง
     } for d in docs]
     committed = False
     try:
+        db[_SOURCES_COLL].insert_one({
+            "_id": attempt, "apply_id": attempt,
+            "source_file": fn, "file_rev": rev,
+            "file_sha256": sha, "data": data, "expire_at": expire_at})
         za.insert_many(rows, ordered=False)
         if za.count_documents({"apply_id": attempt}) != len(rows):
             raise RuntimeError("staged verify failed")
@@ -300,6 +327,7 @@ def apply_import(db, *, filename: str, data: bytes,
             res = None
         if not (res and (res.matched_count or res.upserted_id)):
             za.delete_many({"apply_id": attempt})  # เฉพาะของ attempt นี้
+            db[_SOURCES_COLL].delete_many({"apply_id": attempt})
             _log_safely(db, {"op": "apply", "file": fn, "rev_to": rev,
                              "rev_from": old_rev, "status": "conflict",
                              "admin": admin})
@@ -320,6 +348,11 @@ def apply_import(db, *, filename: str, data: bytes,
                 za.update_many(
                     {"source_file": fn, "file_rev": old_rev},
                     {"$set": {"expire_at": expire_at}})
+            db[_SOURCES_COLL].update_many(
+                {"source_file": fn, "apply_id": {"$ne": attempt}},
+                {"$set": {"expire_at": expire_at}})
+            db[_SOURCES_COLL].update_many(
+                {"apply_id": attempt}, {"$unset": {"expire_at": ""}})
             _log(db, {"op": "apply", "file": fn, "rev_from": old_rev,
                       "rev_to": rev, "rows": len(rows), "sha256": sha,
                       "accounts": accts, "platforms": plats,
@@ -339,6 +372,7 @@ def apply_import(db, *, filename: str, data: bytes,
         if not committed:
             try:
                 za.delete_many({"apply_id": attempt})
+                db[_SOURCES_COLL].delete_many({"apply_id": attempt})
             except Exception:
                 pass  # rows มี expire_at → sweep เก็บภายหลัง
         raise
@@ -379,6 +413,7 @@ def rollback_import(db, *, filename: str, admin: str = "") -> dict:
     expire_at = now + _dt.timedelta(seconds=_RETIRE_S)
     # 1) ปลด expire_at ของ prev ก่อน — ชุดที่จะ active ห้ามโดน sweep
     za.update_many(prev_filt, {"$unset": {"expire_at": ""}})
+    db[_SOURCES_COLL].update_many(prev_filt, {"$unset": {"expire_at": ""}})
     res = files.update_one(
         {"_id": fn, "active_rev": cur},
         {"$set": {"active_rev": prev,
@@ -391,12 +426,16 @@ def rollback_import(db, *, filename: str, admin: str = "") -> dict:
     if not res.matched_count:
         # CAS แพ้ — prev ยังไม่ active → คืน expire_at เดิมให้ sweep ได้
         za.update_many(prev_filt, {"$set": {"expire_at": expire_at}})
+        db[_SOURCES_COLL].update_many(prev_filt, {"$set": {"expire_at": expire_at}})
         _log_safely(db, {"op": "rollback", "file": fn,
                          "status": "conflict", "admin": admin})
         return {"ok": False, "conflict": True, "file": fn}
     try:
         za.update_many({"source_file": fn, "file_rev": cur},
                        {"$set": {"expire_at": expire_at}})
+        db[_SOURCES_COLL].update_many(
+            {"source_file": fn, "file_rev": cur},
+            {"$set": {"expire_at": expire_at}})
         _log(db, {"op": "rollback", "file": fn, "rev_from": cur,
                   "rev_to": prev, "status": "ok", "admin": admin})
     except Exception as exc:
@@ -415,16 +454,18 @@ def sweep_expired(db) -> dict:
     (expire_at รั่วบน active rev ต้องไม่ทำข้อมูลหาย)."""
     active = []
     for d in db[_FILES_COLL].find({}):
-        if not d.get("active_rev"):
-            continue
-        p = {"source_file": d["_id"], "file_rev": d["active_rev"]}
-        if d.get("active_apply"):
-            p["apply_id"] = d["active_apply"]
-        active.append(p)
+        for state in ("active", "disabled"):
+            if not d.get(f"{state}_rev"):
+                continue
+            p = {"source_file": d["_id"], "file_rev": d[f"{state}_rev"]}
+            if d.get(f"{state}_apply"):
+                p["apply_id"] = d[f"{state}_apply"]
+            active.append(p)
     filt: dict = {"expire_at": {"$exists": True, "$lt": _utcnow()}}
     if active:
         filt["$nor"] = active
     res = db[_COLL].delete_many(filt)
+    db[_SOURCES_COLL].delete_many(filt)
     if res.deleted_count:
         _log_safely(db, {"op": "sweep", "deleted": res.deleted_count,
                          "status": "ok"})
@@ -514,7 +555,7 @@ def set_file_enabled(db, *, filename: str, enabled: bool,
     return {"ok": True, "file": fn, "enabled": bool(enabled), "rev": rev}
 
 
-def export_file(db, *, filename: str) -> bytes | None:
+def export_file(db, *, filename: str, original: bool = False) -> bytes | None:
     """active revision rows → file bytes — .txt คืน text verbatim,
     .xlsx คืน workbook (ค่า verbatim; re-import ชื่อเดิม = replace)."""
     fn = _valid_filename(filename)
@@ -529,8 +570,16 @@ def export_file(db, *, filename: str) -> bytes | None:
     filt: dict = {"source_file": fn, "file_rev": rev}
     if apply_id:
         filt["apply_id"] = apply_id
+    if original:
+        source = db[_SOURCES_COLL].find_one(filt)
+        if source is None:
+            return None
+        raw = bytes(source["data"])
+        if hashlib.sha256(raw).hexdigest() != source["file_sha256"]:
+            raise ValueError("source checksum mismatch")
+        return raw
     rows = list(db[_COLL].find(filt).sort(
-        [("sheet", 1), ("row_index", 1)]))
+        [("row_index", 1), ("sheet", 1)]))
     if not rows:
         return None
     if PurePosixPath(fn).suffix.lower() == ".txt":
@@ -543,6 +592,28 @@ def export_file(db, *, filename: str) -> bytes | None:
                             []).append(r)
     for sheet_name, srows in by_sheet.items():
         ws = wb.create_sheet(title=sheet_name[:31])
+        if all(r.get("cells") for r in srows):
+            headers = {c["column_index"]: c["header"] for c in srows[0]["cells"]}
+            field_columns = {h: col for col, h in headers.items() if h}
+            for r in srows:
+                if r.get("manual_edit"):
+                    for h in r.get("fields") or {}:
+                        if h not in field_columns:
+                            col = max(headers, default=0) + 1
+                            headers[col] = h
+                            field_columns[h] = col
+            for col, h in headers.items():
+                cell = ws.cell(1, col, h)
+                cell.data_type = "s"
+            for r in srows:
+                values = {c["column_index"]: c["value"] for c in r["cells"]}
+                if r.get("manual_edit"):
+                    values.update({col: (r.get("fields") or {}).get(h, "")
+                                   for h, col in field_columns.items()})
+                for col, value in values.items():
+                    cell = ws.cell(r["source_row"], col, value)
+                    cell.data_type = "s"
+            continue
         header: list[str] = []
         for r in srows:
             for k in (r.get("fields") or {"text": r.get("text", "")}):

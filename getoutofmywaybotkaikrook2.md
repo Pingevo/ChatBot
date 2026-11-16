@@ -14057,3 +14057,20 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - UI file tree now matches `origin/main` byte-for-byte. PR delta is 51 paths (16 chatbot paths plus tests/docs/census); no ChatAdminWeb paths remain in the diff.
 - Full offline regression after sync: 2248 passed, 15 skipped, 1 xfailed, exit 0. Prior production UI build passed on the identical UI tree.
 - PR #58 is open; the sync commit and this closeout still need pushing. No Mongo migration/backfill or shared-data write.
+
+### กำลังจะทำ — Zaapi KB hardening / isolated worktree (2026-11-16)
+- ผู้ใช้อนุมัติแก้จากแผน audit และเลือกแยก worktree; branch fix/zaapi-kb-validated-mapping จาก main ไม่แตะ dirty UX tree
+- Mapping authority: docs/test/results/zaapi-kb-shop-mapping-validated-2026-11-14.json ใน checkout ต้นทาง SHA 1fd487a5d1e1613d5f6b4b3018f074bb1b6cbe323aa159d6fd02097c41367598; 103 selected sources/693 pairs/60 shops
+- Impact/plan: เริ่ม raw parser+human export lossless cells และเก็บ source bytes; เขียน failing behavioral tests ก่อน; ยืนยัน corpus 118 ไฟล์และ old regression; ขออนุมัติ commit แรกก่อนชุด mapping/scope/index/evidence/API ต่อไป
+- ใช้ owner kb_zaapi_files เดิม ไม่เพิ่ม semantic keyword/regex/business owner; ไม่เขียน Mongo จริง/Product DB ไม่ publish/deploy/push; memory/offline tests เท่านั้น
+- Frozen checksum/8624 lines/892284 bytes และ active prefix 14059 checksum ตรง; branch history coverage partial ไม่อ้าง full audit; audit ล่าสุดอยู่ dirty checkout เดิม ไม่คัดลอก UI diff เข้า branch นี้
+
+### ผ่านเฉพาะขั้น raw integrity — Zaapi KB hardening checkpoint 1 (2026-11-16)
+- Root cause: XLSX fields dict ทับหัวซ้ำ/ข้ามหัวว่าง; generated export ประกอบจาก dict และตีความ literal = เป็นสูตร; ไม่เก็บ original bytes ต่อ revision
+- แก้ใน owner kb_zaapi_files เดิม: cells ตาม column_index + text ทุก nonempty cell, preview duplicate/unnamed positions, generated export คง source row/sheet order และ string literal; fields compatibility ยัง last-value และ manual edits overlay last occurrence/เพิ่ม headers โดยไม่แตะ original
+- เก็บ original bytes ต่อ apply_id ใน <files_collection>_sources ก่อน CAS; export_file(original=True) ตรวจ SHA/เลือก active หรือ disabled triple; legacy ไม่มี bytes คืน None. Conflict/prepublish failure ลบเฉพาะ attempt, rollback/grace sweep รวม source bytes; sweep ปกป้อง disabled เช่นเดียวกับ active
+- TDD: 8 regression cases ใหม่ fail บนโค้ดเดิมก่อนแก้; disabled-expired และ manual-edit export controls fail ก่อน correction; baseline file suite 52 passed. หลังแก้ corpus 118 files original bytes เท่ากันทุกไฟล์และ positional cells/fields/text/source rows round-trip ครบ (executable corpus test)
+- Fresh full offline suite พร้อม ZAAPI_CORPUS_DIR: 2262 passed, 15 skipped, 1 xfailed, 12 existing warnings, exit 0 (58.52s). git diff --check ผ่าน; tests ใช้ dotenv stub/MemoryDb/stub provider ไม่ใช่ live QA
+- ปรับ SRS §6 + schema + process; net production helpers/semantic regex/keyword tables/decision owners = 0, เพิ่ม checksum invariant ใน original export + source storage collection เดียว. ไม่แก้ search/scope/API/UI ใน checkpoint นี้
+- ข้อจำกัด: BSON single-document size limit ทำให้ oversize fail ก่อน publish; legacy source bytes ต้อง re-import จึงมี; real Mongo integration ยังไม่รันเพราะ Docker daemon ไม่พร้อม ไม่ start daemon เอง. งาน mapping/scope/source package/precomputed vectors/evidence/Admin/live QA ยัง pending ไม่อ้างทั้งระบบพร้อม
+- ไม่มี production/Mongo/Product DB/provider/customer writes, ไม่ deploy/push/commit; รอผู้ใช้อนุมัติ diff+commit แรกตาม AGENTS ก่อนชุดถัดไป. งาน UX เดิมไม่แตะ

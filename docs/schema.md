@@ -1712,13 +1712,17 @@ vector (`gen/<gid>/unit_embeddings.npz` ใน snapshot เดียวกัน
 
 ### 5.10 `zaapi_kb` — file-backed Zaapi KB rows + manual docs (file-serving, spec v4)
 
-**Fields (file rows):** `source_file` (filename = identity), `file_rev`, `apply_id` (attempt identity), `sheet`, `row_index`, `source_row`, `kind` (`xlsx_row`/`text`/`manual`), `fields` (verbatim), `text`, `content_type` (product/troubleshooting/faq/warranty — admin-declared, ไม่ infer), `expire_at` (staged/retired grace), `active`
+**Fields (file rows):** `source_file` (filename = identity), `file_rev`, `apply_id` (attempt identity), `sheet`, `row_index`, `source_row` (Excel row, 1-based), `kind` (`xlsx_row`/`text`/`manual`), `cells[]` (`column_index` 1-based, `header` อาจซ้ำ/ว่าง, `value` string คง whitespace/0/False; normalized worksheet view ไม่ใช่ original bytes), `fields` (compatibility view: nonempty named values; หัวซ้ำใช้ค่าสุดท้าย), `text` (ทุก nonempty cell ตามตำแหน่ง), `content_type` (product/troubleshooting/faq/warranty — admin-declared, ไม่ infer), `expire_at` (staged/retired grace), `active`
 
 **Visibility contract:** มองเห็นได้ก็ต่อเมื่อ `(source_file, file_rev, apply_id)` ตรง registry `zaapi_kb_files` triple — staged/orphan/CAS-loser rows ไม่มีทางหลุดมา
 
 **Fields (manual docs):** `kind:"manual"`, `source_id`/`source_name`, `manual_edit:true` (importer ไม่ทับ), `unscoped`/`accounts` (scope check เหมือน file rows)
 
 **Access:** เขียน `kb_zaapi_files.apply_import`/`rollback_import`/`sweep_expired`/`set_file_enabled`(registry เท่านั้น); อ่าน `zaapi_search`, `search_qa`, `get_general_faq`, `zaapi_kb_evidence`, Admin `api/zaapi-kb?mode=docs&source_file`
+
+### 5.10a `zaapi_kb_files_sources` — original source snapshots
+
+ชื่อ collection คำนวณจาก `<ADMIN_MONGO_COLLECTION_ZAAPI_KB_FILES>_sources` (default `zaapi_kb_files_sources`). หนึ่ง document ต่อ import attempt: `_id`=`apply_id`, `source_file`, `file_rev`, `apply_id`, `file_sha256`, `data` (BSON binary), `expire_at` (staged/retired). ใช้ revision triple จาก registry เดียวกับ rows; ไม่มี active flag ซ้ำ. Source write ต้องสำเร็จก่อน CAS; conflict/failed attempt ลบเฉพาะของตน. Rollback/sweep ใช้ grace เดียวกับ rows และ sweep ไม่ลบ active/disabled triples. ไม่มี TTL index ที่ข้าม registry protection. เอกสารเก่าไม่มี snapshot → original export คืน None; ไม่ปลอม reconstructed bytes เป็นต้นฉบับ. Source bytes ไม่อยู่ใน `zaapi_kb` จึงไม่หลุดสู่ search หรือ Admin row serializer; generated export ยังรองรับ legacy rows. Source snapshot มี BSON document size limit; insert เกิน limit fail ก่อน publish.
 
 ### 5.11 `zaapi_kb_files` — registry (visibility owner)
 

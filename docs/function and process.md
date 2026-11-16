@@ -32,6 +32,12 @@
 
 ## 1. ภาพรวมระบบ
 
+### Zaapi KB file import/export boundary
+
+`kb_zaapi_files` ยังคงเป็น owner เดียวของ file-backed KB. XLSX parser เก็บ cells ตามตำแหน่งแยกจาก `fields` compatibility view เพื่อไม่ให้หัวซ้ำ/หัวว่างทำข้อมูลหาย; `text` รวมทุก nonempty cell และยังเก็บ Excel source row. Preview แจ้งตำแหน่งหัวซ้ำ/หัวว่างที่มีข้อมูลโดยไม่เขียน DB. Apply เก็บ original bytes แยกใน `<files_collection>_sources` ต่อ attempt ก่อน rows/CAS; pre-publish fail ไม่เปลี่ยน active pointer. Original export เป็น data-layer option `export_file(original=True)` ตรวจ SHA และอ่าน active/disabled triple เดียวกับ rows; revision เก่าที่ไม่มี bytes ไม่สามารถอ้างว่า export เป็นต้นฉบับได้.
+
+Generated XLSX export ใช้ positional cells คงหัวซ้ำ ช่องว่างระหว่างแถว และลำดับชีต; manual field edits ถูก overlay ที่ occurrence สุดท้ายของ header (ตรงกับ last-value compatibility view) พร้อมเพิ่มคอลัมน์ใหม่ แต่ไม่แก้ original bytes. ค่า cell แบบข้อความไม่ถูกแปลงเป็นสูตร. Legacy rows ไม่มี cells ยังใช้ field-union exporter เดิม. Rollback และ grace sweep ครอบคลุม source bytes ด้วย; active/disabled revisions ไม่ถูก sweep. ขั้นนี้ยังไม่เปลี่ยน mapping/scope/search, ไม่เพิ่ม source-package API และไม่เปิด original mode บน Admin; ต้องทดสอบและ rollout ส่วนเหล่านั้นแยกก่อนอ้างว่าทั้งระบบพร้อม.
+
 ระบบประกอบด้วย 3 ส่วนหลัก:
 
 | ส่วน | เทคโนโลยี | หน้าที่ |
