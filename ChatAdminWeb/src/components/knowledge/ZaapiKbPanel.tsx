@@ -82,6 +82,13 @@ type ImportPreview = {
   sheet_types?: Record<string, string>;
   sheet_type_map?: Record<string, string>;
   untyped_rows?: number;
+  bound_rows?: number;
+  unbound_rows?: number;
+  sheet_columns?: Record<string, { column_index: number; header: string }[]>;
+  subject_samples?: {
+    sheet: string; row_index: number;
+    subject_refs: string[]; facts: { key: string; value: number }[];
+  }[];
 };
 
 // ชนิดเนื้อหาที่ admin เลือก (ห้าม infer จากชื่อไฟล์/ข้อความ)
@@ -191,6 +198,8 @@ export function ZaapiKbPanel() {
   const [imp, setImp] = useState<{
     file: File; accounts: string[]; platforms: string[];
     contentType: string; sheetTypes: Record<string, string>;
+    // per-sheet declared bindings: subject คอลัมน์ + warranty fact คอลัมน์ (optional)
+    bindings: Record<string, { subject?: number; warranty?: number }>;
     preview: ImportPreview | null;
   } | null>(null);
   const [openFile, setOpenFile] = useState<string | null>(null);
@@ -231,6 +240,24 @@ export function ZaapiKbPanel() {
       fd.append("platforms", imp.platforms.join(","));
       fd.append("content_type", imp.contentType);
       fd.append("sheet_types", JSON.stringify(imp.sheetTypes));
+      // declared-subject contract: ส่งเฉพาะชีตที่เลือกคอลัมน์สินค้า —
+      // warranty fact ผูกแถวเดียวกัน ไม่เลือก = ไม่ส่ง fact (ยังตอบจาก text ได้)
+      const sb: Record<string, unknown> = {};
+      for (const [sheet, cols] of Object.entries(imp.preview?.sheet_columns || {})) {
+        const sel = imp.bindings[sheet];
+        if (!sel?.subject) continue;
+        const scol = cols.find((c) => c.column_index === sel.subject);
+        if (!scol) continue;
+        const rule: Record<string, unknown> = {
+          columns: [{ column_index: scol.column_index, header: scol.header }],
+        };
+        if (sel.warranty) {
+          const wcol = cols.find((c) => c.column_index === sel.warranty);
+          if (wcol) rule.facts = { warranty: { column_index: wcol.column_index, header: wcol.header } };
+        }
+        sb[sheet] = rule;
+      }
+      if (Object.keys(sb).length) fd.append("subject_bindings", JSON.stringify(sb));
       const r = await api().post(`/zaapi-kb/import?op=${op}`, fd);
       if (op === "preview") {
         // resolved types (registry-inherited + ที่เลือก) → prefill pickers
@@ -672,6 +699,66 @@ export function ZaapiKbPanel() {
                       </div>
                     ))}
                   </div>
+                  {imp.preview.sheet_columns && Object.keys(imp.preview.sheet_columns).length > 0 && (
+                    <div className="space-y-1.5 border-t border-border pt-2">
+                      <div className="text-text-muted">
+                        เลือกคอลัมน์ที่ระบุสินค้าของแถว (declared subject — ไม่เลือก = ไม่ผูกรุ่น ใช้ตอบทั่วไปอย่างเดียว)
+                      </div>
+                      {Object.entries(imp.preview.sheet_columns).map(([s, cols]) => {
+                        const sel = imp.bindings[s] || {};
+                        const setSel = (k: "subject" | "warranty", v: number) => setImp({
+                          ...imp,
+                          bindings: {
+                            ...imp.bindings,
+                            [s]: { ...sel, [k]: v || undefined },
+                          },
+                        });
+                        const colOpts = [
+                          <option key={0} value="">— ไม่ผูก —</option>,
+                          ...cols.map((c) => (
+                            <option key={c.column_index} value={c.column_index}>
+                              {c.column_index}: {c.header || "(ไม่มีหัว)"}
+                            </option>
+                          )),
+                        ];
+                        return (
+                          <div key={s} className="rounded border border-border/60 p-2 space-y-1">
+                            <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide truncate" title={s}>{s}</div>
+                            <div className="flex items-center gap-2">
+                              <span className="w-24 text-text-subtle">คอลัมน์สินค้า</span>
+                              <select
+                                value={sel.subject ?? ""}
+                                onChange={(e) => setSel("subject", Number(e.target.value) || 0)}
+                                className="flex-1 h-7 px-2 rounded-lg border border-border bg-surface text-[11px] focus:outline-none focus:ring-2 focus:ring-brand/40"
+                              >
+                                {colOpts}
+                              </select>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="w-24 text-text-subtle">คอลัมน์ประกัน</span>
+                              <select
+                                value={sel.warranty ?? ""}
+                                onChange={(e) => setSel("warranty", Number(e.target.value) || 0)}
+                                disabled={!sel.subject}
+                                className="flex-1 h-7 px-2 rounded-lg border border-border bg-surface text-[11px] focus:outline-none focus:ring-2 focus:ring-brand/40 disabled:opacity-40"
+                              >
+                                {colOpts}
+                              </select>
+                            </div>
+                          </div>
+                        );
+                      })}
+                      <div className="text-text-muted">
+                        ผูกแล้ว {imp.preview.bound_rows ?? 0} แถว · ไม่ผูก {imp.preview.unbound_rows ?? 0} แถว
+                        {(imp.preview.subject_samples || []).some((x) => x.facts?.length) && (
+                          <span> · พบ warranty fact {(imp.preview.subject_samples || []).filter((x) => x.facts?.length).length} แถวแรก</span>
+                        )}
+                      </div>
+                      <Button size="sm" variant="outline" onClick={() => doImport("preview")} disabled={importing}>
+                        {importing ? "กำลังตรวจ..." : "อัปเดต Preview ตามที่เลือก"}
+                      </Button>
+                    </div>
+                  )}
                   {imp.preview.warnings.map((w, i) => (
                     <div key={i} className="text-warning">{w}</div>
                   ))}
@@ -719,7 +806,7 @@ export function ZaapiKbPanel() {
               id="zaapi-file-input" type="file" accept=".xlsx,.txt" className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (f) setImp({ file: f, accounts: [], platforms: [], contentType: "", sheetTypes: {}, preview: null });
+                if (f) setImp({ file: f, accounts: [], platforms: [], contentType: "", sheetTypes: {}, bindings: {}, preview: null });
                 e.target.value = "";
               }}
             />
@@ -779,7 +866,7 @@ export function ZaapiKbPanel() {
           id="zaapi-file-input" type="file" accept=".xlsx,.txt" className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
-            if (f) setImp({ file: f, accounts: [], platforms: [], contentType: "", sheetTypes: {}, preview: null });
+            if (f) setImp({ file: f, accounts: [], platforms: [], contentType: "", sheetTypes: {}, bindings: {}, preview: null });
             e.target.value = "";
           }}
         />

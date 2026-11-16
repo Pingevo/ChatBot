@@ -10,8 +10,10 @@ export async function GET(req: NextRequest) {
   if (!r.ok) return r.response;
 
   const upstream = serverConfig.chatbotBaseUrls.shopee.replace(/\/$/, "");
-  const qs = new URL(req.url).search;
-  const res = await fetch(`${upstream}/zaapi-kb/export${qs}`, {
+  const url = new URL(req.url);
+  const pkg = url.searchParams.get("package") === "true";
+  url.searchParams.delete("package");
+  const res = await fetch(`${upstream}/zaapi-kb/export${pkg ? "-package" : ""}${url.search}`, {
     headers: { "X-Internal-Secret": serverConfig.chatbotInternalSecret },
   });
   return new NextResponse(res.body, {

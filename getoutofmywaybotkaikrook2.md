@@ -14181,3 +14181,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - RED→GREEN: vec/pin เก็บตอน import, search ไม่ re-embed (calls=0), stale-pin rows fallback recompute เฉพาะตัว; semantic-below-lexical-rank test ย้าย patch ไว้ก่อน import (contract ใหม่) — ยังพิสูจน์ cosine ชนะ prefilter
 - ผลกระทบ: legacy rows ไม่มี vec → fallback เดิม; manual_edit/rollback ปลอดภัยเพราะ vec อยู่กับ row+revision เดียวกัน; embed ไม่พร้อมตอน import → ข้าม field (degrade เดิม); test suite ไม่ช้าลง (patch ก่อน import)
 - 2320 passed/17 skipped/1 xfailed exit 0; syntax+diff ผ่าน; ยังไม่มี shared DB/customer/deploy/push
+
+### ผ่านแล้ว — API/Admin wiring ตาม declared-subject contract (2026-11-16)
+- Error ก่อนแก้: FastAPI preview/apply รับแค่ filename/accounts/platforms/content_type/sheet_types — subject_bindings/shop_scopes/hash params ไม่มีช่องทางเข้า owner (contract เดิมทำงานเฉพาะ data layer); import proxy ไม่ forward field ใหม่; UI ไม่มีจุดเลือกคอลัมน์สินค้า/ประกัน
+- Fix: (a) `_json_list_param` helper + preview/apply รับ subject_bindings, shop_scopes, source_id, file_sha256, mapping_sha256, source_snapshot_sha256, row_snapshot — JSON เสีย/ผิดรูป → 400 ก่อนเข้า owner; (b) endpoint ใหม่ POST /zaapi-kb/import/package?preview&shops → import_package owner เดิม; (c) GET /zaapi-kb/export-package?file → export_package (unmapped file → 400, ไม่มี rev → 404); (d) proxy import route forward field ใหม่ + op=package (binary octet-stream คงเดิม), export route รองรับ ?package=true; (e) ZaapiKbPanel เพิ่ม ImportPreview fields (sheet_columns/bound_rows/unbound_rows/subject_samples.facts) + per-sheet dropdown เลือกคอลัมน์สินค้า/ประกัน → serialize เป็น subject_bindings JSON ส่ง preview/apply ใหม่
+- RED→GREEN: endpoint test ใหม่ 15 เคสผ่าน (forward params จริงผ่าน owner, malformed JSON/ผิดรูป scope → 400, package preview 0 writes, export-package round-trip, unmapped → 400)
+- ผลกระทบเคสอื่น: params ใหม่ทั้งหมด optional — legacy caller (accounts/platforms เดิม) ทำงานเหมือนเดิม; unmapped file preview/apply ยังได้ (scope=None) แต่ export-package ถูกบล็อก; UI ไม่เลือก binding = ส่งไม่มี subject_bindings → ไม่ผูกรุ่น ตอบทั่วไปอย่างเดียว
+- 2333 passed/17 skipped/1 xfailed exit 0; tsc --noEmit clean; py_compile ผ่าน; ยังไม่มี shared DB/customer/deploy/push
+- งานค้าง: curate corpus bindings จริง, canonical refs/alias ambiguity, multi-need attribution, live authenticated QA
