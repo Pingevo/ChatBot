@@ -915,6 +915,35 @@ def test_near_model_code_boundary(db, monkeypatch):
         assert b2["_qa_prefilter"] < hits[0]["_qa_prefilter"]
 
 
+def test_declared_warranty_fact_survives_package_rollback_and_rejects_stale_proof(db, monkeypatch):
+    _no_embed(monkeypatch)
+    data = _xlsx_bytes({"products": [["model", "warranty", "details"],
+        ["AB100", "1 ปี", "ZX200 มีประกัน 5 ปี"],
+        ["ZX200", "5 ปี", ""],
+    ]})
+    binding = {"products": {"columns": [{"column_index": 1, "header": "model"}],
+        "facts": {"warranty": {"column_index": 2, "header": "warranty"}}}}
+    preview = zkf.preview_import(db, filename="warranty.xlsx", data=data,
+        subject_bindings=binding, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    assert preview["subject_samples"][0]["facts"] == [{"key": "warranty", "value": 12}]
+    assert not db[zkf._COLL].count_documents({})
+    zkf.apply_import(db, filename="warranty.xlsx", data=data,
+        subject_bindings=binding, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    fresh = MemoryDb()
+    zkf.import_package(fresh, data=zkf.export_package(db, filename="warranty.xlsx"), shops=PAIR_SCOPES)
+    hits, _ = zkf.zaapi_search(fresh, shop="ShopA", platform="shopee", query="AB100 ประกัน", refs=("AB100",))
+    assert len(hits) == 1 and hits[0]["facts"] == [{"key": "warranty", "value": 12}]
+    zkf.apply_import(fresh, filename="warranty.xlsx", data=_xlsx_bytes({"products": [
+        ["model", "warranty", "details"], ["AB100", "2 ปี", ""]]}), subject_bindings=binding)
+    assert zkf.rollback_import(fresh, filename="warranty.xlsx")["ok"]
+    hits, _ = zkf.zaapi_search(fresh, shop="ShopA", platform="shopee", query="AB100 ประกัน", refs=("AB100",))
+    assert len(hits) == 1 and hits[0]["facts"] == [{"key": "warranty", "value": 12}]
+    fresh[zkf._COLL].update_many({"subject_refs": ["ab100"]},
+        {"$set": {"facts": [{"key": "warranty", "value": 60}]}})
+    assert not zkf.zaapi_search(fresh, shop="ShopA", platform="shopee", query="AB100 ประกัน", refs=("AB100",))[0]
+    assert zkf.export_file(fresh, filename="warranty.xlsx", original=True) == data
+
+
 def test_subject_binding_preview_and_search_use_declared_column(db, monkeypatch):
     _no_embed(monkeypatch)
     data = _xlsx_bytes({"products": [["model", "details"],

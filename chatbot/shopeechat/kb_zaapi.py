@@ -85,6 +85,8 @@ def zaapi_kb_evidence(
         limit=limit, types=_CONTENT_TYPES_ALL)
     sup = [{"kind": "kb", "record_id": h["record_id"],
             "request_id": request_id,
+            **({"subject_refs": tuple(h["subject_refs"]), "facts": h["facts"]}
+               if h.get("facts") else {}),
             "payload": {"text": h["a"], "fields": h.get("fields") or {}},
             "meta": h.get("meta") or {},
             "score": h.get("_qa_sim")}

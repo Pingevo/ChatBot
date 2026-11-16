@@ -323,6 +323,8 @@ def _restore_snapshot(docs: list[dict], snapshot) -> list[dict]:
 def _subject_digest(d: dict) -> str:
     payload = [d.get("fields") or {}, d.get("text") or "", d.get("cells") or [],
                d.get("subject_refs") or []]
+    if d.get("facts"):
+        payload.append(d["facts"])
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":")).encode()).hexdigest()
 
@@ -337,7 +339,7 @@ def _bind_subjects(docs: list[dict], bindings, reg: dict, sha: str) -> tuple[dic
     sheets = {_sheet_key(d) for d in docs}
     plan = {}
     for sheet, rule in bindings.items():
-        if sheet not in sheets or not isinstance(rule, dict) or set(rule) not in ({"columns"}, {"refs"}, {"rows"}):
+        if sheet not in sheets or not isinstance(rule, dict) or set(rule) - {"facts"} not in ({"columns"}, {"refs"}, {"rows"}):
             raise ValueError("invalid subject binding sheet or rule")
         if "columns" not in rule:
             assignments = {"*": rule["refs"]} if "refs" in rule else rule["rows"]
@@ -363,12 +365,24 @@ def _bind_subjects(docs: list[dict], bindings, reg: dict, sha: str) -> tuple[dic
                     raise ValueError("invalid subject column selector")
                 indices.add(c["column_index"])
             plan[sheet] = {"columns": [dict(c) for c in cols]}
+        facts = rule.get("facts", {})
+        if not isinstance(facts, dict) or set(facts) - {"warranty"}:
+            raise ValueError("invalid subject fact bindings")
+        for selector in facts.values():
+            if (not isinstance(selector, dict) or set(selector) != {"column_index", "header"}
+                    or type(selector["column_index"]) is not int or selector["column_index"] < 1
+                    or not isinstance(selector["header"], str)):
+                raise ValueError("invalid subject fact column selector")
+        if facts:
+            plan[sheet]["facts"] = {key: dict(selector) for key, selector in facts.items()}
     bound = []
     for d in docs:
         rule = plan.get(_sheet_key(d), {})
         refs = list(rule.get("refs", rule.get("rows", {}).get(str(d["row_index"]), ())))
         cells = {c["column_index"]: c for c in d.get("cells") or ()}
-        for selector in rule.get("columns", ()):
+        facts = []
+        selectors = [(None, s) for s in rule.get("columns", ())] + list(rule.get("facts", {}).items())
+        for fact, selector in selectors:
             cell = cells.get(selector["column_index"])
             if cell is None or cell["header"] != selector["header"]:
                 raise ValueError("subject column header or position changed")
@@ -377,9 +391,14 @@ def _bind_subjects(docs: list[dict], bindings, reg: dict, sha: str) -> tuple[dic
                 header = cell["header"]
                 value = (d["fields"].get(header, "") if header and sum(
                     c["header"] == header for c in cells.values()) == 1 else "")
-            if value.strip():
+            if fact:
+                from .warranty import warranty_value_months
+                months = warranty_value_months(value)
+                if refs and months is not None and months > 0:
+                    facts.append({"key": fact, "value": months})
+            elif value.strip():
                 refs.append(" ".join(value.casefold().split()))
-        row = {**d, "subject_refs": sorted(set(refs))}
+        row = {**d, "subject_refs": sorted(set(refs)), **({"facts": facts} if rule.get("facts") else {})}
         bound.append({**row, "subject_digest": _subject_digest(row)})
     return plan, bound
 
@@ -472,7 +491,7 @@ def preview_import(db, *, filename: str, data: bytes,
         "subject_samples": [{"sheet": d.get("sheet"), "row_index": d["row_index"],
                              "source_row": d.get("source_row"), "cells": d.get("cells") or [],
                              "fields": d.get("fields") or {}, "text": d.get("text") or "",
-                             "subject_refs": d["subject_refs"]} for d in docs[:10]],
+                             "subject_refs": d["subject_refs"], "facts": d.get("facts") or []} for d in docs[:10]],
         "duplicate_columns": duplicate_columns,
         "unnamed_columns": [{"sheet": s, "columns": sorted(cs)}
                             for s, cs in unnamed.items()],
@@ -539,6 +558,7 @@ def apply_import(db, *, filename: str, data: bytes,
         "fields": d.get("fields") or {}, "text": d.get("text") or "",
         "cells": d.get("cells") or [],
         "subject_refs": d["subject_refs"], "subject_digest": d["subject_digest"],
+        **({"facts": d["facts"]} if "facts" in d else {}),
         **({"manual_edit": d["manual_edit"]} if "manual_edit" in d else {}),
         "content_type": _row_content_type(d, ctype, stypes),
         "imported_at": now,
@@ -1056,7 +1076,7 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
              "file_rev": 1, "sheet": 1, "row_index": 1,
              "content_type": 1, "kind": 1, "accounts": 1,
              "unscoped": 1, "active": 1, "cells": 1,
-             "subject_refs": 1, "subject_digest": 1}))
+             "subject_refs": 1, "subject_digest": 1, "facts": 1}))
     except Exception:
         return [], ("zaapi_files_read_err",)
     docs = [d for d in docs
@@ -1114,6 +1134,7 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
                      "row": d.get("row_index")},
             "fields": d.get("fields") or {},
             "subject_refs": (d.get("subject_refs") or []) if identity_refs else [],
+            "facts": (d.get("facts") or []) if identity_refs else [],
         })
     hits.sort(key=lambda h: -h["_qa_sim"])
     return hits[:limit], (

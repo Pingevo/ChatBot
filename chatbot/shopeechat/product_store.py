@@ -762,6 +762,9 @@ def to_product_card(doc: dict, message: str = "") -> dict:
     total_stock = av["total_stock"]
     return {
         "item_id": doc.get("item_id"),
+        **({"model_codes": list(doc["model_codes"])}
+           if isinstance(doc.get("model_codes"), list)
+           and all(isinstance(c, str) and c.strip() for c in doc["model_codes"]) else {}),
         "name": doc.get("item_name"),
         "brand": brand,
         "category": doc.get("cat_name"),

@@ -159,6 +159,49 @@ def _compile(needs, selection, pool, requests, profile, **kw):
 
 # ── 1/2/3: task purity — no customer prose crosses the boundary ─────────────
 
+@pytest.mark.parametrize("case", ["ambiguous", "untyped_refs", "bad_file", "wrong_file", "prose_value"])
+def test_file_warranty_fact_requires_unique_identity_and_typed_provenance(case):
+    need = TurnNeed("product", "describe", subject_refs=("AB100",))
+    req = rpl.channel_request("kb")
+    evidence = {"kind": "kb", "request_id": req.request_id,
+                "record_id": "facts.xlsx::products::0", "meta": {"file": "facts.xlsx"},
+                "subject_refs": ("AB100",), "facts": [{"key": "warranty", "value": 12}],
+                "payload": "ข้อมูลต้นฉบับ AB100"}
+    candidates = [_pooled("i:1", codes=("AB100",))]
+    if case == "ambiguous":
+        candidates.append(_pooled("i:2", "2", codes=("AB100",)))
+    elif case == "untyped_refs":
+        evidence["subject_refs"] = {"AB100": True}
+    elif case == "bad_file":
+        evidence["meta"]["file"] = True
+    elif case == "wrong_file":
+        evidence["record_id"] = "other.xlsx::products::0"
+    else:
+        evidence["facts"][0]["value"] = "ZX200 รับประกัน 5 ปี"
+    ctx = _compile((need,), _selection(),
+                   _pool(candidates, supporting=(evidence,)), (req,), _profile())
+    assert not ctx.spec_measured_facts
+    assert ctx.evidence and not any(e.get("facts") for e in ctx.evidence)
+    assert "ข้อมูลต้นฉบับ AB100" in ctx.context_text()
+
+
+def test_file_warranty_facts_keep_subject_need_ownership_on_shared_channel():
+    needs = tuple(TurnNeed("product", "describe", subject_refs=(code,))
+                  for code in ("AB100", "ZX200"))
+    req = rpl.channel_request("kb")
+    supporting = tuple({
+        "kind": "kb", "request_id": req.request_id, "record_id": f"facts.xlsx::{i}",
+        "meta": {"file": "facts.xlsx"}, "subject_refs": (code,),
+        "facts": [{"key": "warranty", "value": value}], "payload": code,
+    } for i, (code, value) in enumerate((("AB100", 12), ("ZX200", 60))))
+    pool = _pool(tuple(_pooled(f"i:{i}", str(i), codes=(code,),
+                              request_ids=(req.request_id,))
+                       for i, code in enumerate(("AB100", "ZX200"))), supporting=supporting)
+    ctx = _compile(needs, _selection(), pool, (req,), _profile())
+    assert {e["identity"]: e["need_indices"] for e in ctx.evidence} == {
+        "i:0": (0,), "i:1": (1,)}
+
+
 def test_raw_customer_prose_cannot_reach_answer_typed():
     sig = inspect.signature(llm.answer_typed)
     for forbidden in ("message", "products", "extra_context"):

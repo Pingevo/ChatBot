@@ -654,6 +654,9 @@ def _attribute(e: dict, *, req_needs, idx_of, need_by_idx, prodish_idx,
         if k:
             idxs.update(ref_needs.get(k, ()))
     idxs &= prodish_idx
+    if e.get("kind") == "kb" and e.get("subject_refs"):
+        idxs = {i for i in idxs if keys & {
+            _norm_ref(r) for r in (need_by_idx[i].subject_refs or ())}}
     if e.get("kind") == "kb_zaapi":
         meta = e.get("meta") if isinstance(e.get("meta"), dict) else None
         if meta is None:
@@ -966,6 +969,33 @@ def _compile_evidence(pool: CandidatePool, web_evidence: tuple, *,
                 continue
             e = {**e, "meta": meta,
                  **{k: meta[k] for k in _META_EMIT_KEYS if k in meta}}
+        if kind == "kb" and "facts" in e:
+            facts = e.get("facts")
+            subject_refs = e.get("subject_refs")
+            refs = {_norm_ref(r) for r in subject_refs} if isinstance(subject_refs, (list, tuple)) else set()
+            filename = e["meta"].get("file") if isinstance(e.get("meta"), dict) else None
+            candidates = {c.identity: c for c in tuple(pool.eligible or ())
+                          + tuple(pool.unavailable or ()) + tuple(pool.rejected or ())
+                          if refs & _cand_keys(c.identity, c.item_id, c.model_id, c.card)}
+            valid = (isinstance(facts, (list, tuple)) and len(facts) == 1
+                     and isinstance(facts[0], dict) and set(facts[0]) == {"key", "value"}
+                     and facts[0]["key"] == "warranty"
+                     and type(facts[0]["value"]) is int and facts[0]["value"] > 0
+                     and refs and all(isinstance(r, str) and r.strip() for r in subject_refs)
+                     and isinstance(filename, str) and bool(filename.strip())
+                     and isinstance(e.get("record_id"), str)
+                     and e["record_id"].startswith(filename + "::")
+                     and len(candidates) == 1)
+            e = {k: v for k, v in e.items() if k != "facts"}
+            if valid:
+                candidate = next(iter(candidates.values()))
+                identity = candidate.identity
+                if identity.startswith(("i:", "u:", "v:")) and e.get("identity", identity) == identity:
+                    e = {**e, "identity": identity, "facts": facts,
+                         "subject_refs": tuple(sorted(refs | _cand_keys(
+                             identity, candidate.item_id, candidate.model_id, candidate.card)))}
+            if "facts" not in e:
+                trace.append("evidence_fact_unresolved:kind=kb")
         idxs = _attribute(e, req_needs=req_needs, idx_of=idx_of,
                           need_by_idx=need_by_idx,
                           prodish_idx=prodish_idx, target_of=target_of,
@@ -1345,7 +1375,10 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
     #   ที่ meta boundary; ไม่ parse payload) — ให้ spec_claim ground มี
     #   typed evidence ของ subject นั้นเหมือน card-derived measured_facts
     for e in evidence:
-        if e.get("kind") != "kb_zaapi":
+        if e.get("kind") not in {"kb_zaapi", "kb"}:
+            continue
+        if e.get("kind") == "kb" and not set(e.get("need_indices") or ()) & {
+                t.need_index for t in task.tasks}:
             continue
         _ident = e.get("identity") or (
             f"i:{e['item_id']}" if e.get("item_id") else "")
@@ -1353,7 +1386,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             measured_facts.append({
                 "identity": _ident, "name": "",
                 "fact_key": _f["key"], "value": _f["value"],
-                "source": "kb_zaapi"})
+                "source": "kb_zaapi" if e.get("kind") == "kb_zaapi" else "kb_zaapi_files"})
     for i, n in enumerate(needs):
         scope = tuple(sorted(set(n.product_types or ())
                              | set(n.subtypes or ())))

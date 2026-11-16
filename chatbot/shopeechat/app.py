@@ -831,6 +831,11 @@ def _finalize_answer(comp, *, message: str, limit: int, products,
     if comp.context is not None:
         rd["spec_measured"] = list(
             comp.context.spec_measured_facts or ())
+        subject_ids = list(dict.fromkeys(list(rd.get("subject_ids") or ()) + [
+            str(f["identity"]) for f in rd["spec_measured"]
+            if f.get("source") == "kb_zaapi_files" and f.get("identity")]))
+        if subject_ids:
+            rd["subject_ids"] = subject_ids
     return ChatResponse(
         answer=answer,
         answer_segments=llm.split_segments(answer),
