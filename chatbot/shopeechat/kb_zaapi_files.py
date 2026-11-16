@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import time as _time
 from pathlib import PurePosixPath
 
 import openpyxl
@@ -1233,6 +1234,39 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
         f"zaapi_files hits={len(hits)} cands={len(cands)} "
         f"docs={len(docs)} reg={nreg}"
         f"{' sim=embed' if sims is not None else ' sim=prefilter'}",)
+
+
+def backfill_stale_vecs(db, *, embed_texts, mid: str, batch: int = 64,
+                        log=print) -> int:
+    """embed+$set vec/vec_model เฉพาะแถว active ที่ vec ขาด/ไม่ตรง mid —
+    คืนจำนวนแถวที่เขียน; query-time lazy-embed ยังเป็น fallback อยู่
+    (derived cache เท่านั้น — ไม่แตะ text/visibility/triple)."""
+    pairs, nreg = _visible_pairs(db)
+    ors = [dict(p) for p in pairs]
+    ors.append({"source_file": {"$exists": False},
+                "kind": "manual", "active": {"$ne": False}})
+    stale_q = {"$or": [{"vec": {"$exists": False}}, {"vec": None},
+                       {"vec_model": {"$ne": mid}}]}
+    docs = list(db[_COLL].find(
+        {"$and": [{"$or": ors}, stale_q]}, {"text": 1}))
+    total = len(docs)
+    log(f"zaapi_kb_embeddings: active_files={len(pairs)}/{nreg} "
+        f"stale_rows={total}")
+    done = 0
+    t0 = _time.time()
+    for i in range(0, total, batch):
+        chunk = docs[i:i + batch]
+        vecs = embed_texts([d.get("text") or "" for d in chunk],
+                           batch_size=batch)
+        for d, v in zip(chunk, vecs):
+            db[_COLL].update_one(
+                {"_id": d["_id"]},
+                {"$set": {"vec": [float(x) for x in v],
+                          "vec_model": mid}})
+        done += len(chunk)
+        log(f"{done}/{total} elapsed={_time.time()-t0:.1f}s")
+    log(f"zaapi_kb_embeddings: done rows={done} model={mid}")
+    return done
 
 
 def file_kb_ready(db) -> dict:

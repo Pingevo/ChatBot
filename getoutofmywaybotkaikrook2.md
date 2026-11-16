@@ -14523,3 +14523,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แก้ด้วย: bind_preview รับ rows (0..50) — rows>0 แนบ sheets{grid} (แถวข้อมูลจริง pad ถึง max col) และ sheets{text} ดิบ ≤20000 chars สำหรับ .txt; endpoint bind-preview ส่ง rows ต่อ; proxy GET ส่ง rows; UI เพิ่มบล็อก "พรีวิวไฟล์ต้นฉบับ" ใต้ไฟล์ที่กาง — ตาราง header sticky + 20 แถวแรก, .txt แสดง <pre> — ใช้ได้ทุกไฟล์ ไม่จำกัด editable
 - เทสต์: +1 test (grid 2 แถว + txt text, default rows=0 ไม่แนบ); focused 131 passed; tsc clean
 - งานค้าง: user curate bindings; คำถาม embed ย้ายเข้า generation cronjob (รอออกแบบ); live QA; deploy
+
+## กำลังจะทำ+ผ่านแล้ว: zaapi_kb vec backfill เป็น daily generation step — 2026-11-17
+- งาน: user ถาม "search embed ใหม่ทุกรอบแก้หรือยัง" + สั่งย้าย embed ของ zaapi kb เข้า generation cronjob daily
+- สถานะจริง: rows มี vec+vec_model ตั้งแต่ import (ไม่ embed ซ้ำ) — ช่องโหว่เดียวคือแถวขาด vec/mismatch → query-time lazy-embed ทุก request ไม่ persist
+- แก้ด้วย: `backfill_stale_vecs` ใน kb_zaapi_files (active triples + manual docs → stale-only embed batch → $set vec/vec_model, derived cache ไม่แตะ text/triple) + script `build_zaapi_kb_embeddings.py` (wire จริง) + step `zaapi_kb_embeddings` ใน _STEP_ORDER (ก่อน import_db) + _ALWAYS_RERUN (resume เติมเสมอ, idempotent)
+- เทสต์: backfill stale-only (แถวสดไม่โดน, manual ขาด vec ถูกเติม, รอบสอง=0) + resume plan tail อัปเดต; 123 passed; py_compile clean
+- งานค้าง: query-time lazy-embed ยังเป็น fallback (ตั้งใจ); user curate bindings; live QA; deploy

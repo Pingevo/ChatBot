@@ -19,7 +19,8 @@ def _steps(done=(), statuses=None):
 
 def test_plan_all_done_reruns_tail_only():
     steps = _steps(done=bg._STEP_ORDER)
-    assert bg._resume_plan(steps, "daily") == ["import_db", "validate"]
+    assert bg._resume_plan(steps, "daily") == [
+        "zaapi_kb_embeddings", "import_db", "validate"]
 
 
 def test_plan_fresh_run_does_everything():
@@ -34,7 +35,8 @@ def test_plan_failed_mid_resume_from_death_point():
     assert plan == [
         "image_texts_sellable", "image_texts_nonsellable",
         "sellable_units", "unit_embeddings", "product_embeddings",
-        "description_embeddings", "import_db", "validate"]
+        "description_embeddings", "zaapi_kb_embeddings",
+        "import_db", "validate"]
 
 
 def test_plan_atomic_pair_when_only_one_missing():
@@ -51,13 +53,13 @@ def test_plan_daily_includes_description_step():
                          if s != "description_embeddings"])
     plan = bg._resume_plan(steps, "daily")
     assert "description_embeddings" in plan
-    assert plan[-2:] == ["import_db", "validate"]
+    assert plan[-3:] == ["zaapi_kb_embeddings", "import_db", "validate"]
 
 
 def test_plan_tail_always_last():
     steps = _steps(statuses={"product_embeddings": "failed"})
     plan = bg._resume_plan(steps, "weekly")
-    assert plan[-2:] == ["import_db", "validate"]
+    assert plan[-3:] == ["zaapi_kb_embeddings", "import_db", "validate"]
     assert plan[0] == "export"
 
 

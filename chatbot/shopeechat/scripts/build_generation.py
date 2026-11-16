@@ -2,7 +2,8 @@
 
 ขั้น: export → image_texts(2 scopes) → units → unit npz → product npz →
 description (weekly=build จริง, daily=carry+re-stamp จาก gen ล่าสุด) →
-import gen colls → validate+manifest → generation_runs.status=pending
+zaapi_kb vec backfill → import gen colls → validate+manifest →
+generation_runs.status=pending
 (ยังไม่ publish — CAS = admin accept แยก).
 
 ทุกขั้นเขียน build_log.jsonl ใน gen dir + อัปเดต Mongo `generation_runs`
@@ -135,6 +136,7 @@ _STEP_ORDER = [
     "unit_embeddings",
     "product_embeddings",
     "description_embeddings",
+    "zaapi_kb_embeddings",
     "import_db",
     "validate",
 ]
@@ -143,7 +145,7 @@ _STEP_ORDER = [
 _IMAGE_TEXT_PAIR = frozenset(
     {"image_texts_sellable", "image_texts_nonsellable"})
 # idempotent/ต้องสดเสมอ — resume rerun ท้ายเส้นทุกครั้ง
-_ALWAYS_RERUN = frozenset({"import_db", "validate"})
+_ALWAYS_RERUN = frozenset({"import_db", "validate", "zaapi_kb_embeddings"})
 
 # step → artifact ใต้ gen_dir ที่ step เขียน (import_db เขียน Mongo ไม่ใช่ไฟล์)
 _STEP_OUTPUTS = {
@@ -267,6 +269,8 @@ def _run_steps(mode: str, db, exports_root: Path, gen_dir: Path,
                          percent=100.0, carried_from=src_gid, rows=rows)
             _update_run(db, gid, "description_embeddings",
                         {"description_source_gid": src_gid})
+    if "zaapi_kb_embeddings" in plan:
+        s("zaapi_kb_embeddings", ["build_zaapi_kb_embeddings.py"])
     if "import_db" in plan:
         _step_update(db, gid, gen_dir, "import_db", "running")
         counts = _import_colls(db, gid, gen_dir)

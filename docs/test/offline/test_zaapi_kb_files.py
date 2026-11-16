@@ -42,6 +42,10 @@ def _match(doc, filt):
             if not any(_match(doc, c) for c in cond):
                 return False
             continue
+        if k == "$and":
+            if not all(_match(doc, c) for c in cond):
+                return False
+            continue
         if k == "$nor":
             if any(_match(doc, c) for c in cond):
                 return False
@@ -664,6 +668,41 @@ def test_search_qa_zaapi_no_evidence_no_hit(db, monkeypatch):
 
 # ══ correction round 1 — independent review findings ══════════════════
 # RED: executable reproductions of data-loss/coverage/scope bugs.
+
+def test_backfill_stale_vecs_only_touches_stale(db, monkeypatch):
+    """generation step: เฉพาะแถว vec ขาด/vec_model ไม่ตรงที่ถูก embed ใหม่ —
+    แถวสด (vec_model ตรง mid) ไม่โดน; manual doc ขาด vec ถูกเติมด้วย."""
+    calls = []
+    def _embed(texts, **k):
+        calls.append(len(texts))
+        return [[0.1, 0.2] for _ in texts]
+    from shopeechat import embedding as emb
+    monkeypatch.setattr(emb, "embed_texts", _embed)
+    monkeypatch.setattr(emb, "model_identity", lambda: "test-embed-2d")
+    zkf.apply_import(db, filename=F1, data=F1_DATA,
+                     subject_bindings=F1_BINDINGS, admin="t")
+    rows = db[zkf._COLL].find({"source_file": F1})
+    assert len(rows) == 2 and all(d.get("vec_model") == "test-embed-2d"
+                                  for d in rows)
+    calls.clear()
+    # stale 1: vec_model คนละ model; stale 2: manual doc ไม่มี vec
+    db[zkf._COLL].update_one(
+        {"_id": rows[0]["_id"]}, {"$set": {"vec_model": "old-model"}})
+    db[zkf._COLL].insert_one(
+        {"_id": "manual-1", "kind": "manual", "active": True,
+         "text": "manual q/a"})
+    n = zkf.backfill_stale_vecs(db, embed_texts=_embed,
+                              mid="test-embed-2d", log=lambda m: None)
+    assert n == 2 and sum(calls) == 2
+    fixed = db[zkf._COLL].find_one({"_id": rows[0]["_id"]})
+    assert fixed["vec_model"] == "test-embed-2d" and fixed["vec"]
+    manual = db[zkf._COLL].find_one({"kind": "manual"})
+    assert manual["vec_model"] == "test-embed-2d"
+    calls.clear()
+    assert zkf.backfill_stale_vecs(db, embed_texts=_embed,
+                                 mid="test-embed-2d", log=lambda m: None) == 0
+    assert calls == []  # สดหมดแล้ว — ไม่ embed ซ้ำ
+
 
 def test_post_commit_failure_never_deletes_active_rev(db, monkeypatch):
     """F1A: retire/log ล้มหลัง CAS → active rev ห้ามถูกลบ + ต้องรายงานจริง."""
