@@ -295,22 +295,28 @@ float toriiMaterialMask(vec3 sourceColor, vec2 point) {
 }
 
 vec2 portalWarpUv(vec2 sampleUv, float aspect, float progress, float time, float exitWarp) {
-  vec2 portalSpace = vec2((sampleUv.x - 0.5) * aspect, (sampleUv.y - 0.45) / 1.30);
+  vec2 portalSpace = vec2((sampleUv.x - 0.5) * aspect * 0.70, (sampleUv.y - 0.45) / 1.40);
   float portalRadius = length(portalSpace);
-  float portalFalloff = 1.0 - smoothstep(0.0, 0.92, portalRadius);
+  float portalFalloff = 1.0 - smoothstep(0.0, 1.04, portalRadius);
   vec2 portalDirection = portalSpace / max(portalRadius, 0.001);
   vec2 portalTangent = vec2(-portalDirection.y, portalDirection.x);
   float portalAngle = atan(portalSpace.y, portalSpace.x);
+  float cameraPush = smoothstep(0.015, 1.0, progress);
   float portalWave = sin(portalAngle * 2.2 + portalRadius * 46.0 - progress * 25.0
     - time * (0.35 + progress * 0.85)) * portalFalloff * progress;
-  float portalSuction = smoothstep(0.0, 1.0, progress) * portalFalloff;
-  float portalPull = portalSuction * (0.045 + progress * 0.405);
+  float portalSuction = cameraPush * portalFalloff;
+  float portalPull = portalSuction * (0.035 + progress * 0.56);
   float portalTwist = sin(portalAngle * 3.0 + portalRadius * 34.0 - progress * 31.0
-    - time * (0.45 + progress * 1.15)) * portalFalloff * progress * 0.135;
-  vec2 portalRadialFlow = vec2(portalDirection.x / max(aspect, 0.08), portalDirection.y * 1.30);
-  vec2 portalSwirlFlow = vec2(portalTangent.x / max(aspect, 0.08), portalTangent.y * 1.30);
+    - time * (0.45 + progress * 1.15)) * portalFalloff * progress * 0.17;
+  vec2 portalRadialFlow = vec2(portalDirection.x / max(aspect * 0.70, 0.08), portalDirection.y * 1.40);
+  vec2 portalSwirlFlow = vec2(portalTangent.x / max(aspect * 0.70, 0.08), portalTangent.y * 1.40);
+  float sheetFlowX = sin(sampleUv.y * 5.4 + time * 0.34
+    + sin(sampleUv.x * 5.8 - progress * 8.0) * 0.82);
+  float sheetFlowY = sin(sampleUv.x * 4.2 - time * 0.26
+    + sin(sampleUv.y * 6.2 + time * 0.16) * 0.7);
+  vec2 waterShear = vec2(sheetFlowX, sheetFlowY) * cameraPush * portalFalloff * 0.025;
   vec2 warpedUv = sampleUv + portalRadialFlow * (portalPull + portalWave * 0.055)
-    + portalSwirlFlow * (portalTwist + portalFalloff * progress * 0.15);
+    + portalSwirlFlow * (portalTwist + portalFalloff * progress * 0.18) + waterShear;
   float clothPinch = sin(portalAngle * 2.8 + portalRadius * 31.0 - time * 1.4
     + sin(time * 0.42 + portalAngle) * 0.7);
   float clothRipple = sin(portalAngle * 5.0 - portalRadius * 44.0 + time * 1.9);
@@ -385,10 +391,10 @@ void main() {
   float surfaceDisplacementMask = waterMask;
   vec2 photoUv = clamp(uv + waterDisplacement * surfaceDisplacementMask, vec2(0.001), vec2(0.999));
   vec2 portalDelta = photoUv - vec2(0.5, 0.45);
-  vec2 portalSpace = vec2(portalDelta.x * aspect, portalDelta.y / 1.30);
+  vec2 portalSpace = vec2(portalDelta.x * aspect * 0.70, portalDelta.y / 1.40);
   float portalRadius = length(portalSpace);
   float portalAngle = atan(portalSpace.y, portalSpace.x);
-  float exitWarp = smoothstep(0.62, 0.99, u_portalProgress) * smoothstep(0.30, 1.25, u_portalLight);
+  float exitWarp = smoothstep(0.18, 0.94, u_portalProgress) * smoothstep(0.20, 1.05, u_portalLight);
   photoUv = portalWarpUv(photoUv, aspect, u_portalProgress, u_time, exitWarp);
   vec3 color = texture2D(u_photo, photoUv).rgb;
   float japanAspect = u_japanSize.x / u_japanSize.y;
@@ -808,11 +814,11 @@ void main() {
   float sceneAbsorb = smoothstep(0.36, 0.64, u_portalProgress);
   color = mix(color, tunnelFog, sceneAbsorb);
   float portalStrength = smoothstep(0.0, 0.08, u_portalProgress);
-  float horizonRadius = mix(0.018, 0.24, smoothstep(0.0, 1.0, u_portalProgress));
-  float eventHorizon = 1.0 - smoothstep(horizonRadius - 0.025, horizonRadius + 0.045, portalRadius);
+  float horizonRadius = mix(0.018, 0.34, smoothstep(0.0, 1.0, u_portalProgress));
+  float eventHorizon = 1.0 - smoothstep(horizonRadius - 0.034, horizonRadius + 0.058, portalRadius);
   vec3 portalShadow = color * vec3(0.10, 0.075, 0.23) + vec3(0.002, 0.003, 0.012);
   color = mix(color, portalShadow, eventHorizon * portalStrength * 0.94);
-  float accretionRadius = 0.36 - u_portalProgress * 0.16
+  float accretionRadius = 0.34 + u_portalProgress * 0.12
     + sin(portalAngle * 3.0 - u_portalProgress * 17.0 + u_time * 0.42) * 0.035;
   float accretionBand = exp(-abs(portalRadius - accretionRadius) * 33.0);
   float flowNoise = sin(portalAngle * 4.2 + portalRadius * 38.0 - u_portalProgress * 31.0
@@ -841,10 +847,10 @@ void main() {
   vec3 waterStreams = vec3(0.0);
   float tunnelFilament = 0.0;
   float tunnelThreadVisibility = 0.38 + darkFlow * 0.34 + tunnelLightCycle * 0.28;
-  float pathConvergence = 1.0 - smoothstep(0.58, 0.98, u_portalProgress);
+  float pathConvergence = 0.42 + (1.0 - smoothstep(0.58, 0.98, u_portalProgress)) * 0.58;
   float streamVisibility = portalStrength * (0.24 + smoothstep(0.15, 1.35, portalLight) * 0.34 + tunnelLightCycle * 0.24);
   float debrisVisibility = portalStrength * smoothstep(0.18, 0.34, u_portalProgress)
-    * mix(0.46, 1.0, 1.0 - smoothstep(0.62, 0.94, u_portalProgress));
+    * mix(0.62, 1.0, 1.0 - smoothstep(0.82, 1.0, u_portalProgress));
   if (portalStrength > 0.001) {
     for (int i = 0; i < 4; i++) {
       float layer = float(i);
