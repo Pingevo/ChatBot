@@ -515,7 +515,7 @@ def apply_import(db, *, filename: str, data: bytes,
                  content_type=None, sheet_types=None,
                  source_id=None, shop_scopes=None, row_snapshot=None,
                    file_sha256=None, mapping_sha256=None, source_snapshot_sha256=None,
-                   subject_bindings=None) -> dict:
+                   subject_bindings=None, require_scope: bool = False) -> dict:
     """full-file replace: insert rows ที่ stamp (file_rev, apply_id) ครบ
     ตั้งแต่ต้น + expire_at → verify ด้วย apply_id → CAS publish triple
     (file, rev, apply_id) จุดเดียว — visibility ไม่ต้องการ mutation หลัง CAS:
@@ -533,6 +533,8 @@ def apply_import(db, *, filename: str, data: bytes,
     reg = files.find_one({"_id": fn}) or {}
     scope = _import_scope(db, fn, reg, source_id, shop_scopes, data,
                           file_sha256, mapping_sha256, source_snapshot_sha256)
+    if require_scope and not scope["shop_scopes"]:
+        raise ValueError("shop scope required: select platform/shop for this file before import")
     bindings, docs = _bind_subjects(docs, subject_bindings, reg, hashlib.sha256(data).hexdigest())
     old_rev = int(reg.get("active_rev") or 0)
     rev = old_rev + 1
@@ -918,7 +920,7 @@ def import_package(db, *, data: bytes, shops: list[dict],
         raise ValueError("row snapshot missing")
     if preview:
         return preview_import(db, **kw)
-    return apply_import(db, admin=admin, **kw)
+    return apply_import(db, admin=admin, require_scope=True, **kw)
 
 
 def export_file(db, *, filename: str, original: bool = False) -> bytes | None:

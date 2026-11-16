@@ -46,10 +46,15 @@ type ZaapiDoc = {
   active: boolean;
 };
 
+// shop scope — คู่ platform|shop_id ที่ผูกไฟล์กับร้านจริง (บังคับก่อน import)
+type ShopScope = { platform: string; shop_id: string; shopname: string };
+
 // file-backed source (zaapi_kb_files registry) — filename = identity ตรงทุกตัวอักษร
 type ZaapiFile = {
   file: string;
   active_rev: number;
+  source_id?: string | null;
+  shop_scopes?: ShopScope[] | null;
   disabled?: boolean;
   prev_rev?: number | null;
   rows: number;
@@ -109,6 +114,7 @@ const PLATFORM_COLORS: Record<string, string> = {
   "LINE Official": "bg-green-100 text-green-700",
 };
 const PAGE_SIZE = 25;
+const FILES_PAGE_SIZE = 10;
 const TITLE_COLS = ["รุ่นสินค้า", "ชื่อรุ่นสินค้าย่อ", "คำถามเกี่ยวสินค้า", "คำถาม", "รุ่น", "model"];
 
 function docTitle(d: ZaapiDoc): string {
@@ -194,10 +200,11 @@ export function ZaapiKbPanel() {
 
   // ── file-based import (spec v4) ──
   const [files, setFiles] = useState<ZaapiFile[]>([]);
+  const [filesPage, setFilesPage] = useState(0);
   const [importing, setImporting] = useState(false);
   const [snapshotting, setSnapshotting] = useState(false);
   const [imp, setImp] = useState<{
-    file: File; accounts: string[]; platforms: string[];
+    file: File; platforms: string[]; scopes: ShopScope[];
     contentType: string; sheetTypes: Record<string, string>;
     // per-sheet declared bindings: subject คอลัมน์ + warranty fact คอลัมน์ (optional)
     bindings: Record<string, { subject?: number; warranty?: number }>;
@@ -208,7 +215,7 @@ export function ZaapiKbPanel() {
   const [fileDocsTotal, setFileDocsTotal] = useState(0);
   const [fileDocsPage, setFileDocsPage] = useState(0);
   const [fileDocsLoading, setFileDocsLoading] = useState(false);
-  const [kbShops, setKbShops] = useState<{ name: string; platform: string }[]>([]);
+  const [kbShops, setKbShops] = useState<{ name: string; platform: string; shop_id: string }[]>([]);
   const [shopPeek, setShopPeek] = useState<string | null>(null);
 
   const loadSources = useCallback(() => {
@@ -237,8 +244,12 @@ export function ZaapiKbPanel() {
       const fd = new FormData();
       fd.append("file", imp.file);
       fd.append("filename", imp.file.name);
-      fd.append("accounts", imp.accounts.join(","));
-      fd.append("platforms", imp.platforms.join(","));
+      fd.append("accounts", [...new Set(imp.scopes.map((s) => s.shopname))].join(","));
+      fd.append("platforms", [...new Set(imp.scopes.map((s) => s.platform))].join(","));
+      fd.append("shop_scopes", JSON.stringify(imp.scopes));
+      // registry มี source_id อยู่แล้ว → ส่ง "" ให้ inherit; ไฟล์ใหม่ → identity เฉพาะไฟล์นี้
+      const reg = files.find((f) => f.file === imp.file.name);
+      fd.append("source_id", reg?.source_id ? "" : `manual:${imp.file.name}`);
       fd.append("content_type", imp.contentType);
       fd.append("sheet_types", JSON.stringify(imp.sheetTypes));
       // declared-subject contract: ส่งเฉพาะชีตที่เลือกคอลัมน์สินค้า —
@@ -518,11 +529,11 @@ export function ZaapiKbPanel() {
 
   // platform → shops group (import modal — เลือก platform ก่อนแล้วร้านตาม platform)
   const impShopGroups = (() => {
-    const byPlat = new Map<string, string[]>();
+    const byPlat = new Map<string, { name: string; shop_id: string }[]>();
     for (const s of kbShops) {
       const k = s.platform || "other";
       if (!byPlat.has(k)) byPlat.set(k, []);
-      byPlat.get(k)!.push(s.name);
+      byPlat.get(k)!.push({ name: s.name, shop_id: s.shop_id });
     }
     const order = IMPORT_PLATFORMS.map((p) => p.v);
     return [...byPlat.entries()]
@@ -530,12 +541,28 @@ export function ZaapiKbPanel() {
         const ia = order.indexOf(a[0]), ib = order.indexOf(b[0]);
         return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a[0].localeCompare(b[0]);
       })
-      .map(([plat, names]) => ({
+      .map(([plat, shops]) => ({
         plat,
         label: IMPORT_PLATFORMS.find((p) => p.v === plat)?.l || plat || "other",
-        names,
+        shops,
       }));
   })();
+
+  // เปิด import modal — prefill scope จาก registry เดิมถ้าไฟล์ชื่อซ้ำ (re-import ไม่ต้องแมปใหม่)
+  function openImport(f: File) {
+    const reg = files.find((x) => x.file === f.name);
+    const scopes: ShopScope[] = (reg?.shop_scopes || []).map(
+      ({ platform, shop_id, shopname }) => ({ platform, shop_id, shopname }));
+    setImp({
+      file: f,
+      platforms: [...new Set(scopes.map((s) => s.platform))],
+      scopes,
+      contentType: reg?.content_type || "",
+      sheetTypes: reg?.sheet_types || {},
+      bindings: {},
+      preview: null,
+    });
+  }
 
   const filtered = sources
     .filter((s) => {
@@ -568,7 +595,7 @@ export function ZaapiKbPanel() {
                 <div className="font-mono text-text">{imp.file.name}</div>
               </div>
               <div>
-                <label className="text-text-muted block mb-1">Platform (ว่าง = ทุก platform)</label>
+                <label className="text-text-muted block mb-1">Platform (เลือกเพื่อกรองรายชื่อร้าน)</label>
                 <div className="flex gap-1.5 flex-wrap">
                   {IMPORT_PLATFORMS.map((p) => (
                     <button
@@ -587,20 +614,27 @@ export function ZaapiKbPanel() {
                 </div>
               </div>
               <div>
-                <label className="text-text-muted block mb-1">ร้านที่ใช้ได้ (ว่าง = ทุกร้าน)</label>
-                <input
-                  type="text"
-                  placeholder="พิมพ์ชื่อร้าน คั่นด้วย , (เช่น ShopA, ShopB)"
-                  defaultValue={imp.accounts.join(", ")}
-                  onBlur={(e) => setImp({
-                    ...imp,
-                    accounts: e.target.value.split(",")
-                      .map((x) => x.trim()).filter(Boolean),
-                  })}
-                  className="w-full h-8 px-2 mb-1.5 rounded-lg border border-border bg-surface text-xs focus:outline-none focus:ring-2 focus:ring-brand/40"
-                />
+                <label className="text-text-muted block mb-1">ร้านที่ไฟล์นี้เป็นของ * (ต้องเลือกอย่างน้อย 1 — ไฟล์ที่ไม่ผูกร้านจะ import ไม่ได้)</label>
+                {imp.scopes.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5 mb-1.5">
+                    {imp.scopes.map((s) => (
+                      <button
+                        key={`${s.platform}|${s.shop_id}`}
+                        onClick={() => setImp({
+                          ...imp,
+                          scopes: imp.scopes.filter(
+                            (x) => !(x.platform === s.platform && x.shop_id === s.shop_id)),
+                        })}
+                        className="px-2 py-0.5 rounded-lg border border-brand bg-brand/10 text-brand text-[11px]"
+                        title="กดเพื่อเอาร้านนี้ออก"
+                      >
+                        {s.shopname} · {s.platform} ✕
+                      </button>
+                    ))}
+                  </div>
+                )}
                 {!imp.platforms.length ? (
-                  <div className="text-text-subtle text-[11px]">เลือก platform ก่อนเพื่อดูรายชื่อร้าน (หรือพิมพ์ชื่อเองด้านบน)</div>
+                  <div className="text-text-subtle text-[11px]">เลือก platform ก่อนเพื่อดูรายชื่อร้าน</div>
                 ) : (
                   <div className="max-h-36 overflow-y-auto space-y-1.5">
                     {impShopGroups
@@ -609,19 +643,22 @@ export function ZaapiKbPanel() {
                         <div key={g.plat}>
                           <div className="text-[10px] font-semibold text-text-muted uppercase tracking-wide">{g.label}</div>
                           <div className="flex flex-col gap-0.5">
-                            {g.names.map((n) => {
-                              const on = imp.accounts.includes(n);
+                            {g.shops.map((s) => {
+                              const on = imp.scopes.some(
+                                (x) => x.platform === g.plat && x.shop_id === s.shop_id);
                               return (
-                                <label key={n}
+                                <label key={s.shop_id}
                                   className={`flex items-center gap-1.5 rounded px-1.5 py-0.5 cursor-pointer ${on ? "bg-brand/10" : "hover:bg-surface-2"}`}>
                                   <input type="checkbox" className="accent-brand" checked={on}
                                     onChange={() => setImp({
                                       ...imp,
-                                      accounts: on
-                                        ? imp.accounts.filter((x) => x !== n)
-                                        : [...imp.accounts, n],
+                                      scopes: on
+                                        ? imp.scopes.filter(
+                                            (x) => !(x.platform === g.plat && x.shop_id === s.shop_id))
+                                        : [...imp.scopes, {
+                                            platform: g.plat, shop_id: s.shop_id, shopname: s.name }],
                                     })} />
-                                  <span>{n}</span>
+                                  <span>{s.name} <span className="text-text-subtle">({s.shop_id})</span></span>
                                 </label>
                               );
                             })}
@@ -630,26 +667,11 @@ export function ZaapiKbPanel() {
                       ))}
                   </div>
                 )}
-                <div className="flex flex-wrap gap-1.5 mt-1.5">
-                  {[...new Set(sources.flatMap((s) => s.accounts.map((a) => a.name)))].map((n) => {
-                    const inGroups = impShopGroups.some((g) => g.names.includes(n));
-                    if (inGroups) return null;
-                    return (
-                      <button
-                        key={n}
-                        onClick={() => setImp({
-                          ...imp,
-                          accounts: imp.accounts.includes(n)
-                            ? imp.accounts.filter((x) => x !== n)
-                            : [...imp.accounts, n],
-                        })}
-                        className={`px-2 py-1 rounded-lg border text-[11px] ${imp.accounts.includes(n) ? "border-brand bg-brand/10 text-brand" : "border-border text-text-muted"}`}
-                      >
-                        {n}
-                      </button>
-                    );
-                  })}
-                </div>
+                {!imp.scopes.length && (
+                  <div className="text-warning mt-1 text-[11px]">
+                    ยังไม่ได้เลือกร้าน — import จะถูกปฏิเสธจนกว่าจะระบุว่าไฟล์นี้เป็นของร้านไหน
+                  </div>
+                )}
               </div>
               <div>
                 <label className="text-text-muted block mb-1">ชนิดเนื้อหาของไฟล์ (admin เลือกเอง — แถวที่ไม่จัดชนิดจะถูก hold การใช้ตอบ)</label>
@@ -773,7 +795,7 @@ export function ZaapiKbPanel() {
                   {importing ? "กำลังตรวจ..." : "Preview"}
                 </Button>
               ) : (
-                <Button size="sm" onClick={() => doImport("apply")} disabled={importing}>
+                <Button size="sm" onClick={() => doImport("apply")} disabled={importing || !imp.scopes.length}>
                   {importing ? "กำลังนำเข้า..." : "ยืนยัน Import"}
                 </Button>
               )}
@@ -806,7 +828,7 @@ export function ZaapiKbPanel() {
               id="zaapi-file-input" type="file" accept=".xlsx,.txt" className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (f) setImp({ file: f, accounts: [], platforms: [], contentType: "", sheetTypes: {}, bindings: {}, preview: null });
+                if (f) openImport(f);
                 e.target.value = "";
               }}
             />
@@ -866,17 +888,21 @@ export function ZaapiKbPanel() {
           id="zaapi-file-input" type="file" accept=".xlsx,.txt" className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
-            if (f) setImp({ file: f, accounts: [], platforms: [], contentType: "", sheetTypes: {}, bindings: {}, preview: null });
+            if (f) openImport(f);
             e.target.value = "";
           }}
         />
       </div>
 
       {/* file-based sources (import ตรงจากไฟล์ — filename = identity) */}
-      {files.length > 0 && (
+      {files.length > 0 && (() => {
+        const pageCount = Math.ceil(files.length / FILES_PAGE_SIZE);
+        const page = Math.min(filesPage, pageCount - 1);
+        const pageFiles = files.slice(page * FILES_PAGE_SIZE, (page + 1) * FILES_PAGE_SIZE);
+        return (
         <div className="border border-border rounded-xl divide-y divide-border bg-surface">
           <div className="px-4 py-2 text-[11px] font-medium text-text-subtle bg-surface-2 rounded-t-xl flex items-center justify-between gap-2">
-            <span>ไฟล์นำเข้า ({files.length}) — ชื่อไฟล์เดิมแทนทั้งชุด · Export เป็น Excel</span>
+            <span>ไฟล์นำเข้า ({files.length}) — ชื่อไฟล์เดิมแทนทั้งชุด · Export เป็น Excel{pageCount > 1 ? ` · หน้า ${page + 1}/${pageCount}` : ""}</span>
             {editable && (
               <button
                 onClick={async () => {
@@ -893,7 +919,7 @@ export function ZaapiKbPanel() {
               </button>
             )}
           </div>
-          {files.map((f) => (
+          {pageFiles.map((f) => (
             <div key={f.file} className={f.disabled ? "opacity-60" : ""}>
               <div className="flex items-center gap-3 px-4 py-2.5">
                 <button onClick={() => toggleFileDoc(f)} className="flex items-center gap-2 flex-1 min-w-0 text-left">
@@ -981,8 +1007,18 @@ export function ZaapiKbPanel() {
               )}
             </div>
           ))}
+          {pageCount > 1 && (
+            <div className="px-4 py-3">
+              <Pagination
+                page={page + 1}
+                totalPages={pageCount}
+                onChange={(pg) => setFilesPage(pg - 1)}
+              />
+            </div>
+          )}
         </div>
-      )}
+        );
+      })()}
 
       <div className="border border-border rounded-xl divide-y divide-border overflow-y-auto bg-surface max-h-[calc(100dvh-300px)]">
         {filtered.map((s) => {
