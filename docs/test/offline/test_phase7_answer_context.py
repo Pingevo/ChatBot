@@ -434,6 +434,24 @@ def test_fully_empty_context_zero_calls(monkeypatch):
     assert out.answer_calls == 0 and _final_text(out) == acx.EMPTY_CONTEXT_REPLY
 
 
+@pytest.mark.parametrize("kind", ["kb", "device_spec", None])
+def test_no_cards_context_does_not_assert_missing_product_data(kind):
+    evidence = ({"kind": kind, "need_indices": [3],
+                 "payload": "ข้อมูลทดสอบรับประกัน 1 ปี"},) if kind else ()
+    ctx = acx.AnswerContext(
+        task=acx.AnswerTask(tasks=(acx.NeedTask(
+            kind="product", operation="describe", need_index=3),)),
+        products=(), evidence=evidence, availability_notes=(),
+        constraint_notes=(), unanswered_needs=(), estimated_tokens=0)
+    body = ctx.context_text()
+    assert "จำนวนสินค้าใน context: 0" in body
+    assert "ไม่พบข้อมูลสินค้าที่ตรงกับคำถามในระบบค้นหา" not in body
+    assert "ให้บอกลูกค้าว่าไม่พบข้อมูลรุ่นนี้ในระบบ" not in body
+    if kind:
+        assert "ข้อมูลทดสอบรับประกัน 1 ปี" in body
+        assert "งานที่ 1" in body
+
+
 def test_empty_products_with_evidence_one_typed_call(monkeypatch):
     from shopeechat import app as _app
     calls = {"typed": 0}
