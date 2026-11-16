@@ -14510,3 +14510,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - verify: active 6,274 แถว bound 5,710 (91%); samples ถูก ('black shark gs3'+'gs3', 'zc311', 'pb100s'); probe จริง: zc311 ThaiSuperPhone/lazada+shopee → 112+066, pb100s CukTech/lazada → 116+068, gs3 KingGadgets/shopee → 008, gs3 CukTech/lazada → 0 fail-closed; suspicious-check normalized = 0 แถวที่ subject ผิดเนื้อตัวเอง
 - ผลกระทบ: ไฟล์ไม่มี subject col 11 ไฟล์คง unbound (ถูก—general/FAQ); แถวสกปรก ~150 ref ขยะไม่เคย match (exact-equality) ปลอดภัย
 - งานค้าง: Gemini คำถามสเปค end-to-end; live QA; deploy; 15 ไฟล์ไม่มี mapping
+
+## กำลังจะทำ+ผ่านแล้ว: หน้าแก้ subject binding บนไฟล์ที่ import แล้ว (ไม่ต้อง re-upload) — 2026-11-17
+- งาน: admin ขอหน้าเว็บดู/กำหนด binding เองสำหรับไฟล์โครงสร้างแปลก (009/073/114/081/085/086 ฯลฯ)
+- แก้ด้วย: owner functions `bind_preview` (คอลัมน์+ค่าตัวอย่างจาก stored source bytes ผ่าน export_file original=True, 0 writes) และ `bind_apply` (apply_import rev ใหม่ด้วย bytes เดิม — scope/type/source inherit; {}=ล้าง); endpoints `GET /zaapi-kb/bind-preview` + `POST /zaapi-kb/bind`; proxy `/api/zaapi-kb/bind`; UI ในส่วน expand ไฟล์ของ ZaapiKbPanel — ต่อชีตเลือกโหมด คอลัมน์(ติ๊กหลายคอลัมน์พร้อมตัวอย่างค่า)/refs ทั้งชีต/rows JSON + prefill binding เดิม
+- เทสต์: test_zaapi_kb_api.py +3 (preview cols/samples+0writes, rebind rev2→{}→rev3 bound อีกครั้ง scope inherit, 400 ตาราง) — หมายเหตุ MemoryDb ไม่รองรับ dotted `subject_refs.0` จึงตรวจผลจาก docs จริง; focused 130 passed; tsc clean; py_compile clean
+- ผลกระทบ: feature ใหม่ล้วน ไม่แตะ logic เดิม; rollback ได้ตาม rev contract
+- งานค้าง: user ใช้หน้านี้ curate ไฟล์แปลกเอง; spec provider E2E; live QA; deploy

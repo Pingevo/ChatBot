@@ -999,6 +999,54 @@ def export_file(db, *, filename: str, original: bool = False) -> bytes | None:
 
 # ── search ────────────────────────────────────────────────────────────────
 
+def bind_preview(db, *, filename: str) -> dict:
+    """read-only: คอลัมน์ + ค่าตัวอย่างต่อชีต จาก stored source bytes —
+    ให้ admin เลือก subject binding โดยไม่ต้อง re-upload (0 writes)."""
+    fn = _valid_filename(filename)
+    data = export_file(db, filename=fn, original=True)
+    if data is None:
+        raise ValueError("no stored source for this file")
+    docs = parse_upload(fn, data)
+    reg = db[_FILES_COLL].find_one({"_id": fn}) or {}
+    sheets: dict[str, dict] = {}
+    for d in docs:
+        s = _sheet_key(d)
+        info = sheets.setdefault(s, {"rows": 0, "columns": {}})
+        info["rows"] += 1
+        for c in d.get("cells") or ():
+            col = info["columns"].setdefault(
+                c["column_index"], {"header": c["header"], "samples": []})
+            v = _clean(c["value"])
+            if v and v not in col["samples"] and len(col["samples"]) < 8:
+                col["samples"].append(v)
+    return {
+        "filename": fn, "active_rev": reg.get("active_rev"),
+        "subject_bindings": reg.get("subject_bindings") or {},
+        "sheets": {s: {"rows": i["rows"], "columns": [
+            {"column_index": k, "header": v["header"], "samples": v["samples"]}
+            for k, v in sorted(i["columns"].items())]}
+            for s, i in sheets.items()}}
+
+
+def bind_apply(db, *, filename: str, subject_bindings, admin: str = "") -> dict:
+    """re-bind subjects บน stored source — apply_import rev ใหม่
+    (scope/type/source ทั้งหมด inherit จาก registry; {} = ล้าง binding)."""
+    fn = _valid_filename(filename)
+    data = export_file(db, filename=fn, original=True)
+    if data is None:
+        raise ValueError("no stored source for this file")
+    if not isinstance(subject_bindings, dict):
+        raise ValueError("subject_bindings must be a sheet mapping")
+    res = apply_import(db, filename=fn, data=data,
+                       subject_bindings=subject_bindings, admin=admin)
+    if res.get("ok"):
+        rev = res.get("rev")
+        res["bound_rows"] = db[_COLL].count_documents(
+            {"source_file": fn, "file_rev": rev,
+             "subject_refs.0": {"$exists": True}})
+    return res
+
+
 def _trigram_dice(a: str, b: str) -> float:
     """char-3gram Dice — prefilter score เท่านั้น (ไม่ใช่ semantic truth)."""
     a, b = " ".join((a or "").lower().split()), " ".join(

@@ -201,3 +201,59 @@ def test_export_package_requires_mapping(monkeypatch):
     zkf.apply_import(db, filename=F1, data=F1_DATA)
     r2 = CLIENT.get("/zaapi-kb/export-package", params={"file": F1})
     assert r2.status_code == 400, r2.text
+
+
+def test_bind_preview_returns_columns_samples_and_current(monkeypatch):
+    """read-only: ดึงคอลัมน์+ค่าตัวอย่างจาก stored source + binding ปัจจุบัน."""
+    db = _patch_db(monkeypatch)
+    _stub_embed(monkeypatch)
+    _apply_bound_file(db)
+    r = CLIENT.get("/zaapi-kb/bind-preview", params={"file": F1})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["filename"] == F1 and body["active_rev"] == 1
+    assert body["subject_bindings"] == F1_BINDINGS
+    sheet = body["sheets"]["ข้อมูลสินค้า"]
+    assert sheet["rows"] == 2
+    assert sheet["columns"][0]["header"] == "ชื่อสินค้า"
+    assert sheet["columns"][0]["samples"]
+    assert db[zkf._LOG_COLL].count_documents({}) == 1  # preview 0 writes
+
+
+def test_bind_apply_rebinds_from_stored_source(monkeypatch):
+    """POST bind ใช้ stored source (ไม่ต้องอัปโหลด) → rev ใหม่ + scope inherit."""
+    db = _patch_db(monkeypatch)
+    _stub_embed(monkeypatch)
+    _apply_bound_file(db)  # rev1 bound=2, scope=SHOP
+    r = CLIENT.post("/zaapi-kb/bind", params={
+        "file": F1, "subject_bindings": json.dumps({})})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] and body["rev"] == 2
+    reg = db[zkf._FILES_COLL].find_one({"_id": F1})
+    assert reg["active_rev"] == 2
+    assert reg["shop_scopes"][0]["key"] == "shopee|s1"  # scope inherit
+    assert reg["subject_bindings"] == {}
+    # bind กลับด้วย contract เดิม → rev3 bound อีกครั้ง
+    # (bound_rows count ใช้ subject_refs.0 dotted query — MemoryDb ไม่รองรับ
+    # จึงตรวจผลจริงจากเอกสารแทน)
+    r = CLIENT.post("/zaapi-kb/bind", params={
+        "file": F1, "subject_bindings": json.dumps(F1_BINDINGS)})
+    assert r.status_code == 200, r.text
+    assert r.json()["rev"] == 3
+    rows = db[zkf._COLL].find({"source_file": F1, "file_rev": 3})
+    assert len(rows) == 2 and all(d.get("subject_refs") for d in rows)
+
+
+def test_bind_requires_bindings_and_known_file(monkeypatch):
+    db = _patch_db(monkeypatch)
+    _stub_embed(monkeypatch)
+    _apply_bound_file(db)
+    for params, want in [
+        ({"file": F1}, 400),  # ไม่ส่ง subject_bindings
+        ({"file": F1, "subject_bindings": "{bad"}, 400),
+        ({"file": F1, "subject_bindings": "[1]"}, 400),
+        ({"file": "nope.xlsx", "subject_bindings": "{}"}, 400),
+    ]:
+        r = CLIENT.post("/zaapi-kb/bind", params=params)
+        assert r.status_code == want, r.text

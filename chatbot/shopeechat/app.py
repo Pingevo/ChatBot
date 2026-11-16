@@ -5883,6 +5883,35 @@ def zaapi_kb_import_sweep(request: Request) -> dict:
     return JSONResponse(res)
 
 
+@app.get("/zaapi-kb/bind-preview")
+def zaapi_kb_bind_preview(file: str) -> dict:
+    """read-only: คอลัมน์ + ค่าตัวอย่างต่อชีตจาก stored source —
+    หน้า admin ใช้เลือก subject binding โดยไม่ต้อง re-upload."""
+    from . import kb_zaapi_files as _zkf
+    try:
+        return JSONResponse(_zkf.bind_preview(
+            knowledge_base._admin_db(), filename=file))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/zaapi-kb/bind")
+def zaapi_kb_bind(request: Request, file: str,
+                  subject_bindings: str = "") -> dict:
+    """apply subject_bindings ใหม่บน stored source (rev ใหม่, rollback ได้);
+    scope/type/source inherit จาก registry — subject_bindings = {} ล้าง binding."""
+    from . import kb_zaapi_files as _zkf
+    try:
+        _sb = _json_param(subject_bindings)
+        if not subject_bindings.strip() or _sb is None:
+            raise ValueError("subject_bindings JSON required")
+        return JSONResponse(_zkf.bind_apply(
+            knowledge_base._admin_db(), filename=file,
+            subject_bindings=_sb, admin=_admin_name(request)))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get("/zaapi-kb/export")
 def zaapi_kb_export(file: str):
     """active revision → xlsx bytes (round-trip re-import ชื่อเดิมได้)."""

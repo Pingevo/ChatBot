@@ -97,6 +97,22 @@ type ImportPreview = {
   }[];
 };
 
+// subject-binding editor — preview คอลัมน์/ค่าตัวอย่างจาก stored source
+type BindRule = {
+  columns?: { column_index: number; header: string }[];
+  refs?: string[];
+  rows?: Record<string, string[]>;
+};
+type BindPreview = {
+  filename: string; active_rev: number;
+  subject_bindings: Record<string, BindRule>;
+  sheets: Record<string, {
+    rows: number;
+    columns: { column_index: number; header: string; samples: string[] }[];
+  }>;
+};
+type BindSheetSel = { mode: "cols" | "refs" | "rows"; cols: number[]; refs: string; rows: string };
+
 // ชนิดเนื้อหาที่ admin เลือก (ห้าม infer จากชื่อไฟล์/ข้อความ)
 const CONTENT_TYPES: { v: string; l: string }[] = [
   { v: "", l: "— ไม่จัดชนิด (hold การใช้ตอบ) —" },
@@ -217,6 +233,10 @@ export function ZaapiKbPanel() {
   const [fileDocsLoading, setFileDocsLoading] = useState(false);
   const [kbShops, setKbShops] = useState<{ name: string; platform: string; shop_id: string }[]>([]);
   const [shopPeek, setShopPeek] = useState<string | null>(null);
+  const [bind, setBind] = useState<{
+    file: string; loading: boolean; saving: boolean;
+    data: BindPreview | null; sel: Record<string, BindSheetSel>;
+  } | null>(null);
 
   const loadSources = useCallback(() => {
     api()
@@ -398,6 +418,68 @@ export function ZaapiKbPanel() {
       else toast.error("Rollback ไม่ได้ — " + (r.data?.reason || "error"));
     } catch {
       toast.error("Rollback ไม่สำเร็จ");
+    }
+  }
+
+  // ── subject-binding editor (ใช้ stored source — ไม่ต้อง re-upload) ──
+  async function openBind(f: ZaapiFile) {
+    if (bind?.file === f.file) { setBind(null); return; }
+    setBind({ file: f.file, loading: true, saving: false, data: null, sel: {} });
+    try {
+      const r = await api().get("/zaapi-kb/bind", { params: { file: f.file } });
+      const data = r.data as BindPreview;
+      const sel: Record<string, BindSheetSel> = {};
+      for (const [sheet, rule] of Object.entries(data.subject_bindings || {})) {
+        if (rule.columns?.length)
+          sel[sheet] = { mode: "cols", cols: rule.columns.map((c) => c.column_index), refs: "", rows: "" };
+        else if (rule.refs?.length)
+          sel[sheet] = { mode: "refs", cols: [], refs: rule.refs.join(", "), rows: "" };
+        else if (rule.rows && Object.keys(rule.rows).length)
+          sel[sheet] = { mode: "rows", cols: [], refs: "", rows: JSON.stringify(rule.rows) };
+      }
+      setBind({ file: f.file, loading: false, saving: false, data, sel });
+    } catch {
+      toast.error("โหลด binding preview ไม่สำเร็จ");
+      setBind(null);
+    }
+  }
+
+  function setSel(sheet: string, patch: Partial<BindSheetSel>) {
+    if (!bind) return;
+    const cur = bind.sel[sheet] || { mode: "cols" as const, cols: [], refs: "", rows: "" };
+    setBind({ ...bind, sel: { ...bind.sel, [sheet]: { ...cur, ...patch } } });
+  }
+
+  async function saveBind() {
+    if (!bind) return;
+    const sb: Record<string, BindRule> = {};
+    const headers = (s: string, i: number) =>
+      bind.data?.sheets[s]?.columns.find((c) => c.column_index === i)?.header || "";
+    try {
+      for (const [sheet, sel] of Object.entries(bind.sel)) {
+        if (sel.mode === "cols" && sel.cols.length)
+          sb[sheet] = { columns: sel.cols.map((i) => ({ column_index: i, header: headers(sheet, i) })) };
+        else if (sel.mode === "refs" && sel.refs.trim())
+          sb[sheet] = { refs: sel.refs.split(",").map((x) => x.trim()).filter(Boolean) };
+        else if (sel.mode === "rows" && sel.rows.trim())
+          sb[sheet] = { rows: JSON.parse(sel.rows) };
+      }
+    } catch {
+      toast.error("rows JSON ไม่ถูกต้อง");
+      return;
+    }
+    setBind({ ...bind, saving: true });
+    try {
+      const r = await api().post(`/zaapi-kb/bind?file=${encodeURIComponent(bind.file)}`,
+        { subject_bindings: sb });
+      if (r.data?.ok) {
+        toast.success(`Bind → rev ${r.data.rev} · ผูก ${r.data.bound_rows ?? "?"} แถว`);
+        setBind(null);
+        loadFiles();
+      } else toast.error("Bind ไม่สำเร็จ — " + (r.data?.reason || r.data?.detail || "error"));
+    } catch (e: any) {
+      toast.error("Bind ไม่สำเร็จ — " + (e?.response?.data?.detail || "error"));
+      setBind({ ...bind, saving: false });
     }
   }
 
@@ -974,6 +1056,94 @@ export function ZaapiKbPanel() {
               </div>
               {openFile === f.file && (
                 <div className="border-t border-border bg-surface-2/50 px-4 py-3">
+                  {editable && (
+                    <div className="mb-3 rounded-lg border border-border/60 bg-surface px-3 py-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-[11px] text-text-subtle">
+                          Subject bindings — ผูกแถวกับรุ่น/สินค้า (คำถามเจาะรุ่นจะตอบได้ก็ต่อเมื่อผูกแล้ว)
+                        </div>
+                        <Button size="sm" variant="outline" onClick={() => openBind(f)}>
+                          {bind?.file === f.file ? "ปิด" : "ตั้งค่าผูกรุ่น"}
+                        </Button>
+                      </div>
+                      {bind?.file === f.file && (
+                        <div className="mt-2 space-y-2 border-t border-border/60 pt-2">
+                          {bind.loading ? (
+                            <div className="flex justify-center py-3"><Loading size={16} /></div>
+                          ) : bind.data ? (
+                            <>
+                              {Object.entries(bind.data.sheets).map(([s, info]) => {
+                                const sel = bind.sel[s] || { mode: "cols" as const, cols: [], refs: "", rows: "" };
+                                const headerOf = (i: number) => info.columns.find((c) => c.column_index === i)?.header || "";
+                                return (
+                                  <div key={s} className="rounded border border-border/60 p-2 space-y-1.5">
+                                    <div className="flex items-center gap-2 flex-wrap">
+                                      <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wide truncate" title={s}>{s}</span>
+                                      <span className="text-[10px] text-text-subtle">{info.rows} แถว</span>
+                                      <div className="ml-auto flex items-center gap-2 text-[10px]">
+                                        {([["cols", "คอลัมน์"], ["refs", "refs ทั้งชีต"], ["rows", "รายแถว (JSON)"]] as const).map(([m, l]) => (
+                                          <label key={m} className="flex items-center gap-1 cursor-pointer">
+                                            <input type="radio" checked={sel.mode === m} onChange={() => setSel(s, { mode: m })} />
+                                            {l}
+                                          </label>
+                                        ))}
+                                      </div>
+                                    </div>
+                                    {sel.mode === "cols" && (
+                                      <div className="space-y-1">
+                                        {info.columns.map((c) => (
+                                          <label key={c.column_index} className="flex items-start gap-1.5 text-[11px] cursor-pointer">
+                                            <input type="checkbox" className="mt-0.5"
+                                              checked={sel.cols.includes(c.column_index)}
+                                              onChange={(e) => setSel(s, {
+                                                cols: e.target.checked
+                                                  ? [...sel.cols, c.column_index].sort((a, b) => a - b)
+                                                  : sel.cols.filter((x) => x !== c.column_index),
+                                              })} />
+                                            <span className="min-w-0">
+                                              <span className="font-medium">{c.column_index}: {c.header || "(ไม่มีหัว)"}</span>
+                                              {c.samples.length > 0 && (
+                                                <span className="block text-text-subtle truncate">
+                                                  {c.samples.slice(0, 3).join(" · ")}{c.samples.length > 3 ? " …" : ""}
+                                                </span>
+                                              )}
+                                            </span>
+                                          </label>
+                                        ))}
+                                      </div>
+                                    )}
+                                    {sel.mode === "refs" && (
+                                      <input
+                                        value={sel.refs} placeholder="ref1, ref2, ... (ใช้ทั้งชีต)"
+                                        onChange={(e) => setSel(s, { refs: e.target.value })}
+                                        className="w-full h-7 px-2 rounded-lg border border-border bg-surface text-[11px] focus:outline-none focus:ring-2 focus:ring-brand/40"
+                                      />
+                                    )}
+                                    {sel.mode === "rows" && (
+                                      <textarea
+                                        value={sel.rows} rows={3}
+                                        placeholder='{"3": ["รุ่น a"], "5": ["รุ่น b", "alias b"]}'
+                                        onChange={(e) => setSel(s, { rows: e.target.value })}
+                                        className="w-full px-2 py-1 rounded-lg border border-border bg-surface text-[11px] font-mono focus:outline-none focus:ring-2 focus:ring-brand/40"
+                                      />
+                                    )}
+                                  </div>
+                                );
+                              })}
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[10px] text-text-subtle">
+                                  rev {bind.data.active_rev} → บันทึก = rev ใหม่ (rollback ได้) · ว่างทั้งหมด = ล้าง binding
+                                </span>
+                                <Button size="sm" onClick={saveBind} disabled={bind.saving}>
+                                  {bind.saving ? "กำลังบันทึก..." : "บันทึก binding"}
+                                </Button>
+                              </div>
+                            </>
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {fileDocsLoading ? (
                     <div className="flex justify-center py-6"><Loading size={18} /></div>
                   ) : fileDocs.length === 0 ? (
