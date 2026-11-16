@@ -24,6 +24,18 @@ AD1404T_MSG = ("หัวชาร์จ AD1404T ใช้กับสายช�
                "ขอแบบมีจอ ยาว 2 เมตรและได้เต็มสปีด")
 
 
+def test_zaapi_request_keeps_subject_and_target_roles_distinct():
+    from dataclasses import replace
+    from shopeechat.retrieval_planner import channel_request
+    from shopeechat.retrieval_selection import needs_for_request
+    from shopeechat.turn_decision import TurnNeed
+    subject = TurnNeed("product", "describe", subject_refs=("AB100",), target_refs=("ZX200",))
+    reverse = replace(subject, subject_refs=subject.target_refs, target_refs=subject.subject_refs)
+    request = replace(channel_request("kb"), request_id="ch:kb:0",
+                      subject_refs=subject.subject_refs, target_refs=subject.target_refs)
+    assert needs_for_request(request, (subject, reverse)) == (subject,)
+
+
 def _profile(msg=AD1404T_MSG):
     return route_context.build_retrieval_profile(
         msg, history=[],

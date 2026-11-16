@@ -536,6 +536,60 @@ def test_zaapi_kb_evidence_nonproduct_type_visible(db, monkeypatch):
     assert "รีเซ็ตหูฟัง" in res.supporting_evidence[0]["payload"]["text"]
 
 
+@pytest.mark.parametrize("need_kind", ["product", "compare", "compat"])
+@pytest.mark.parametrize("primary_present", [False, True])
+def test_product_evidence_does_not_promote_target_row_to_subject(db, monkeypatch, primary_present, need_kind):
+    from shopeechat import kb_zaapi
+    _no_embed(monkeypatch)
+    rows = [["model", "warranty"], ["ZX200", "Target warranty 5 years"]]
+    if primary_present:
+        rows.append(["AB100", "Subject warranty 1 year"])
+    zkf.apply_import(db, filename="roles.xlsx", data=_xlsx_bytes({"products": rows}),
+                     content_type="product", subject_bindings={"products": {"columns": [
+                         {"column_index": 1, "header": "model"}]}})
+
+    class N:
+        kind = need_kind
+        subject_refs = ("AB100",)
+        target_refs = ("ZX200",)
+        capability_asks = ("warranty",)
+
+    result = kb_zaapi.zaapi_kb_evidence(db=db, needs=(N(),), request_id="ch:kb:0",
+        message="AB100 warranty when used with ZX200")
+    assert not any("Target warranty" in e["payload"]["text"] for e in result.supporting_evidence)
+    assert bool(result.supporting_evidence) == primary_present
+
+
+def test_target_only_need_does_not_establish_a_product_subject(db, monkeypatch):
+    from shopeechat import kb_zaapi
+    from shopeechat.turn_decision import TurnNeed
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="target.txt", data=b"ZX200 warranty 5 years",
+                     content_type="product", subject_bindings={"-": {"refs": ["ZX200"]}})
+    need = TurnNeed("product", "describe", target_refs=("ZX200",))
+    result = kb_zaapi.zaapi_kb_evidence(db=db, needs=(need,), message="Warranty for use with ZX200")
+    assert not result.supporting_evidence
+
+
+def test_resolved_current_subject_remains_identity_authority_over_target(db, monkeypatch):
+    from shopeechat import kb_zaapi
+    from shopeechat.turn_decision import TurnNeed, apply_resolved_subject_refs
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="current.xlsx", data=_xlsx_bytes({"products": [
+        ["model", "warranty"], ["ZX200", "Target warranty 5 years"],
+        ["AB100", "Subject warranty 1 year"],
+    ]}), content_type="product", subject_bindings={"products": {"rows": {
+        "0": ["ZX200"], "1": ["123"],
+    }}})
+    needs = apply_resolved_subject_refs((TurnNeed("product", "describe",
+        target_refs=("ZX200",), subject_scope="current_single"),),
+        ("123",), plan_scope="current_single")
+    assert needs[0].subject_refs == ("123",)
+    result = kb_zaapi.zaapi_kb_evidence(db=db, needs=needs, message="This product warranty with ZX200")
+    assert len(result.supporting_evidence) == 1
+    assert "Subject warranty" in result.supporting_evidence[0]["payload"]["text"]
+
+
 def test_readiness_searchable(db):
     zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     r = zkf.file_kb_ready(db)
