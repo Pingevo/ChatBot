@@ -189,6 +189,8 @@ F1_EDITED = _xlsx_bytes({
         ["AC65B", "หูฟัง Bluetooth รุ่น AC65B แบต 35 ชม.", "รับประกัน 1 ปี"],
     ]})
 F2 = "002 - other-shop.xlsx"
+F1_BINDINGS = {"ข้อมูลสินค้า": {"columns": [{"column_index": 1, "header": "ชื่อสินค้า"}]}}
+TS_BINDINGS = {"ชีต1": {"columns": [{"column_index": 2, "header": "รุ่น"}]}}
 
 
 def _no_embed(monkeypatch):
@@ -243,7 +245,7 @@ def test_parse_txt():
 
 
 def test_preview_zero_writes(db):
-    r = zkf.preview_import(db, filename=F1, data=F1_DATA,
+    r = zkf.preview_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS,
                            accounts=["ShopA"], platforms=["shopee"])
     assert r["new_rows"] == 2 and r["replaces_rev"] is None
     assert r["new_rev"] == 1 and r["accounts"] == ["ShopA"]
@@ -256,7 +258,7 @@ def test_preview_zero_writes(db):
 # ── apply / replace / rollback / sweep ─────────────────────────────────
 
 def test_apply_new_file(db):
-    r = zkf.apply_import(db, filename=F1, data=F1_DATA,
+    r = zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS,
                          accounts=["ShopA"], platforms=["shopee"],
                          admin="t")
     assert r["ok"] and r["rev"] == 1 and r["rows"] == 2
@@ -268,7 +270,7 @@ def test_apply_new_file(db):
 
 
 def test_same_filename_replaces_new_filename_adds(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     r2 = zkf.apply_import(db, filename=F1, data=F1_EDITED, admin="t")
     assert r2["ok"] and r2["rev"] == 2 and r2["replaced_rev"] == 1
     reg = db[zkf._FILES_COLL].find_one({"_id": F1})
@@ -283,7 +285,7 @@ def test_same_filename_replaces_new_filename_adds(db):
 
 
 def test_rollback_restores_prev(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     zkf.apply_import(db, filename=F1, data=F1_EDITED, admin="t")
     r = zkf.rollback_import(db, filename=F1, admin="t")
     assert r["ok"] and r["rev"] == 1
@@ -298,7 +300,7 @@ def test_rollback_restores_prev(db):
 
 
 def test_toggle_file_enabled(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     # disable → visibility หาย แต่ rows คงอยู่
     r = zkf.set_file_enabled(db, filename=F1, enabled=False, admin="t")
     assert r["ok"] and r["rev"] == 1
@@ -326,7 +328,7 @@ def test_toggle_file_enabled(db):
 
 
 def test_rollback_fails_after_sweep(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     zkf.apply_import(db, filename=F1, data=F1_EDITED, admin="t")
     # expire rev1 → sweep deletes → rollback ไม่ได้
     past = datetime.now(timezone.utc) - timedelta(seconds=10)
@@ -345,7 +347,7 @@ def test_visibility_active_rev_only_and_manual_untouched(db):
     db[zkf._COLL].insert_many([{
         "_id": "manual1", "text": "manual answer", "kind": "manual",
         "fields": {"q": "x"}, "active": True}])
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     zkf.apply_import(db, filename=F1, data=F1_EDITED, admin="t")
     pairs, _ = zkf._visible_pairs(db)
     assert len(pairs) == 1
@@ -362,7 +364,7 @@ def test_visibility_active_rev_only_and_manual_untouched(db):
 # ── export round-trip ─────────────────────────────────────────────────
 
 def test_export_roundtrip(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     data = zkf.export_file(db, filename=F1)
     assert data
     wb = load_workbook(io.BytesIO(data))
@@ -386,9 +388,9 @@ def test_export_missing_returns_none(db):
 # ── scope ─────────────────────────────────────────────────────────────
 
 def test_scope_filter(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA,
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS,
                      accounts=["ShopA"], platforms=["shopee"], admin="t")
-    zkf.apply_import(db, filename=F2, data=F1_EDITED,
+    zkf.apply_import(db, filename=F2, data=F1_EDITED, subject_bindings=F1_BINDINGS,
                      accounts=["ShopB"], platforms=["shopee"], admin="t")
     hits, _ = zkf.zaapi_search(db, shop="ShopA", platform="shopee",
                              query="AC65B", refs=["AC65B"])
@@ -404,7 +406,7 @@ def test_scope_filter(db):
 def test_search_verbatim_provenance(db, monkeypatch):
     # ปิด embed ให้ deterministic — prefilter score แทน cosine
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     hits, trace = zkf.zaapi_search(db, shop=None, platform=None,
                                  query="AC65B แบต", refs=["AC65B"])
     assert hits
@@ -417,7 +419,7 @@ def test_search_verbatim_provenance(db, monkeypatch):
 
 def test_search_gate_closed_when_legacy(db, monkeypatch):
     _zaapi_mode(monkeypatch, "legacy")
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     hits, trace = zkf.zaapi_search(db, query="AC65B")
     assert hits == [] and "gate_closed" in trace[0]
 
@@ -435,6 +437,7 @@ def test_search_qa_zaapi_cross_model_guard(db, monkeypatch):
         ["AC65B2 แบตอยู่กี่ชม.", "AC65B2 อยู่ได้ 45 ชม."],
     ]})
     zkf.apply_import(db, filename="both.xlsx", data=both,
+                     subject_bindings={"s": {"rows": {"0": ["AC65B"], "1": ["AC65B2"]}}},
                      content_type="faq", admin="t")
     monkeypatch.setattr(kb, "_admin_db", lambda: db)
     hits = kb.search_qa("แบตอยู่กี่ชม.", model_codes={"AC65B"})
@@ -442,6 +445,32 @@ def test_search_qa_zaapi_cross_model_guard(db, monkeypatch):
     assert any("AC65B อยู่ได้ 30" in t for t in texts)
     assert not any("AC65B2 อยู่ได้ 45" in t for t in texts), \
         "doc ผูก AC65B2 ต้องไม่ตอบคำถาม AC65B"
+
+
+def test_qa_uses_declared_subject_instead_of_models_mentioned_in_answer(db, monkeypatch):
+    from shopeechat import knowledge_base as kb
+    _no_embed(monkeypatch)
+    data = _xlsx_bytes({"qa": [["question", "answer"],
+        ["Battery duration", "30 hours, unlike AC65B2"],
+    ]})
+    zkf.apply_import(db, filename="subject-qa.xlsx", data=data, content_type="faq",
+                     subject_bindings={"qa": {"refs": ["AC65B"]}})
+    monkeypatch.setattr(kb, "_admin_db", lambda: db)
+    hits = kb.search_qa("แบตอยู่กี่ชม.", model_codes={"AC65B"})
+    assert hits and "30 hours" in hits[0]["a"]
+    assert hits[0]["_qa_level"] == "model" and hits[0]["model_codes"] == ["AC65B"]
+
+
+def test_known_qa_subject_is_not_widened_by_comparison_mentions(db, monkeypatch):
+    from shopeechat import knowledge_base as kb
+    _no_embed(monkeypatch)
+    data = _xlsx_bytes({"qa": [["question", "answer"],
+        ["AC65B2", "45 hours compared with AC65B"],
+    ]})
+    zkf.apply_import(db, filename="subject-qa.xlsx", data=data, content_type="faq",
+                     subject_bindings={"qa": {"refs": ["AC65B2"]}})
+    monkeypatch.setattr(kb, "_admin_db", lambda: db)
+    assert kb.search_qa("AC65B2 compared with AC65B", model_codes={"AC65B"}) == []
 
 
 def test_get_general_faq_zaapi(db, monkeypatch):
@@ -463,7 +492,7 @@ def test_zaapi_kb_evidence_shape(db, monkeypatch):
     _no_embed(monkeypatch)
     monkeypatch.setattr(kb, "_admin_db", lambda: db)
     monkeypatch.setattr(kb_zaapi, "_COLL", zkf._COLL)
-    zkf.apply_import(db, filename=F1, data=F1_DATA,
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS,
                      content_type="product", admin="t")
 
     class N:  # TurnNeed-shaped double
@@ -491,7 +520,7 @@ def test_zaapi_kb_evidence_nonproduct_type_visible(db, monkeypatch):
     _no_embed(monkeypatch)
     monkeypatch.setattr(kb, "_admin_db", lambda: db)
     monkeypatch.setattr(kb_zaapi, "_COLL", zkf._COLL)
-    zkf.apply_import(db, filename=TS_FILE, data=TS_DATA,
+    zkf.apply_import(db, filename=TS_FILE, data=TS_DATA, subject_bindings=TS_BINDINGS,
                      content_type="troubleshooting", admin="t")
 
     class N:  # TurnNeed-shaped double
@@ -508,7 +537,7 @@ def test_zaapi_kb_evidence_nonproduct_type_visible(db, monkeypatch):
 
 
 def test_readiness_searchable(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     r = zkf.file_kb_ready(db)
     assert r["searchable"] and r["active_rows"] == 2 and r["files"] == 1
 
@@ -528,7 +557,7 @@ def test_qa_troubleshoot_tips_zaapi(db, monkeypatch):
     """app.chat() → warranty_flow troubleshoot-first owner ผ่าน zaapi rows."""
     from shopeechat import knowledge_base as kb
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=TS_FILE, data=TS_DATA,
+    zkf.apply_import(db, filename=TS_FILE, data=TS_DATA, subject_bindings=TS_BINDINGS,
                      content_type="troubleshooting", admin="t")
     monkeypatch.setattr(kb, "_admin_db", lambda: db)
     tips = kb.qa_troubleshoot_tips("หูฟัง AC65B เชื่อมต่อไม่ได้",
@@ -540,7 +569,7 @@ def test_qa_context_zaapi(db, monkeypatch):
     """app.chat() → _qa_ctx path: zaapi hit กลายเป็น คำตอบอ้างอิง."""
     from shopeechat import knowledge_base as kb
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=TS_FILE, data=TS_DATA,
+    zkf.apply_import(db, filename=TS_FILE, data=TS_DATA, subject_bindings=TS_BINDINGS,
                      content_type="troubleshooting", admin="t")
     monkeypatch.setattr(kb, "_admin_db", lambda: db)
     ctx = kb.qa_context("AC65B เชื่อมต่อไม่ได้", snap=None)
@@ -573,7 +602,7 @@ def test_search_qa_zaapi_no_evidence_no_hit(db, monkeypatch):
     """ไม่มีหลักฐาน → ไม่มี hit → owner อื่นตัดสิน (ห้ามแต่งคำตอบ)."""
     from shopeechat import knowledge_base as kb
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     monkeypatch.setattr(kb, "_admin_db", lambda: db)
     assert kb.search_qa("กาแล็กซี่ S999 ราคาเท่าไหร่",
                         model_codes={"S999"}) == []
@@ -584,7 +613,7 @@ def test_search_qa_zaapi_no_evidence_no_hit(db, monkeypatch):
 
 def test_post_commit_failure_never_deletes_active_rev(db, monkeypatch):
     """F1A: retire/log ล้มหลัง CAS → active rev ห้ามถูกลบ + ต้องรายงานจริง."""
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     za = db[zkf._COLL]
     # class-level patch: pymongo db[name] คืน instance ใหม่ทุกครั้ง —
     # apply_import ใช้ handle ของตัวเอง ต้องแพตช์ที่ class
@@ -606,7 +635,7 @@ def test_post_commit_failure_never_deletes_active_rev(db, monkeypatch):
 
 def test_post_commit_log_failure_keeps_rows(db, monkeypatch):
     """F1A': _log ล้มหลัง publish → rows คงอยู่ + warning."""
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     orig_log = zkf._log
 
     def bad_log(d, entry):
@@ -623,7 +652,7 @@ def test_post_commit_log_failure_keeps_rows(db, monkeypatch):
 def test_concurrent_loser_never_deletes_winner_rows(db, monkeypatch):
     """F1B: A commit rev1 ก่อน → B (stale reg, ไฟล์ต่าง) CAS แพ้ →
     B ต้องไม่ลบแถวของ A และต้องไม่ publish เนื้อหาของ B."""
-    rA = zkf.apply_import(db, filename=F1, data=F1_DATA, admin="a")
+    rA = zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="a")
     assert rA["ok"] and rA["rev"] == 1
     files = db[zkf._FILES_COLL]
     # B อ่าน registry ก่อน A commit → เห็น {} (old_rev=0)
@@ -651,7 +680,7 @@ def test_retry_after_crash_same_and_different_file(db, monkeypatch):
         raise RuntimeError("crash before CAS")
     monkeypatch.setattr(type(files), "update_one", crash_uo)
     try:
-        zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+        zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     except RuntimeError:
         pass
     monkeypatch.undo()
@@ -667,7 +696,7 @@ def test_retry_after_crash_same_and_different_file(db, monkeypatch):
 
 def test_rollback_rejects_partially_swept_prev(db):
     """F1C: prev rev หายบางแถว → rollback ต้องปฏิเสธ (ไม่ใช่ count>0 พอ)."""
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     zkf.apply_import(db, filename=F1, data=F1_EDITED, admin="t")
     za = db[zkf._COLL]
     old = list(za.find({"source_file": F1, "file_rev": 1}))
@@ -683,7 +712,7 @@ def test_rollback_rejects_partially_swept_prev(db):
 
 def test_sweep_never_deletes_active_rev(db):
     """F1C': expire_at รั่วบน active rows (bug) → sweep ห้ามลบชุดที่ใช้งาน."""
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     past = datetime.now(timezone.utc) - timedelta(seconds=10)
     db[zkf._COLL].update_many(
         {"source_file": F1, "file_rev": 1}, {"$set": {"expire_at": past}})
@@ -703,11 +732,11 @@ def test_grace_window_is_7_days():
 def test_content_type_filters_typed_search(db, monkeypatch):
     """F2: typed search เห็นเฉพาะแถวของชนิดนั้น; unclassified ถูก hold."""
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=F1, data=F1_DATA,
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS,
                      content_type="product", admin="t")
     zkf.apply_import(db, filename="115 - คำถามทั่วไป.xlsx", data=_xlsx_bytes({
         "faq": [["คำถาม", "คำตอบ"], ["AC65B เชื่อมต่อกี่เครื่อง", "1 เครื่อง"]],
-    }), content_type="faq", admin="t")
+    }), content_type="faq", subject_bindings={"faq": {"refs": ["AC65B"]}}, admin="t")
     zkf.apply_import(db, filename="099 - raw.xlsx", data=_xlsx_bytes({
         "raw": [["x", "y"], ["AC65B unclassified", "raw"]],
     }), admin="t")  # ไม่จัดชนิด
@@ -751,7 +780,7 @@ def test_invalid_content_type_rejected():
     assert docs
     import pytest as _pt
     with _pt.raises(ValueError):
-        zkf.apply_import(MemoryDb(), filename=F1, data=F1_DATA,
+        zkf.apply_import(MemoryDb(), filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS,
                          content_type="guessy", admin="t")
 
 
@@ -774,6 +803,7 @@ def test_search_beyond_500_rows(db, monkeypatch):
     rows.append(["ZZ900", "สเปคจริงของ ZZ900"])
     big = _xlsx_bytes({"s": [["k", "v"]] + rows})
     zkf.apply_import(db, filename="big.xlsx", data=big,
+                     subject_bindings={"s": {"columns": [{"column_index": 1, "header": "k"}]}},
                      content_type="product", admin="t")
     hits, tr = zkf.zaapi_search(db, query="ZZ900", refs=["ZZ900"],
                                 types=("product",))
@@ -798,6 +828,11 @@ def test_manual_scope_and_legacy_unmigrated_excluded(db, monkeypatch):
     db[zkf._COLL].insert_one({
         "_id": "manOff", "kind": "manual", "text": "ZZ900 manual inactive",
         "unscoped": True, "accounts": [], "active": False})
+    manual_rows = [{**d, "row_index": 0} for d in db[zkf._COLL].find({"kind": "manual"})]
+    _, bound = zkf._bind_subjects(manual_rows, {"-": {"refs": ["ZZ900"]}}, {}, "")
+    for row in bound:
+        db[zkf._COLL].update_one({"_id": row["_id"]}, {"$set": {
+            "subject_refs": row["subject_refs"], "subject_digest": row["subject_digest"]}})
     hits, _ = zkf.zaapi_search(db, shop="ShopA", platform="shopee",
                              query="ZZ900", refs=["ZZ900"],
                              include_manual=True)
@@ -815,7 +850,7 @@ def test_manual_scope_and_legacy_unmigrated_excluded(db, monkeypatch):
 def test_near_model_code_boundary(db, monkeypatch):
     """F3C: ref 'AC65B' ต้องไม่เป็น proof ของ 'AC65B2' — row AC65B ชนะ."""
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=F1, data=F1_DATA,
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS,
                      content_type="product", admin="t")
     hits, _ = zkf.zaapi_search(db, query="AC65B แบต", refs=["AC65B"],
                              types=("product",), limit=5)
@@ -826,6 +861,152 @@ def test_near_model_code_boundary(db, monkeypatch):
         assert b2["_qa_prefilter"] < hits[0]["_qa_prefilter"]
 
 
+def test_subject_binding_preview_and_search_use_declared_column(db, monkeypatch):
+    _no_embed(monkeypatch)
+    data = _xlsx_bytes({"products": [["model", "details"],
+        ["AC65B", "รับประกัน 1 ปี"],
+        ["AC65B2", "รับประกัน 2 ปี ต่างจาก AC65B"],
+        ["", "รับประกัน AC65B แต่ยังไม่ยืนยันสินค้าของแถว"],
+    ]})
+    binding = {"products": {"columns": [{"column_index": 1, "header": "model"}]}}
+    preview = zkf.preview_import(db, filename="subjects.xlsx", data=data, subject_bindings=binding)
+    assert preview["bound_rows"] == 2 and preview["unbound_rows"] == 1
+    assert preview["subject_samples"][0]["subject_refs"] == ["ac65b"]
+    assert preview["subject_samples"][0]["cells"][0]["value"] == "AC65B"
+    assert preview["sheet_columns"] == {"products": [
+        {"column_index": 1, "header": "model"}, {"column_index": 2, "header": "details"}]}
+    assert db[zkf._FILES_COLL].count_documents({}) == 0
+    zkf.apply_import(db, filename="subjects.xlsx", data=data, subject_bindings=binding)
+    hits, _ = zkf.zaapi_search(db, query="AC65B รับประกัน", refs=("AC65B",))
+    assert len(hits) == 1 and "1 ปี" in hits[0]["a"]
+    assert "2 ปี" not in hits[0]["a"]
+
+
+@pytest.mark.parametrize("selector", [
+    {"column_index": 1, "header": "wrong"},
+    {"column_index": 99, "header": "model"},
+    {"column_index": True, "header": "model"},
+])
+def test_invalid_subject_selector_rejected_before_writes(db, selector):
+    data = _xlsx_bytes({"products": [["model"], ["AC65B"]]})
+    with pytest.raises(ValueError, match="subject"):
+        zkf.apply_import(db, filename="subjects.xlsx", data=data,
+                         subject_bindings={"products": {"columns": [selector]}})
+    assert db[zkf._COLL].count_documents({}) == 0
+    assert db[zkf._SOURCES_COLL].count_documents({}) == 0
+
+
+def test_subject_binding_is_positional_and_manual_changes_invalidate_it(db, monkeypatch):
+    _no_embed(monkeypatch)
+    data = _xlsx_bytes({"products": [["model", "model", "details"],
+        ["AC65B2", "AC65B", "รับประกัน 2 ปี"],
+    ]})
+    zkf.apply_import(db, filename="subjects.xlsx", data=data,
+        subject_bindings={"products": {"columns": [{"column_index": 1, "header": "model"}]}})
+    assert not zkf.zaapi_search(db, query="AC65B รับประกัน", refs=("AC65B",))[0]
+    assert zkf.zaapi_search(db, query="AC65B2 รับประกัน", refs=("AC65B2",))[0]
+    db[zkf._COLL].update_many({}, {"$set": {"text": "AC65B2 updated fact", "manual_edit": True}})
+    assert not zkf.zaapi_search(db, query="AC65B2 updated fact", refs=("AC65B2",))[0]
+
+
+def test_subject_reference_edit_cannot_reuse_another_subject_proof(db, monkeypatch):
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="proof.txt", data=b"AC65B compared with AC65B2",
+                     subject_bindings={"-": {"refs": ["AC65B"]}})
+    db[zkf._COLL].update_many({}, {"$set": {"subject_refs": ["ac65b2"]}})
+    assert not zkf.zaapi_search(db, query="AC65B2", refs=("AC65B2",))[0]
+
+
+def test_explicit_row_subjects_bind_mixed_qa_without_changing_source(db, monkeypatch):
+    _no_embed(monkeypatch)
+    data = _xlsx_bytes({"qa": [["question", "answer"],
+        ["AC65B battery", "30 hours"], ["AC65B2 compared with AC65B", "45 hours"],
+    ]})
+    zkf.apply_import(db, filename="mixed.xlsx", data=data,
+        subject_bindings={"qa": {"rows": {"0": ["AC65B"], "1": ["AC65B2"]}}})
+    hits, _ = zkf.zaapi_search(db, query="AC65B battery", refs=("AC65B",))
+    assert len(hits) == 1 and "30 hours" in hits[0]["a"]
+    assert zkf.export_file(db, filename="mixed.xlsx", original=True) == data
+    with pytest.raises(ValueError, match="subject"):
+        zkf.apply_import(db, filename="mixed.xlsx", data=_xlsx_bytes({
+            "qa": [["question", "answer"], ["different subject", "different answer"]],
+        }))
+
+
+def test_fixed_subject_refs_require_review_when_source_bytes_change(db, monkeypatch):
+    _no_embed(monkeypatch)
+    binding = {"-": {"refs": ["AC65B"]}}
+    zkf.apply_import(db, filename="subject.txt", data=b"AC65B original", subject_bindings=binding)
+    assert zkf.zaapi_search(db, query="AC65B", refs=("AC65B",))[0]
+    with pytest.raises(ValueError, match="subject"):
+        zkf.apply_import(db, filename="subject.txt", data=b"AC65B2 new product")
+    assert zkf.export_file(db, filename="subject.txt", original=True) == b"AC65B original"
+
+
+def test_subject_binding_survives_package_and_revision_rollback(db, monkeypatch):
+    _no_embed(monkeypatch)
+    binding = {"-": {"refs": ["AC65B"]}}
+    zkf.apply_import(db, filename="subject.txt", data=b"AC65B first", subject_bindings=binding,
+                     source_id="source-a", shop_scopes=PAIR_SCOPES)
+    package = zkf.export_package(db, filename="subject.txt")
+    fresh = MemoryDb()
+    zkf.import_package(fresh, data=package, shops=PAIR_SCOPES)
+    assert zkf.zaapi_search(fresh, shop="ShopA", platform="shopee", query="AC65B", refs=("AC65B",))[0]
+    zkf.apply_import(fresh, filename="subject.txt", data=b"AC65B2 next",
+                     subject_bindings={"-": {"refs": ["AC65B2"]}})
+    assert not zkf.zaapi_search(fresh, shop="ShopA", platform="shopee", query="AC65B", refs=("AC65B",))[0]
+    assert zkf.rollback_import(fresh, filename="subject.txt")["ok"]
+    assert zkf.zaapi_search(fresh, shop="ShopA", platform="shopee", query="AC65B", refs=("AC65B",))[0]
+
+
+@pytest.mark.parametrize("legacy", ["missing", "null"])
+def test_package_without_subject_binding_does_not_inherit_destination_identity(db, monkeypatch, legacy):
+    from shopeechat.kb_zaapi_schema import canonical_json
+    _no_embed(monkeypatch)
+    data = b"AC65B original source"
+    zkf.apply_import(db, filename="unbound.txt", data=data, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    package = json.loads(zkf.export_package(db, filename="unbound.txt"))
+    package.pop("integrity_sha256")
+    if legacy == "missing":
+        package["metadata"].pop("subject_bindings")
+    else:
+        package["metadata"]["subject_bindings"] = None
+    package["integrity_sha256"] = hashlib.sha256(canonical_json(package).encode()).hexdigest()
+    fresh = MemoryDb()
+    zkf.apply_import(fresh, filename="unbound.txt", data=data, source_id="source-a", shop_scopes=PAIR_SCOPES,
+                     subject_bindings={"-": {"refs": ["AC65B"]}})
+    assert zkf.zaapi_search(fresh, shop="ShopA", platform="shopee", query="AC65B", refs=("AC65B",))[0]
+    zkf.import_package(fresh, data=json.dumps(package).encode(), shops=PAIR_SCOPES)
+    assert not zkf.zaapi_search(fresh, shop="ShopA", platform="shopee", query="AC65B", refs=("AC65B",))[0]
+    assert zkf.export_file(fresh, filename="unbound.txt", original=True) == data
+
+
+@pytest.mark.parametrize("requested,other", [
+    ("AC65B", "AC65B2"), ("AC65B", "AC65B-2"), ("ZX100", "ZX100B"),
+])
+def test_model_bound_search_abstains_when_only_other_model_exists(db, monkeypatch, requested, other):
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="identity.xlsx", content_type="product",
+        subject_bindings={"products": {"columns": [{"column_index": 1, "header": "model"}]}},
+        data=_xlsx_bytes({
+        "products": [["model", "details"], [other, "รับประกัน 2 ปี เฉพาะสินค้ารุ่นนี้"]],
+    }))
+    hits, _ = zkf.zaapi_search(db, query=f"{requested} รับประกัน", refs=(requested,))
+    assert hits == [], f"other-model evidence must not answer {requested}: {hits}"
+
+
+def test_model_reference_in_comparison_is_not_subject_identity(db, monkeypatch):
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="comparison.xlsx", content_type="product",
+        subject_bindings={"products": {"columns": [{"column_index": 1, "header": "model"}]}},
+        data=_xlsx_bytes({
+        "products": [["model", "details"],
+                     ["AC65B2", "AC65B2 รับประกัน 2 ปี ต่างจาก AC65B รุ่นเก่า"]],
+    }))
+    hits, _ = zkf.zaapi_search(db, query="AC65B รับประกัน", refs=("AC65B",))
+    assert hits == [], f"a comparison mention does not bind the row to AC65B: {hits}"
+
+
 def test_readiness_manual_only_not_searchable(db):
     """F3D: มีแต่ manual/legacy docs → ยังไม่พร้อม (ต้องมี active file rows)."""
     db[zkf._COLL].insert_one({
@@ -834,7 +1015,7 @@ def test_readiness_manual_only_not_searchable(db):
         "_id": "l", "kind": "xlsx_row", "text": "legacy"})
     r = zkf.file_kb_ready(db)
     assert r["searchable"] is False, "manual/legacy must not flip readiness"
-    zkf.apply_import(db, filename=F1, data=F1_DATA, admin="t")
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     assert zkf.file_kb_ready(db)["searchable"] is True
 
 
@@ -845,7 +1026,7 @@ def test_qa_path_scoped_file_visible_to_own_shop(db, monkeypatch):
     ShopA (เดิม shop=None → scoped file มองไม่เห็นเลย)."""
     from shopeechat import knowledge_base as kb
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=TS_FILE, data=TS_DATA,
+    zkf.apply_import(db, filename=TS_FILE, data=TS_DATA, subject_bindings=TS_BINDINGS,
                      content_type="troubleshooting",
                      accounts=["ShopA"], platforms=["shopee"], admin="t")
     monkeypatch.setattr(kb, "_admin_db", lambda: db)
@@ -1036,7 +1217,7 @@ def test_platform_scope_case_insensitive(db, monkeypatch):
     """platform stored display-case ('Shopee' จาก UI) ต้อง match
     req.platform lowercase ('shopee') — ไม่เช่นนั้น file scoped ตายเงียบ."""
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=F1, data=F1_DATA,
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS,
                      platforms=["Shopee"], admin="t")
     hits, _ = zkf.zaapi_search(db, shop=None, platform="shopee",
                              query="AC65B", refs=["AC65B"])
@@ -1053,7 +1234,7 @@ def test_platform_scope_case_insensitive(db, monkeypatch):
 def test_file_kb_ready_ignores_scope(db):
     """readiness = มี active file rows ตาม triple — ไม่กรอง shop/platform
     (file ที่ scope ไว้ก็ยังเป็นข้อมูลที่พร้อมเสิร์ฟร้านนั้น)."""
-    zkf.apply_import(db, filename=F1, data=F1_DATA,
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS,
                      accounts=["ShopA"], platforms=["shopee"], admin="t")
     r = zkf.file_kb_ready(db)
     assert r["searchable"] and r["active_rows"] == 2, (
@@ -1275,7 +1456,7 @@ def test_mapping_rejects_inconsistent_or_stale_input(corruption):
 
 def test_pair_scope_does_not_form_cartesian_product(db, monkeypatch):
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="source-a", shop_scopes=PAIR_SCOPES)
     for shop, platform, expected in [
         ("ShopA", "shopee", True), ("ShopB", "lazada", True),
         ("shop-a", "shopee", True), ("ShopA", "lazada", False),
@@ -1287,13 +1468,13 @@ def test_pair_scope_does_not_form_cartesian_product(db, monkeypatch):
 
 def test_explicit_unmapped_source_is_not_global(db, monkeypatch):
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="unmapped", shop_scopes=[])
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="unmapped", shop_scopes=[])
     for shop, platform in [("ShopA", "shopee"), (None, None)]:
         assert not zkf.zaapi_search(db, shop=shop, platform=platform, query="AC65B")[0]
 
 
 def test_pair_metadata_inherits_and_rolls_back_with_revision(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES[:1])
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="source-a", shop_scopes=PAIR_SCOPES[:1])
     zkf.apply_import(db, filename=F1, data=F1_EDITED, shop_scopes=PAIR_SCOPES[1:])
     reg = db[zkf._FILES_COLL].find_one({"_id": F1})
     assert reg["source_id"] == "source-a" and reg["shop_scopes"] == PAIR_SCOPES[1:]
@@ -1304,26 +1485,27 @@ def test_pair_metadata_inherits_and_rolls_back_with_revision(db):
 
 
 def test_source_binding_rejects_accidental_reassignment(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="source-a", shop_scopes=PAIR_SCOPES)
     with pytest.raises(ValueError):
-        zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-b", shop_scopes=PAIR_SCOPES)
+        zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="source-b", shop_scopes=PAIR_SCOPES)
     with pytest.raises(ValueError):
         zkf.apply_import(db, filename=F2, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
     assert db[zkf._FILES_COLL].count_documents({}) == 1
 
 
 def test_unmapped_only_is_not_kb_ready(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="unmapped", shop_scopes=[])
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="unmapped", shop_scopes=[])
     for scopes in ([], [{}], "invalid"):
         db[zkf._FILES_COLL].update_one({"_id": F1}, {"$set": {"shop_scopes": scopes}})
         assert not zkf.file_kb_ready(db)["searchable"]
 
 
 def test_list_files_exposes_explicit_scope_instead_of_global_arrays(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="source-a", shop_scopes=PAIR_SCOPES)
     row = zkf.list_files(db)[0]
     assert row["source_id"] == "source-a"
     assert row["shop_scopes"] == sorted(PAIR_SCOPES, key=lambda s: s["key"])
+    assert row["subject_bindings"] == F1_BINDINGS
 
 
 def test_validated_plan_checks_file_hash_before_publish(db):
@@ -1348,7 +1530,7 @@ def test_strict_scope_rollback_does_not_reopen_legacy_global_revision(db):
 
 def test_source_package_roundtrip_preserves_scope_raw_rows_and_manual_edits(db, monkeypatch):
     _no_embed(monkeypatch)
-    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a",
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="source-a",
                      shop_scopes=PAIR_SCOPES, content_type="product")
     db[zkf._COLL].update_many({"source_row": 2}, {"$set": {
         "manual_edit": True, "fields": {"model": "AUD100", "value": "edited fact"},
@@ -1369,7 +1551,7 @@ def test_source_package_roundtrip_preserves_scope_raw_rows_and_manual_edits(db, 
 
 
 def test_source_package_rejects_tampering_and_unknown_shops_before_writes(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="source-a", shop_scopes=PAIR_SCOPES)
     package = zkf.export_package(db, filename=F1)
     fresh = MemoryDb()
     with pytest.raises(ValueError):
@@ -1383,7 +1565,7 @@ def test_source_package_rejects_tampering_and_unknown_shops_before_writes(db):
 
 
 def test_source_package_preview_is_read_only(db):
-    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=[])
+    zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, source_id="source-a", shop_scopes=[])
     package = zkf.export_package(db, filename=F1)
     fresh = MemoryDb()
     result = zkf.import_package(fresh, data=package, shops=PAIR_SCOPES, preview=True)

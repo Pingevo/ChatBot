@@ -1132,6 +1132,7 @@ def _chat_files(mp, *, file_rows, filename="test-kb.xlsx",
         if file_rows is not None:
             r = _zkf.apply_import(
                 admindb, filename=filename, data=file_rows,
+                subject_bindings={"ข้อมูลสินค้า": {"columns": [{"column_index": 1, "header": "ชื่อสินค้า"}]}},
                 accounts=["ShopA"], platforms=["shopee"],
                 content_type=content_type, admin="t")
             assert r["ok"]
@@ -1267,6 +1268,7 @@ def test_zaapi_files_conflicting_sources_both_reach_evidence():
         mp, file_rows=_FILE_XLSX,
         import_fn=lambda admindb: _zkf.apply_import(
             admindb, filename="second-kb.xlsx", data=f2,
+            subject_bindings={"ข้อมูลสินค้า": {"columns": [{"column_index": 1, "header": "ชื่อสินค้า"}]}},
             accounts=["ShopA"], platforms=["shopee"],
             content_type="product", admin="t"))
     ev = _file_evid(typed_ctx)

@@ -40,6 +40,8 @@ Generated XLSX export ใช้ positional cells คงหัวซ้ำ ช่
 
 `export_package`/`import_package` ส่ง JSON source package (base64 original + mapping/provenance/types + positional rows/manual edits + canonical payload checksum), ตรวจ original SHA/current shop pairs/row provenance แล้วเรียก preview/apply เดิม; preview 0 writes. ไม่ใช่ authenticated signature หรือ full DB dump; legacy ไม่มี source bytes/mapping ต้อง re-import/review ก่อน. API/Admin, retrieval index/evidence และ live QA ยังต้องทำต่อก่อน rollout.
 
+Subject binding (data layer): ผู้ดูแลระบุ `subject_bindings` รายชีตจาก preview โดยเลือก positional column+expected header, explicit refs สำหรับทั้งชีต/TXT หรือ refs ราย global row_index สำหรับ Q&A ปนหลายรุ่น โดยไม่แก้ไฟล์ต้นฉบับและไม่เดาจากชื่อคอลัมน์/ข้อความ. Preview คืน column inventory, ตัวอย่าง 10 แถวพร้อมข้อมูลเต็ม และ bound/unbound counts. ก่อน stage owner สร้าง subject_refs + fingerprint ของ fields/text/cells/refs; เมื่อค้นโดยมี refs ต้องตรง declared subject และ fingerprint ยังตรง มิฉะนั้นไม่เสิร์ฟเป็นข้อมูลเฉพาะรุ่น. รุ่นในข้อความเปรียบเทียบไม่ใช่เจ้าของแถว. การแก้ fields/text/refs ผ่านช่องทางเดิมทำให้ proof เก่าใช้ไม่ได้จน review/rebuild; bytes เปลี่ยนเมื่อใช้ fixed refs/row assignments ต้องส่ง plan ที่ยืนยันใหม่. Metadata นี้ไปกับ revision/package/rollback; package ไม่มี/null binding ไม่ inherit identity จากฐานปลายทาง. QA ใช้ verified refs และ known model_codes ที่ระบุ ไม่สรุป identity จากคำตอบหรือ widen จาก incidental model mentions. ยังต้องทำ API/Admin, canonical/catalogue identity validation, multi-need attribution, precomputed index/evidence และ live QA ก่อน rollout; readiness จำนวน rows ไม่ใช่หลักฐานว่า model coverage ครบ.
+
 ระบบประกอบด้วย 3 ส่วนหลัก:
 
 | ส่วน | เทคโนโลยี | หน้าที่ |

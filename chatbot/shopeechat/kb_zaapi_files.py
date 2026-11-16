@@ -320,6 +320,70 @@ def _restore_snapshot(docs: list[dict], snapshot) -> list[dict]:
     return restored
 
 
+def _subject_digest(d: dict) -> str:
+    payload = [d.get("fields") or {}, d.get("text") or "", d.get("cells") or [],
+               d.get("subject_refs") or []]
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                    separators=(",", ":")).encode()).hexdigest()
+
+
+def _bind_subjects(docs: list[dict], bindings, reg: dict, sha: str) -> tuple[dict, list[dict]]:
+    if bindings is None:
+        bindings = reg.get("subject_bindings") or {}
+        if reg.get("file_sha256") != sha and any("refs" in b or "rows" in b for b in bindings.values()):
+            raise ValueError("fixed subject bindings require review for changed source")
+    if not isinstance(bindings, dict):
+        raise ValueError("subject_bindings must be a sheet mapping")
+    sheets = {_sheet_key(d) for d in docs}
+    plan = {}
+    for sheet, rule in bindings.items():
+        if sheet not in sheets or not isinstance(rule, dict) or set(rule) not in ({"columns"}, {"refs"}, {"rows"}):
+            raise ValueError("invalid subject binding sheet or rule")
+        if "columns" not in rule:
+            assignments = {"*": rule["refs"]} if "refs" in rule else rule["rows"]
+            row_keys = {str(d["row_index"]) for d in docs if _sheet_key(d) == sheet}
+            if (not isinstance(assignments, dict) or not assignments
+                    or ("rows" in rule and set(assignments) - row_keys)):
+                raise ValueError("invalid subject row positions")
+            normalized = {}
+            for key, refs in assignments.items():
+                if not isinstance(refs, list) or not refs or not all(isinstance(r, str) and r.strip() for r in refs):
+                    raise ValueError("invalid subject refs")
+                normalized[key] = sorted({" ".join(r.casefold().split()) for r in refs})
+            plan[sheet] = {"refs": normalized["*"]} if "refs" in rule else {"rows": normalized}
+        else:
+            cols = rule["columns"]
+            if not isinstance(cols, list) or not cols:
+                raise ValueError("subject columns must be nonempty")
+            indices = set()
+            for c in cols:
+                if (not isinstance(c, dict) or set(c) != {"column_index", "header"}
+                        or type(c["column_index"]) is not int or c["column_index"] < 1
+                        or not isinstance(c["header"], str) or c["column_index"] in indices):
+                    raise ValueError("invalid subject column selector")
+                indices.add(c["column_index"])
+            plan[sheet] = {"columns": [dict(c) for c in cols]}
+    bound = []
+    for d in docs:
+        rule = plan.get(_sheet_key(d), {})
+        refs = list(rule.get("refs", rule.get("rows", {}).get(str(d["row_index"]), ())))
+        cells = {c["column_index"]: c for c in d.get("cells") or ()}
+        for selector in rule.get("columns", ()):
+            cell = cells.get(selector["column_index"])
+            if cell is None or cell["header"] != selector["header"]:
+                raise ValueError("subject column header or position changed")
+            value = cell["value"]
+            if d.get("manual_edit"):
+                header = cell["header"]
+                value = (d["fields"].get(header, "") if header and sum(
+                    c["header"] == header for c in cells.values()) == 1 else "")
+            if value.strip():
+                refs.append(" ".join(value.casefold().split()))
+        row = {**d, "subject_refs": sorted(set(refs))}
+        bound.append({**row, "subject_digest": _subject_digest(row)})
+    return plan, bound
+
+
 def _import_scope(db, filename: str, reg: dict, source_id, shop_scopes,
                   data: bytes, file_sha256, mapping_sha256, source_snapshot_sha256) -> dict:
     sha = hashlib.sha256(data).hexdigest()
@@ -351,13 +415,15 @@ def _import_scope(db, filename: str, reg: dict, source_id, shop_scopes,
 def preview_import(db, *, filename: str, data: bytes,
                    accounts=(), platforms=(), content_type=None,
                    sheet_types=None, source_id=None, shop_scopes=None, row_snapshot=None,
-                   file_sha256=None, mapping_sha256=None, source_snapshot_sha256=None) -> dict:
+                   file_sha256=None, mapping_sha256=None, source_snapshot_sha256=None,
+                   subject_bindings=None) -> dict:
     """read-only: parse + เทียบ registry เดิม — 0 writes."""
     fn = _valid_filename(filename)
     docs = _restore_snapshot(parse_upload(fn, data), row_snapshot)
     reg = db[_FILES_COLL].find_one({"_id": fn}) or {}
     scope = _import_scope(db, fn, reg, source_id, shop_scopes, data,
                           file_sha256, mapping_sha256, source_snapshot_sha256)
+    bindings, docs = _bind_subjects(docs, subject_bindings, reg, hashlib.sha256(data).hexdigest())
     old_rev = reg.get("active_rev", 0)
     _of: dict = {"source_file": fn, "file_rev": old_rev}
     if reg.get("active_apply"):
@@ -371,9 +437,11 @@ def preview_import(db, *, filename: str, data: bytes,
     untyped = 0
     columns: dict[tuple[str, str], set[int]] = {}
     unnamed: dict[str, set[int]] = {}
+    sheet_columns: dict[str, dict[int, str]] = {}
     for d in docs:
         sname = _sheet_key(d)
         for c in d.get("cells") or ():
+            sheet_columns.setdefault(sname, {})[c["column_index"]] = c["header"]
             if c["header"]:
                 columns.setdefault((sname, c["header"]), set()).add(c["column_index"])
             elif _clean(c["value"]):
@@ -396,7 +464,15 @@ def preview_import(db, *, filename: str, data: bytes,
         "platforms": _norm_platforms(platforms or reg.get("platforms")
                                    or ()),
         "content_type": ctype, "sheet_types": stypes,
-        "untyped_rows": untyped, **scope,
+        "untyped_rows": untyped, **scope, "subject_bindings": bindings,
+        "bound_rows": sum(bool(d["subject_refs"]) for d in docs),
+        "unbound_rows": sum(not d["subject_refs"] for d in docs),
+        "sheet_columns": {s: [{"column_index": i, "header": h} for i, h in sorted(cs.items())]
+                          for s, cs in sheet_columns.items()},
+        "subject_samples": [{"sheet": d.get("sheet"), "row_index": d["row_index"],
+                             "source_row": d.get("source_row"), "cells": d.get("cells") or [],
+                             "fields": d.get("fields") or {}, "text": d.get("text") or "",
+                             "subject_refs": d["subject_refs"]} for d in docs[:10]],
         "duplicate_columns": duplicate_columns,
         "unnamed_columns": [{"sheet": s, "columns": sorted(cs)}
                             for s, cs in unnamed.items()],
@@ -419,7 +495,8 @@ def apply_import(db, *, filename: str, data: bytes,
                  accounts=(), platforms=(), admin: str = "",
                  content_type=None, sheet_types=None,
                  source_id=None, shop_scopes=None, row_snapshot=None,
-                   file_sha256=None, mapping_sha256=None, source_snapshot_sha256=None) -> dict:
+                   file_sha256=None, mapping_sha256=None, source_snapshot_sha256=None,
+                   subject_bindings=None) -> dict:
     """full-file replace: insert rows ที่ stamp (file_rev, apply_id) ครบ
     ตั้งแต่ต้น + expire_at → verify ด้วย apply_id → CAS publish triple
     (file, rev, apply_id) จุดเดียว — visibility ไม่ต้องการ mutation หลัง CAS:
@@ -437,6 +514,7 @@ def apply_import(db, *, filename: str, data: bytes,
     reg = files.find_one({"_id": fn}) or {}
     scope = _import_scope(db, fn, reg, source_id, shop_scopes, data,
                           file_sha256, mapping_sha256, source_snapshot_sha256)
+    bindings, docs = _bind_subjects(docs, subject_bindings, reg, hashlib.sha256(data).hexdigest())
     old_rev = int(reg.get("active_rev") or 0)
     rev = old_rev + 1
     # scope/types: ค่าที่ส่งมามีนัย → ใช้ใหม่; ไม่ส่ง → inherit registry เดิม
@@ -445,7 +523,8 @@ def apply_import(db, *, filename: str, data: bytes,
     ctype = ctype if ctype is not None else reg.get("content_type")
     stypes = stypes or dict(reg.get("sheet_types") or {})
     metadata = {**scope, "file_sha256": sha, "accounts": accts,
-                "platforms": plats, "content_type": ctype, "sheet_types": stypes}
+                "platforms": plats, "content_type": ctype, "sheet_types": stypes,
+                "subject_bindings": bindings}
     previous_metadata = {k: reg.get(k) for k in metadata}
     attempt = hashlib.sha256(
         f"{fn}|{rev}|{sha}|{now.isoformat()}|{os.urandom(16).hex()}"
@@ -459,6 +538,7 @@ def apply_import(db, *, filename: str, data: bytes,
         "row_index": d["row_index"], "source_row": d.get("source_row", 0),
         "fields": d.get("fields") or {}, "text": d.get("text") or "",
         "cells": d.get("cells") or [],
+        "subject_refs": d["subject_refs"], "subject_digest": d["subject_digest"],
         **({"manual_edit": d["manual_edit"]} if "manual_edit" in d else {}),
         "content_type": _row_content_type(d, ctype, stypes),
         "imported_at": now,
@@ -686,6 +766,7 @@ def list_files(db) -> list[dict]:
             "sheet_types": d.get("sheet_types") or {},
             "rows": db[_COLL].count_documents(filt) if rev else 0,
             "source_id": d.get("source_id"), "shop_scopes": d.get("shop_scopes"),
+            "subject_bindings": d.get("subject_bindings") or {},
             "mapping_sha256": d.get("mapping_sha256"),
             "source_snapshot_sha256": d.get("source_snapshot_sha256"),
             "accounts": d.get("accounts") or [],
@@ -756,7 +837,7 @@ def export_package(db, *, filename: str) -> bytes | None:
     _restore_snapshot(parse_upload(fn, raw), rows)
     metadata = {k: reg.get(k) for k in (
         "source_id", "shop_scopes", "accounts", "platforms", "content_type", "sheet_types",
-        "mapping_sha256", "source_snapshot_sha256")}
+        "mapping_sha256", "source_snapshot_sha256", "subject_bindings")}
     payload = {"format": "zaapi-kb-source", "version": 1, "filename": fn,
                "source_sha256": source["file_sha256"],
                "source_b64": base64.b64encode(raw).decode("ascii"),
@@ -797,7 +878,9 @@ def import_package(db, *, data: bytes, shops: list[dict],
           "row_snapshot": payload.get("rows"),
           "file_sha256": payload["source_sha256"],
           "mapping_sha256": metadata.get("mapping_sha256"),
-          "source_snapshot_sha256": metadata.get("source_snapshot_sha256")}
+          "source_snapshot_sha256": metadata.get("source_snapshot_sha256"),
+          "subject_bindings": ({} if metadata.get("subject_bindings") is None
+                               else metadata["subject_bindings"])}
     if not isinstance(kw["row_snapshot"], list):
         raise ValueError("row snapshot missing")
     if preview:
@@ -972,7 +1055,8 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
             {"fields": 1, "text": 1, "source_file": 1,
              "file_rev": 1, "sheet": 1, "row_index": 1,
              "content_type": 1, "kind": 1, "accounts": 1,
-             "unscoped": 1, "active": 1}))
+             "unscoped": 1, "active": 1, "cells": 1,
+             "subject_refs": 1, "subject_digest": 1}))
     except Exception:
         return [], ("zaapi_files_read_err",)
     docs = [d for d in docs
@@ -980,6 +1064,13 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
             or _manual_scope_ok(d, shop, platform)]
     if not docs:
         return [], (f"zaapi_files_empty reg={nreg}",)
+    identity_refs = {" ".join(str(r).casefold().split()) for r in refs if str(r).strip()}
+    if identity_refs:
+        docs = [d for d in docs if isinstance(d.get("subject_refs"), list)
+                and identity_refs.intersection(d["subject_refs"])
+                and d.get("subject_digest") == _subject_digest(d)]
+        if not docs:
+            return [], ("zaapi_files_subject_unverified_or_mismatch",)
     ref_l = [str(r).lower() for r in refs if str(r).strip()]
     # exact query substring = ref เดียวกัน (short query เช่น "AC65B" ต้องจับได้)
     qfull = (query or "").strip().lower()
@@ -989,7 +1080,8 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
     for d in docs:
         text = d.get("text") or ""
         hay = text.lower()
-        ref_hits = sum(1 for r in ref_l if _ref_hit(r, hay))
+        ref_hits = (len(identity_refs.intersection(d["subject_refs"])) if identity_refs else
+                    sum(1 for r in ref_l if _ref_hit(r, hay)))
         tri = _trigram_dice(query, text)
         if ref_hits or tri >= 0.08:
             scored.append((ref_hits * 0.5 + tri, d))
@@ -1021,6 +1113,7 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
                      "sheet": d.get("sheet"),
                      "row": d.get("row_index")},
             "fields": d.get("fields") or {},
+            "subject_refs": (d.get("subject_refs") or []) if identity_refs else [],
         })
     hits.sort(key=lambda h: -h["_qa_sim"])
     return hits[:limit], (

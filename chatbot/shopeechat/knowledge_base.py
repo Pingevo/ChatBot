@@ -1044,19 +1044,18 @@ def search_qa(message: str, *, model_codes: set[str] | None = None,
         _za_mode = False
     if _za_mode:
         from . import kb_zaapi_files as _zkf
-        _refs = tuple(model_codes or ()) + tuple(
-            extract_model_keywords(message))
+        known = {" ".join(str(c).upper().split()) for c in (model_codes or set())}
+        _refs = tuple(sorted(known)) or tuple(extract_model_keywords(message))
         hits, _tr = _zkf.zaapi_search(
             _admin_db(), shop=shop, platform=platform,
             query=message, refs=_refs,
             limit=max(limit, 1) * 3,
             types=types or ("faq", "troubleshooting", "warranty"),
             include_manual=True)
-        known = {str(c).upper() for c in (model_codes or set())}
         za_hits: list[dict] = []
         for h in hits:
-            dcodes = {t.upper() for t in extract_model_keywords(h.get("a") or "")}
-            if known and dcodes and not (dcodes & known):
+            dcodes = known.intersection(str(r).upper() for r in h.get("subject_refs") or ())
+            if known and not dcodes:
                 continue  # คำแนะนำผูกรุ่นอื่น — guard เดิม ห้ามข้ามรุ่น
             h["model_codes"] = sorted(dcodes)
             h["q"] = h.get("q") or h.get("record_id") or ""
