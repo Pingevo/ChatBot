@@ -14497,3 +14497,16 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ลบหน้า /zaapi-kb-mapping (page + sidebar/mobile nav + Map icon import); files list เพิ่ม client pagination 10 ไฟล์/หน้า (103 ไฟล์=11 หน้า)
 - Tests: API 16/16 ผ่าน (+test_apply_requires_shop_scope); test_export_package_requires_mapping ปรับ seed legacy unscoped ผ่าน owner ตรง; tsc --noEmit clean (ลบ .next/types stale ก่อน)
 - ค้าง: full regression กำลังรัน; 15 ไฟล์รอ admin import ผ่าน UI; subject bindings corpus จริงยังไม่ curate; live authenticated QA ยังไม่มีช่องทาง; ไม่มี deploy/push
+
+## กำลังจะทำ: curate subject bindings ทั้ง Zaapi corpus (103 files) — 2026-11-14
+- เป้าหมาย: ผูกคอลัมน์ subject (brand/รุ่น/สินค้า) ให้ไฟล์ที่มีข้อมูลรายรุ่น เพื่อให้คำถามเจาะรุ่นตอบได้โดยไม่มั่ว
+- วิธี: scan header ทุกไฟล์ → preview binding → apply (rev ใหม่, rollback ได้) → verify subject_refs + real provider probe
+- ข้อระวัง: auto-detect ต้อง verify ตัวอย่าง subject_refs จริง ไม่เดาเงียบๆ; ไฟล์ไม่มีคอลัมน์รุ่นชัด = ข้ามไว้ (fail-closed)
+
+## ผ่านแล้ว: curate subject bindings ทั้ง Zaapi corpus (90 files) — 2026-11-14
+- error/งาน: คำถามเจาะรุ่น fail-closed เพราะแถวไม่มี subject_refs
+- เกิดเพราะ: import ครั้งแรกไม่ได้ประกาศ subject column; คอลัมน์เดียวกันค่าปน (หัวข้อคำสั่ง/ว่าง/รวมหลายรุ่น)
+- แก้ด้วย: scan header+ค่าทุกแถว 118 ไฟล์ → เลือก subject col ต่อชีต (primary + alias เช่น ชื่อรุ่นสินค้าย่อ) → apply_import rev2 ทั้ง 90 ไฟล์ (embedding MPS ค้างไฟล์ 117 → kill + rerun 117/118 บน CPU ผ่าน EMBEDDING_DEVICE)
+- verify: active 6,274 แถว bound 5,710 (91%); samples ถูก ('black shark gs3'+'gs3', 'zc311', 'pb100s'); probe จริง: zc311 ThaiSuperPhone/lazada+shopee → 112+066, pb100s CukTech/lazada → 116+068, gs3 KingGadgets/shopee → 008, gs3 CukTech/lazada → 0 fail-closed; suspicious-check normalized = 0 แถวที่ subject ผิดเนื้อตัวเอง
+- ผลกระทบ: ไฟล์ไม่มี subject col 11 ไฟล์คง unbound (ถูก—general/FAQ); แถวสกปรก ~150 ref ขยะไม่เคย match (exact-equality) ปลอดภัย
+- งานค้าง: Gemini คำถามสเปค end-to-end; live QA; deploy; 15 ไฟล์ไม่มี mapping
