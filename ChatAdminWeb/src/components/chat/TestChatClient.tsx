@@ -2850,7 +2850,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                 <div className="text-xs text-text-subtle">ยังไม่มี — ลองถามอะไรดู</div>
               ) : (
                 lastProducts.map((p, i) => (
-                  <div key={p.item_id || i} className="bg-surface-2 border border-border rounded-lg p-2.5 text-xs">
+                  <div key={`${p.item_id}-${i}`} className="bg-surface-2 border border-border rounded-lg p-2.5 text-xs">
                     <div className="font-semibold text-text mb-1">{escapeHtml(p.name || "(ไม่มีชื่อ)")}</div>
                     <div className="flex flex-wrap gap-x-3 gap-y-1 text-text-muted">
                       <span>🏷️ {escapeHtml(p.brand || "—")}</span>

@@ -234,8 +234,8 @@ export function MessageContent({ msg, variant }: Props) {
           {msg.text && msg.text !== "(สินค้า)" && msg.text !== "(สินค้าพร้อมตัวเลือก)" && msg.text !== "[item]" && msg.text !== "[variation_card]" && (
             <div className={`chat-message-copy ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>
           )}
-          {msg.products.map((p) => (
-            <ProductCardView key={p.item_id} product={p} variant={variant} />
+          {msg.products.map((p, i) => (
+            <ProductCardView key={`${p.item_id}-${i}`} product={p} variant={variant} />
           ))}
           {msg.table && <TableView table={msg.table} variant={variant} />}
         </div>
@@ -276,8 +276,8 @@ export function MessageContent({ msg, variant }: Props) {
       {msg.text && <div className={`chat-message-copy ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>}
       {msg.products && msg.products.length > 0 && (
         <div className="space-y-1.5">
-          {msg.products.map((p) => (
-            <ProductCardView key={p.item_id} product={p} variant={variant} />
+          {msg.products.map((p, i) => (
+            <ProductCardView key={`${p.item_id}-${i}`} product={p} variant={variant} />
           ))}
         </div>
       )}
