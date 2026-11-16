@@ -8,7 +8,7 @@ import { api } from "@/lib/apiClient";
 import { Loading } from "@/components/ui/Loading";
 import { Button } from "@/components/ui/Button";
 import { toast } from "@/components/ui/Toast";
-import { Save } from "lucide-react";
+import { Save, ArrowLeft } from "lucide-react";
 
 type SheetInfo = {
   rows: number;
@@ -104,6 +104,10 @@ function PreviewInner() {
     <div className="min-h-screen bg-surface p-4 space-y-4">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div className="min-w-0">
+          <a href="/knowledge"
+            className="inline-flex items-center gap-1 text-[11px] text-text-subtle hover:text-text mb-1">
+            <ArrowLeft size={12} /> กลับหน้าฐานความรู้
+          </a>
           <div className="text-sm font-semibold text-text break-all">{data.filename}</div>
           <div className="text-[11px] text-text-subtle">
             ไฟล์ต้นฉบับ · rev {data.active_rev} · แก้ cell ได้โดยตรง — บันทึก = rev ใหม่ (rollback ได้) · แสดงสูงสุด 50 แถวแรกต่อชีต

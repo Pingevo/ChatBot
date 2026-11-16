@@ -1048,14 +1048,12 @@ export function ZaapiKbPanel() {
                       onChange={() => doToggleFile(f)} />
                   </span>
                 )}
-                <button
-                  onClick={() => window.open(
-                    `/zaapi-preview?file=${encodeURIComponent(f.file)}`,
-                    "_blank", "popup=yes,width=1200,height=800")}
+                <a
+                  href={`/zaapi-preview?file=${encodeURIComponent(f.file)}`}
                   className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center"
-                  title="พรีวิว/แก้ไฟล์ต้นฉบับ (หน้าต่างใหม่)" aria-label="Preview source">
+                  title="พรีวิว/แก้ไฟล์ต้นฉบับ" aria-label="Preview source">
                   <Eye size={13} className="text-text-muted" />
-                </button>
+                </a>
                 <button onClick={() => doExport(f)} className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center" title="Export xlsx" aria-label="Export">
                   <Download size={13} className="text-text-muted" />
                 </button>
