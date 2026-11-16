@@ -6,7 +6,9 @@ against pymongo; collections are created/dropped under a `zztest_` DB.
 """
 from __future__ import annotations
 
+import hashlib
 import io
+import json
 import os
 import sys
 from copy import deepcopy
@@ -1220,6 +1222,206 @@ def test_human_export_retains_manual_field_edits_and_original_source(db):
     assert exported["fields"]["เพิ่ม"] == "new"
     assert exported["cells"][1]["value"] == "first"
     assert zkf.export_file(db, filename="edited.xlsx", original=True) == data
+
+
+PAIR_SCOPES = [
+    {"key": "shopee|shop-a", "platform": "shopee", "shop_id": "shop-a", "shopname": "ShopA"},
+    {"key": "lazada|shop-b", "platform": "lazada", "shop_id": "shop-b", "shopname": "ShopB"},
+]
+
+
+def _mapping_inputs():
+    source = json.dumps({"items": [
+        {"id": "source-a", "downloaded_file": {"file": "mapped.xlsx", "sha256": hashlib.sha256(F1_DATA).hexdigest()}},
+        {"id": "source-b", "downloaded_file": {"file": "unmapped.txt", "sha256": hashlib.sha256(b"unmapped").hexdigest()}},
+    ]}).encode()
+    mapping = {
+        "version": 1, "zaapi_source_sha256": hashlib.sha256(source).hexdigest(),
+        "shops_sha256": "a" * 64, "mapping": {"source-a": [s["key"] for s in PAIR_SCOPES]},
+        "rows": [{"source_id": "source-a", "file": "mapped.xlsx", "shops": deepcopy(PAIR_SCOPES)}],
+    }
+    return mapping, source
+
+
+def test_validated_mapping_keeps_explicit_pairs_and_unmapped_sources():
+    mapping, source = _mapping_inputs()
+    plan = zkf.validate_shop_mapping(json.dumps(mapping).encode(), source, PAIR_SCOPES)
+    assert len(plan) == 2
+    selected = next(r for r in plan if r["source_id"] == "source-a")
+    assert selected["filename"] == "mapped.xlsx"
+    assert selected["shop_scopes"] == sorted(PAIR_SCOPES, key=lambda s: s["key"])
+    assert selected["file_sha256"] == hashlib.sha256(F1_DATA).hexdigest()
+    assert next(r for r in plan if r["source_id"] == "source-b")["shop_scopes"] == []
+
+
+@pytest.mark.parametrize("corruption", ["source_hash", "source_id", "shop_key", "row_pairs", "filename", "duplicate_pair"])
+def test_mapping_rejects_inconsistent_or_stale_input(corruption):
+    mapping, source = _mapping_inputs()
+    if corruption == "source_hash":
+        source += b" "
+    elif corruption == "source_id":
+        mapping["mapping"]["unknown"] = []
+    elif corruption == "shop_key":
+        mapping["mapping"]["source-a"] = ["shopee|unknown"]
+    elif corruption == "row_pairs":
+        mapping["rows"][0]["shops"] = PAIR_SCOPES[:1]
+    elif corruption == "filename":
+        mapping["rows"][0]["file"] = "other.xlsx"
+    else:
+        mapping["mapping"]["source-a"].append(PAIR_SCOPES[0]["key"])
+    with pytest.raises(ValueError):
+        zkf.validate_shop_mapping(json.dumps(mapping).encode(), source, PAIR_SCOPES)
+
+
+def test_pair_scope_does_not_form_cartesian_product(db, monkeypatch):
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    for shop, platform, expected in [
+        ("ShopA", "shopee", True), ("ShopB", "lazada", True),
+        ("shop-a", "shopee", True), ("ShopA", "lazada", False),
+        ("ShopB", "shopee", False), (None, "shopee", False), ("ShopA", None, False),
+    ]:
+        hits, _ = zkf.zaapi_search(db, shop=shop, platform=platform, query="AC65B", refs=("AC65B",))
+        assert bool(hits) is expected, (shop, platform)
+
+
+def test_explicit_unmapped_source_is_not_global(db, monkeypatch):
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="unmapped", shop_scopes=[])
+    for shop, platform in [("ShopA", "shopee"), (None, None)]:
+        assert not zkf.zaapi_search(db, shop=shop, platform=platform, query="AC65B")[0]
+
+
+def test_pair_metadata_inherits_and_rolls_back_with_revision(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES[:1])
+    zkf.apply_import(db, filename=F1, data=F1_EDITED, shop_scopes=PAIR_SCOPES[1:])
+    reg = db[zkf._FILES_COLL].find_one({"_id": F1})
+    assert reg["source_id"] == "source-a" and reg["shop_scopes"] == PAIR_SCOPES[1:]
+    assert zkf.rollback_import(db, filename=F1)["ok"]
+    reg = db[zkf._FILES_COLL].find_one({"_id": F1})
+    assert reg["shop_scopes"] == PAIR_SCOPES[:1]
+    assert reg["file_sha256"] == hashlib.sha256(F1_DATA).hexdigest()
+
+
+def test_source_binding_rejects_accidental_reassignment(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    with pytest.raises(ValueError):
+        zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-b", shop_scopes=PAIR_SCOPES)
+    with pytest.raises(ValueError):
+        zkf.apply_import(db, filename=F2, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    assert db[zkf._FILES_COLL].count_documents({}) == 1
+
+
+def test_unmapped_only_is_not_kb_ready(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="unmapped", shop_scopes=[])
+    for scopes in ([], [{}], "invalid"):
+        db[zkf._FILES_COLL].update_one({"_id": F1}, {"$set": {"shop_scopes": scopes}})
+        assert not zkf.file_kb_ready(db)["searchable"]
+
+
+def test_list_files_exposes_explicit_scope_instead_of_global_arrays(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    row = zkf.list_files(db)[0]
+    assert row["source_id"] == "source-a"
+    assert row["shop_scopes"] == sorted(PAIR_SCOPES, key=lambda s: s["key"])
+
+
+def test_validated_plan_checks_file_hash_before_publish(db):
+    mapping, source = _mapping_inputs()
+    plan = zkf.validate_shop_mapping(json.dumps(mapping).encode(), source, PAIR_SCOPES)
+    selected = next(p for p in plan if p["source_id"] == "source-a")
+    with pytest.raises(ValueError, match="checksum"):
+        zkf.apply_import(db, data=F1_EDITED, **selected)
+    assert db[zkf._FILES_COLL].count_documents({}) == 0
+    assert zkf.apply_import(db, data=F1_DATA, **selected)["ok"]
+    reg = db[zkf._FILES_COLL].find_one({"_id": "mapped.xlsx"})
+    assert reg["mapping_sha256"] == selected["mapping_sha256"]
+
+
+def test_strict_scope_rollback_does_not_reopen_legacy_global_revision(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA)
+    zkf.apply_import(db, filename=F1, data=F1_EDITED, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    result = zkf.rollback_import(db, filename=F1)
+    assert result["ok"] is False and result["reason"] == "prev_scope_unverified"
+    assert db[zkf._FILES_COLL].find_one({"_id": F1})["active_rev"] == 2
+
+
+def test_source_package_roundtrip_preserves_scope_raw_rows_and_manual_edits(db, monkeypatch):
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a",
+                     shop_scopes=PAIR_SCOPES, content_type="product")
+    db[zkf._COLL].update_many({"source_row": 2}, {"$set": {
+        "manual_edit": True, "fields": {"model": "AUD100", "value": "edited fact"},
+        "text": "AUD100 edited fact",}})
+    package = zkf.export_package(db, filename=F1)
+    fresh = MemoryDb()
+    result = zkf.import_package(fresh, data=package, shops=PAIR_SCOPES)
+    assert result["ok"]
+    reg = fresh[zkf._FILES_COLL].find_one({"_id": F1})
+    assert reg["shop_scopes"] == sorted(PAIR_SCOPES, key=lambda s: s["key"])
+    assert reg["source_id"] == "source-a" and reg["content_type"] == "product"
+    assert zkf.export_file(fresh, filename=F1, original=True) == F1_DATA
+    before = list(db[zkf._COLL].find({}).sort("row_index"))
+    after = list(fresh[zkf._COLL].find({}).sort("row_index"))
+    for key in ("cells", "fields", "text", "source_row", "content_type"):
+        assert [r.get(key) for r in before] == [r.get(key) for r in after], key
+    assert not zkf.zaapi_search(fresh, shop="ShopA", platform="lazada", query="AUD100")[0]
+
+
+def test_source_package_rejects_tampering_and_unknown_shops_before_writes(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=PAIR_SCOPES)
+    package = zkf.export_package(db, filename=F1)
+    fresh = MemoryDb()
+    with pytest.raises(ValueError):
+        zkf.import_package(fresh, data=package, shops=PAIR_SCOPES[:1])
+    manifest = json.loads(package)
+    manifest["filename"] = "other.xlsx"
+    with pytest.raises(ValueError):
+        zkf.import_package(fresh, data=json.dumps(manifest).encode(), shops=PAIR_SCOPES)
+    assert fresh[zkf._COLL].count_documents({}) == 0
+    assert fresh[zkf._FILES_COLL].count_documents({}) == 0
+
+
+def test_source_package_preview_is_read_only(db):
+    zkf.apply_import(db, filename=F1, data=F1_DATA, source_id="source-a", shop_scopes=[])
+    package = zkf.export_package(db, filename=F1)
+    fresh = MemoryDb()
+    result = zkf.import_package(fresh, data=package, shops=PAIR_SCOPES, preview=True)
+    assert result["new_rows"] == 2 and result["shop_scopes"] == []
+    assert fresh[zkf._FILES_COLL].count_documents({}) == 0
+    assert fresh[zkf._SOURCES_COLL].count_documents({}) == 0
+
+
+def test_validated_corpus_mapping_snapshot():
+    mapping_file = os.environ.get("ZAAPI_MAPPING_FILE")
+    snapshot_file = os.environ.get("ZAAPI_MAPPING_SNAPSHOT_HTML")
+    source_dir = os.environ.get("ZAAPI_CORPUS_DIR")
+    if not all((mapping_file, snapshot_file, source_dir)):
+        pytest.skip("set mapping, snapshot HTML and corpus paths for frozen mapping validation")
+    html = Path(snapshot_file).read_text()
+    snapshot = json.loads(html.split('<script id="snapshot" type="application/json">', 1)[1].split('</script>', 1)[0])
+    source = (Path(source_dir).parent / "knowledge-sources.json").read_bytes()
+    plan = zkf.validate_shop_mapping(Path(mapping_file).read_bytes(), source, snapshot["shops"])
+    assert len(plan) == 118
+    assert sum(bool(p["shop_scopes"]) for p in plan) == 103
+    assert sum(len(p["shop_scopes"]) for p in plan) == 693
+    assert len({s["key"] for p in plan for s in p["shop_scopes"]}) == 60
+    imported = MemoryDb()
+    for item in plan:
+        data = (Path(source_dir) / item["filename"]).read_bytes()
+        assert hashlib.sha256(data).hexdigest() == item["file_sha256"]
+        assert zkf.apply_import(imported, data=data, **item)["ok"]
+        package = zkf.export_package(imported, filename=item["filename"])
+        fresh = MemoryDb()
+        assert zkf.import_package(fresh, data=package, shops=snapshot["shops"])["ok"]
+        reg = fresh[zkf._FILES_COLL].find_one({"_id": item["filename"]})
+        assert reg["shop_scopes"] == item["shop_scopes"]
+        assert reg["mapping_sha256"] == item["mapping_sha256"]
+        assert zkf.export_file(fresh, filename=item["filename"], original=True) == data
+    for shop in zkf._norm_shop_scopes(snapshot["shops"]):
+        expected = {p["filename"] for p in plan if shop["key"] in {s["key"] for s in p["shop_scopes"]}}
+        pairs, _ = zkf._visible_pairs(imported, shop["shop_id"], shop["platform"])
+        assert {p["source_file"] for p in pairs} == expected, shop["key"]
 
 
 def test_corpus_positional_cells_and_original_bytes_roundtrip():

@@ -12,9 +12,11 @@
 """
 from __future__ import annotations
 
+import base64
 import datetime as _dt
 import hashlib
 import io
+import json
 import os
 from pathlib import PurePosixPath
 
@@ -157,7 +159,106 @@ def _norm_sheet_types(v) -> dict[str, str]:
     return out
 
 
+def _json_object(pairs):
+    out = {}
+    for key, value in pairs:
+        if key in out:
+            raise ValueError("duplicate JSON key")
+        out[key] = value
+    return out
+
+
+def _norm_shop_scopes(scopes) -> list[dict]:
+    if not isinstance(scopes, list):
+        raise ValueError("shop_scopes must be a list")
+    out, keys, names = [], set(), set()
+    for s in scopes:
+        if not isinstance(s, dict):
+            raise ValueError("invalid shop scope")
+        if not all(isinstance(s.get(k), str) and s[k].strip()
+                   for k in ("platform", "shop_id", "shopname")):
+            raise ValueError("shop scope requires platform, shop_id and shopname")
+        p, sid, name = s["platform"].strip().lower(), s["shop_id"].strip(), s["shopname"].strip()
+        key = f"{p}|{sid}"
+        if "|" in p or "|" in sid or s.get("key", key) != key:
+            raise ValueError("invalid shop key")
+        if key in keys or (p, name) in names:
+            raise ValueError("duplicate or ambiguous shop scope")
+        keys.add(key)
+        names.add((p, name))
+        out.append({"key": key, "platform": p, "shop_id": sid, "shopname": name})
+    return sorted(out, key=lambda s: s["key"])
+
+
+def validate_shop_mapping(mapping_data: bytes, source_data: bytes,
+                          shops: list[dict]) -> list[dict]:
+    mapping = json.loads(mapping_data, object_pairs_hook=_json_object)
+    source = json.loads(source_data, object_pairs_hook=_json_object)
+    if (not isinstance(mapping, dict) or mapping.get("version") != 1
+            or not isinstance(mapping.get("mapping"), dict)
+            or not isinstance(mapping.get("rows"), list)
+            or not isinstance(source, dict) or not isinstance(source.get("items"), list)):
+        raise ValueError("invalid mapping/source schema")
+    if mapping.get("zaapi_source_sha256") != hashlib.sha256(source_data).hexdigest():
+        raise ValueError("source snapshot checksum mismatch")
+    current = {s["key"]: s for s in _norm_shop_scopes(shops)}
+    sources, filenames = {}, set()
+    for item in source["items"]:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"]:
+            raise ValueError("invalid source identity")
+        download = item.get("downloaded_file")
+        if not isinstance(download, dict) or not isinstance(download.get("file"), str):
+            raise ValueError("source file metadata missing")
+        fn = _valid_filename(download["file"])
+        sha = download.get("sha256")
+        if not isinstance(sha, str) or len(sha) != 64:
+            raise ValueError("invalid source file checksum")
+        try:
+            int(sha, 16)
+        except ValueError:
+            raise ValueError("invalid source file checksum") from None
+        if item["id"] in sources or fn in filenames:
+            raise ValueError("duplicate source identity or filename")
+        sources[item["id"]] = {"filename": fn, "file_sha256": sha}
+        filenames.add(fn)
+    if set(mapping["mapping"]) - set(sources):
+        raise ValueError("unknown source in mapping")
+    rows = {}
+    for row in mapping["rows"]:
+        if (not isinstance(row, dict) or not isinstance(row.get("source_id"), str)
+                or row["source_id"] in rows):
+            raise ValueError("invalid or duplicate mapping row")
+        rows[row["source_id"]] = row
+    if set(rows) != set(mapping["mapping"]):
+        raise ValueError("mapping and rows disagree")
+    plan = []
+    for sid, info in sources.items():
+        selected = mapping["mapping"].get(sid, [])
+        if (not isinstance(selected, list) or not all(isinstance(k, str) for k in selected)
+                or len(set(selected)) != len(selected) or set(selected) - set(current)):
+            raise ValueError("duplicate, unknown or stale shop key")
+        scopes = sorted((current[k] for k in selected), key=lambda s: s["key"])
+        if sid in rows:
+            row = rows[sid]
+            if row.get("file") != info["filename"] or _norm_shop_scopes(row.get("shops")) != scopes:
+                raise ValueError("mapping row does not match source/current shops")
+        plan.append({"source_id": sid, **info, "shop_scopes": scopes,
+                     "mapping_sha256": hashlib.sha256(mapping_data).hexdigest(),
+                     "source_snapshot_sha256": mapping["zaapi_source_sha256"]})
+    return plan
+
+
 def _scope_ok(reg: dict, shop, platform) -> bool:
+    if reg.get("shop_scopes") is not None:
+        if not isinstance(shop, str) or not isinstance(platform, str):
+            return False
+        try:
+            scopes = _norm_shop_scopes(reg["shop_scopes"])
+        except ValueError:
+            return False
+        return any(s["platform"] == platform.strip().lower()
+                   and shop.strip() in (s["shop_id"], s["shopname"])
+                   for s in scopes)
     accts = reg.get("accounts") or ()
     plats = reg.get("platforms") or ()
     if accts and (shop or "") not in accts:
@@ -189,17 +290,74 @@ def _sheet_key(d: dict) -> str:
 
 
 def _row_content_type(d: dict, file_type, sheet_types: dict) -> str | None:
-    return (sheet_types.get(_sheet_key(d))
-            or file_type or None)
+    return (d["content_type"] if "content_type" in d else
+            sheet_types.get(_sheet_key(d)) or file_type or None)
+
+
+def _restore_snapshot(docs: list[dict], snapshot) -> list[dict]:
+    if snapshot is None:
+        return docs
+    if not isinstance(snapshot, list) or len(snapshot) != len(docs):
+        raise ValueError("row snapshot count mismatch")
+    restored = []
+    for raw, row in zip(docs, snapshot):
+        if (not isinstance(row, dict) or any(row.get(k) != raw.get(k)
+                for k in ("kind", "sheet", "row_index", "source_row"))
+                or (row.get("cells") or []) != (raw.get("cells") or [])):
+            raise ValueError("row snapshot provenance mismatch")
+        fields = row.get("fields")
+        if (not isinstance(fields, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in fields.items())
+                or not isinstance(row.get("text"), str)
+                or not isinstance(row.get("manual_edit", False), bool)):
+            raise ValueError("invalid row snapshot values")
+        changed = fields != raw["fields"] or row["text"] != raw["text"]
+        if changed and not row.get("manual_edit"):
+            raise ValueError("changed row requires manual edit provenance")
+        restored.append({**raw, "fields": fields, "text": row["text"],
+                         "content_type": _norm_content_type(row.get("content_type")),
+                         "manual_edit": row.get("manual_edit", False)})
+    return restored
+
+
+def _import_scope(db, filename: str, reg: dict, source_id, shop_scopes,
+                  data: bytes, file_sha256, mapping_sha256, source_snapshot_sha256) -> dict:
+    sha = hashlib.sha256(data).hexdigest()
+    if file_sha256 is not None and file_sha256 != sha:
+        raise ValueError("source file checksum mismatch")
+    sid = reg.get("source_id") if source_id is None else source_id
+    scopes = reg.get("shop_scopes") if shop_scopes is None else shop_scopes
+    if sid is not None:
+        if not isinstance(sid, str) or not sid.strip() or sid != sid.strip():
+            raise ValueError("invalid source identity")
+        if reg.get("source_id") not in (None, sid):
+            raise ValueError("source reassignment requires explicit migration")
+        bound = db[_FILES_COLL].find_one({"source_id": sid})
+        if bound and bound["_id"] != filename:
+            raise ValueError("source already bound to another filename; review rename")
+        if scopes is None:
+            raise ValueError("source requires explicit shop scopes")
+    if scopes is not None:
+        if sid is None:
+            raise ValueError("shop scopes require a source identity")
+        scopes = _norm_shop_scopes(scopes)
+    return {"source_id": sid, "shop_scopes": scopes,
+            "mapping_sha256": mapping_sha256 or (
+                reg.get("mapping_sha256") if reg.get("file_sha256") == sha else None),
+            "source_snapshot_sha256": source_snapshot_sha256 or (
+                reg.get("source_snapshot_sha256") if reg.get("file_sha256") == sha else None)}
 
 
 def preview_import(db, *, filename: str, data: bytes,
                    accounts=(), platforms=(), content_type=None,
-                   sheet_types=None) -> dict:
+                   sheet_types=None, source_id=None, shop_scopes=None, row_snapshot=None,
+                   file_sha256=None, mapping_sha256=None, source_snapshot_sha256=None) -> dict:
     """read-only: parse + เทียบ registry เดิม — 0 writes."""
     fn = _valid_filename(filename)
-    docs = parse_upload(fn, data)
+    docs = _restore_snapshot(parse_upload(fn, data), row_snapshot)
     reg = db[_FILES_COLL].find_one({"_id": fn}) or {}
+    scope = _import_scope(db, fn, reg, source_id, shop_scopes, data,
+                          file_sha256, mapping_sha256, source_snapshot_sha256)
     old_rev = reg.get("active_rev", 0)
     _of: dict = {"source_file": fn, "file_rev": old_rev}
     if reg.get("active_apply"):
@@ -238,7 +396,7 @@ def preview_import(db, *, filename: str, data: bytes,
         "platforms": _norm_platforms(platforms or reg.get("platforms")
                                    or ()),
         "content_type": ctype, "sheet_types": stypes,
-        "untyped_rows": untyped,
+        "untyped_rows": untyped, **scope,
         "duplicate_columns": duplicate_columns,
         "unnamed_columns": [{"sheet": s, "columns": sorted(cs)}
                             for s, cs in unnamed.items()],
@@ -259,7 +417,9 @@ def _log(db, entry: dict) -> None:
 
 def apply_import(db, *, filename: str, data: bytes,
                  accounts=(), platforms=(), admin: str = "",
-                 content_type=None, sheet_types=None) -> dict:
+                 content_type=None, sheet_types=None,
+                 source_id=None, shop_scopes=None, row_snapshot=None,
+                   file_sha256=None, mapping_sha256=None, source_snapshot_sha256=None) -> dict:
     """full-file replace: insert rows ที่ stamp (file_rev, apply_id) ครบ
     ตั้งแต่ต้น + expire_at → verify ด้วย apply_id → CAS publish triple
     (file, rev, apply_id) จุดเดียว — visibility ไม่ต้องการ mutation หลัง CAS:
@@ -270,11 +430,13 @@ def apply_import(db, *, filename: str, data: bytes,
     fn = _valid_filename(filename)
     ctype = _norm_content_type(content_type)
     stypes = _norm_sheet_types(sheet_types)
-    docs = parse_upload(fn, data)
+    docs = _restore_snapshot(parse_upload(fn, data), row_snapshot)
     now = _utcnow()
     sha = hashlib.sha256(data).hexdigest()
     za, files = db[_COLL], db[_FILES_COLL]
     reg = files.find_one({"_id": fn}) or {}
+    scope = _import_scope(db, fn, reg, source_id, shop_scopes, data,
+                          file_sha256, mapping_sha256, source_snapshot_sha256)
     old_rev = int(reg.get("active_rev") or 0)
     rev = old_rev + 1
     # scope/types: ค่าที่ส่งมามีนัย → ใช้ใหม่; ไม่ส่ง → inherit registry เดิม
@@ -282,6 +444,9 @@ def apply_import(db, *, filename: str, data: bytes,
     plats = _norm_platforms(platforms or reg.get("platforms") or ())
     ctype = ctype if ctype is not None else reg.get("content_type")
     stypes = stypes or dict(reg.get("sheet_types") or {})
+    metadata = {**scope, "file_sha256": sha, "accounts": accts,
+                "platforms": plats, "content_type": ctype, "sheet_types": stypes}
+    previous_metadata = {k: reg.get(k) for k in metadata}
     attempt = hashlib.sha256(
         f"{fn}|{rev}|{sha}|{now.isoformat()}|{os.urandom(16).hex()}"
         .encode()).hexdigest()[:24]
@@ -294,15 +459,19 @@ def apply_import(db, *, filename: str, data: bytes,
         "row_index": d["row_index"], "source_row": d.get("source_row", 0),
         "fields": d.get("fields") or {}, "text": d.get("text") or "",
         "cells": d.get("cells") or [],
+        **({"manual_edit": d["manual_edit"]} if "manual_edit" in d else {}),
         "content_type": _row_content_type(d, ctype, stypes),
         "imported_at": now,
         "expire_at": expire_at,  # staged: ไม่ commit → sweep เก็บเอง
     } for d in docs]
     committed = False
     try:
+        if scope["source_id"] is not None:
+            files.create_index("source_id", unique=True,
+                               partialFilterExpression={"source_id": {"$type": "string"}})
         db[_SOURCES_COLL].insert_one({
             "_id": attempt, "apply_id": attempt,
-            "source_file": fn, "file_rev": rev,
+            "source_file": fn, "file_rev": rev, "metadata": metadata,
             "file_sha256": sha, "data": data, "expire_at": expire_at})
         za.insert_many(rows, ordered=False)
         if za.count_documents({"apply_id": attempt}) != len(rows):
@@ -314,9 +483,7 @@ def apply_import(db, *, filename: str, data: bytes,
                 {"_id": fn, "active_rev": old_rev},
                 {"$set": {
                     "active_rev": rev, "active_apply": attempt,
-                    "file_sha256": sha,
-                    "accounts": accts, "platforms": plats,
-                    "content_type": ctype, "sheet_types": stypes,
+                    **metadata, "prev_metadata": previous_metadata,
                     "row_count": len(rows),
                     "prev_row_count": reg.get("row_count"),
                     "prev_rev": old_rev or None,
@@ -398,6 +565,9 @@ def rollback_import(db, *, filename: str, admin: str = "") -> dict:
         _log_safely(db, {"op": "rollback", "file": fn,
                          "status": "no_prev", "admin": admin})
         return {"ok": False, "reason": "no_prev", "file": fn}
+    if (reg.get("shop_scopes") is not None
+            and (reg.get("prev_metadata") or {}).get("shop_scopes") is None):
+        return {"ok": False, "reason": "prev_scope_unverified", "file": fn}
     prev_filt: dict = {"source_file": fn, "file_rev": prev}
     if reg.get("prev_apply"):
         prev_filt["apply_id"] = reg["prev_apply"]
@@ -414,9 +584,12 @@ def rollback_import(db, *, filename: str, admin: str = "") -> dict:
     # 1) ปลด expire_at ของ prev ก่อน — ชุดที่จะ active ห้ามโดน sweep
     za.update_many(prev_filt, {"$unset": {"expire_at": ""}})
     db[_SOURCES_COLL].update_many(prev_filt, {"$unset": {"expire_at": ""}})
+    previous_metadata = reg.get("prev_metadata") or {}
+    current_metadata = {k: reg.get(k) for k in previous_metadata}
     res = files.update_one(
         {"_id": fn, "active_rev": cur},
-        {"$set": {"active_rev": prev,
+        {"$set": {**previous_metadata, "prev_metadata": current_metadata,
+                  "active_rev": prev,
                   "active_apply": reg.get("prev_apply"),
                   "prev_rev": cur,
                   "prev_apply": reg.get("active_apply"),
@@ -512,6 +685,9 @@ def list_files(db) -> list[dict]:
             "content_type": d.get("content_type"),
             "sheet_types": d.get("sheet_types") or {},
             "rows": db[_COLL].count_documents(filt) if rev else 0,
+            "source_id": d.get("source_id"), "shop_scopes": d.get("shop_scopes"),
+            "mapping_sha256": d.get("mapping_sha256"),
+            "source_snapshot_sha256": d.get("source_snapshot_sha256"),
             "accounts": d.get("accounts") or [],
             "platforms": d.get("platforms") or [],
             "file_sha256": d.get("file_sha256", ""),
@@ -553,6 +729,80 @@ def set_file_enabled(db, *, filename: str, enabled: bool,
     _log(db, {"op": "toggle", "file": fn, "rev_to": rev,
               "status": "ok", "admin": admin, "enabled": bool(enabled)})
     return {"ok": True, "file": fn, "enabled": bool(enabled), "rev": rev}
+
+
+def export_package(db, *, filename: str) -> bytes | None:
+    from .kb_zaapi_schema import canonical_json
+    fn = _valid_filename(filename)
+    reg = db[_FILES_COLL].find_one({"_id": fn}) or {}
+    rev = reg.get("active_rev") or reg.get("disabled_rev")
+    attempt = reg.get("active_apply") or reg.get("disabled_apply")
+    if not rev:
+        return None
+    if not reg.get("source_id") or reg.get("shop_scopes") is None:
+        raise ValueError("portable export requires explicit validated source/shop mapping")
+    filt = {"source_file": fn, "file_rev": rev, "apply_id": attempt}
+    source = db[_SOURCES_COLL].find_one(filt)
+    if source is None:
+        raise ValueError("original source unavailable; re-import required")
+    raw = bytes(source["data"])
+    if hashlib.sha256(raw).hexdigest() != source["file_sha256"]:
+        raise ValueError("source checksum mismatch")
+    stored = list(db[_COLL].find(filt).sort("row_index"))
+    if len(stored) != reg.get("row_count"):
+        raise ValueError("active revision rows incomplete")
+    keys = ("kind", "sheet", "row_index", "source_row", "cells", "fields", "text", "content_type", "manual_edit")
+    rows = [{k: r[k] for k in keys if k in r} for r in stored]
+    _restore_snapshot(parse_upload(fn, raw), rows)
+    metadata = {k: reg.get(k) for k in (
+        "source_id", "shop_scopes", "accounts", "platforms", "content_type", "sheet_types",
+        "mapping_sha256", "source_snapshot_sha256")}
+    payload = {"format": "zaapi-kb-source", "version": 1, "filename": fn,
+               "source_sha256": source["file_sha256"],
+               "source_b64": base64.b64encode(raw).decode("ascii"),
+               "metadata": metadata, "rows": rows}
+    digest = hashlib.sha256(canonical_json(payload).encode()).hexdigest()
+    return canonical_json({**payload, "integrity_sha256": digest}).encode()
+
+
+def import_package(db, *, data: bytes, shops: list[dict],
+                   preview: bool = False, admin: str = "") -> dict:
+    from .kb_zaapi_schema import canonical_json
+    payload = json.loads(data, object_pairs_hook=_json_object)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid source package")
+    digest = payload.pop("integrity_sha256", None)
+    if digest != hashlib.sha256(canonical_json(payload).encode()).hexdigest():
+        raise ValueError("package integrity mismatch")
+    if payload.get("format") != "zaapi-kb-source" or payload.get("version") != 1:
+        raise ValueError("unsupported source package")
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("source_id"), str):
+        raise ValueError("source package identity missing")
+    scopes = _norm_shop_scopes(metadata.get("shop_scopes"))
+    current = {s["key"]: s for s in _norm_shop_scopes(shops)}
+    if any(current.get(s["key"]) != s for s in scopes):
+        raise ValueError("package shop scope unknown or stale")
+    if not isinstance(payload.get("source_b64"), str):
+        raise ValueError("source bytes missing")
+    raw = base64.b64decode(payload["source_b64"], validate=True)
+    if hashlib.sha256(raw).hexdigest() != payload.get("source_sha256"):
+        raise ValueError("package source checksum mismatch")
+    kw = {"filename": payload.get("filename"), "data": raw,
+          "source_id": metadata["source_id"], "shop_scopes": scopes,
+          "accounts": metadata.get("accounts") or (),
+          "platforms": metadata.get("platforms") or (),
+          "content_type": metadata.get("content_type"),
+          "sheet_types": metadata.get("sheet_types"),
+          "row_snapshot": payload.get("rows"),
+          "file_sha256": payload["source_sha256"],
+          "mapping_sha256": metadata.get("mapping_sha256"),
+          "source_snapshot_sha256": metadata.get("source_snapshot_sha256")}
+    if not isinstance(kw["row_snapshot"], list):
+        raise ValueError("row snapshot missing")
+    if preview:
+        return preview_import(db, **kw)
+    return apply_import(db, admin=admin, **kw)
 
 
 def export_file(db, *, filename: str, original: bool = False) -> bytes | None:
@@ -788,6 +1038,12 @@ def file_kb_ready(db) -> dict:
     for d in regs:
         if not d.get("active_rev"):
             continue
+        if d.get("shop_scopes") is not None:
+            try:
+                if not _norm_shop_scopes(d["shop_scopes"]):
+                    continue
+            except ValueError:
+                continue
         p = {"source_file": d["_id"], "file_rev": d["active_rev"]}
         if d.get("active_apply"):
             p["apply_id"] = d["active_apply"]
