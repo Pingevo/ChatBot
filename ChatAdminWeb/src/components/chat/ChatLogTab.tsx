@@ -67,8 +67,8 @@ export function ChatLogTab({ messages }: Props) {
               {/* Products attached */}
               {msg.products && msg.products.length > 0 && (
                 <div className="flex flex-wrap gap-1 pt-1">
-                  {msg.products.map((p) => (
-                    <span key={p.item_id} className="text-[10px] px-1.5 py-0.5 rounded bg-surface-2 text-text-muted">
+                  {msg.products.map((p, i) => (
+                    <span key={`${p.item_id}-${i}`} className="text-[10px] px-1.5 py-0.5 rounded bg-surface-2 text-text-muted">
                       📦 {p.name}
                     </span>
                   ))}
