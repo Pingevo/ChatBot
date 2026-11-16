@@ -172,12 +172,32 @@ def test_export_package_endpoint_round_trip(monkeypatch):
     assert db2[zkf._FILES_COLL].count_documents({}) == 0
 
 
-def test_export_package_requires_mapping(monkeypatch):
+def test_apply_requires_shop_scope(monkeypatch):
+    """ไฟล์ใหม่ผ่าน endpoint ต้องประกาศ shop_scopes — re-import ไฟล์ที่
+    registry มี scope อยู่แล้ว inherit ได้โดยไม่ส่งซ้ำ."""
     db = _patch_db(monkeypatch)
     _stub_embed(monkeypatch)
-    # apply โดยไม่ส่ง shop_scopes → legacy unmapped file → export-package ต้อง 400
+    r = CLIENT.post("/zaapi-kb/import/apply",
+                    params={"filename": F1}, content=F1_DATA)
+    assert r.status_code == 400, r.text
+    assert "shop scope required" in r.json()["detail"]
+    assert db[zkf._FILES_COLL].count_documents({}) == 0
+    r = CLIENT.post("/zaapi-kb/import/apply", params={
+        "filename": F1, "shop_scopes": json.dumps([SHOP]),
+        "source_id": "src-x", "file_sha256": SHA,
+    }, content=F1_DATA)
+    assert r.status_code == 200, r.text
+    # registry มี scope แล้ว → apply ซ้ำโดยไม่ส่ง param inherit ได้
     r = CLIENT.post("/zaapi-kb/import/apply",
                     params={"filename": F1}, content=F1_DATA)
     assert r.status_code == 200, r.text
+
+
+def test_export_package_requires_mapping(monkeypatch):
+    db = _patch_db(monkeypatch)
+    _stub_embed(monkeypatch)
+    # seed legacy unmapped file ผ่าน owner ตรง (data layer permissive —
+    # endpoint ปฏิเสธ unscoped apply แล้ว) → export-package ต้อง 400
+    zkf.apply_import(db, filename=F1, data=F1_DATA)
     r2 = CLIENT.get("/zaapi-kb/export-package", params={"file": F1})
     assert r2.status_code == 400, r2.text

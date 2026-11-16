@@ -14484,3 +14484,16 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ผลกระทบเคสอื่น: params ใหม่ทั้งหมด optional — legacy caller (accounts/platforms เดิม) ทำงานเหมือนเดิม; unmapped file preview/apply ยังได้ (scope=None) แต่ export-package ถูกบล็อก; UI ไม่เลือก binding = ส่งไม่มี subject_bindings → ไม่ผูกรุ่น ตอบทั่วไปอย่างเดียว
 - 2333 passed/17 skipped/1 xfailed exit 0; tsc --noEmit clean; py_compile ผ่าน; ยังไม่มี shared DB/customer/deploy/push
 - งานค้าง: curate corpus bindings จริง, canonical refs/alias ambiguity, multi-need attribution, live authenticated QA
+
+### กำลังจะทำ — zaapi data reset + scope-first contract (2026-11-16)
+- ผู้ใช้สั่ง: clear data zaapi เดิมทั้งหมด → import ใหม่ตาม validated shop/platform mapping (zaapi-kb-shop-mapping-validated-2026-11-14.json) และบังคับให้คน import เลือกร้าน+แพลตฟอร์มก่อนไฟล์เสมอ
+- พบก่อนลงมือ: DB จริง (chatbot) ว่างอยู่แล้วทุก collection (zaapi_kb/files/sources/log/mappings=0, shops=65, kb_source=zaapi) — clear เป็น idempotent เท่านั้น ไม่มีข้อมูลเสี่ยงหาย; manifest 118 ไฟล์ แต่ mapping เลือก 103 (validation file ยืนยัน files_selected=103, unselected=15 — ผู้ใช้จำ 113 คลาด)
+- แผน: import 103 ผ่าน apply_import owner เดิมพร้อม source_id+shop_scopes+file/mapping/snapshot sha จาก JSON; 15 ไฟล์ที่ไม่มี mapping ข้ามไว้ (backup mappings เก่าให้แค่ accounts ไม่มี platform — 2 ไฟล์ resolve ได้, 6 กำกวม 3 แพลตฟอร์ม, 7 ไม่มีร้านเลย → ผู้ใช้เลือก "ค้างทั้ง 15 ให้ import ผ่าน UI ใหม่")
+
+### ผ่านแล้ว — zaapi reset/re-import + scope-first enforcement + ลบหน้า map (2026-11-16)
+- Import: 103/103 OK ผ่าน apply_import (CAS/revision เดิม) — registry 103 ไฟล์ทุกไฟล์มี shop_scopes+source_id, rows=6274, sources=103, log=103; scoped search verify: BlackShark/shopee ตอบ, ร้านผิด=0, platform-only=0 (strict pair contract — ออกแบบไว้)
+- Fix scope-first: (a) apply_import เพิ่ม require_scope=False — True แล้ว resolved shop_scopes ว่าง → ValueError ก่อน stage (fail-closed); FastAPI apply + import_package apply path ส่ง True เสมอ (ไฟล์ใหม่ต้องประกาศร้าน, re-import inherit จาก registry ได้); preview ยัง permissive (read-only); data layer ปล่อย permissive ไว้สำหรับ migration/test
+- UI: mapping route GET เพิ่ม shop_id (dedupe platform|shop_id) + ลบ POST (retire zaapi_kb_mappings writer); ZaapiKbPanel เปลี่ยน shop picker เป็น scope objects (platform|shop_id|shopname) — เลือกร้านเป็น checkbox ตาม platform, scope chips เอาออกได้, Apply disabled จนกว่า scopes≥1, prefill scope จาก registry เมื่อ re-import ชื่อซ้ำ, source_id inherit หรือ "manual:<filename>" สำหรับไฟล์ใหม่; accounts/platforms derive จาก scopes
+- ลบหน้า /zaapi-kb-mapping (page + sidebar/mobile nav + Map icon import); files list เพิ่ม client pagination 10 ไฟล์/หน้า (103 ไฟล์=11 หน้า)
+- Tests: API 16/16 ผ่าน (+test_apply_requires_shop_scope); test_export_package_requires_mapping ปรับ seed legacy unscoped ผ่าน owner ตรง; tsc --noEmit clean (ลบ .next/types stale ก่อน)
+- ค้าง: full regression กำลังรัน; 15 ไฟล์รอ admin import ผ่าน UI; subject bindings corpus จริงยังไม่ curate; live authenticated QA ยังไม่มีช่องทาง; ไม่มี deploy/push

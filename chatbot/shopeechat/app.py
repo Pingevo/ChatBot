@@ -5843,7 +5843,7 @@ async def zaapi_kb_import_apply(
             file_sha256=file_sha256 or None,
             mapping_sha256=mapping_sha256 or None,
             source_snapshot_sha256=source_snapshot_sha256 or None,
-            row_snapshot=_rs))
+            row_snapshot=_rs, require_scope=True))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
