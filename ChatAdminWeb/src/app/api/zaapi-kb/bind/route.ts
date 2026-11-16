@@ -1,5 +1,5 @@
 // /api/zaapi-kb/bind — subject-binding editor proxy → FastAPI
-//   GET  ?file=<name>          → /zaapi-kb/bind-preview (columns+samples, 0 writes)
+//   GET  ?file=<name>[&rows=N] → /zaapi-kb/bind-preview (columns+samples; rows>0 +grid/text, 0 writes)
 //   POST ?file=<name> {subject_bindings} → /zaapi-kb/bind (apply rev ใหม่)
 import { NextRequest } from "next/server";
 import { requirePageEdit } from "@/backend/middleware/authorize";
@@ -16,8 +16,9 @@ export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const file = url.searchParams.get("file") || "";
   if (!file) return json({ detail: "file required" }, 400);
+  const rows = url.searchParams.get("rows") || "";
   const res = await fetch(
-    `${await upstream()}/zaapi-kb/bind-preview?file=${encodeURIComponent(file)}`,
+    `${await upstream()}/zaapi-kb/bind-preview?file=${encodeURIComponent(file)}${rows ? `&rows=${encodeURIComponent(rows)}` : ""}`,
     { headers: { "X-Internal-Secret": serverConfig.chatbotInternalSecret } });
   const data = await res.json().catch(() => ({}));
   return json(data, res.status);

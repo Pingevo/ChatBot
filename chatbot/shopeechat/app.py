@@ -5884,13 +5884,14 @@ def zaapi_kb_import_sweep(request: Request) -> dict:
 
 
 @app.get("/zaapi-kb/bind-preview")
-def zaapi_kb_bind_preview(file: str) -> dict:
+def zaapi_kb_bind_preview(file: str, rows: int = 0) -> dict:
     """read-only: คอลัมน์ + ค่าตัวอย่างต่อชีตจาก stored source —
-    หน้า admin ใช้เลือก subject binding โดยไม่ต้อง re-upload."""
+    หน้า admin ใช้เลือก subject binding โดยไม่ต้อง re-upload;
+    rows>0 เพิ่ม grid แถวจริง/text ดิบ (พรีวิวไฟล์ต้นฉบับ)."""
     from . import kb_zaapi_files as _zkf
     try:
         return JSONResponse(_zkf.bind_preview(
-            knowledge_base._admin_db(), filename=file))
+            knowledge_base._admin_db(), filename=file, rows=rows))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

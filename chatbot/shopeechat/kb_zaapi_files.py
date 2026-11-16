@@ -999,33 +999,49 @@ def export_file(db, *, filename: str, original: bool = False) -> bytes | None:
 
 # ── search ────────────────────────────────────────────────────────────────
 
-def bind_preview(db, *, filename: str) -> dict:
+def bind_preview(db, *, filename: str, rows: int = 0) -> dict:
     """read-only: คอลัมน์ + ค่าตัวอย่างต่อชีต จาก stored source bytes —
-    ให้ admin เลือก subject binding โดยไม่ต้อง re-upload (0 writes)."""
+    ให้ admin เลือก subject binding โดยไม่ต้อง re-upload (0 writes).
+    rows>0 → เพิ่ม grid แถวข้อมูลจริง N แถวแรกต่อชีต + text ดิบของไฟล์ .txt."""
     fn = _valid_filename(filename)
     data = export_file(db, filename=fn, original=True)
     if data is None:
         raise ValueError("no stored source for this file")
+    rows = min(max(int(rows or 0), 0), 50)
     docs = parse_upload(fn, data)
     reg = db[_FILES_COLL].find_one({"_id": fn}) or {}
     sheets: dict[str, dict] = {}
     for d in docs:
         s = _sheet_key(d)
-        info = sheets.setdefault(s, {"rows": 0, "columns": {}})
+        info = sheets.setdefault(
+            s, {"rows": 0, "columns": {}, "grid": [], "text": None})
         info["rows"] += 1
+        if rows and d.get("kind") == "text" and info["text"] is None:
+            info["text"] = (d.get("text") or "")[:20000]
         for c in d.get("cells") or ():
             col = info["columns"].setdefault(
                 c["column_index"], {"header": c["header"], "samples": []})
             v = _clean(c["value"])
             if v and v not in col["samples"] and len(col["samples"]) < 8:
                 col["samples"].append(v)
+        if rows and len(info["grid"]) < rows and d.get("cells"):
+            info["grid"].append([_clean(c["value"]) for c in d["cells"]])
+
+    def _sheet_out(i: dict) -> dict:
+        ncol = max(i["columns"]) if i["columns"] else 0
+        out = {"rows": i["rows"], "columns": [
+            {"column_index": k, "header": v["header"], "samples": v["samples"]}
+            for k, v in sorted(i["columns"].items())]}
+        if rows:
+            out["grid"] = [r + [""] * (ncol - len(r)) for r in i["grid"]]
+            if i["text"] is not None:
+                out["text"] = i["text"]
+        return out
+
     return {
         "filename": fn, "active_rev": reg.get("active_rev"),
         "subject_bindings": reg.get("subject_bindings") or {},
-        "sheets": {s: {"rows": i["rows"], "columns": [
-            {"column_index": k, "header": v["header"], "samples": v["samples"]}
-            for k, v in sorted(i["columns"].items())]}
-            for s, i in sheets.items()}}
+        "sheets": {s: _sheet_out(i) for s, i in sheets.items()}}
 
 
 def bind_apply(db, *, filename: str, subject_bindings, admin: str = "") -> dict:

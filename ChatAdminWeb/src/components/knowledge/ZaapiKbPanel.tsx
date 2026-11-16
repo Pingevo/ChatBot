@@ -109,6 +109,8 @@ type BindPreview = {
   sheets: Record<string, {
     rows: number;
     columns: { column_index: number; header: string; samples: string[] }[];
+    grid?: string[][];  // rows>0 — แถวข้อมูลจริง N แถวแรก (xlsx)
+    text?: string;      // rows>0 — เนื้อดิบของไฟล์ .txt
   }>;
 };
 type BindSheetSel = { mode: "cols" | "refs" | "rows"; cols: number[]; refs: string; rows: string };
@@ -236,6 +238,9 @@ export function ZaapiKbPanel() {
   const [bind, setBind] = useState<{
     file: string; loading: boolean; saving: boolean;
     data: BindPreview | null; sel: Record<string, BindSheetSel>;
+  } | null>(null);
+  const [filePrev, setFilePrev] = useState<{
+    file: string; loading: boolean; data: BindPreview | null;
   } | null>(null);
 
   const loadSources = useCallback(() => {
@@ -441,6 +446,19 @@ export function ZaapiKbPanel() {
     } catch {
       toast.error("โหลด binding preview ไม่สำเร็จ");
       setBind(null);
+    }
+  }
+
+  // ── พรีวิวไฟล์ต้นฉบับ (stored source — grid แถวจริง / text ดิบ) ──
+  async function openFilePrev(f: ZaapiFile) {
+    if (filePrev?.file === f.file) { setFilePrev(null); return; }
+    setFilePrev({ file: f.file, loading: true, data: null });
+    try {
+      const r = await api().get("/zaapi-kb/bind", { params: { file: f.file, rows: 20 } });
+      setFilePrev({ file: f.file, loading: false, data: r.data as BindPreview });
+    } catch {
+      toast.error("โหลดพรีวิวไฟล์ไม่สำเร็จ");
+      setFilePrev(null);
     }
   }
 
@@ -1144,6 +1162,67 @@ export function ZaapiKbPanel() {
                       )}
                     </div>
                   )}
+                  <div className="mb-3 rounded-lg border border-border/60 bg-surface px-3 py-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="text-[11px] text-text-subtle">
+                        พรีวิวไฟล์ต้นฉบับ — แถวจริงจาก xlsx / text ดิบของ .txt (read-only)
+                      </div>
+                      <Button size="sm" variant="outline" onClick={() => openFilePrev(f)}>
+                        {filePrev?.file === f.file ? "ปิด" : "พรีวิวไฟล์"}
+                      </Button>
+                    </div>
+                    {filePrev?.file === f.file && (
+                      <div className="mt-2 space-y-3 border-t border-border/60 pt-2">
+                        {filePrev.loading ? (
+                          <div className="flex justify-center py-3"><Loading size={16} /></div>
+                        ) : filePrev.data ? (
+                          Object.entries(filePrev.data.sheets).map(([s, info]) => (
+                            <div key={s} className="space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] font-semibold text-text-muted uppercase tracking-wide truncate" title={s}>{s}</span>
+                                <span className="text-[10px] text-text-subtle">{info.rows} แถว</span>
+                              </div>
+                              {info.text != null ? (
+                                <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words rounded border border-border/60 bg-surface-2/60 p-2 text-[11px] leading-relaxed">{info.text}</pre>
+                              ) : info.grid && info.grid.length > 0 ? (
+                                <div className="max-h-72 overflow-auto rounded border border-border/60">
+                                  <table className="w-full border-collapse text-[11px]">
+                                    <thead className="sticky top-0 bg-surface-2">
+                                      <tr>
+                                        <th className="border-b border-border/60 px-2 py-1 text-left text-[10px] font-medium text-text-subtle w-8">#</th>
+                                        {info.columns.map((c) => (
+                                          <th key={c.column_index} className="border-b border-l border-border/60 px-2 py-1 text-left text-[10px] font-medium text-text-subtle whitespace-nowrap">
+                                            {c.header || `คอลัมน์ ${c.column_index}`}
+                                          </th>
+                                        ))}
+                                      </tr>
+                                    </thead>
+                                    <tbody>
+                                      {info.grid.map((r, ri) => (
+                                        <tr key={ri} className="align-top odd:bg-surface-2/40">
+                                          <td className="px-2 py-1 text-[10px] text-text-subtle">{ri + 2}</td>
+                                          {r.map((v, ci) => (
+                                            <td key={ci} className="border-l border-border/40 px-2 py-1 max-w-[220px]">
+                                              <div className="line-clamp-3 break-words" title={v}>{v}</div>
+                                            </td>
+                                          ))}
+                                        </tr>
+                                      ))}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              ) : (
+                                <div className="text-[11px] text-text-subtle">ไม่มีแถวข้อมูล</div>
+                              )}
+                              {info.rows > (info.grid?.length || 0) && info.grid?.length ? (
+                                <div className="text-[10px] text-text-subtle">แสดง {info.grid.length} แถวแรก จาก {info.rows} แถว</div>
+                              ) : null}
+                            </div>
+                          ))
+                        ) : null}
+                      </div>
+                    )}
+                  </div>
                   {fileDocsLoading ? (
                     <div className="flex justify-center py-6"><Loading size={18} /></div>
                   ) : fileDocs.length === 0 ? (

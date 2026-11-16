@@ -217,7 +217,28 @@ def test_bind_preview_returns_columns_samples_and_current(monkeypatch):
     assert sheet["rows"] == 2
     assert sheet["columns"][0]["header"] == "ชื่อสินค้า"
     assert sheet["columns"][0]["samples"]
+    assert "grid" not in sheet  # rows=0 ค่าเริ่มต้น — ไม่แนบแถวดิบ
     assert db[zkf._LOG_COLL].count_documents({}) == 1  # preview 0 writes
+
+
+def test_bind_preview_rows_returns_grid_and_text(monkeypatch):
+    """rows>0 → แนบ grid แถวจริงต่อชีต (xlsx) และ text ดิบ (.txt) — read-only."""
+    db = _patch_db(monkeypatch)
+    _stub_embed(monkeypatch)
+    _apply_bound_file(db)
+    r = CLIENT.get("/zaapi-kb/bind-preview", params={"file": F1, "rows": 5})
+    assert r.status_code == 200, r.text
+    sheet = r.json()["sheets"]["ข้อมูลสินค้า"]
+    assert len(sheet["grid"]) == 2
+    assert sheet["grid"][0][0]  # cell แรกของแถวข้อมูลแรกไม่ว่าง
+    # ไฟล์ .txt → text ดิบ
+    zkf.apply_import(db, filename="notes.txt",
+                     data="บรรทัดหนึ่ง\nบรรทัดสอง".encode("utf-8"),
+                     content_type="faq", admin="t")
+    r = CLIENT.get("/zaapi-kb/bind-preview", params={"file": "notes.txt", "rows": 5})
+    assert r.status_code == 200, r.text
+    sheet = r.json()["sheets"]["-"]
+    assert "บรรทัดหนึ่ง" in sheet["text"]
 
 
 def test_bind_apply_rebinds_from_stored_source(monkeypatch):

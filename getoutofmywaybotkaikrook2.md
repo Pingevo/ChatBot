@@ -14517,3 +14517,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - เทสต์: test_zaapi_kb_api.py +3 (preview cols/samples+0writes, rebind rev2→{}→rev3 bound อีกครั้ง scope inherit, 400 ตาราง) — หมายเหตุ MemoryDb ไม่รองรับ dotted `subject_refs.0` จึงตรวจผลจาก docs จริง; focused 130 passed; tsc clean; py_compile clean
 - ผลกระทบ: feature ใหม่ล้วน ไม่แตะ logic เดิม; rollback ได้ตาม rev contract
 - งานค้าง: user ใช้หน้านี้ curate ไฟล์แปลกเอง; spec provider E2E; live QA; deploy
+
+## กำลังจะทำ+ผ่านแล้ว: พรีวิวไฟล์ต้นฉบับ (xlsx grid / txt text) ในหน้า KB — 2026-11-17
+- งาน: admin ขอ "เลือกย้อนกลับไปพรีวิวดูไฟล์ xlsx/txt" บนไฟล์ที่ import แล้ว
+- แก้ด้วย: bind_preview รับ rows (0..50) — rows>0 แนบ sheets{grid} (แถวข้อมูลจริง pad ถึง max col) และ sheets{text} ดิบ ≤20000 chars สำหรับ .txt; endpoint bind-preview ส่ง rows ต่อ; proxy GET ส่ง rows; UI เพิ่มบล็อก "พรีวิวไฟล์ต้นฉบับ" ใต้ไฟล์ที่กาง — ตาราง header sticky + 20 แถวแรก, .txt แสดง <pre> — ใช้ได้ทุกไฟล์ ไม่จำกัด editable
+- เทสต์: +1 test (grid 2 แถว + txt text, default rows=0 ไม่แนบ); focused 131 passed; tsc clean
+- งานค้าง: user curate bindings; คำถาม embed ย้ายเข้า generation cronjob (รอออกแบบ); live QA; deploy
