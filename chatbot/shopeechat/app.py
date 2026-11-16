@@ -5913,6 +5913,26 @@ def zaapi_kb_bind(request: Request, file: str,
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/zaapi-kb/edit-source")
+async def zaapi_kb_edit_source(request: Request, file: str) -> dict:
+    """แก้ไฟล์ต้นฉบับจากหน้า preview → rev ใหม่ (scope/bindings inherit);
+    body JSON: {patches:{sheet:{row:{col:value}}}} (xlsx) หรือ {text} (.txt)."""
+    from . import kb_zaapi_files as _zkf
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="JSON body required")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON object required")
+    try:
+        return JSONResponse(_zkf.edit_source_apply(
+            knowledge_base._admin_db(), filename=file,
+            patches=body.get("patches"), text=body.get("text"),
+            admin=_admin_name(request)))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.get("/zaapi-kb/export")
 def zaapi_kb_export(file: str):
     """active revision → xlsx bytes (round-trip re-import ชื่อเดิมได้)."""

@@ -14530,3 +14530,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แก้ด้วย: `backfill_stale_vecs` ใน kb_zaapi_files (active triples + manual docs → stale-only embed batch → $set vec/vec_model, derived cache ไม่แตะ text/triple) + script `build_zaapi_kb_embeddings.py` (wire จริง) + step `zaapi_kb_embeddings` ใน _STEP_ORDER (ก่อน import_db) + _ALWAYS_RERUN (resume เติมเสมอ, idempotent)
 - เทสต์: backfill stale-only (แถวสดไม่โดน, manual ขาด vec ถูกเติม, รอบสอง=0) + resume plan tail อัปเดต; 123 passed; py_compile clean
 - งานค้าง: query-time lazy-embed ยังเป็น fallback (ตั้งใจ); user curate bindings; live QA; deploy
+
+## กำลังจะทำ+ผ่านแล้ว: popup พรีวิว+แก้ไฟล์ต้นฉบับ (editable/resizable) — 2026-11-17
+- งาน: user ขอปุ่มพรีวิวข้าง toggle → เปิด popup หน้าใหม่ + แก้ cell ได้ + ยืดหด/ลากขยายตาราง
+- แก้ด้วย: bind_preview เพิ่ม grid_src (source_row จริงต่อแถว grid — patch target); `edit_source_apply` owner (xlsx patch ลง stored bytes เดิม validate bounds ≤5000 cells / txt text ทั้งก้อน → apply_import rev ใหม่ scope+bindings inherit); endpoint POST /zaapi-kb/edit-source (JSON body); proxy bind POST dispatch {patches|text}→edit-source vs {subject_bindings}→bind; หน้า /zaapi-preview (Suspense+useSearchParams) — contentEditable cells dirty-tracking, ลากขอบ th ปรับความกว้างคอลัมน์, resize-y กรอบตาราง, textarea .txt, ปุ่มบันทึก→rev ใหม่; ปุ่ม Eye ข้าง toggle เปิด window popup
+- เทสต์: +2 owner tests (patch xlsx rev2 edited_cells=1 bindings inherit / txt + validation table), grid_src assert; 134 passed; tsc clean
+- ข้อจำกัด: แก้ได้เฉพาะ 50 แถวแรกที่ preview แสดง (แถวอื่นคงเดิม — patch ไม่ทับ); แก้ header ที่ binding ผูกอยู่จะ fail ตอน apply (ตาม design)
+- งานค้าง: inline preview block ใน panel ถูกแทนด้วย popup; user curate bindings; live QA; deploy

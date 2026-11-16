@@ -231,6 +231,7 @@ def test_bind_preview_rows_returns_grid_and_text(monkeypatch):
     sheet = r.json()["sheets"]["ข้อมูลสินค้า"]
     assert len(sheet["grid"]) == 2
     assert sheet["grid"][0][0]  # cell แรกของแถวข้อมูลแรกไม่ว่าง
+    assert sheet["grid_src"] == [2, 3]  # source_row จริง (patch target)
     # ไฟล์ .txt → text ดิบ
     zkf.apply_import(db, filename="notes.txt",
                      data="บรรทัดหนึ่ง\nบรรทัดสอง".encode("utf-8"),

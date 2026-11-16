@@ -704,6 +704,53 @@ def test_backfill_stale_vecs_only_touches_stale(db, monkeypatch):
     assert calls == []  # สดหมดแล้ว — ไม่ embed ซ้ำ
 
 
+def test_edit_source_apply_patches_xlsx_cells(db):
+    """patch cell ลง stored bytes → rev ใหม่ ข้อมูลอื่นคงเดิม + rollback ได้."""
+    zkf.apply_import(db, filename=F1, data=F1_DATA,
+                     subject_bindings=F1_BINDINGS, admin="t")
+    r = zkf.edit_source_apply(
+        db, filename=F1,
+        patches={"ข้อมูลสินค้า": {"2": {"2": "แก้รายละเอียดใหม่"}}},
+        admin="t")
+    assert r["ok"] and r["rev"] == 2 and r["edited_cells"] == 1
+    rows = db[zkf._COLL].find({"source_file": F1, "file_rev": 2})
+    assert any("แก้รายละเอียดใหม่" in (d.get("text") or "") for d in rows)
+    reg = db[zkf._FILES_COLL].find_one({"_id": F1})
+    assert reg["subject_bindings"] == F1_BINDINGS  # inherit
+
+
+def test_edit_source_apply_txt_and_validation(db):
+    zkf.apply_import(db, filename="notes.txt",
+                     data="เนื้อเดิม".encode("utf-8"),
+                     content_type="faq", admin="t")
+    r = zkf.edit_source_apply(db, filename="notes.txt",
+                              text="เนื้อใหม่\nบรรทัดสอง", admin="t")
+    assert r["ok"] and r["rev"] == 2
+    doc = db[zkf._COLL].find_one({"source_file": "notes.txt", "file_rev": 2})
+    assert "เนื้อใหม่" in doc["text"]
+    try:
+        zkf.edit_source_apply(db, filename="notes.txt", admin="t",
+                              patches={"ข้อมูลสินค้า": {"2": {"1": "x"}}})
+        assert False
+    except ValueError:
+        pass
+    zkf.apply_import(db, filename=F1, data=F1_DATA,
+                     subject_bindings=F1_BINDINGS, admin="t")
+    for patches in [{"nope": {"2": {"1": "x"}}},          # ชีตไม่มี
+                    {"ข้อมูลสินค้า": {"abc": {"1": "x"}}}]:  # row index เสีย
+        try:
+            zkf.edit_source_apply(db, filename=F1, patches=patches, admin="t")
+            assert False, patches
+        except ValueError:
+            pass
+    try:
+        zkf.edit_source_apply(db, filename="missing.xlsx",
+                              patches={"s": {"2": {"1": "x"}}}, admin="t")
+        assert False
+    except ValueError:
+        pass
+
+
 def test_post_commit_failure_never_deletes_active_rev(db, monkeypatch):
     """F1A: retire/log ล้มหลัง CAS → active rev ห้ามถูกลบ + ต้องรายงานจริง."""
     zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")

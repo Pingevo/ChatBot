@@ -1015,7 +1015,8 @@ def bind_preview(db, *, filename: str, rows: int = 0) -> dict:
     for d in docs:
         s = _sheet_key(d)
         info = sheets.setdefault(
-            s, {"rows": 0, "columns": {}, "grid": [], "text": None})
+            s, {"rows": 0, "columns": {}, "grid": [], "grid_src": [],
+                "text": None})
         info["rows"] += 1
         if rows and d.get("kind") == "text" and info["text"] is None:
             info["text"] = (d.get("text") or "")[:20000]
@@ -1027,6 +1028,7 @@ def bind_preview(db, *, filename: str, rows: int = 0) -> dict:
                 col["samples"].append(v)
         if rows and len(info["grid"]) < rows and d.get("cells"):
             info["grid"].append([_clean(c["value"]) for c in d["cells"]])
+            info["grid_src"].append(d.get("source_row"))
 
     def _sheet_out(i: dict) -> dict:
         ncol = max(i["columns"]) if i["columns"] else 0
@@ -1035,6 +1037,7 @@ def bind_preview(db, *, filename: str, rows: int = 0) -> dict:
             for k, v in sorted(i["columns"].items())]}
         if rows:
             out["grid"] = [r + [""] * (ncol - len(r)) for r in i["grid"]]
+            out["grid_src"] = i["grid_src"]
             if i["text"] is not None:
                 out["text"] = i["text"]
         return out
@@ -1061,6 +1064,60 @@ def bind_apply(db, *, filename: str, subject_bindings, admin: str = "") -> dict:
         res["bound_rows"] = db[_COLL].count_documents(
             {"source_file": fn, "file_rev": rev,
              "subject_refs.0": {"$exists": True}})
+    return res
+
+
+def edit_source_apply(db, *, filename: str, patches=None, text=None,
+                      admin: str = "") -> dict:
+    """แก้ไฟล์ต้นฉบับจากหน้า preview → rev ใหม่ (scope/bindings inherit):
+    xlsx = patches {sheet: {row: {col: value}}} ลง stored bytes เดิม
+    (cell อื่น/แถวเกิน preview คงเดิม); txt = text ทั้งก้อน."""
+    fn = _valid_filename(filename)
+    data = export_file(db, filename=fn, original=True)
+    if data is None:
+        raise ValueError("no stored source for this file")
+    suffix = PurePosixPath(fn).suffix.lower()
+    ncell = 0
+    if suffix == ".txt":
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("text required for .txt")
+        new_data = text.encode("utf-8")
+    else:
+        if not isinstance(patches, dict) or not patches:
+            raise ValueError("patches {sheet:{row:{col:value}}} required")
+        wb = openpyxl.load_workbook(io.BytesIO(data))
+        try:
+            for sheet, rows in patches.items():
+                if sheet not in wb.sheetnames:
+                    raise ValueError(f"unknown sheet: {sheet}")
+                ws = wb[sheet]
+                if not isinstance(rows, dict):
+                    raise ValueError("patch rows must be a mapping")
+                for r, cols in rows.items():
+                    r_i = int(r) if str(r).isdigit() else 0
+                    if r_i < 1 or r_i > ws.max_row + 50:
+                        raise ValueError(f"bad row index: {r}")
+                    if not isinstance(cols, dict):
+                        raise ValueError("patch cols must be a mapping")
+                    for c, v in cols.items():
+                        c_i = int(c) if str(c).isdigit() else 0
+                        if c_i < 1 or c_i > ws.max_column + 10:
+                            raise ValueError(f"bad column index: {c}")
+                        ws.cell(row=r_i, column=c_i).value = v
+                        ncell += 1
+            if ncell > 5000:
+                raise ValueError("too many edited cells")
+            buf = io.BytesIO()
+            wb.save(buf)
+            new_data = buf.getvalue()
+        finally:
+            wb.close()
+    reg = db[_FILES_COLL].find_one({"_id": fn}) or {}
+    res = apply_import(db, filename=fn, data=new_data,
+                       subject_bindings=reg.get("subject_bindings") or {},
+                       admin=admin)
+    if res.get("ok"):
+        res["edited_cells"] = ncell
     return res
 
 
