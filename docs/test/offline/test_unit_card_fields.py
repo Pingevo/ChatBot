@@ -15,6 +15,16 @@ from chatbot.shopeechat import product_store as ps
 from chatbot.shopeechat import conversation_products as cp
 
 
+def test_declared_model_codes_survive_card_projection_without_name_inference():
+    doc = {"item_id": "A", "item_name": "AC65B compared with AC65B2",
+           "model_codes": ["AC65B"]}
+    card = ps.to_product_card(doc)
+    assert card["model_codes"] == ["AC65B"]
+    card["model_codes"].append("AC65B2")
+    assert doc["model_codes"] == ["AC65B"]
+    assert "model_codes" not in ps.to_product_card({"item_name": doc["item_name"]})
+
+
 def main() -> int:
     docs = json.load(open(ROOT / "exports" / "ShpProducts.export.json", encoding="utf-8"))
 

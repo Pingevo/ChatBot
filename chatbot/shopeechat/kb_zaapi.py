@@ -69,18 +69,24 @@ def zaapi_kb_evidence(
     # typed roles เดิม — subject/target refs + capability_asks จาก TurnNeed
     # เท่านั้น (ไม่ parse prose); query = message + typed terms
     refs: list[str] = []
+    targets: list[str] = []
     asks: list[str] = []
     for n in prodish:
-        refs += [str(r) for r in (getattr(n, "subject_refs", ()) or ())]
-        refs += [str(r) for r in (getattr(n, "target_refs", ()) or ())]
+        refs += [str(r) for r in (getattr(n, "subject_refs", ()) or ())
+                 if str(r).strip()]
+        targets += [str(r) for r in (getattr(n, "target_refs", ()) or ())]
         asks += [str(a) for a in (getattr(n, "capability_asks", ()) or ())]
-    query = " ".join(x for x in ([message] + asks + refs) if x).strip()
+    if not refs:
+        return KbEvidenceResult(trace=("zaapi_subject_unresolved",))
+    query = " ".join(x for x in ([message] + asks + refs + targets) if x).strip()
     hits, trace = _zkf.zaapi_search(
         db if db is not None else _kb._admin_db(),
         shop=shop, platform=platform, query=query, refs=refs,
         limit=limit, types=_CONTENT_TYPES_ALL)
     sup = [{"kind": "kb", "record_id": h["record_id"],
             "request_id": request_id,
+            **({"subject_refs": tuple(h["subject_refs"]), "facts": h["facts"]}
+               if h.get("facts") else {}),
             "payload": {"text": h["a"], "fields": h.get("fields") or {}},
             "meta": h.get("meta") or {},
             "score": h.get("_qa_sim")}

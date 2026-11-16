@@ -14,7 +14,7 @@ export async function POST(req: NextRequest) {
 
   const url = new URL(req.url);
   const op = url.searchParams.get("op") || "preview";
-  if (!["preview", "apply", "rollback", "sweep"].includes(op))
+  if (!["preview", "apply", "rollback", "sweep", "package"].includes(op))
     return error("invalid op", 400);
 
   const upstream = serverConfig.chatbotBaseUrls.shopee.replace(/\/$/, "");
@@ -33,15 +33,30 @@ export async function POST(req: NextRequest) {
     const form = await req.formData().catch(() => null);
     const file = form?.get("file");
     if (!form || !(file instanceof Blob)) return error("file required", 400);
-    const name = String(form.get("filename") || (file as File).name || "");
-    const params = new URLSearchParams({
-      filename: name,
-      accounts: String(form.get("accounts") || ""),
-      platforms: String(form.get("platforms") || ""),
-      content_type: String(form.get("content_type") || ""),
-      sheet_types: String(form.get("sheet_types") || ""),
-    });
-    target = `${upstream}/zaapi-kb/import/${op}?${params}`;
+    if (op === "package") {
+      const params = new URLSearchParams({
+        preview: String(url.searchParams.get("preview") === "true"),
+        shops: String(form.get("shops") || ""),
+      });
+      target = `${upstream}/zaapi-kb/import/package?${params}`;
+    } else {
+      const name = String(form.get("filename") || (file as File).name || "");
+      const params = new URLSearchParams({
+        filename: name,
+        accounts: String(form.get("accounts") || ""),
+        platforms: String(form.get("platforms") || ""),
+        content_type: String(form.get("content_type") || ""),
+        sheet_types: String(form.get("sheet_types") || ""),
+        subject_bindings: String(form.get("subject_bindings") || ""),
+        source_id: String(form.get("source_id") || ""),
+        shop_scopes: String(form.get("shop_scopes") || ""),
+        file_sha256: String(form.get("file_sha256") || ""),
+        mapping_sha256: String(form.get("mapping_sha256") || ""),
+        source_snapshot_sha256: String(form.get("source_snapshot_sha256") || ""),
+        row_snapshot: String(form.get("row_snapshot") || ""),
+      });
+      target = `${upstream}/zaapi-kb/import/${op}?${params}`;
+    }
     body = await file.arrayBuffer();
     headers.set("Content-Type", "application/octet-stream");
   }

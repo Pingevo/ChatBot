@@ -1106,7 +1106,7 @@ _FILE_XLSX = _xlsx_bytes([
 
 def _chat_files(mp, *, file_rows, filename="test-kb.xlsx",
                 content_type="product", shop="ShopA", msg=_MSG,
-                intent_result=None,
+                intent_result=None, subject_bindings=None,
                 llm_reply="CTC620P ใช้ได้ค่ะ", import_fn=None):
     """file row → apply_import (real owner) → app.chat() → (resp, typed_ctx).
     import_fn(admindb) เสริม import เพิ่ม/ทำกิจก่อน chat (replace/rollback)."""
@@ -1132,6 +1132,8 @@ def _chat_files(mp, *, file_rows, filename="test-kb.xlsx",
         if file_rows is not None:
             r = _zkf.apply_import(
                 admindb, filename=filename, data=file_rows,
+                subject_bindings=subject_bindings if subject_bindings is not None else {
+                    "ข้อมูลสินค้า": {"columns": [{"column_index": 1, "header": "ชื่อสินค้า"}]}},
                 accounts=["ShopA"], platforms=["shopee"],
                 content_type=content_type, admin="t")
             assert r["ok"]
@@ -1236,6 +1238,35 @@ def test_zaapi_files_replace_uses_new_value():
         "rollback must restore old value"
 
 
+@pytest.mark.parametrize("subject_present", [False, True])
+def test_zaapi_files_chat_warranty_never_uses_target(subject_present):
+    rows = [["ชื่อสินค้า", "รายละเอียดสินค้า", "ระยะประกัน"],
+            ["Xiaomi 17 Ultra", "รับประกัน 5 ปี", "5 ปี"]]
+    if subject_present:
+        rows.append(["CTC620P", "รับประกัน 1 ปี", "1 ปี"])
+    resp, ctx = _chat_files(
+        MonkeyPatch(), file_rows=_xlsx_bytes(rows),
+        subject_bindings={"ข้อมูลสินค้า": {
+            "columns": [{"column_index": 1, "header": "ชื่อสินค้า"}],
+            "facts": {"warranty": {"column_index": 3, "header": "ระยะประกัน"}}}},
+        msg="CTC620P รับประกันกี่ปี ถ้าใช้ร่วมกับ Xiaomi 17 Ultra",
+        intent_result=_WARRANTY_INTENT,
+        llm_reply=("CTC620P รับประกัน 1 ปีค่ะ" if subject_present
+                   else "ยังไม่มีข้อมูลประกัน CTC620P ค่ะ"))
+    assert ctx is not None
+    evidence = _file_evid(ctx)
+    assert not any("5 ปี" in _ev_text(e) for e in evidence)
+    assert bool(evidence) == subject_present
+    if subject_present:
+        assert all("CTC620P" in _ev_text(e) for e in evidence)
+        assert ctx.spec_measured_facts, "\n".join(ctx.trace)
+        assert {f["value"] for f in ctx.spec_measured_facts} == {12}
+        assert set((resp.routing_decision or {}).get("subject_ids") or ()) == {
+            f["identity"] for f in ctx.spec_measured_facts}
+        assert "1 ปี" in (resp.answer or "")
+    assert "5 ปี" not in (resp.answer or "")
+
+
 def test_zaapi_files_near_model_not_confused():
     """ไฟล์มี CTC620P + CTC620P2 → ถาม CTC620P → evidence แรกต้องเป็นแถว
     CTC620P (ref boundary; แถว CTC620P2 ไม่ได้ ref credit)."""
@@ -1267,6 +1298,7 @@ def test_zaapi_files_conflicting_sources_both_reach_evidence():
         mp, file_rows=_FILE_XLSX,
         import_fn=lambda admindb: _zkf.apply_import(
             admindb, filename="second-kb.xlsx", data=f2,
+            subject_bindings={"ข้อมูลสินค้า": {"columns": [{"column_index": 1, "header": "ชื่อสินค้า"}]}},
             accounts=["ShopA"], platforms=["shopee"],
             content_type="product", admin="t"))
     ev = _file_evid(typed_ctx)

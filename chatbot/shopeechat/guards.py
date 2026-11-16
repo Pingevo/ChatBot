@@ -300,7 +300,7 @@ def _spec_fact_grounded(resp, tok: str, raw_ctx: str = "") -> bool:
         # canonical Zaapi facts เท่านั้นที่ ground ได้ — card-derived
         #   measured rows (spec_measured รวม card facts ของทุก candidate
         #   รวมตัวที่ถูก drop) ไม่ใช่ guard authority
-        if str(_mf.get("source") or "") != "kb_zaapi":
+        if str(_mf.get("source") or "") not in ("kb_zaapi", "kb_zaapi_files"):
             continue
         _ident = str(_mf.get("identity") or "")
         if not _ident or (_sids and _ident not in _sids):
@@ -310,7 +310,7 @@ def _spec_fact_grounded(resp, tok: str, raw_ctx: str = "") -> bool:
                     subject_id=_ident,
                     fact_key=str(_mf.get("fact_key") or ""),
                     value=_mf.get("value"),
-                    status="known", source="kb_zaapi"),),
+                    status="known", source=str(_mf["source"])),),
                 _ident, tok):
             return True
     # warranty claim — months semantics ผ่าน owner เดิม (warranty.py):
@@ -332,7 +332,7 @@ def _spec_fact_grounded(resp, tok: str, raw_ctx: str = "") -> bool:
                 return True
         for _mf in (isinstance(_rd, dict)
                     and (_rd.get("spec_measured") or ()) or ()):
-            if str(_mf.get("source") or "") != "kb_zaapi":
+            if str(_mf.get("source") or "") not in ("kb_zaapi", "kb_zaapi_files"):
                 continue
             if str(_mf.get("fact_key") or "") != "warranty":
                 continue

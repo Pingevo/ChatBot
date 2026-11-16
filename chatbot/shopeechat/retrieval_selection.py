@@ -219,11 +219,11 @@ def needs_for_request(req: RetrievalRequest, needs: tuple) -> tuple:
         # per-need zaapi channel (ch:kb:<i> ติด refs ของ need มา) —
         #   identity-scoped coverage: เฉพาะ need ที่ refs ตรงกันเป๊ะ;
         #   typed topic gate ที่ compiler คัดหัวข้อขั้นสุดท้าย
-        srefs = (frozenset(req.subject_refs or ())
-                 | frozenset(req.target_refs or ()))
+        srefs = frozenset(req.subject_refs or ())
+        trefs = frozenset(req.target_refs or ())
         out = [n for n in prodish
-               if (frozenset(n.subject_refs or ())
-                   | frozenset(n.target_refs or ())) == srefs]
+               if frozenset(n.subject_refs or ()) == srefs
+               and frozenset(n.target_refs or ()) == trefs]
     else:
         out = list(needs)  # bare kb/อื่นๆ = context channel ทุก need
     return tuple(out)

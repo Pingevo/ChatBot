@@ -831,6 +831,11 @@ def _finalize_answer(comp, *, message: str, limit: int, products,
     if comp.context is not None:
         rd["spec_measured"] = list(
             comp.context.spec_measured_facts or ())
+        subject_ids = list(dict.fromkeys(list(rd.get("subject_ids") or ()) + [
+            str(f["identity"]) for f in rd["spec_measured"]
+            if f.get("source") == "kb_zaapi_files" and f.get("identity")]))
+        if subject_ids:
+            rd["subject_ids"] = subject_ids
     return ChatResponse(
         answer=answer,
         answer_segments=llm.split_segments(answer),
@@ -5749,24 +5754,57 @@ def _json_param(s: str):
         return None
 
 
+def _json_list_param(s: str):
+    """query param JSON array → list; ว่าง/parse ไม่ได้ → None."""
+    import json
+    s = (s or "").strip()
+    if not s:
+        return None
+    try:
+        v = json.loads(s)
+        return v if isinstance(v, list) else None
+    except Exception:
+        return None
+
+
 @app.post("/zaapi-kb/import/preview")
 async def zaapi_kb_import_preview(
     request: Request, filename: str,
     accounts: str = "", platforms: str = "",
-    content_type: str = "", sheet_types: str = "") -> dict:
+    content_type: str = "", sheet_types: str = "",
+    subject_bindings: str = "", source_id: str = "",
+    shop_scopes: str = "", file_sha256: str = "",
+    mapping_sha256: str = "", source_snapshot_sha256: str = "",
+    row_snapshot: str = "") -> dict:
     """read-only: parse → diff vs registry — 0 writes, 0 provider calls.
-    sheet_types = JSON {"ชื่อ sheet": "product|troubleshooting|faq|warranty"}."""
+    sheet_types = JSON {"ชื่อ sheet": "product|troubleshooting|faq|warranty"};
+    subject_bindings = JSON ตาม declared-subject contract (columns/refs/rows/facts);
+    shop_scopes = JSON list[{platform,shop_id,shopname}] (validated mapping pairs)."""
     from . import kb_zaapi_files as _zkf
     try:
         _st = _json_param(sheet_types)
         if sheet_types.strip() and _st is None:
             raise ValueError("invalid sheet_types JSON")
+        _sb = _json_param(subject_bindings)
+        if subject_bindings.strip() and _sb is None:
+            raise ValueError("invalid subject_bindings JSON")
+        _ss = _json_list_param(shop_scopes)
+        if shop_scopes.strip() and _ss is None:
+            raise ValueError("invalid shop_scopes JSON")
+        _rs = _json_param(row_snapshot)
+        if row_snapshot.strip() and _rs is None:
+            raise ValueError("invalid row_snapshot JSON")
         return JSONResponse(_zkf.preview_import(
             knowledge_base._admin_db(), filename=filename,
             data=await request.body(),
             accounts=_csv_param(accounts), platforms=_csv_param(platforms),
             content_type=content_type or None,
-            sheet_types=_st))
+            sheet_types=_st, subject_bindings=_sb,
+            source_id=source_id or None, shop_scopes=_ss,
+            file_sha256=file_sha256 or None,
+            mapping_sha256=mapping_sha256 or None,
+            source_snapshot_sha256=source_snapshot_sha256 or None,
+            row_snapshot=_rs))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -5775,19 +5813,55 @@ async def zaapi_kb_import_preview(
 async def zaapi_kb_import_apply(
     request: Request, filename: str,
     accounts: str = "", platforms: str = "",
-    content_type: str = "", sheet_types: str = "") -> dict:
+    content_type: str = "", sheet_types: str = "",
+    subject_bindings: str = "", source_id: str = "",
+    shop_scopes: str = "", file_sha256: str = "",
+    mapping_sha256: str = "", source_snapshot_sha256: str = "",
+    row_snapshot: str = "") -> dict:
     from . import kb_zaapi_files as _zkf
     try:
         _st = _json_param(sheet_types)
         if sheet_types.strip() and _st is None:
             raise ValueError("invalid sheet_types JSON")
+        _sb = _json_param(subject_bindings)
+        if subject_bindings.strip() and _sb is None:
+            raise ValueError("invalid subject_bindings JSON")
+        _ss = _json_list_param(shop_scopes)
+        if shop_scopes.strip() and _ss is None:
+            raise ValueError("invalid shop_scopes JSON")
+        _rs = _json_param(row_snapshot)
+        if row_snapshot.strip() and _rs is None:
+            raise ValueError("invalid row_snapshot JSON")
         return JSONResponse(_zkf.apply_import(
             knowledge_base._admin_db(), filename=filename,
             data=await request.body(),
             accounts=_csv_param(accounts), platforms=_csv_param(platforms),
             admin=_admin_name(request),
             content_type=content_type or None,
-            sheet_types=_st))
+            sheet_types=_st, subject_bindings=_sb,
+            source_id=source_id or None, shop_scopes=_ss,
+            file_sha256=file_sha256 or None,
+            mapping_sha256=mapping_sha256 or None,
+            source_snapshot_sha256=source_snapshot_sha256 or None,
+            row_snapshot=_rs))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/zaapi-kb/import/package")
+async def zaapi_kb_import_package(
+    request: Request, preview: bool = False, shops: str = "") -> dict:
+    """portable source package (zaapi-kb-source v1) → preview/apply เดียวกัน.
+    shops = JSON list[{platform,shop_id,shopname}] ของ scope ปัจจุบันสำหรับตรวจ mapping."""
+    from . import kb_zaapi_files as _zkf
+    try:
+        _shops = _json_list_param(shops)
+        if shops.strip() and _shops is None:
+            raise ValueError("invalid shops JSON")
+        return JSONResponse(_zkf.import_package(
+            knowledge_base._admin_db(), data=await request.body(),
+            shops=_shops or [], preview=preview,
+            admin=_admin_name(request)))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -5825,6 +5899,25 @@ def zaapi_kb_export(file: str):
         content=data, media_type=mt,
         headers={"Content-Disposition":
                  f"attachment; filename*=UTF-8''{quote(file)}"})
+
+
+@app.get("/zaapi-kb/export-package")
+def zaapi_kb_export_package(file: str):
+    """portable source package (zaapi-kb-source v1) — bytes + mapping metadata."""
+    from . import kb_zaapi_files as _zkf
+    from fastapi.responses import Response
+    try:
+        data = _zkf.export_package(knowledge_base._admin_db(), filename=file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if data is None:
+        raise HTTPException(status_code=404, detail="file not found")
+    from urllib.parse import quote
+    name = file.rsplit(".", 1)[0] + ".zaapi-kb-source.json"
+    return Response(
+        content=data, media_type="application/json",
+        headers={"Content-Disposition":
+                 f"attachment; filename*=UTF-8''{quote(name)}"})
 
 
 @app.post("/zaapi-kb/files/toggle")
