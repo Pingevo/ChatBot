@@ -231,28 +231,30 @@ def test_product_word_not_anger():
     assert ("human", "handoff") not in _pairs(p)
 
 
-# ── 2. post-handoff lock (M2 human ownership contract) ──────────────────────
+# ── 2. post-handoff ownership (M2 → BlackShark contract) ─────────────────────
+# ownership="human" ยังเป็น authority — แต่ needs ถูกประเมินปกติ:
+#   typed claim evidence → collect, follow-up ของเคส → status,
+#   คำถามตอบได้ → need เดิม; human_wait เหลือเฉพาะ turn ไม่มี need
 
-def test_active_ticket_locks_plain_text():
-    p = _decide("ยังไม่มีใครตอบเลย", ticket_state={"state": "handoff"})
-    assert p.primary_action == "human_wait"
+def test_active_ticket_status_followup_gets_status_need():
+    p = _decide("ตรวจสอบยังครับ", ticket_state={"state": "handoff"})
     assert p.ownership == "human"
-    assert p.needs == ()
+    assert ("claim", "status") in _pairs(p)
+    assert p.primary_action != "human_wait"
 
 
-def test_active_ticket_locks_greeting():
+def test_active_ticket_greeting_is_case_followup():
     p = _decide("สวัสดีครับ", ticket_state={"state": "handoff"})
-    assert p.primary_action == "human_wait"
     assert p.ownership == "human"
-    assert p.needs == ()
+    assert ("claim", "status") in _pairs(p)
 
 
 @pytest.mark.parametrize("state", ["handoff", "open", "pending"])
-def test_active_ticket_states_lock(state):
-    p = _decide("ยังไม่มีใครตอบเลย", ticket_state={"state": state})
-    assert p.primary_action == "human_wait"
+def test_active_ticket_states_keep_ownership(state):
+    p = _decide("ตรวจสอบยังครับ", ticket_state={"state": state})
     assert p.ownership == "human"
-    assert p.needs == ()
+    assert "post_handoff" in p.flags
+    assert p.primary_action != "human_wait"
 
 
 @pytest.mark.parametrize("state", ["closed", "resolved", "bot"])
@@ -263,32 +265,24 @@ def test_closed_ticket_states_unlock(state):
 
 
 def test_ticket_state_string_form():
-    p = _decide("ยังไม่มีใครตอบเลย", ticket_state="open")
-    assert p.primary_action == "human_wait"
+    p = _decide("ตรวจสอบยังครับ", ticket_state="open")
     assert p.ownership == "human"
+    assert ("claim", "status") in _pairs(p)
 
 
-def test_m2_human_ownership_stops_before_need_evaluation(monkeypatch):
-    """M2: when ownership == 'human', detector intentionally stops before
-    evaluating needs — zero need-extraction calls may run."""
-    from shopeechat import handoffs, message_detectors, route_context, warranty
-    monkeypatch.setattr(handoffs, "is_human_request",
-                        lambda *a, **k: pytest.fail("is_human_request called"))
-    monkeypatch.setattr(handoffs, "is_service_anger",
-                        lambda *a, **k: pytest.fail("is_service_anger called"))
-    monkeypatch.setattr(warranty, "detect_claim_request",
-                        lambda *a, **k: pytest.fail("detect_claim_request called"))
-    monkeypatch.setattr(route_context, "resolve_route",
-                        lambda *a, **k: pytest.fail("resolve_route called"))
-    monkeypatch.setattr(message_detectors, "detect_general_question",
-                        lambda *a, **k: pytest.fail("detect_general_question called"))
-    p = _decide("ขอแอดมินหน่อย มีสายชาร์จเคลมได้ไหม", ticket_state="open",
+def test_human_ownership_evaluates_needs():
+    """BlackShark contract: ownership=='human' keeps ownership but needs are
+    still evaluated — supplemental claim fields bind as collect, answerable
+    questions keep their needs; only need-less turns wait."""
+    p = _decide("0812345678", ticket_state="open",
                 claim_state={"stage": "collecting", "episode_id": "e1"})
-    assert p.primary_action == "human_wait"
     assert p.ownership == "human"
-    assert p.needs == ()
+    assert ("claim", "collect") in _pairs(p)
     assert p.claim.stage == "collecting"
     assert "post_handoff" in p.flags
+    # unanswerable/no-need turn still waits for the human
+    p2 = _decide("", ticket_state="open")
+    assert p2.primary_action in ("human_wait", "no_reply")
 
 
 # ── 5. claim resume requires a fresh claim signal ────────────────────────────
@@ -780,29 +774,34 @@ def test_shadow_fixture_actions_contract():
 
 # ── Phase 1F — contract inputs: anchor / claim provenance ────────────────────
 
-def test_active_ticket_locks_claim_info():
+def test_active_ticket_claim_info_binds():
     p = _decide("0812345678", ticket_state="open")
-    assert p.primary_action == "human_wait"
+    assert p.ownership == "human"
+    assert ("claim", "collect") in _pairs(p)
 
 
-def test_active_ticket_locks_claim_name():
+def test_active_ticket_claim_name_binds():
     p = _decide("สมชาย ใจดี", ticket_state={"state": "handoff"})
-    assert p.primary_action == "human_wait"
+    assert p.ownership == "human"
+    assert ("claim", "collect") in _pairs(p)
 
 
-def test_active_ticket_locks_lone_name():
+def test_active_ticket_lone_name_binds():
     p = _decide("สมชาย", ticket_state={"state": "handoff"})
-    assert p.primary_action == "human_wait"
+    assert p.ownership == "human"
+    assert ("claim", "collect") in _pairs(p)
 
 
-def test_active_ticket_locks_product_question():
+def test_active_ticket_product_question_answered():
     p = _decide("มีสายชาร์จไหมครับ", ticket_state="pending")
-    assert p.primary_action == "human_wait"
+    assert p.ownership == "human"
+    assert ("product", "describe") in _pairs(p)
 
 
-def test_active_ticket_locks_image_placeholder():
+def test_active_ticket_image_placeholder_is_supplemental():
     p = _decide("[รูปภาพ]", ticket_state={"state": "open"})
-    assert p.primary_action == "human_wait"
+    assert p.ownership == "human"
+    assert ("claim", "collect") in _pairs(p)
 
 
 def test_decide_turn_has_no_exceptions_param():

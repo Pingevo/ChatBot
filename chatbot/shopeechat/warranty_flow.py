@@ -81,6 +81,7 @@ class ClaimLifecycleView:
     stage: str  # absent | collecting | ts_suggested | resolved | cancelled
     lifecycle_open: bool
     accepts_claim_fields: bool
+    handed_off: bool = False
 
 
 def _claim_lifecycle(claim_state: dict | None) -> ClaimLifecycleView:
@@ -97,6 +98,9 @@ def _claim_lifecycle(claim_state: dict | None) -> ClaimLifecycleView:
         # collecting only — ts_suggested เป็น episode เปิด แต่ยังไม่รับข้อมูล
         # (verdict หลัง troubleshoot ผ่าน ts-followup branch เท่านั้น)
         accepts_claim_fields=stage == "collecting",
+        # episode ที่ POST สำเร็จแล้ว (typed — ใช้กัน POST ซ้ำ + ownership
+        #   evidence ตอน ticket_state ไม่มี เช่น shadow/test calls)
+        handed_off=open_ and bool(cs.get("handed_off_at")),
     )
 
 
@@ -295,17 +299,24 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
     # ── Pre-check: claim request detection ──
     _is_claim_request = _warranty_mod.detect_claim_request(req.message)
 
+    # dup-handoff guard — typed episode flag (authority — marker text ไม่ได้
+    #   emit เสมอเมื่อ outcome=queued) หรือ ticket_state/marker evidence:
+    #   supplemental info ยังผูกเข้า episode ได้ แต่ห้าม POST handoff ซ้ำ
+    _already_handed = (
+        bool(_claim_state.get("handed_off_at"))
+        or _is_active_post_handoff(req, history))
+
     # ── State machine ทำงานเฉพาะเมื่อมี history หรือ episode เปิดอยู่ ──
     #   (persisted state เป็น authority — history fetch ว่างไม่ตัด resume)
     if not history and not _view.lifecycle_open:
         # First-message claim (no history, no open episode) → handle ที่ท้ายฟังก์ชัน
-        return _handle_first_message_claim(req, ctx, _is_claim_request, _warranty_mod, llm, _app_module, _claim_state)
+        return _handle_first_message_claim(req, ctx, _is_claim_request, _warranty_mod, llm, _app_module, _claim_state, already_handed=_already_handed)
 
     # ⚡ 2B.4 — explicit claim request ตอนไม่มี open episode → fresh-claim path
     #   เดียวกันเสมอ (absent/terminal → episode ใหม่ผ่าน transition owner;
     #   marker เก่าบน terminal episode ห้าม reopen)
     if _is_claim_request and not _view.lifecycle_open:
-        return _handle_first_message_claim(req, ctx, True, _warranty_mod, llm, _app_module, _claim_state)
+        return _handle_first_message_claim(req, ctx, True, _warranty_mod, llm, _app_module, _claim_state, already_handed=_already_handed)
 
     # ── ดึง last model message ──
     _last_model_msgs = [h for h in history if h.get("role") == "model"][-1:]
@@ -623,7 +634,8 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
     # ── ถ้ามี warranty claim answer → ส่ง handoff + return ──
     if _warranty_claim_answer:
         return _build_warranty_claim_response(
-            req, ctx, _warranty_claim_answer, _warranty_claim_handoff,
+            req, ctx, _warranty_claim_answer,
+            _warranty_claim_handoff and not _already_handed,
             _warranty_claim_ctx, _app_module, llm, claim_state=_claim_state
         )
 
@@ -650,7 +662,7 @@ def handle_warranty_flow(req, ctx: dict, history: list[dict], db) -> dict | None
 
     # ── First-message claim (มี history แต่ state machine ไม่ได้จับ) ──
     if _is_claim_request:
-        return _handle_first_message_claim(req, ctx, True, _warranty_mod, llm, _app_module, _claim_state)
+        return _handle_first_message_claim(req, ctx, True, _warranty_mod, llm, _app_module, _claim_state, already_handed=_already_handed)
 
     return None
 
@@ -778,14 +790,21 @@ def _build_post_handoff_response(req, ctx, _app_module, llm) -> dict:
 
 def _build_warranty_claim_response(req, ctx, answer, handoff, claim_ctx,
                                      _app_module, llm, source="warranty_claim_flow",
-                                     claim_state: dict | None = None) -> dict:
+                                     claim_state: dict | None = None,
+                                     already_handed: bool = False) -> dict:
     """สร้าง response สำหรับ warranty claim พร้อม handoff API call.
 
     claim_state = authoritative claim lifecycle state ของ caller (เป้าหมาย:
     open episode ⟹ episode_id ส่งผ่าน transport explicitly — `_send_handoff`
     ไม่อ่าน Mongo เอง). lifecycle open แต่ไม่มี episode_id หรือ claim_state
     ไม่ทราบ → handoff ถือไม่สมบูรณ์: ไม่ POST + flag False (ห้าม false success)
+    already_handed=True → episode นี้ POST ไปแล้ว — ตอบ supplemental อย่างเดียว
+    (ไม่ POST ซ้ำ, flag/routing = bot_reply, base answer ไม่ถูกแทนด้วย fail reply;
+    disposition ยัง TERMINAL — claim answer จบ flow ไม่ไหลต่อไป product)
     """
+    _terminal_flow = handoff
+    if already_handed:
+        handoff = False
     _model_name = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash-lite")
     _total = round(_time.time() - ctx.get("total_start", _time.time()), 2)
     _handoff_result: dict = {}
@@ -816,6 +835,25 @@ def _build_warranty_claim_response(req, ctx, answer, handoff, claim_ctx,
         # ⚡ 2B.4 — handoff สำเร็จเปลี่ยน conversation ownership ไม่ใช่ claim
         #   resolution: claim_state คงอยู่ (lifecycle แยกจาก ticket; resolved/
         #   cancelled มาจาก valid terminal evidence เท่านั้น)
+        # typed dedupe evidence — marker text ไม่ได้ emit เสมอ (queued ไม่มี
+        #   ชื่อแอดมิน) → episode-scope flag เป็น authority ของ "POST แล้ว"
+        if _handoff_result and _episode_id and claim_state is not None:
+            try:
+                from . import conversation_products as _cp_hf
+                from datetime import datetime as _dt_hf, timezone as _tz_hf
+                _cp_hf.merge_claim_fields(
+                    req.conversation_id,
+                    episode_id=_episode_id,
+                    expected_stage=_ep_view.stage,
+                    fields={
+                        "handed_off_at": _dt_hf.now(_tz_hf.utc).isoformat(),
+                        "handoff_outcome": (_handoff_result.get("outcome")
+                                            or {}).get("state"),
+                    },
+                    platform=req.platform, shop=req.shop)
+            except Exception as _he:
+                print(f"[WARRANTY-CLAIM] handed_off mark failed: {_he}",
+                      file=sys.stderr)
 
         if _assigned_admin_name:
             _reason_thai = {
@@ -853,7 +891,7 @@ def _build_warranty_claim_response(req, ctx, answer, handoff, claim_ctx,
         "timing": ctx.get("timing_breakdown") or {},
         # flag = authoritative outcome เท่านั้น (request handoff แต่ transport fail → False)
         "handoff_to_admin": bool(handoff and _handoff_result),
-        "warranty_disposition": _WarrantyDisposition.TERMINAL if handoff else _WarrantyDisposition.CONTINUE_PRODUCT,
+        "warranty_disposition": _WarrantyDisposition.TERMINAL if _terminal_flow else _WarrantyDisposition.CONTINUE_PRODUCT,
         "handoff_reason": claim_ctx.get("handoff_reason") if handoff and _handoff_result else None,
         "handoff_claim": claim_ctx,
         "steps": ctx.get("steps", []),
@@ -1032,28 +1070,37 @@ def _handle_tax_invoice_followup(req, ctx, history, _warranty_mod, _app_module, 
 
 
 def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_module,
-                                claim_state: dict | None = None) -> dict | None:
+                                claim_state: dict | None = None,
+                                already_handed: bool = False) -> dict | None:
     """State: first-message claim — claim request ไม่มี history หรือ state machine ไม่ได้จับ.
 
     explicit fresh claim request → transition owner เริ่ม episode ใหม่เมื่อ
     absent/terminal (identity allowlist ข้ามได้, case evidence ไม่ข้าม);
     open episode → ต่อ episode เดิม (retry/claim-request กลาง collect ไม่ fork).
+    already_handed → episode POST แล้ว: supplemental answer เท่านั้น ห้าม POST ซ้ำ
     """
     if not is_claim:
         return None
     _bot_name = ctx.get("bot_name", "เรา")
     # ⚡ Task 5C-F — malfunction claim ต้อง acknowledge + safe checks ก่อน
     #   ขอข้อมูลเคลม (ไม่เดาสเปค/สาเหตุเฉพาะรุ่น)
-    _answer = (
-        _warranty_mod.malfunction_safe_check(req.message)
-        + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
-        f"• วันที่ซื้อสินค้า\n"
-        f"• เลขที่คำสั่งซื้อ\n"
-        f"• รูปหรือวิดีโอแสดงอาการ/ความเสียหาย\n\n"
-        f"เงื่อนไขการรับประกันเบื้องต้น: สินค้าต้องอยู่ในช่วงรับประกัน "
-        f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
-        f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ {_bot_name} จะตรวจสอบและประสานงานต่อให้ค่ะ"
-    )
+    # already_handed → ไม่ถามข้อมูลซ้ำทั้งชุด: turn ที่มาถึงจุดนี้คือ claim-routed
+    #   ที่ collect SM ไม่ได้จับ (ไม่มี field ใหม่) = follow-up/status ของเคสที่
+    #   ส่งแอดมินแล้ว → status answer เดียว (ไม่ POST ซ้ำ)
+    if already_handed:
+        from . import responses as _resp_mod
+        _answer = _resp_mod.CLAIM_STATUS_REPLY
+    else:
+        _answer = (
+            _warranty_mod.malfunction_safe_check(req.message)
+            + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
+            f"• วันที่ซื้อสินค้า\n"
+            f"• เลขที่คำสั่งซื้อ\n"
+            f"• รูปหรือวิดีโอแสดงอาการ/ความเสียหาย\n\n"
+            f"เงื่อนไขการรับประกันเบื้องต้น: สินค้าต้องอยู่ในช่วงรับประกัน "
+            f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
+            f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ {_bot_name} จะตรวจสอบและประสานงานต่อให้ค่ะ"
+        )
     # ⚡ 2B.4 — explicit fresh claim request → episode lifecycle ผ่าน owner เดียว
     #   (capture authoritative return — episode_id ของ episode ที่เพิ่ง mint
     #   อยู่ใน state นี้ ไม่ใช่ claim_state เดิม)
@@ -1061,7 +1108,7 @@ def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_mod
     _claim_ctx = {"claim_topic": "เคลม/ซ่อม/ประกันสินค้า", "handoff_reason": "claim"}
     return _build_warranty_claim_response(
         req, ctx, _answer, True, _claim_ctx, _app_module, llm,
-        claim_state=claim_state
+        claim_state=claim_state, already_handed=already_handed
     )
 
 
@@ -1123,6 +1170,13 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
     #   เฉพาะตอนไม่ terminal (terminal ต้อง explicit fresh claim เท่านั้น)
     _view = _claim_lifecycle(_claim_state)
     _accept_evidence = _view.lifecycle_open or _view.stage == "absent"
+
+    # dup-handoff guard — typed episode flag (authority — marker text ไม่ได้
+    #   emit เสมอเมื่อ outcome=queued) หรือ ticket_state/marker evidence:
+    #   supplemental info ยังผูกเข้า episode ได้ แต่ห้าม POST handoff ซ้ำ
+    _already_handed = (
+        bool(_claim_state.get("handed_off_at"))
+        or _is_active_post_handoff(req, history))
 
     # ⚡ 2B.4 — explicit claim request ตอนไม่มี open episode → ข้าม SM ทั้งก้อน
     #   ไป fresh-claim path เดียว (terminal/absent → episode ใหม่ผ่าน owner)
@@ -1565,7 +1619,8 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             print(f"[TIMING] WARRANTY-CLAIM: {_total_elapsed:.2f}s  handoff={_warranty_claim_handoff}", file=sys.stderr)
             # transport owner เดียว — outcome ยืนยันเท่านั้นถึง claim/flag/clear
             return _build_warranty_claim_response(
-                req, ctx, _warranty_claim_answer, _warranty_claim_handoff,
+                req, ctx, _warranty_claim_answer,
+                _warranty_claim_handoff and not _already_handed,
                 _warranty_claim_ctx, _app_module, llm,
                 claim_state=_claim_state,
             )
@@ -1747,23 +1802,30 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
 
         # ⚡ Task 5C-F — malfunction claim ต้อง acknowledge + safe checks ก่อน
         #   ขอข้อมูลเคลม (QA tips ถ้ามีจะชนะ — return ก่อนถึงข้อความนี้)
-        _claim_first_answer = (
-            warranty.malfunction_safe_check(req.message)
-            + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
-            f"• วันที่ซื้อสินค้า\n"
-            f"• เลขที่คำสั่งซื้อ\n"
-            f"• รูปหรือวิดีโอแสดงอาการ/ความเสียหาย\n\n"
-            f"เงื่อนไขการรับประกันเบื้องต้น: สินค้าต้องอยู่ในช่วงรับประกัน "
-            f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
-            f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ {_bot_name} จะตรวจสอบและประสานงานต่อให้ค่ะ"
-        )
+        # already_handed → เคสส่งแอดมินแล้ว: claim-routed turn ที่ SM ไม่ได้จับ
+        #   = follow-up/status → status answer (ไม่ถามข้อมูลซ้ำ ไม่ POST ซ้ำ)
+        if _already_handed:
+            from . import responses as _resp_mod
+            _claim_first_answer = _resp_mod.CLAIM_STATUS_REPLY
+        else:
+            _claim_first_answer = (
+                warranty.malfunction_safe_check(req.message)
+                + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
+                f"• วันที่ซื้อสินค้า\n"
+                f"• เลขที่คำสั่งซื้อ\n"
+                f"• รูปหรือวิดีโอแสดงอาการ/ความเสียหาย\n\n"
+                f"เงื่อนไขการรับประกันเบื้องต้น: สินค้าต้องอยู่ในช่วงรับประกัน "
+                f"และไม่ใช่ความเสียหายจากการใช้งานผิดวิธี น้ำเข้า หรือตกกระแทก "
+                f"(ขึ้นกับเงื่อนไขเฉพาะรุ่น) หากข้อมูลครบ {_bot_name} จะตรวจสอบและประสานงานต่อให้ค่ะ"
+            )
         # ⚡ QA-KB troubleshoot-first — ถ้ามีวิธีแก้เบื้องต้นที่ตรงรุ่น/สินค้า
         #    → แนะนำก่อน ยังไม่ขอข้อมูลเคลม/ไม่ handoff
         #    ลูกค้าตอบ "ไม่หาย/ไม่ได้" → state machine (ts_suggested) เข้า claim info
+        #    (already_handed = เคสอยู่กับแอดมินแล้ว → ข้าม tips ตอบ status)
         try:
             from . import knowledge_base as _kbmod
             from . import generation_pointer as _gen
-            _tips = _kbmod.qa_troubleshoot_tips(
+            _tips = None if _already_handed else _kbmod.qa_troubleshoot_tips(
                 req.message, conversation_id=req.conversation_id,
                 item_id=req.item_id,
                 snap=ctx.get("snap", _gen.SNAP_UNSET),
@@ -1811,9 +1873,10 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
         _claim_state = _claim_transition(req, _claim_state, "collecting", fresh_claim=True)
 
         # ⚡ handoff ทันที — canonical builder เป็น owner เดียวของ transport/result/flag/answer
+        #   already_handed → supplemental only (ห้าม POST ซ้ำเข้า episode เดิม)
         return _build_warranty_claim_response(
             req, ctx, _claim_first_answer, True,
             {"claim_topic": "เคลม/ซ่อม/ประกันสินค้า", "handoff_reason": "claim"},
             _app_module, llm, source="warranty_claim_first_message",
-            claim_state=_claim_state,
+            claim_state=_claim_state, already_handed=_already_handed,
         )

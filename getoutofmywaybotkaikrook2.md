@@ -14537,3 +14537,54 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - เทสต์: +2 owner tests (patch xlsx rev2 edited_cells=1 bindings inherit / txt + validation table), grid_src assert; 134 passed; tsc clean
 - ข้อจำกัด: แก้ได้เฉพาะ 50 แถวแรกที่ preview แสดง (แถวอื่นคงเดิม — patch ไม่ทับ); แก้ header ที่ binding ผูกอยู่จะ fail ตอน apply (ตาม design)
 - งานค้าง: inline preview block ใน panel ถูกแทนด้วย popup; user curate bindings; live QA; deploy
+
+## กำลังจะทำ: แก้คุณภาพคำตอบ Shopee chatbot เคส BlackShark (ภาพจอเสีย + เคลม + handoff) — 2026-11-21
+- เป้าหมาย: แก้ root cause ใน owner เดิมตลอดเส้นทาง inbound ข้อความ/รูป → ตัดสินใจ → ค้นหลักฐาน → ตอบ → ส่งต่อแอดมิน
+- baseline (read-only evidence): conv shp_2914916050682852821, 58 msgs / 23 shadow_replies (batch manual 2026-11-17), image_desc มีใน Q1/Q5 แต่ Q15 ไม่มี (raw_payload มี URL แต่คนละ shape), ไม่มี doc ใน conversation_products/status_conversation/botworker_events/buffer_messages
+- ข้อบกพร่องที่พิสูจน์แล้วจาก shadow_replies: Q1 รูปจอเสีย→เสนอพัดลม 3 ใบ, Q3 parse ข้อความเป็นชื่อ, Q4 ขายสินค้าระหว่างเคลม, Q5 ตอบรับรูป generic ไม่ใช้อาการ, Q6–Q23 human_wait ตอบ "ส่งต่อให้แอดมิน" ซ้ำ 18 ครั้ง
+- วิธี: trace call path จริง → RED behavioral tests → แก้ใน owner เดิม → GREEN → replay Q1–Q23 → waythrough+ledger → หยุดก่อน commit ให้ user ตรวจ diff
+
+## ผ่านแล้ว: BlackShark root-cause fixes (verified 2026-11-21)
+- RED→GREEN: docs/test/offline/test_blackshark_claim_regression.py (17 tests, 11 RED baseline → 17 GREEN); offline suite 2363 passed 0 regressions
+- order_store: ตัด cross-shop fallback ใน lookup_order/lookup_by_tracking — order ร้านอื่นไม่หลุดมา (BlackShark Q9 SN ผูก claim ถูกร้าน)
+- warranty._extract_name_ner: denylist เพิ่มวลีผสมที่ไม่มีทางเป็นชื่อ ("เป็นแบบ/แบบนี้/แบบนั้น/เป็นอย่าง/ผิดปกติ/สดวก") — "จอเป็นแบบนี้สะ"/"สดวกส่ง" ไม่ถูก persist เป็นชื่อลูกค้าอีก
+- turn_decision.decide_turn: +has_visual_media/image_desc params; post-handoff ประเมิน needs ปกติ (human_wait เหลือเฉพาะไม่มี need ตอบได้); open-claim media/item-tag → claim/collect; post-handoff fields → collect, ข้อความว่าง-field → claim/status; suppress human/anger re-handoff ใต้ human ownership; vision desc ที่มีอาการ/เคลม → claim need; post_handoff รวม claim.handed_off (typed episode flag — ticket_state ไม่มีก็ตรวจได้); suppress policy need ใต้ post_handoff (คำถามจัดส่ง/นโยบายตอนเคสอยู่แอดมิน = claim-context)
+- warranty_flow: ClaimLifecycleView +handed_off; _build_warranty_claim_response +already_handed (ไม่ POST ซ้ำ, flag/routing ตาม outcome จริง, disposition ยัง TERMINAL) + เขียน claim_state.handed_off_at/handoff_outcome หลัง transport ยืนยัน (episode-scope typed dedupe — marker text ไม่ emit เมื่อ queued ไม่มีชื่อแอดมิน); _handle_first_message_claim +already_handed → CLAIM_STATUS_REPLY (ไม่ถามข้อมูลซ้ำ); legacy first-message block +already_handed status + ข้าม QA troubleshoot tips; _already_handed = handed_off_at OR _is_active_post_handoff ทั้ง v2/legacy
+- app.py: lock post-handoff ย้ายหลัง vision/planner เฉพาะ legacy (v2/v3 strict ต่อ); ส่ง image_desc เข้า decide_turn; plan claim need (collect/status) → promote _is_claim_request; item-tag block gate ใต้ open claim; media-unreadable แนบ image_desc
+- responses.py: +CLAIM_STATUS_REPLY ("เคสอยู่ระหว่างแอดมินดำเนินการ") + MEDIA_UNREADABLE_REPLY
+- ผลกระทบเคสอื่น: stale-lock tests (6+3) อัปเดตเป็นสัญญาใหม่ (v2/v3 strict boundary / legacy TurnPlan-owned); fixture rows 15 จุดใน legacy_turn_incidents.jsonl อัปเดตตาม semantics ใหม่ (anger ใต้ handoff → claim/status, policy need หายใต้ post_handoff); lock-product-plus-warranty-term เหลือ product need เดียว (policy suppressed → คำถามสินค้าใหม่ยังตอบได้ ไม่ถูก lock)
+- Replay Q1–Q23 (in-process, LLM/vision/transport stub, conversation_products in-mem): TOTAL_POSTS 11→1 (episode เดียว), prods=0 ทุก turn (ไม่ mis-sell พัดลม), Q5/Q7/Q15 รูปผูกเป็น claim evidence, Q9 SN persist, Q17–Q23 status reply แทน product-store/shipping, claim_state สะอาด (ไม่มีชื่อปลอม)
+- งานค้าง: SRS §6 doc updates; commit แยกทีละ fix (หยุดรอ user ตรวจ diff); production-provider (Gemini จริง) ยังไม่ได้ verify — replay ใช้ stub
+
+## ผ่านแล้ว: live-provider replay Q1–Q23 (Gemini จริง + Mongo จริง) — 2026-11-21
+- วิธี: /tmp/replay_live.py — un-stub vision/intent/text (Gemini จริง: vision gemini-3.1-flash-lite โหลดรูปจริง bytes+tokens จริง), conversation_products → admin Mongo จริง (conv shadow:replay:devin-blackshark-live1); เก็บ _send_handoff เป็น seam (บันทึก POST + queued outcome — admin server ไม่ได้รัน)
+- ผล: TOTAL_POSTS 1 (episode เดียว), prods=0 ทุก turn, claim_state persist ใน Mongo จริง (collecting + handed_off_at + order SN + has_image, ไม่มีชื่อปลอม)
+- vision จริง 4/4 media turns: Q1 จอเสีย (ด่างเขียว/ขาว) → claim first-message+POST; Q5 จุดดำบนจอ; Q7 วิดีโอ (Black Shark) → claim evidence; Q15 ใบปะหน้าพัสดุ J&T (API-format URL ที่เดิม desc=None) → desc จริง + ผูก claim evidence — ยืนยัน extraction fix ครบทั้ง 2 payload shapes
+- intent classify + answer ผ่าน _generate จริงทุก turn (0 exception); deterministic replies (status/collect/first-message) ตาม design — ไม่มี LLM call ในเส้นที่ไม่ควรมี
+
+## ผ่านแล้ว: live matrix A/B/C regression กับเคสจริง wattaka/pingevox/aumporn (Gemini จริง + Mongo read-only จริง) — 2026-11-21
+- วิธี: docs/test/live/live_matrix_abc.py --smoke = 3 convs × 3 variants (A=legacy ungrouped / B=grouped+zaapi KB / C=grouped+legacy KB); artifact docs/test/results/live_matrix_abc_20261117-052418.json
+- harness fix: pool_matrix_audit.py shims (get_subject_set/load_timeline/load_claim_state/merge_claim_fields/transition_claim_state) รับ platform/shop kwargs ตาม signature ใหม่ของ conversation_products — ก่อนแก้ทุกเคส error `_get() got unexpected kwarg 'platform'`; ยังคง in-mem persistence + _ReadOnly product coll (mongo_write=0)
+- gate: SMOKE PASS — gemini 59 calls/62 attempts (e503 x3 retried), e429=0, quota alive, mongo_write=0, web=0, vision=0, openrouter=0; errors=0
+- ผลต่อเคส: wattaka t1 exact_item ถูกทุก variant, t2 spec 480Mbps ถูก, t3 10Gbps+magnetic constraint → B/C ตอบตรง "ไม่มีผ่านครบทุกข้อ"+verdict รายตัว + handoff flag=constraint_no_match (by design, ไม่ใช่ transport), A อ่อน (defer แอดมิน); pingevox greeting/compat xiaomi17ultra/adapter subtype ถูกทุก variant (historical item เป็น evidence ไม่ถูกเลือก), A อ่อน t3/t4; aumporn t1 exact_item ถูก, t2 multifact → A ตอบครบ / B,C ระวังตัว (ยืนยันเฉพาะ HR+โหมด), t3 Strava → ไม่มี variant ยืนยัน Strava ตรงๆ (A ระบุแอปที่รองรับ, C ตอบ spec ทั่วไป — gap คำตอบ spec-follow-up ที่มีอยู่เดิม)
+- isolation: ทุกคำตอบอยู่ใน shop scope (CukTechThailand/KingGadgets/IMILabThailand) ไม่มีข้ามร้าน; ไม่มี claim/handoff ผิดพลาด; ไม่มี regression จากชุดแก้ BlackShark (เส้น product Q&A ปกติไม่มี claim context)
+- ข้อสังเกต (pre-existing, ไม่ใช่ regression): A-path อ่อนใน constraint/subtype turns; Strava follow-up ตอบไม่ตรงใน B/C — อยู่นอกขอบเขตชุดแก้นี้
+- งานค้าง: commit แยกทีละ fix (รอ user); optional full gold-corpus matrix run
+
+## ผ่านแล้ว: evidence-gap fixes — desc fallback + claimed wattage tier + unanswered wording (verified 2026-11-21)
+- ที่มา: pingevox Q3/Q4 — verdict เต็มสเปค hedge ทุกตัวทั้งที่ desc/name มี "240W"; spec claim ใน desc โดน defer-note ทั้งที่ข้อมูลมี; unanswered boilerplate อ่านเหมือน error
+- RED→GREEN: docs/test/offline/test_evidence_gap_fixes.py (10 tests); suite เต็ม 2372 passed 0 regression (1 stale contract update: zaapi cable-no-capacity, phase10b name-watt)
+- F1 product_store._doc_description_text (ใหม่): flat `description` ว่าง → join text blocks จาก `description_info.extended_description.field_list` (240 docs ในร้านที่ probe ไม่มี flat desc — CMC615P/CTL301/adapter รวม) → `to_product_card` description_excerpt 0→2684 chars (verify บน doc จริง CMC615P/CTC615P/CTC620P); LLM/spec_tokens/grounding เห็น spec text ใน desc แล้ว
+- F2 _wattage_rc claimed tier: structured watts ว่าง → fallback อ่าน `output_w` fact (parse name/desc/variants ผ่าน _extract_max_wattage — ต้อง numeric จริง ไม่ใช่ bool, finite, >0) → claimed_wattage_covers_target / claimed_insufficient_wattage / claimed_wattage_variant_unconfirmed (แทน missing_wattage_evidence เมื่อ seller ระบุ watt ไว้); device_compat._extract_max_wattage เติม bool/isfinite/>0 filter (output_power_w=True เคยไหลเป็น 1.0); _compat_segment render claimed codes ด้วย "ตามข้อมูลสินค้าระบุ" (attribute source ไม่ claim verified — ผู้ใช้เลือกแล้ว); structured tier เหนือกว่าเสมอ
+- F3 _unanswered_segment tail: "ไม่มีข้อมูลยืนยันจากข้อมูลสินค้าที่มี" → "ไม่มีระบุไว้ในข้อมูลสินค้า" (อ่านเป็นคำตอบตรง ไม่ใช่ error boilerplate — เก็บ "ไม่สามารถยืนยัน" outcome phrase)
+- verdict บน doc จริง: CMC615P/CTC615P/CTC620P × xiaomi 17 ultra → compatible + claimed_wattage_covers_target (เดิม missing_wattage_evidence); CTL301 (Lightning) ยัง connector_disjoint incompatible เหมือนเดิม
+- ผลกระทบเคสอื่น: ทุก compat verdict ที่มี watt ในชื่อ/desc จะเลิก hedge เต็มสเปค → ตอบ attribute-source แทน; เคสไม่มี watt เลยคง missing_wattage_evidence; guard '615W'/'6A' hallucination catches ยังทำงาน; multi-subject spec-claim fail-closed ไม่เปลี่ยน
+- งานค้าง: commit แยกทีละ fix; Strava-shaped leading-negative questions (TurnPlan polarity) เคส aumporn; live matrix rerun ยืนยันคำตอบจริงหลัง fix
+
+## ผ่านแล้ว: F4 confirmed-compat targets ใน unanswered asks (verified 2026-11-21)
+- ที่มา: เคส aumporn — "เชื่อม Strava ได้ไหม"/"ไม่ซิงค์ใช่ไหม" ตอบ boilerplate "ไม่มีข้อมูล" ทั้งที่ desc ระบุแอปที่รองรับ (Imilab Fit, Glory Fit); ลูกค้าอยากได้ "ตอบตรง + บอกที่ใช้ได้ชัวร์ๆ"
+- policy_resolver.declared_compat_targets (ใหม่): enumerate spec-db device keys ที่ _declares match + _declared_apps (Latin app names หลัง แอปพลิเคชัน/แอปฯ/แอป — split ,|และ|หรือ); containment-dedupe ("iphone" ⊂ "iphone 14 pro" ถูกตัด) + cap 8 — display data เท่านั้น ไม่ใช่ verdict proof (declare ไม่มี relation/negation check เหมือน declares_device เดิม)
+- UnansweredNeed +confirmed_targets — populate ที่ capability-ask no_evidence site: resolve subject cards ผ่าน by_req + subject_refs (refs ว่าง → ไม่ populate — fail closed ห้ามยืม card อื่น); _unanswered_segment ต่อท้าย "ที่ระบุไว้ว่ารองรับตามข้อมูลสินค้า: X, Y"
+- verify บน doc จริง: W01 → ('pixel', 'Imilab Fit', 'Glory Fit'); CTL301 → iphone 14 pro/13/12/11/x/7, ipad pro, ipad air
+- suite: 2378 passed 0 regressions (test_evidence_gap_fixes +5 = 15 tests); commit 7e1606b
+- เหลือ: leading-negative polarity ("ไม่ซิงค์ใช่ไหม" → ยืนยันคำเดา) ยังไม่มี typed polarity ใน TurnPlan — wording ตอนนี้อ่านเป็น "ไม่มีระบุ" ได้ทั้ง 2 โพล; live matrix rerun (bg) เช็ค F1–F3 บนคำตอบจริง

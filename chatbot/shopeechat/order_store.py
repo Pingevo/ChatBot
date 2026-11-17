@@ -195,12 +195,9 @@ def lookup_by_tracking(
         if shop_filter:
             query["shopname"] = shop_filter
         doc = coll.find_one(query)
+        # ห้าม fallback ข้ามร้าน — tracking ของร้านอื่นต้องตอบ "ไม่พบ"
         if not doc:
-            # ลองไม่กรอง shop
-            if shop_filter:
-                doc = coll.find_one({"$or": [{f"package_list.{f}": tn} for f in _tk_fields]})
-            if not doc:
-                return None
+            return None
         # ใช้ lookup_order เพื่อ parse เดียวกัน (DRY)
         return lookup_order(doc.get("order_sn") or "", shop_filter=shop_filter)
     except PyMongoError as e:
@@ -383,12 +380,10 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
         if shop_filter:
             query["shopname"] = shop_filter
         doc = coll.find_one(query)
+        # ห้าม fallback ข้ามร้าน — order_sn ของร้านอื่นต้องตอบ "ไม่พบ"
+        # (เคส BlackShark: เลขคำสั่งซื้อลูกค้าต้องผูกร้านเดียวกันเสมอ)
         if not doc:
-            # ลองไม่กรอง shop
-            if shop_filter:
-                doc = coll.find_one({"order_sn": order_sn})
-            if not doc:
-                return None
+            return None
 
         # ดึง items
         items = []

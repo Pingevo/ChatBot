@@ -1267,21 +1267,26 @@ def _watt_reasons(ctx):
 
 
 def test_name_watt_is_not_full_speed_proof():
-    """Defect A: card ไม่มี structured watt แต่ชื่อมี '100W' → name-derived
-    watt ห้ามเป็น adequacy proof — verdict ต้อง missing_wattage_evidence
-    และ final answer ไม่ claim full-speed."""
+    """Defect A→claimed tier: card ไม่มี structured watt แต่ชื่อมี '100W'
+    → claimed (seller-claimed) evidence — verdict ต้อง
+    claimed_wattage_covers_target (ไม่ใช่ missing/adequate-structured)
+    และ final answer ต้องบอกแหล่งว่ามาจากข้อมูลสินค้า ไม่ claim verified
+    full-speed ตรงๆ."""
     needs, ctx = _watt_verdict_ctx(
         _watt_verdict_card("สายชาร์จ C to C 1m 100W"))
     v = ctx.compat_verdicts
     assert v and v[0].decision.outcome == "compatible", (
         f"premise: connector match → compatible — {ctx.compat_verdicts}")
     reasons = _watt_reasons(ctx)
-    assert "missing_wattage_evidence" in reasons, (
-        f"ชื่อ '100W' ไม่ใช่ structured evidence → missing — {reasons}")
+    assert "claimed_wattage_covers_target" in reasons, (
+        f"ชื่อ '100W' = seller-claimed → claimed tier — {reasons}")
+    assert "cable_capacity_covers_target" not in reasons, (
+        f"claimed ไม่ใช่ structured capacity proof — {reasons}")
     answer = _render(_compose(needs, ctx,
                               product_text="สายชาร์จ C to C 1m"))
-    assert "เต็มสเปค" in answer or "ยืนยัน" in answer, (
-        f"ต้องมี caveat ไม่ใช่ bare ใช้ได้ — answer:\n{answer}")
+    assert "ใช้งานร่วมกับ" in answer, f"answer:\n{answer}"
+    assert "ตามข้อมูลสินค้า" in answer, (
+        f"claimed tier ต้อง attribute แหล่งข้อมูล — answer:\n{answer}")
 
 
 def test_all_adequate_variants_no_caveat():

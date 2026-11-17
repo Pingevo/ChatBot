@@ -34,14 +34,16 @@ def _extract_max_wattage(p: dict) -> float:
     """
     # 1. ลองจาก spec field ก่อน (output_power_w จาก CSV schema)
     spec_w = p.get("output_power_w") or p.get("specs", {}).get("output_power_w")
-    if spec_w and isinstance(spec_w, (int, float)) and spec_w > 0:
+    if (isinstance(spec_w, (int, float)) and not isinstance(spec_w, bool)
+            and math.isfinite(spec_w) and spec_w > 0):
         return float(spec_w)
     # 2. ลองจาก variants ที่มี output_power_w
     variants = p.get("variants") or []
     max_v = 0.0
     for v in variants:
         vw = v.get("output_power_w")
-        if vw and isinstance(vw, (int, float)) and vw > max_v:
+        if (isinstance(vw, (int, float)) and not isinstance(vw, bool)
+                and math.isfinite(vw) and vw > max_v):
             max_v = float(vw)
     if max_v > 0:
         return max_v

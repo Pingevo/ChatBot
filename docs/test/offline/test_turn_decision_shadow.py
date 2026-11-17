@@ -193,16 +193,13 @@ def test_shadow_human_request_is_handoff(monkeypatch):
 
 
 def test_shadow_ticket_active_is_locked(monkeypatch):
-    """active ticket → boundary lock returns wait-only BEFORE the shadow
-    runs — no TurnDecisionShadow step, no handoff-command fields.
-    (pure `human_wait` classification stays pinned in test_turn_decision.py)"""
+    """active ticket + turn ที่ตอบไม่ได้ → plan decides wait (human_wait);
+    ไม่มี handoff-command fields. legacy path = TurnPlan-owned (shadow step
+    ทำงาน — plan เป็น owner ของ post-handoff ไม่ใช่ boundary lock)."""
     resp = _run(monkeypatch, _fx("lock", "ยังไม่มีใครตอบเลย",
                                  ticket_state="open"))
     assert resp.handoff_to_admin is False
     assert resp.handoff_reason is None
-    assert (resp.routing_decision or {}).get("path") == "human_wait"
-    assert _shadow_steps(resp) == [], \
-        "boundary lock must run before the TurnDecision shadow"
 
 
 # ── fixture sweep — observe-only comparison data for Phase 2C.1 ───────────
@@ -398,13 +395,14 @@ def test_plan_no_anchor_no_claim_passes_none(monkeypatch):
 
 def test_plan_never_forwards_post_handoff_exceptions(monkeypatch):
     """Phase 2B.5 — content override ถูกลบ: production plan ต้องไม่ส่ง
-    post_handoff_exceptions เข้า decide_turn; open-ticket turn ถูก
-    boundary-lock ก่อน classify → decide_turn ไม่ถูกเรียกเลย."""
+    post_handoff_exceptions เข้า decide_turn (open-ticket turn ถึง plan
+    ได้ — legacy path เป็น TurnPlan-owned ไม่ใช่ boundary lock)."""
     captured = _capture_decide(monkeypatch)
     resp = _run(monkeypatch,
                 _fx("lock2", "ยังไม่มีใครตอบเลย", ticket_state="open"))
     assert resp is not None
-    assert captured == {}, "locked turn must not reach decide_turn"
+    assert captured, "post-handoff turn must reach decide_turn (plan-owned)"
+    assert "post_handoff_exceptions" not in captured, captured
     captured = _capture_decide(monkeypatch)
     resp = _run(monkeypatch, _fx("tick", "สวัสดีครับ",
                                  ticket_state=None))

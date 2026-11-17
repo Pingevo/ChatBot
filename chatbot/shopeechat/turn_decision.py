@@ -101,7 +101,7 @@ TurnNeedKind = Literal[
 TurnNeedOp = Literal[
     "describe", "compare", "recommend", "price",
     "link", "stock", "compat", "policy",
-    "lookup", "collect", "handoff",
+    "lookup", "collect", "handoff", "status",
 ]
 TurnPrimaryAction = Literal[
     "no_reply", "human_wait", "execute_needs",
@@ -285,8 +285,14 @@ def decide_turn(
     active_anchor: dict | None = None,
     tag_item_ids: tuple = (),
     has_visual_media: bool = False,
+    image_desc: str | None = None,
 ) -> TurnPlan:
-    """สร้าง TurnPlan ของ turn — pure, deterministic (ยกเว้น intent_result ที่ caller ส่งมา)."""
+    """สร้าง TurnPlan ของ turn — pure, deterministic (ยกเว้น intent_result ที่ caller ส่งมา).
+
+    image_desc = typed vision evidence ของรูปเทิร์นปัจจุบันเท่านั้น
+    (None=caller ไม่มี desc; ""=vision อ่านไม่สำเร็จ) — desc เป็น
+    observation ไม่ใช่หลักฐานยืนยันประกัน/สาเหตุความเสียหาย
+    """
     intent: dict = intent_result if isinstance(intent_result, dict) else {}
     intent_name = intent.get("intent")
     intent_conf = _rc.intent_confidence(intent)
@@ -318,33 +324,54 @@ def decide_turn(
     ownership = _resolve_ownership(ticket_state)
     claim = _wf._claim_lifecycle(claim_state)
 
-    # 2. post-handoff lock — ticket_state เป็น ownership authority เดียว:
-    #   active → human_wait ทุกข้อความ ไม่มี content escape (Phase 2B.5 / M2)
-    #   หยุดก่อนประเมิน needs เพื่อรับประกัน zero need-extraction side effects
-    if ownership == "human":
-        return TurnPlan(
-            primary_action="human_wait",
-            needs=(),
-            ownership="human",
-            claim=claim,
-            requires_clarification=False,
-            normalized_message=norm,
-            flags=frozenset(flags | {"post_handoff"}),
-            intent_confidence=intent_conf,
-        )
+    # 2. post-handoff — ownership authority: ticket_state เป็นหลัก +
+    #   typed episode flag (claim.handed_off) เป็น episode-scope evidence
+    #   ตอน ticket_state ไม่มี/ไม่ถูกส่ง (shadow/test calls) — ตามกติกาเดิม:
+    #   needs ถูกประเมินปกติ — turn ที่มี supplemental claim evidence/คำถาม
+    #   ตอบได้ต้องไม่ถูก human_wait บัง (BlackShark Q6–Q23 regression);
+    #   human_wait เหลือเฉพาะ turn ที่ไม่มี need ตอบได้ (ประเมินแล้ว)
+    _post_handoff = ownership == "human" or claim.handed_off
+    if _post_handoff:
+        flags.add("post_handoff")
+
+    # current-turn vision evidence (typed — รูปเทิร์นนี้เท่านั้น)
+    _desc = (image_desc or "").strip()
+    _vision_provided = image_desc is not None
 
     # 3. system/noise/placeholder — เหลือว่างหลัง cleanup
     if not norm and flags:
-        if claim.accepts_claim_fields and has_visual_media:
+        # item card = typed subject evidence เช่นเดียวกับ media — ตอน claim
+        #   เปิดอยู่ card ระบุ "สินค้าที่เคลม" ไม่ใช่คำขอขาย (BlackShark Q4)
+        if claim.accepts_claim_fields and (
+                has_visual_media or "has_item_tag" in flags):
             flags.add("claim_resume")
             return TurnPlan(
                 primary_action="execute_needs",
                 needs=(TurnNeed(
                     kind="claim",
                     operation="collect",
-                    subject_refs=(),
+                    subject_refs=item_ids,
                     confidence=1.0,
                     provenance=("claim_state", "media_placeholder"),
+                ),),
+                ownership=ownership,
+                claim=claim,
+                requires_clarification=False,
+                normalized_message="",
+                flags=frozenset(flags),
+                intent_confidence=intent_conf,
+            )
+        if _post_handoff and (has_visual_media or "has_item_tag" in flags):
+            # media/item card ใต้ human ownership = supplemental evidence ของเคส
+            #   เสมอ (placeholder ที่ไม่มี typed media ก็ผูกเป็น case intent)
+            if _real_media:
+                flags.add("real_visual_media")
+            return TurnPlan(
+                primary_action="execute_needs",
+                needs=(TurnNeed(
+                    kind="claim", operation="collect", subject_refs=item_ids,
+                    confidence=1.0,
+                    provenance=("post_handoff", "visual_media"),
                 ),),
                 ownership=ownership,
                 claim=claim,
@@ -358,15 +385,37 @@ def decide_turn(
             #   รูป/วิดีโอจริง = subject evidence → ให้ pipeline ตอบ
             #   (sticker/placeholder เปล่าที่ไม่มี media → no_reply ด้านล่าง)
             flags.add("real_visual_media")
+            if _vision_provided and not _desc:
+                # vision อ่านรูปเทิร์นนี้ไม่ได้ — ขออธิบาย ห้ามเดา/ห้ามขายจาก
+                #   หลักฐานเก่า (BlackShark Q15)
+                return TurnPlan(
+                    primary_action="clarify",
+                    needs=(),
+                    ownership=ownership,
+                    claim=claim,
+                    requires_clarification=True,
+                    normalized_message="",
+                    flags=frozenset(flags | {"media_unreadable"}),
+                    intent_confidence=intent_conf,
+                )
+            elif _desc and (
+                    _warranty.detect_claim_request(_desc)
+                    or _warranty.malfunction_safe_check(_desc)):
+                # อาการเสียที่มองเห็น → claim intake (desc เป็น observation —
+                #   ไม่ยืนยันสิทธิ์ประกัน/สาเหตุความเสียหาย)
+                _need = TurnNeed(
+                    kind="claim", operation="collect", subject_refs=item_ids,
+                    confidence=0.9,
+                    provenance=("real_visual_media",
+                                "image_desc_claim_signal"))
+            else:
+                _need = TurnNeed(
+                    kind="product", operation="describe", subject_refs=item_ids,
+                    confidence=0.8,
+                    provenance=("real_visual_media",))
             return TurnPlan(
                 primary_action="execute_needs",
-                needs=(TurnNeed(
-                    kind="product",
-                    operation="describe",
-                    subject_refs=(),
-                    confidence=0.8,
-                    provenance=("real_visual_media",),
-                ),),
+                needs=(_need,),
                 ownership=ownership,
                 claim=claim,
                 requires_clarification=False,
@@ -479,8 +528,11 @@ def decide_turn(
         ))
 
     # 4. explicit human request (predicate เจ้าของ: handoffs)
+    #   post_handoff = ticket เป็น human-owned อยู่แล้ว — handoff need ซ้ำ
+    #   ไม่มีผล (transport dedupe ที่ owner อื่น) → ปล่อยให้ fallback ด้านล่าง
+    #   ผลิต claim/status แทน
     _is_human = _handoffs.is_human_request(norm)
-    if _is_human:
+    if _is_human and not _post_handoff:
         _add_need("human", "handoff", conf=1.0, prov=("handoffs.is_human_request",))
 
     # 5. claim resume / request / troubleshoot — ก่อน anger เสมอ
@@ -490,6 +542,12 @@ def decide_turn(
     _is_claim_req = (
         _warranty.detect_claim_request(norm)
         or intent_name == "warranty_claim"
+        # current-turn vision desc = typed symptom evidence ของเทิร์นนี้ —
+        #   ข้อความ generic แต่รูปเห็นอาการเสีย → claim intake (desc เป็น
+        #   observation ไม่ใช่หลักฐานยืนยันประกัน/สาเหตุ)
+        or (_real_media and bool(_desc)
+            and (_warranty.detect_claim_request(_desc)
+                 or _warranty.malfunction_safe_check(_desc)))
     )
     _has_malfunction = bool(_warranty.malfunction_safe_check(norm))
 
@@ -505,9 +563,11 @@ def decide_turn(
         _add_need("troubleshoot", "describe", conf=0.9,
                   prov=("warranty.malfunction_safe_check",))
 
-    # 6. service anger/frustration — เฉพาะเมื่อไม่มี claim/troubleshoot signal
-    if (not _is_human and not _is_claim_resume and not _is_claim_req
-            and not _has_malfunction and _handoffs.is_service_anger(norm)):
+    # 6. service anger/frustration — เฉพาะเมื่อไม่มี claim/troubleshoot signal;
+    #   post_handoff → เหตุผลเดียวกับข้อ 4 (ticket human-owned แล้ว)
+    if (not _post_handoff and not _is_human and not _is_claim_resume
+            and not _is_claim_req and not _has_malfunction
+            and _handoffs.is_service_anger(norm)):
         flags.add("customer_frustration")
         _add_need("human", "handoff", conf=1.0,
                   prov=("handoffs.is_service_anger",))
@@ -796,9 +856,14 @@ def decide_turn(
 
     # policy need (canonical producers: detect_general_question,
     # detect_warranty_duration_question, route.needs_shipping, intent)
+    # post_handoff → คำถาม policy/จัดส่งตอนเคสอยู่กับแอดมิน = follow-up
+    #   ของเคส ("ส่งของให้ยัง" = ของเคลม) — claim/status fallback เป็น owner
+    #   ไม่ emit policy need ที่จะดึง turn ไป general pipeline
     _gen_qtype = _detectors.detect_general_question(norm)
     _is_warr_dur = _warranty.detect_warranty_duration_question(norm)
-    if (intent_name in ("general_question", "warranty_duration")
+    if _post_handoff:
+        pass
+    elif (intent_name in ("general_question", "warranty_duration")
             and intent_conf >= 0.7):
         _add_need("policy", "policy", refs=_subject_refs, conf=intent_conf,
                   prov=(f"intent={intent_name}",))
@@ -885,6 +950,34 @@ def decide_turn(
                         needs[_owner].capability_asks + (_a,))))
         if tuple(_kept) != _n.capability_asks:
             needs[_j] = _dc_replace(_n, capability_asks=tuple(_kept))
+
+    # post-handoff fallback — turn ใต้ human ownership:
+    #   typed claim evidence (order_sn/เบอร์/ชื่อ/วันที่/สื่อ) = supplemental
+    #   info → collect ผูกเคสเสมอ (order/lookup need อื่นอยู่ร่วมได้);
+    #   ข้อความที่ไม่แบก field = follow-up ของเคส → status (ตอบจาก
+    #   claim/ticket state ไม่ใช่ข้อความรอแอดมินซ้ำ)
+    if _post_handoff and norm:
+        _has_collect = any(
+            n.kind == "claim" and n.operation == "collect" for n in needs)
+        if (_order_sn or _info.get("phone") or _info.get("order_id")
+                or _info.get("name")
+                or _warranty.parse_purchase_date(norm) is not None
+                or has_visual_media):
+            if not _has_collect:
+                _add_need("claim", "collect", conf=0.9, prov=("post_handoff",))
+        elif not needs:
+            _add_need("claim", "status", conf=0.7, prov=("post_handoff",))
+    if _post_handoff and not needs:
+        return TurnPlan(
+            primary_action="human_wait",
+            needs=(),
+            ownership="human",
+            claim=claim,
+            requires_clarification=False,
+            normalized_message=norm,
+            flags=frozenset(flags),
+            intent_confidence=intent_conf,
+        )
 
     requires_clarification = bool(_unanchored_followup_ask)
 
