@@ -1260,7 +1260,8 @@ def test_zaapi_files_chat_warranty_never_uses_target(subject_present):
     if subject_present:
         assert all("CTC620P" in _ev_text(e) for e in evidence)
         assert ctx.spec_measured_facts, "\n".join(ctx.trace)
-        assert {f["value"] for f in ctx.spec_measured_facts} == {12}
+        assert {f["value"] for f in ctx.spec_measured_facts
+                if f["fact_key"] == "warranty"} == {12}
         assert set((resp.routing_decision or {}).get("subject_ids") or ()) == {
             f["identity"] for f in ctx.spec_measured_facts}
         assert "1 ปี" in (resp.answer or "")

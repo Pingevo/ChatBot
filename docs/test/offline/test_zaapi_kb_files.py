@@ -711,6 +711,57 @@ def test_kb_evidence_emits_identity_and_spec_token_facts(db, monkeypatch):
     assert "spec_tokens" in facts
     toks = set(facts["spec_tokens"])
     assert {"120w", "33w", "150w"} <= toks
+    # compile boundary — spec_tokens fact ต้องผ่าน fact-validation gate
+    #   (row-declared identity + file/record provenance เดียวกับ warranty
+    #   path) ไม่ใช่ถูก strip เป็น unresolved
+    from shopeechat import answer_context as acx
+    from shopeechat.candidate_pool import CandidatePool
+    pool = CandidatePool((), (), (), (), (),
+                         res.supporting_evidence, ())
+    trace = []
+    evidence = acx._compile_evidence(
+        pool, (), req_needs={"ch:kb": (need,)}, idx_of={id(need): 0},
+        need_by_idx={0: need}, prodish_idx={0}, target_of={},
+        ref_needs={}, trace=trace)
+    assert len(evidence) == 1
+    ev2 = evidence[0]
+    assert ev2.get("identity") == ev["identity"]
+    facts2 = {f["key"]: f["value"] for f in ev2.get("facts") or ()}
+    assert {"120w", "33w", "150w"} <= set(facts2.get("spec_tokens") or ())
+    assert not any("evidence_fact_unresolved" in t for t in trace)
+
+
+def test_kb_warranty_fact_still_resolves_to_unique_candidate(db, monkeypatch):
+    """import-bound warranty fact path เดิม — candidate resolve +
+    identity rewrite ไม่ถูก spec_tokens admission ทำลาย"""
+    from shopeechat import kb_zaapi
+    from shopeechat import answer_context as acx
+    from shopeechat.candidate_pool import CandidatePool
+    from shopeechat.turn_decision import TurnNeed
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="w.xlsx", data=_xlsx_bytes({"S1": [
+        ["model", "warranty"], ["AB100", "12 เดือน"],
+    ]}), content_type="product", subject_bindings={"S1": {
+        "columns": [{"column_index": 1, "header": "model"}],
+        "facts": {"warranty": {"column_index": 2, "header": "warranty"}}}})
+    need = TurnNeed("product", "describe", subject_refs=("AB100",),
+                    capability_asks=("warranty",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="AB100 ประกันกี่เดือน")
+    card = {"item_id": "999", "name": "AB100 thing",
+            "model_codes": ["AB100"]}
+    sel_c = type("S", (), {"identity": "i:999", "item_id": "999",
+                           "model_id": None, "card": card})()
+    pool = CandidatePool((), (sel_c,), (), (), (),
+                         res.supporting_evidence, ())
+    trace = []
+    evidence = acx._compile_evidence(
+        pool, (), req_needs={"ch:kb": (need,)}, idx_of={id(need): 0},
+        need_by_idx={0: need}, prodish_idx={0}, target_of={},
+        ref_needs={}, trace=trace)
+    assert len(evidence) == 1
+    w = [f for f in evidence[0].get("facts") or () if f["key"] == "warranty"]
+    assert w and w[0]["value"] == 12
 
 
 def test_readiness_searchable(db):

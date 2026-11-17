@@ -1011,23 +1011,46 @@ def _compile_evidence(pool: CandidatePool, web_evidence: tuple, *,
             candidates = {c.identity: c for c in tuple(pool.eligible or ())
                           + tuple(pool.unavailable or ()) + tuple(pool.rejected or ())
                           if refs & _cand_keys(c.identity, c.item_id, c.model_id, c.card)}
-            valid = (isinstance(facts, (list, tuple)) and len(facts) == 1
-                     and isinstance(facts[0], dict) and set(facts[0]) == {"key", "value"}
-                     and facts[0]["key"] == "warranty"
-                     and type(facts[0]["value"]) is int and facts[0]["value"] > 0
-                     and refs and all(isinstance(r, str) and r.strip() for r in subject_refs)
-                     and isinstance(filename, str) and bool(filename.strip())
-                     and isinstance(e.get("record_id"), str)
-                     and e["record_id"].startswith(filename + "::")
-                     and len(candidates) == 1)
+            prov_ok = (isinstance(filename, str) and bool(filename.strip())
+                       and isinstance(e.get("record_id"), str)
+                       and e["record_id"].startswith(filename + "::"))
+            _flist = facts if isinstance(facts, (list, tuple)) else ()
+            w_facts = [f for f in _flist
+                       if isinstance(f, dict) and set(f) == {"key", "value"}
+                       and f["key"] == "warranty"
+                       and type(f["value"]) is int and f["value"] > 0]
+            s_facts = [f for f in _flist
+                       if isinstance(f, dict) and set(f) == {"key", "value"}
+                       and f["key"] == "spec_tokens"
+                       and isinstance(f["value"], (list, tuple))
+                       and 0 < len(f["value"]) <= 64
+                       and all(isinstance(v, str) and v.strip()
+                               for v in f["value"])]
             e = {k: v for k, v in e.items() if k != "facts"}
-            if valid:
+            keep: list = []
+            if (len(w_facts) == 1 and prov_ok and refs
+                    and all(isinstance(r, str) and r.strip()
+                            for r in subject_refs)
+                    and len(candidates) == 1):
                 candidate = next(iter(candidates.values()))
                 identity = candidate.identity
-                if identity.startswith(("i:", "u:", "v:")) and e.get("identity", identity) == identity:
-                    e = {**e, "identity": identity, "facts": facts,
+                _eident = e.get("identity")
+                # identity ที่ emit มา = row-declared ref (∈ refs) =
+                #   alias ของ subject เดียวกัน → resolve → canonical;
+                #   identity อื่นนอก refs = spoofed → ตัดทิ้งเดิม
+                if identity.startswith(("i:", "u:", "v:")) and (
+                        _eident is None or _norm_ref(_eident) in refs):
+                    e = {**e, "identity": identity,
                          "subject_refs": tuple(sorted(refs | _cand_keys(
-                             identity, candidate.item_id, candidate.model_id, candidate.card)))}
+                             identity, candidate.item_id, candidate.model_id,
+                             candidate.card)))}
+                    keep += w_facts
+            if (s_facts and prov_ok
+                    and isinstance(e.get("identity"), str)
+                    and e["identity"].strip()):
+                keep += s_facts
+            if keep:
+                e = {**e, "facts": keep}
             if "facts" not in e:
                 trace.append("evidence_fact_unresolved:kind=kb")
         idxs = _attribute(e, req_needs=req_needs, idx_of=idx_of,
