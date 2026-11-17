@@ -14597,3 +14597,24 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - test แก้: r12 test_verdict_segment_* fixture เติม subject_refs=("9") ให้ตรง production deictic stamping
 - suite: 2383 passed 0 regressions (+5 tests ใน test_evidence_gap_fixes); อยู่บน branch fix/compat-verdict-llm-context
 - เหลือ: live verify pingevox Q3/Q4 หลัง merge; featured-card pick ยังไม่ผูก verdict (ข้อ 3 ที่ user สั่งรอ)
+
+---
+
+## 2026-11-17 — Live verify post-G1-merge: gemini provider Q&A check (กำลังจะทำ)
+
+- user สั่ง "call gemini provider เช็คคำตอบคำถาม" → ตรงกับงานค้าง A-330: live verify pingevox Q3/Q4 หลัง merge fix/compat-verdict-llm-context
+- วิธี: รัน `docs/test/live/live_matrix_abc.py --smoke` (3 convs wattaka/pingevox/aumporn × A legacy/B grouped+zaapi/C grouped+legacy) — real Gemini calls ผ่าน app.chat pipeline, Mongo read-only seams, web/OR/vision die-spies
+- เช็คเฉพาะคำตอบ (verdict→model context, claimed wattage, confirmed targets) — ไม่แก้โค้ด/DB/config, ไม่มี customer send
+
+### ผ่านแล้ว: live verify post-G1-merge — matrix A/B/C real Gemini run 20261117-082250
+
+- วิธี: re-pin `NEW_GID` → `g20261117-020003-ff01306c` (active gen จริง — pin เดิม g20261027 npz ถูกลบไปแล้ว ทำ B/C รัน degraded); artifact `docs/test/results/live_matrix_abc_20261117-082250.{json,md}`
+- infra: 33 turns / 61 gemini calls / 62 attempts (e503×1 retried ผ่าน), e429=0, mongo_write=0, web=0, openrouter=0, vision=0, quota alive — SMOKE PASS
+- fixed-reply check: product questions ทุก turn src=product_store / knowledge_base+mongo + g=2 (intent+answer gen) — ไม่มี fixed-reply constant ในคำตอบสินค้าเลย; greeting turns (pingevox t2/t5) src=greeting = GREETING_REPLY deterministic (by design ไม่ใช่ defect)
+- G1 verify (pingevox-t3): typed verdicts — 3 anonymous compatible (connector_match + claimed_wattage_covers_target) → model แต่ง prose เองไม่ใช่ template verdict list; CTL301 historical = incompatible connector_disjoint → เงียบตามสัญญาไม่ถูกเสนอ; candidates ที่ verify ไม่ได้ → tail "สินค้าที่ตรวจสอบไม่ได้" honest-by-design (partial coverage)
+- context/history carry ถูก: wattaka t2 anchor 27639651334 → 480Mbps ตรง spec; pingevox t4 รับ target xiaomi 17 ultra + subtype adapter จาก t3; aumporn W01 subject anchor ครบ 3 turns; Strava ask → fail-closed no_evidence ซื่อสัตย์ทั้ง B/C (A ชื่อ Imilab Fit/Glory Fit ในคำตอบ)
+- defect ใหม่ (A-path legacy เท่านั้น): spec-defer guard rewrite แทรกข้อความกลาง image markdown `![name](url)` — aumporn t1/t2/t3 answer มี `![` ค้างไม่มี `](url)` เลย (markup พัง 3/3 turns); B/C ไม่พบเพราะ card render deterministic แยก bubble
+- ยืนยัน deferred item 3 (A-330) เห็น live: featured card ไม่ verdict-aware — pingevox-t4 emit `24929355322` (20W, verdict claimed_insufficient_wattage vs 90W target) ทั้งที่ `53617544035` (claimed_wattage_covers_target) มี verdict ดีกว่าแต่ไม่ถูก emit เป็น card
+- gap: confirmed_targets (A-329) ไม่ยิงใน grouped path — compat need subj_refs ว่าง → fail-closed by design ไม่มี declared list (B/C aumporn-t3); B ยังตอบชื่อ app ที่รองรับเองในส่วน model-composed
+- minor: B|wattaka-t3 มี greeting prefix "สวัสดีค่ะ abubu ยินดีให้บริการนะคะ" กลาง conversation; C|wattaka-t3 ไม่บอกตรงๆ ว่าไม่มีรุ่น 10Gbps (unanswered=[] แต่ constraint ไม่ถูกกล่าวใน prose)
+- งานค้าง: A-path image-markup corruption (defer rewrite ทับ span `](url)`) — defect จริงควร fix; verdict-aware featured pick (deferred item 3); confirmed_targets ใน grouped path; ไม่มี code fix ใน task นี้ (QA audit เท่านั้น)

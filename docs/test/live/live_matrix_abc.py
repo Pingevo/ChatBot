@@ -45,7 +45,7 @@ from shopeechat import answer_context as acx
 from shopeechat import intent_classifier as ic
 import shopeechat.app as appmod
 
-NEW_GID = "g20261027-025541-563ca0f0"
+NEW_GID = "g20261117-020003-ff01306c"
 OLD_GID = PM.GID                        # real active pointer (read once by PM)
 TS = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 OUT_JSON = ROOT / "docs/test/results" / f"live_matrix_abc_{TS}.json"
