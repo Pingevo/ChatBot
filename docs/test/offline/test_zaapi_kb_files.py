@@ -643,6 +643,49 @@ def test_resolved_current_subject_remains_identity_authority_over_target(db, mon
     assert "Subject warranty" in result.supporting_evidence[0]["payload"]["text"]
 
 
+def test_named_product_phrase_hint_reaches_bound_row(db, monkeypatch):
+    """subject_hints = phrase candidates ฝั่ง subject (รูป model_terms เช่น
+    'GS3ULTRA' ที่ _extract_codes ไม่จับ) — identity match เทียบแบบ
+    space-insensitive กับ declared subject binding; row binding +
+    subject_digest เป็น proof เดิม"""
+    from shopeechat import kb_zaapi
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="watch.xlsx", data=_xlsx_bytes({"Sheet1": [
+        ["รุ่นสินค้า", "ชื่อรุ่นสินค้าย่อ", "spec"],
+        ["Black Shark GS3 Ultra", "GS3 Ultra", "กันน้ำ 5ATM & IP69K"],
+    ]}), content_type="product", subject_bindings={"Sheet1": {"columns": [
+        {"column_index": 1, "header": "รุ่นสินค้า"},
+        {"column_index": 2, "header": "ชื่อรุ่นสินค้าย่อ"}]}})
+
+    class N:
+        kind = "product"
+        subject_refs = ()
+        target_refs = ()
+        capability_asks = ("กันน้ำ",)
+
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(N(),), message="GS3 Ultra กันน้ำระดับไหน",
+        subject_hints=("GS3ULTRA",))
+    assert res.supporting_evidence
+    assert "5ATM" in res.supporting_evidence[0]["payload"]["text"]
+
+
+def test_hint_never_substitutes_target_identity(db, monkeypatch):
+    """hint ที่ normalize ตรง target_refs ของ need → ถูกตัดออกจาก subject
+    refs — hint เป็น subject-side candidate เท่านั้น"""
+    from shopeechat import kb_zaapi
+    from shopeechat.turn_decision import TurnNeed
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="dev.txt", data=b"iphone 15 spec detail",
+                     content_type="product",
+                     subject_bindings={"-": {"refs": ["iphone 15"]}})
+    need = TurnNeed("compat", "verify", target_refs=("iphone 15",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="สายใช้กับ iphone 15 ไหม",
+        subject_hints=("IPHONE15",))
+    assert not res.supporting_evidence
+
+
 def test_readiness_searchable(db):
     zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     r = zkf.file_kb_ready(db)

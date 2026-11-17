@@ -1222,10 +1222,15 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
             or _manual_scope_ok(d, shop, platform)]
     if not docs:
         return [], (f"zaapi_files_empty reg={nreg}",)
-    identity_refs = {" ".join(str(r).casefold().split()) for r in refs if str(r).strip()}
+    # identity normalization owner เดียวทั้งสองฝั่ง — space-insensitive
+    #   casefold ('GS3ULTRA' ≡ 'gs3 ultra'; bound refs เก็บ normalized อยู่แล้ว)
+    identity_refs = {"".join(str(r).casefold().split())
+                     for r in refs if str(r).strip()}
     if identity_refs:
         docs = [d for d in docs if isinstance(d.get("subject_refs"), list)
-                and identity_refs.intersection(d["subject_refs"])
+                and identity_refs.intersection(
+                    "".join(str(s).casefold().split())
+                    for s in d["subject_refs"])
                 and d.get("subject_digest") == _subject_digest(d)]
         if not docs:
             return [], ("zaapi_files_subject_unverified_or_mismatch",)
@@ -1238,7 +1243,10 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
     for d in docs:
         text = d.get("text") or ""
         hay = text.lower()
-        ref_hits = (len(identity_refs.intersection(d["subject_refs"])) if identity_refs else
+        ref_hits = (len(identity_refs.intersection(
+                        "".join(str(s).casefold().split())
+                        for s in d["subject_refs"]))
+                    if identity_refs else
                     sum(1 for r in ref_l if _ref_hit(r, hay)))
         tri = _trigram_dice(query, text)
         if ref_hits or tri >= 0.08:

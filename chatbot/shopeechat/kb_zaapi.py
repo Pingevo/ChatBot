@@ -43,6 +43,7 @@ def zaapi_kb_evidence(
     message: str = "",
     limit: int = 20,
     needs: tuple = (),
+    subject_hints: tuple = (),
     request_id: str = "ch:kb",
     db=None,
     exports_root=None,
@@ -51,6 +52,9 @@ def zaapi_kb_evidence(
 
     needs = TurnNeeds ของ turn (productish เท่านั้นที่ใช้); ไม่มี → ไม่มี
     evidence (general troubleshooting ยังไม่มี owner ใน path นี้)
+    subject_hints = phrase candidates ฝั่ง subject (เช่น profile.model_terms)
+    — search candidate เท่านั้น ไม่ใช่ identity; declared subject binding +
+    subject_digest ของ row เป็น proof เดิม (hint ที่ตรง target_refs ถูกตัด)
     message คง signature สำหรับ callsites เดิม — ไม่ใช้ keyword scan แล้ว
     db/exports_root = injectable สำหรับ tests; default = admin DB เดิม
     """
@@ -76,6 +80,13 @@ def zaapi_kb_evidence(
                  if str(r).strip()]
         targets += [str(r) for r in (getattr(n, "target_refs", ()) or ())]
         asks += [str(a) for a in (getattr(n, "capability_asks", ()) or ())]
+    # hints เข้า refs เฉพาะเมื่อไม่ชน target ของ need (normalize owner เดียว
+    #   กับ identity filter — space-insensitive); target ไม่เคยเป็น subject
+    _tgt = {"".join(str(t).casefold().split()) for t in targets}
+    refs += [str(h) for h in (subject_hints or ())
+             if str(h).strip()
+             and "".join(str(h).casefold().split()) not in _tgt]
+    refs = list(dict.fromkeys(refs))
     if not refs:
         return KbEvidenceResult(trace=("zaapi_subject_unresolved",))
     query = " ".join(x for x in ([message] + asks + refs + targets) if x).strip()
