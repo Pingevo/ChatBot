@@ -581,6 +581,20 @@ def _clean_description(desc: str) -> str:
     return result[:3000]
 
 
+def _doc_description_text(doc: dict) -> str:
+    """ดึง description text ของ doc — flat field ก่อน, ว่างค่อย fallback
+    join text blocks จาก description_info.extended_description.field_list
+    (Shopee API v2 เก็บ desc เป็น text/image blocks — image blocks ข้าม)."""
+    desc = doc.get("description") or ""
+    if desc.strip():
+        return desc
+    fl = ((doc.get("description_info") or {})
+          .get("extended_description") or {}).get("field_list") or []
+    return "\n".join(
+        t for t in ((f.get("text") or "").strip()
+                    for f in fl if isinstance(f, dict)) if t)
+
+
 def _stock_info_has_any_stock_source(stock_info: dict) -> bool:
     """stock_info_v2 มี source ที่อ่านค่า stock เป็นตัวเลขได้จริงไหม.
 
@@ -790,7 +804,7 @@ def to_product_card(doc: dict, message: str = "") -> dict:
         "is_flash_sale": bool(doc.get("is_flash_sale")),
         # description normalized field เดียว (promo strip + cap) — ไม่ gate ตามคำถาม
         #   admission อยู่ที่ answer_context._scope_card / llm._build_context
-        "description_excerpt": _clean_description(doc.get("description") or ""),
+        "description_excerpt": _clean_description(_doc_description_text(doc)),
         "variants": [
             {
                 "name": m.get("model_name"),
