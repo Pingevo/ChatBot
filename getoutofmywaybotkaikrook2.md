@@ -14588,3 +14588,12 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - verify บน doc จริง: W01 → ('pixel', 'Imilab Fit', 'Glory Fit'); CTL301 → iphone 14 pro/13/12/11/x/7, ipad pro, ipad air
 - suite: 2378 passed 0 regressions (test_evidence_gap_fixes +5 = 15 tests); commit 7e1606b
 - เหลือ: leading-negative polarity ("ไม่ซิงค์ใช่ไหม" → ยืนยันคำเดา) ยังไม่มี typed polarity ใน TurnPlan — wording ตอนนี้อ่านเป็น "ไม่มีระบุ" ได้ทั้ง 2 โพล; live matrix rerun (bg) เช็ค F1–F3 บนคำตอบจริง
+
+## ผ่านแล้ว: G1 compat verdict → model context, render เฉพาะตัวผ่าน/ถามตรง (verified 2026-11-21)
+- ที่มา: user review pingevox replay — (1) คำตอบแนะนำ list verdict ทุกตัวยาว/เป็น template ("ใช้งานร่วมกับ xiaomi 17 ultra ได้ค่ะ — ตามข้อมูลสินค้า..." ซ้ำทุกบรรทัด) รวมตัวที่ไม่ผ่านด้วย; (2) อยากให้ LLM ปั้นประโยค spec+compat เองแทน deterministic segment
+- CompatVerdict + `asked` field: True = subject คือ named subject_refs ที่ลูกค้าถามตรง (matched ใน _verdict_target_decisions — deictic ask ได้ stamp ผ่าน apply_resolved_subject_refs; zaapi verdicts = named refs เสมอ → asked=True); anonymous recommend-pool candidate = False
+- context_text() + verdict block: serialize verdicts ทุกตัวเป็น "ผลตรวจความเข้ากันได้" (ordinal map เดียวกับ products) — compatible → "ใช้งานร่วมกันได้"+_verdict_hint (reason-code→hint table เดียวกับ _compat_segment); asked-incompatible → "ใช้งานร่วมกันไม่ได้"; anonymous-incompatible → "…ไม่ได้ — ไม่ใช่สินค้าที่จะแนะนำ ห้ามเสนอ/กล่าวถึง" — model เห็นข้อเท็จจริงเสมอแม้ไม่บอกลูกค้า (กัน model แนะนำตัวที่ fail เพราะ card ยังอยู่ใน context)
+- compose_answer split: asked → deterministic segment เหมือนเดิม (verdict คือคำตอบคำถามตรง ทั้งผ่าน/ไม่ผ่าน); anonymous compatible → ไม่ render segment ให้ model ปั้น (fallback เมื่อ product_text ว่าง); anonymous incompatible → เงียบ (ไม่ใช่คำแนะนำ) — covered.add ทุก verdict กัน need กลายเป็น unanswered
+- test แก้: r12 test_verdict_segment_* fixture เติม subject_refs=("9") ให้ตรง production deictic stamping
+- suite: 2383 passed 0 regressions (+5 tests ใน test_evidence_gap_fixes); อยู่บน branch fix/compat-verdict-llm-context
+- เหลือ: live verify pingevox Q3/Q4 หลัง merge; featured-card pick ยังไม่ผูก verdict (ข้อ 3 ที่ user สั่งรอ)
