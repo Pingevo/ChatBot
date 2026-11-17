@@ -14618,3 +14618,17 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - gap: confirmed_targets (A-329) ไม่ยิงใน grouped path — compat need subj_refs ว่าง → fail-closed by design ไม่มี declared list (B/C aumporn-t3); B ยังตอบชื่อ app ที่รองรับเองในส่วน model-composed
 - minor: B|wattaka-t3 มี greeting prefix "สวัสดีค่ะ abubu ยินดีให้บริการนะคะ" กลาง conversation; C|wattaka-t3 ไม่บอกตรงๆ ว่าไม่มีรุ่น 10Gbps (unanswered=[] แต่ constraint ไม่ถูกกล่าวใน prose)
 - งานค้าง: A-path image-markup corruption (defer rewrite ทับ span `](url)`) — defect จริงควร fix; verdict-aware featured pick (deferred item 3); confirmed_targets ใน grouped path; ไม่มี code fix ใน task นี้ (QA audit เท่านั้น)
+
+## Legacy answer quality — กำลังจะทำ (Devin session, 2026-11-17)
+
+- port uncommitted work จาก codex worktree `codex/zaapi-answer-evidence` (kb_zaapi field-passage selection + answer_context desc-card subject filter + 3 behavioral tests + SRS entry) → branch `fix/zaapi-answer-evidence` บน main a54cf08
+- scope: legacy `chat()` path เท่านั้น (user สั่งไม่แตะ chat_v2/chatbotv3) — requirements: spec ตอบถูกไม่ defer แอดมิน, compat มีข้อมูลต้องไม่บอก "ไม่มีข้อมูลยืนยัน", handoff ส่งจริง+เข้าใจบริบท, แนะนำตรง compat, การ์ด 1-2 ใบ spec text, มอก. scope ตามบริบท, เอาประโยคล็อกออก, ตอบเบื้องต้น+ส่งต่อแอดมินแบบธรรมชาติ
+- เป้าหมาย trace ต่อ: subject_refs=() → zaapi_subject_unresolved (GS3 Ultra), vague task → Gemini, compose "ไม่มีระบุ", spec-claim guard ตัดตัวเลขจาก kb row, A-path image-markup corruption, verdict-aware featured pick, confirmed_targets grouped path
+
+## Repo disk-usage audit — กำลังจะทำ (Devin session, 2026-11-17)
+
+- user ถาม "folder งานไฟล์อะไรใหญ่ ทำไมใหญ่" — audit ขนาด read-only เท่านั้น (du/fd) ไม่แก้โค้ด ไม่ลบไฟล์
+- protocol: frozen sha ตรง + active prefix 14620 ตรง; tail อ่าน 14621–14626 = pre-work ของ concurrent session (zaapi-answer-evidence port) ยังไม่มี closeout
+
+- ผ่านแล้ว: repo รวม ~11G — exports 4.8G (gen 3.5G = 4 snapshot ×~900M อยู่ใน retention policy active+prev+3daily+2weekly+grace24h; maintenance 510M backup reset เก่า; live files ~770M), ChatAdminWeb 4.2G (.next 3.5G dev/turbopack+webpack cache regen ได้, node_modules 694M), .venv 1.2G (torch 536M), docs/test 306M, .git 116M — โค้ดจริง 7.2M ทุกอย่างใหญ่ gitignored/regenerable ไม่มีรั่ว
+- งานค้าง: ไม่มี (report-only ไม่ลบไฟล์) — จุดคืนพื้นที่ที่เสนอ: ChatAdminWeb/.next ~3.5G + exports/maintenance ~510M รอ user สั่งลบ
