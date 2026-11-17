@@ -83,14 +83,52 @@ def zaapi_kb_evidence(
         db if db is not None else _kb._admin_db(),
         shop=shop, platform=platform, query=query, refs=refs,
         limit=limit, types=_CONTENT_TYPES_ALL)
-    sup = [{"kind": "kb", "record_id": h["record_id"],
-            "request_id": request_id,
-            **({"subject_refs": tuple(h["subject_refs"]), "facts": h["facts"]}
-               if h.get("facts") else {}),
-            "payload": {"text": h["a"], "fields": h.get("fields") or {}},
-            "meta": h.get("meta") or {},
-            "score": h.get("_qa_sim")}
-           for h in hits]
+    rank_query = message.casefold()
+    for ref in refs:
+        rank_query = rank_query.replace(ref.casefold(), " ")
+    rank_query = " ".join(rank_query.split()) or " ".join(asks) or query
+    sup = []
+    for h in hits:
+        fields = h.get("fields") or {"row": h["a"]}
+        passages = []
+        for name, value in fields.items():
+            if not value:
+                continue
+            whole = f"{name}: {str(value).strip()}"
+            if len(whole.encode("utf-8")) <= 900:
+                passages.append(whole)
+            else:
+                passages.extend(
+                    f"{name}: {line[i:i + 250]}"
+                    for line in str(value).splitlines() if line.strip()
+                    for i in range(0, len(line), 250))
+        try:
+            from . import embedding as _emb
+            qv = _emb.embed_query(rank_query)
+            vectors = _emb.embed_texts(passages)
+            ranked = sorted(zip(passages, vectors),
+                            key=lambda pair: _zkf._cosine(qv, pair[1]),
+                            reverse=True)
+            passages = [p for p, _ in ranked]
+        except Exception:
+            pass
+        selected = []
+        used = 0
+        for passage in passages:
+            size = len(passage.encode("utf-8"))
+            if size + used + bool(selected) > 1000:
+                continue
+            selected.append(passage)
+            used += size + 1
+            if len(selected) == 3:
+                break
+        sup.append({"kind": "kb", "record_id": h["record_id"],
+                    "request_id": request_id,
+                    **({"subject_refs": tuple(h["subject_refs"]), "facts": h["facts"]}
+                       if h.get("facts") else {}),
+                    "payload": {"text": "\n".join(selected), "fields": fields},
+                    "meta": h.get("meta") or {},
+                    "score": h.get("_qa_sim")})
     return KbEvidenceResult(
         supporting_evidence=tuple(sup),
         raw_count=len(sup),

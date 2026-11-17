@@ -540,6 +540,55 @@ def test_zaapi_kb_evidence_nonproduct_type_visible(db, monkeypatch):
     assert "รีเซ็ตหูฟัง" in res.supporting_evidence[0]["payload"]["text"]
 
 
+def test_zaapi_evidence_preserves_relevant_late_column_within_context_budget(db, monkeypatch):
+    from shopeechat import kb_zaapi
+    from shopeechat import embedding as emb
+
+    monkeypatch.setattr(emb, "embed_query", lambda query, *a, **k:
+                        [0.0, 1.0] if "funcooler 5 pro" in query.lower()
+                        else [1.0, 0.0])
+    monkeypatch.setattr(emb, "embed_texts", lambda texts, *a, **k: [
+        [1.0, 0.0] if "ขาจับ x1" in text else
+        [0.0, 1.0] if "FunCooler 5 Pro" in text else [0.0, 0.0]
+        for text in texts])
+    monkeypatch.setattr(emb, "model_identity", lambda: {"name": "test", "dim": 2})
+    data = _xlsx_bytes({"Sheet1": [
+        ["รุ่นสินค้า", "ชื่อเต็ม", "ชื่อย่อ", "รายละเอียด", "อุปกรณ์ภายในกล่อง"],
+        ["FunCooler 5 Pro", "Black Shark FunCooler 5 Pro", "FunCooler 5 Pro",
+         "ข้อมูลทั่วไป " * 200,
+         "Black Shark FunCooler 5 Pro x1\nขาจับ x1\nคู่มือ x1"],
+    ]})
+    zkf.apply_import(db, filename="cooler.xlsx", data=data,
+                     content_type="product", subject_bindings={
+                         "Sheet1": {"rows": {"0": ["FunCooler 5 Pro"]}}})
+
+    class N:
+        kind = "product"
+        subject_refs = ("FunCooler 5 Pro",)
+        target_refs = ()
+        capability_asks = ()
+
+    need = N()
+    result = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="FunCooler 5 Pro ในกล่องมีอะไร")
+    assert len(result.supporting_evidence) == 1
+    text = result.supporting_evidence[0]["payload"]["text"]
+    assert "ขาจับ x1" in text
+    assert len(text.encode("utf-8")) <= 1000
+    from shopeechat import answer_context as acx
+    from shopeechat.candidate_pool import CandidatePool
+    pool = CandidatePool((), (), (), (), (),
+                         result.supporting_evidence, ())
+    trace = []
+    evidence = acx._compile_evidence(
+        pool, (), req_needs={"ch:kb": (need,)}, idx_of={id(need): 0},
+        need_by_idx={0: need}, prodish_idx={0}, target_of={},
+        ref_needs={}, trace=trace)
+    assert len(evidence) == 1
+    assert "ขาจับ x1" in evidence[0]["payload"]
+    assert not any("evidence_truncated" in event for event in trace)
+
+
 @pytest.mark.parametrize("need_kind", ["product", "compare", "compat"])
 @pytest.mark.parametrize("primary_present", [False, True])
 def test_product_evidence_does_not_promote_target_row_to_subject(db, monkeypatch, primary_present, need_kind):

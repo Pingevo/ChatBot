@@ -1623,7 +1623,17 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             #   drift ที่ลูกค้าไม่ได้ขอ (W02 ใน W01 follow-up); subject
             #   ไม่มี card เลย → alternative = substitute answer เจตนา
             #   (มี WPB100L ไหม → เสนอ AC65B แทน — ห้าม filter)
-            cands = [s for s in cands if s.role != "alternative"]
+            subject_keys = set().union(*(
+                _cand_keys(s.identity, s.card.get("item_id"),
+                           s.card.get("model_id"), s.card)
+                for s in cands if s.role == "subject"))
+            cands = [s for s in cands
+                     if s.role != "alternative"
+                     and (s.role != "description"
+                          or bool(_cand_keys(
+                              s.identity, s.card.get("item_id"),
+                              s.card.get("model_id"), s.card)
+                              & subject_keys))]
         if tainted_reqs or tainted_pairs:
             kept = [s for s in cands
                     if s.request_id not in tainted_reqs

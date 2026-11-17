@@ -1616,6 +1616,27 @@ def test_single_product_question_keeps_answer_and_card_on_same_identity():
     assert selected_ids == context_ids
 
 
+def test_named_spec_question_does_not_attach_other_models():
+    named = _item_doc("i-ad653", "AD653U หัวชาร์จ 65W", ("AD653U",), "charger")
+    other = _item_doc("i-ad120", "AD1204U หัวชาร์จ 120W", ("AD1204U",), "charger")
+    resp, ctx = _chat(
+        [], msg="AD653U ช่อง USB-C1 จ่ายกี่วัตต์",
+        llm_reply="AD653U ช่อง USB-C1 จ่ายไฟ 65W ค่ะ",
+        catalog=[named, other],
+        units=[_unit("u-ad653", "i-ad653", "m-ad653", named["item_name"],
+                     ("AD653U",), "charger"),
+               _unit("u-ad120", "i-ad120", "m-ad120", other["item_name"],
+                     ("AD1204U",), "charger")],
+        intent_result={"intent": "product_spec", "confidence": 0.99,
+                       "product_type": "charger", "charger_subtype": "adapter",
+                       "requested_facts": ["charging_speed"]},
+    )
+    assert ctx is not None
+    assert len(resp.products) == 1
+    assert resp.products[0]["item_id"] == "i-ad653"
+    assert "AD1204U" not in resp.answer
+
+
 def test_general_recommendation_returns_one_primary_product_and_card():
     resp, ctx = _chat(
         [], msg="แนะนำสาย USB-C สำหรับ Xiaomi 17 Ultra",

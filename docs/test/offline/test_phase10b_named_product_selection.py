@@ -93,7 +93,7 @@ def _fetch(cards, calls: list):
     return f
 
 
-def _chain(msg, cards, intent_result=_INTENT_OTHER):
+def _chain(msg, cards, intent_result=_INTENT_OTHER, desc_cards=()):
     """production chain เดียวกับ app.py grouped callsite:
     decide_turn → build_retrieval_profile → run_grouped_selection →
     compile_answer_context — fetcher stub เท่านั้นที่ถูกแทน.
@@ -107,7 +107,8 @@ def _chain(msg, cards, intent_result=_INTENT_OTHER):
     out = rrt.run_grouped_selection(
         prof, message=msg, shop="canary-shop", platform="shopee",
         fetcher=_fetch(cards, calls), legacy_fetcher=_fetch(cards, calls),
-        needs=plan.needs, snap=None)
+        needs=plan.needs, snap=None,
+        desc_fetcher=(lambda *a, **k: desc_cards) if desc_cards else None)
     assert out is not None, "grouped pipeline must not raise"
     ctx = acx.compile_answer_context(
         needs=plan.needs, selection=out["selection"], pool=out["pool"],
@@ -544,6 +545,24 @@ def test_direct_code_named_product_request():
     slots, _, reqs = _reqs(prof, _needs("มี W01 ไหม"))
     assert len(reqs) == 1
     assert reqs[0].subject_refs == ("W01",)
+
+
+def test_named_spec_context_excludes_other_model_slots():
+    asked = _card("CUKTECH AD653U หัวชาร์จ 65W", "9301")
+    other = _card("CUKTECH AD1204U หัวชาร์จ 120W", "9302")
+    plan, prof, out, ctx, _ = _chain(
+        "AD653U ช่อง USB-C1 จ่ายกำลังไฟสูงสุดกี่วัตต์",
+        [asked, other],
+        {"intent": "product_spec", "confidence": 0.99,
+         "product_type": "charger", "charger_subtype": "adapter",
+         "requested_facts": ["charging_speed"]},
+        desc_cards=[other])
+    assert any(s.card["name"] == asked["name"]
+               for s in out["selection"].selected)
+    assert any(s.card["name"] == other["name"]
+               for s in out["selection"].selected)
+    assert ctx.task.tasks[0].subject_names == (asked["name"],)
+    assert [p["name"] for p in ctx.products] == [asked["name"]]
 
 
 def test_subject_device_question_role():
