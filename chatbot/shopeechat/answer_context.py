@@ -1119,6 +1119,25 @@ def compile_answer_task(*, needs: tuple, selection: SelectionResult,
     req_needs = _req_needs_map(requests, needs)
     by_req = dict(selection.by_request)
     vc = tuple(getattr(profile, "value_constraints", ()) or ())
+    # serialized subject evidence per need (attribution owner เดียวกับ
+    #   compile — raw supporting records; identity-scoped, ไม่นับ
+    #   target-scoped evidence) — capability asks ride task เมื่อ subject
+    #   มีหลักฐานจริงแม้ไม่มี subject-role card (hint-matched kb row)
+    _prodish = {i for i, n in enumerate(needs)
+                if n.kind in PRODUCTISH_NEED_KINDS}
+    _idx_of = {id(n): i for i, n in enumerate(needs)}
+    _need_by_idx = dict(enumerate(needs))
+    _target_of = {i: _need_target(
+        n, _need_requests(n, requests, req_needs), profile)
+        for i, n in enumerate(needs)}
+    _ref_needs = _ref_needs_map(needs, requests, selection, pool, _prodish)
+    _subj_evid = {i for e in (pool.supporting_evidence or ())
+                  if e.get("identity") and not e.get("target")
+                  and e.get("kind") != "device_spec"
+                  for i in _attribute(
+                      e, req_needs=req_needs, idx_of=_idx_of,
+                      need_by_idx=_need_by_idx, prodish_idx=_prodish,
+                      target_of=_target_of, ref_needs=_ref_needs)}
     for i, n in enumerate(needs):
         if n.kind not in PRODUCTISH_NEED_KINDS:
             if n.kind in _POLICY_NEED_KINDS:
@@ -1161,7 +1180,7 @@ def compile_answer_task(*, needs: tuple, selection: SelectionResult,
                 getattr(n, "requested_facts", ()) or ()),
             capability_asks=tuple(
                 getattr(n, "capability_asks", ()) or ()
-                if any(
+                if i in _subj_evid or any(
                     s.role == "subject" or s.identity in {
                         _s.identity for _r in reqs_n
                         for _s in by_req.get(_r.request_id, ())
@@ -1936,12 +1955,21 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         #   deterministic UnansweredNeed ที่ name ทุก ask — missing
         #   evidence = cannot-confirm เสมอ ไม่ใช่ negative claim
         _asks = tuple(getattr(n, "capability_asks", ()) or ())
-        if _asks and not any(
+        # serialized subject evidence = record ที่ attribute เข้า need นี้
+        #   + พก identity (kb row bound/matched, listing/image ของ subject)
+        #   — ไม่นับ target-scoped evidence (device_spec/web target =
+        #   หลักฐานของ counterpart ไม่ใช่ของ subject)
+        _subj_evid = any(
+            i in (e.get("need_indices") or ())
+            and e.get("identity") and not e.get("target")
+            and e.get("kind") != "device_spec"
+            for e in evidence)
+        if _asks and not (_subj_evid or any(
                 s.role == "subject" or s.identity in {
                     _s.identity for _r in reqs_n
                     for _s in by_req.get(_r.request_id, ())
                     if _s.role == "subject"}
-                for s in cands):
+                for s in cands)):
             _lbl = ("ยังไม่มีข้อมูลยืนยัน " + "/".join(_asks) +
                     " ของรุ่นนี้ — ห้ามยืนยันเงื่อนไขนั้น")
             for s in cands:

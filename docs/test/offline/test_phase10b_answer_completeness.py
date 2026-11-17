@@ -389,6 +389,39 @@ def test_generic_subject_never_its_own_compat_target():
     assert "ZX200" in prod.subject_refs
 
 
+def test_capability_asks_ride_task_on_attributed_subject_evidence():
+    """serialized subject evidence ที่ attribute เข้า need (kb row ที่
+    bound+matched ผ่าน per-need channel — need.subject_refs ว่างก็ตาม)
+    นับเป็น exact-subject evidence เดียวกับ subject-role card: asks ride
+    task ให้ model แยก subclaim ไม่ใช่ deterministic cannot-confirm"""
+    need = TurnNeed(
+        kind="product", operation="describe",
+        product_types=frozenset({"smartwatch"}),
+        requested_facts=("description",),
+        capability_asks=("กันน้ำ",))
+    slot_req = _req("req-x", types=("smartwatch",))
+    kb_req = _req("ch:kb:0", source="kb")   # per-need channel — refs ว่าง
+    evid = {"kind": "kb", "request_id": "ch:kb:0",
+            "record_id": "w.xlsx::s::0", "identity": "gs3 ultra",
+            "meta": {"file": "w.xlsx"},
+            "facts": [{"key": "spec_tokens", "value": ("5atm",)}],
+            "payload": "จุดเด่นสินค้า: กันน้ำ 5ATM & IP69K"}
+    sel = _selection(
+        (_sel_card("i:1", "candidate", "req-x", "GS3 Ultra Watch"), "req-x"))
+    pool = _pool((_pooled("i:1", codes=("GS3",), request_ids=("req-x",)),),
+                 supporting=(evid,))
+    ctx = _compile((need,), sel, pool, (slot_req, kb_req), _profile())
+    assert not [u for u in ctx.unanswered_needs
+                if u.need_index == 0 and u.reason == "no_evidence"], (
+        f"attributed subject evidence ต้องนับเป็น coverage ของ asks — "
+        f"got {ctx.unanswered_needs}")
+    assert "กันน้ำ" in {a for t in ctx.task.tasks
+                       for a in (t.capability_asks or ())}, (
+        "ask ต้องไหลเข้า task ให้ model แยก subclaim")
+    assert any(f["fact_key"] == "spec_tokens"
+               for f in ctx.spec_measured_facts)
+
+
 def test_capability_asks_named_when_whole_need_uncovered():
     """need ไม่มี coverage เลย (subject ไม่อยู่ในระบบ) — asks ยังถูก name
     ใน outcome เดิม ไม่หายไปพร้อม need."""
