@@ -1141,7 +1141,11 @@ class TestIncompatibleLeavesProducts:
     def test_verdict_segment_preserves_identity_target_reason(self):
         card = self._lightning_card("relation_target")
         sel = _selection((card, "req-0"))
-        needs = self._compat_needs()
+        # deictic ask ของ item นี้ — production stamp resolved id เข้า
+        #   subject_refs (apply_resolved_subject_refs) → verdict = asked
+        needs = (TurnNeed(kind="compat", operation="compat",
+                          subject_refs=("9",),
+                          target_refs=("xiaomi 17 ultra",)),)
         ctx = _compile(
             needs, sel,
             _pool(eligible=[_pooled("i:9", "9")],
