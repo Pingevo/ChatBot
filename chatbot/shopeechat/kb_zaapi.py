@@ -98,6 +98,8 @@ def zaapi_kb_evidence(
     for ref in refs:
         rank_query = rank_query.replace(ref.casefold(), " ")
     rank_query = " ".join(rank_query.split()) or " ".join(asks) or query
+    _idnorm = lambda v: "".join(str(v).casefold().split())
+    _refs_n = {_idnorm(r) for r in refs}
     sup = []
     for h in hits:
         fields = h.get("fields") or {"row": h["a"]}
@@ -133,10 +135,28 @@ def zaapi_kb_evidence(
             used += size + 1
             if len(selected) == 3:
                 break
+        # identity = declared ref ที่ match จริง (row binding ผ่าน digest
+        #   แล้ว — canonical identity ของ record เดียวกัน, ไม่ใช่ hint ฝั่ง
+        #   request); facts += spec_tokens จาก selected passages เท่านั้น —
+        #   measured-facts channel เดิม ให้ spec_claim ground ด้วย typed
+        #   evidence ของ subject นั้น (extractor owner เดียวกับ card facts)
+        _matched = sorted(
+            s for s in (h.get("subject_refs") or ())
+            if _idnorm(s) in _refs_n)
+        facts = list(h.get("facts") or ())
+        try:
+            from . import policy_resolver as _pr
+            _toks = _pr._spec_tokens("\n".join(selected))
+        except Exception:
+            _toks = ()
+        if _toks:
+            facts.append({"key": "spec_tokens", "value": _toks})
         sup.append({"kind": "kb", "record_id": h["record_id"],
                     "request_id": request_id,
-                    **({"subject_refs": tuple(h["subject_refs"]), "facts": h["facts"]}
+                    **({"subject_refs": tuple(h["subject_refs"])}
                        if h.get("facts") else {}),
+                    **({"identity": _matched[0]} if _matched else {}),
+                    **({"facts": facts} if facts else {}),
                     "payload": {"text": "\n".join(selected), "fields": fields},
                     "meta": h.get("meta") or {},
                     "score": h.get("_qa_sim")})

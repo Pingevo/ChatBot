@@ -686,6 +686,33 @@ def test_hint_never_substitutes_target_identity(db, monkeypatch):
     assert not res.supporting_evidence
 
 
+def test_kb_evidence_emits_identity_and_spec_token_facts(db, monkeypatch):
+    """subject-matched row → evidence พก identity = declared ref ที่ match +
+    spec_tokens fact จาก selected passages — typed measured-facts channel
+    เดิมสำหรับ spec_claim grounding (ไม่ใช่ authority ใหม่)"""
+    from shopeechat import kb_zaapi
+    from shopeechat.turn_decision import TurnNeed
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="power.xlsx", data=_xlsx_bytes({"Sheet1": [
+        ["รุ่น", "ชื่อย่อ", "กำลังไฟ"],
+        ["CUKTECH PB100P", "PB100P",
+         "Output: USB-C 120W + USB-A 33W = เฉลี่ยรวมไม่เกิน 150W"],
+    ]}), content_type="product", subject_bindings={"Sheet1": {"columns": [
+        {"column_index": 1, "header": "รุ่น"},
+        {"column_index": 2, "header": "ชื่อย่อ"}]}})
+    need = TurnNeed("product", "describe", subject_refs=("PB100P",),
+                    capability_asks=("กำลังไฟ",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="PB100P ชาร์จได้สูงสุดกี่วัตต์")
+    assert len(res.supporting_evidence) == 1
+    ev = res.supporting_evidence[0]
+    assert "pb100p" in ev["identity"].lower()
+    facts = {f["key"]: f["value"] for f in ev.get("facts") or ()}
+    assert "spec_tokens" in facts
+    toks = set(facts["spec_tokens"])
+    assert {"120w", "33w", "150w"} <= toks
+
+
 def test_readiness_searchable(db):
     zkf.apply_import(db, filename=F1, data=F1_DATA, subject_bindings=F1_BINDINGS, admin="t")
     r = zkf.file_kb_ready(db)
