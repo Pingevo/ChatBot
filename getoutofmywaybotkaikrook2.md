@@ -14580,3 +14580,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - verdict บน doc จริง: CMC615P/CTC615P/CTC620P × xiaomi 17 ultra → compatible + claimed_wattage_covers_target (เดิม missing_wattage_evidence); CTL301 (Lightning) ยัง connector_disjoint incompatible เหมือนเดิม
 - ผลกระทบเคสอื่น: ทุก compat verdict ที่มี watt ในชื่อ/desc จะเลิก hedge เต็มสเปค → ตอบ attribute-source แทน; เคสไม่มี watt เลยคง missing_wattage_evidence; guard '615W'/'6A' hallucination catches ยังทำงาน; multi-subject spec-claim fail-closed ไม่เปลี่ยน
 - งานค้าง: commit แยกทีละ fix; Strava-shaped leading-negative questions (TurnPlan polarity) เคส aumporn; live matrix rerun ยืนยันคำตอบจริงหลัง fix
+
+## ผ่านแล้ว: F4 confirmed-compat targets ใน unanswered asks (verified 2026-11-21)
+- ที่มา: เคส aumporn — "เชื่อม Strava ได้ไหม"/"ไม่ซิงค์ใช่ไหม" ตอบ boilerplate "ไม่มีข้อมูล" ทั้งที่ desc ระบุแอปที่รองรับ (Imilab Fit, Glory Fit); ลูกค้าอยากได้ "ตอบตรง + บอกที่ใช้ได้ชัวร์ๆ"
+- policy_resolver.declared_compat_targets (ใหม่): enumerate spec-db device keys ที่ _declares match + _declared_apps (Latin app names หลัง แอปพลิเคชัน/แอปฯ/แอป — split ,|และ|หรือ); containment-dedupe ("iphone" ⊂ "iphone 14 pro" ถูกตัด) + cap 8 — display data เท่านั้น ไม่ใช่ verdict proof (declare ไม่มี relation/negation check เหมือน declares_device เดิม)
+- UnansweredNeed +confirmed_targets — populate ที่ capability-ask no_evidence site: resolve subject cards ผ่าน by_req + subject_refs (refs ว่าง → ไม่ populate — fail closed ห้ามยืม card อื่น); _unanswered_segment ต่อท้าย "ที่ระบุไว้ว่ารองรับตามข้อมูลสินค้า: X, Y"
+- verify บน doc จริง: W01 → ('pixel', 'Imilab Fit', 'Glory Fit'); CTL301 → iphone 14 pro/13/12/11/x/7, ipad pro, ipad air
+- suite: 2378 passed 0 regressions (test_evidence_gap_fixes +5 = 15 tests); commit 7e1606b
+- เหลือ: leading-negative polarity ("ไม่ซิงค์ใช่ไหม" → ยืนยันคำเดา) ยังไม่มี typed polarity ใน TurnPlan — wording ตอนนี้อ่านเป็น "ไม่มีระบุ" ได้ทั้ง 2 โพล; live matrix rerun (bg) เช็ค F1–F3 บนคำตอบจริง
