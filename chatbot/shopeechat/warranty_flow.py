@@ -835,9 +835,15 @@ def _build_warranty_claim_response(req, ctx, answer, handoff, claim_ctx,
             )
         elif not _handoff_result:
             # outcome ไม่ยืนยัน — base answer อาจ claim admin-contact → แทนด้วยข้อความตรงๆ
-            #   (queued ยืนยันแล้วแต่ไม่มีชื่อ → เก็บ base answer — claim รอแอดมินจริง)
+            #   (queued ยืนยันแล้วแต่ไม่มีชื่อ → เก็บ base answer — claim รอแอดมินจริง);
+            #   คำแนะนำปลอดภัยของอาการ (ไหม้/ควัน/ร้อน) ห้ามหายไปกับ transport —
+            #   safety owner เดิมตัดสินว่าจะ prepend หรือไม่ (ไม่มีอาการ → "")
             from . import responses as _resp_mod
-            answer = _resp_mod.HANDOFF_FAILED_REPLY
+            from . import warranty as _warranty_mod
+            _safety = _warranty_mod.malfunction_safe_check(
+                getattr(req, "message", "") or "")
+            answer = ((_safety.rstrip() + "\n\n") if _safety.strip() else "") \
+                + _resp_mod.HANDOFF_FAILED_REPLY
 
     return {
         "answer": answer,
