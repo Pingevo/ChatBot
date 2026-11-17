@@ -191,13 +191,16 @@ def test_cable_capacity_below_target_is_typed_limitation():
 
 # 5 -------------------------------------------------------------------------
 def test_cable_without_capacity_is_unknown_not_title_parsed():
+    """ไม่มี structured capacity → title/desc watts เป็น seller-claimed
+    tier (claimed_wattage_covers_target) ไม่ใช่ verified capacity —
+    ห้าม promote เป็น cable_capacity_covers_target."""
     card = _cable({}, name="CTC620P สายชาร์จ 240W USB-C to USB-C",
                   description="รองรับ 240W 6A PD3.1")
     f = _facts(card)
     assert not _vals(f, "power_capacity_w")
     assert not _vals(f, "output_w_structured")
     d = _decide(card)
-    assert "missing_wattage_evidence" in d.reason_codes
+    assert "claimed_wattage_covers_target" in d.reason_codes
     assert "cable_capacity_covers_target" not in d.reason_codes
 
 

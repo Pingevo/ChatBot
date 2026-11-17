@@ -497,8 +497,8 @@ def extract_field_facts(card: dict, *, subject_id: str = "",
     add("output_w", device_compat._extract_max_wattage(card) or None,
         "card", "output_power_w|variants|name")
     # structured-only watt values สำหรับ compat verdict — name/title/
-    #   description ไม่ใช่ wattage proof (parse fallback ของ
-    #   _extract_max_wattage ใช้ได้แค่ retrieval/ranking ไม่ใช่ verdict);
+    #   description ไม่ใช่ verified proof (`output_w` ข้างบนถูกใช้เป็น
+    #   seller-claimed tier ใน _wattage_rc แทนเมื่อ structured ไม่มี);
     #   canonical owner = device_compat._structured_watts (set ครบทุก
     #   structured value: card-level + specs + ทุก variant, numeric/
     #   finite/>0 เท่านั้น) — resolve_compat ประเมินความสัมพันธ์ทั้ง
@@ -782,9 +782,10 @@ def _wattage_rc(subject_facts, target_facts, subject_id: str,
     charges path): เปรียบ target min_watt (structured เท่านั้น) กับ
     subject watt — cable ใช้ `power_capacity_w` (capacity ≠ output) ส่วน
     power source ใช้ `output_w_structured`; ไม่มี req_w → [] (ไม่เติม
-    caveat); req>0 แต่ไม่มี subject watt → missing_wattage_evidence;
-    ทุกค่า < req → insufficient_wattage; mixed → variant_unconfirmed;
-    ครบและเป็น cable → cable_capacity_covers_target"""
+    caveat); req>0 แต่ไม่มี subject watt เลย → missing_wattage_evidence;
+    ไม่มี structured แต่มี seller-claimed (`output_w` parsed card watt)
+    → claimed_* codes; ทุกค่า < req → insufficient_wattage; mixed →
+    variant_unconfirmed; ครบและเป็น cable → cable_capacity_covers_target"""
     _sid = (subject_id or "").lower()
     _req_w = 0.0
     for _v in _fact_vals(target_facts, target, "min_watt"):
@@ -814,7 +815,27 @@ def _wattage_rc(subject_facts, target_facts, subject_id: str,
         if math.isfinite(_fw):
             _ws.append(_fw)
     if not _ws:
-        return ["missing_wattage_evidence"]
+        # claimed tier — watt ที่ parse จาก name/desc/variants ของ card
+        # (`output_w` = seller-claimed; ไม่ใช่ structured proof แต่เป็นข้อมูล
+        # สินค้าจริง) — แยก reason code เพื่อ render "ตามข้อมูลสินค้าระบุ"
+        # ไม่ใช่ missing/verified ตรงๆ
+        _claimed = []
+        for _v in _fact_vals(subject_facts, subject_id, "output_w"):
+            if isinstance(_v, bool):
+                continue
+            try:
+                _fw = float(_v)
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(_fw) and _fw > 0:
+                _claimed.append(_fw)
+        if not _claimed:
+            return ["missing_wattage_evidence"]
+        if all(_w < _req_w for _w in _claimed):
+            return ["claimed_insufficient_wattage"]
+        if any(_w < _req_w for _w in _claimed):
+            return ["claimed_wattage_variant_unconfirmed"]
+        return ["claimed_wattage_covers_target"]
     if all(_w < _req_w for _w in _ws):
         return ["insufficient_wattage"]
     if any(_w < _req_w for _w in _ws):
