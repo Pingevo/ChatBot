@@ -1832,6 +1832,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         #   decided-incompatible → drop (+note); undecided → เก็บเป็น
         #   candidate พร้อม limitation (unverified ≠ catalog-empty);
         #   decided-compatible verdicts ไหลเป็น typed proof artifact
+        vmap: dict = {}
         ptn = _norm_target(target_of.get(i))
         if ptn and n.kind != "compat":
             verdicts_t, _unres_t = _verdict_target_decisions(
@@ -2044,6 +2045,18 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             _prim_ok = any(
                 c.role != "alternative" and c.identity in _ok_ids
                 for c in cands)
+        # verdict-aware emit order (A-330): need ที่มี typed verdicts →
+        #   featured pick ต้องเป็นตัวที่ verdict ดีกว่า — partition ตาม
+        #   verdict tier (stable: ลำดับใน tier เดียวกัน = selection order
+        #   verbatim ของ owner เดิม); candidate ไร้ verdict = undecided
+        #   อยู่หลัง decided; decided-incompatible ออกจาก cands แล้ว
+        _vmap_i = vmap or {v.subject_id: v for v in decided.get(i, ())}
+        if _vmap_i and len(cands) > 1:
+            cands = sorted(
+                cands,
+                key=lambda _s: _verdict_emit_tier(
+                    _vmap_i.get(_cpool._identity_key(_s.card or {})[0]
+                                or _s.identity)))
         for s in cands:
             prev = emitted.get(s.identity)
             if prev is not None:
@@ -2386,6 +2399,32 @@ _VERDICT_RC_HINT: tuple[tuple[str, str], ...] = (
      " — สายรองรับกำลังไฟตามที่อุปกรณ์ต้องการ (กำลังชาร์จจริงขึ้นกับ"
      "หัวชาร์จ/อุปกรณ์/โปรโตคอล)"),
 )
+
+
+_VERDICT_COVER_RC = frozenset({
+    "claimed_wattage_covers_target", "cable_capacity_covers_target"})
+_VERDICT_CAVEAT_RC = frozenset({
+    "insufficient_wattage", "wattage_variant_unconfirmed",
+    "claimed_insufficient_wattage",
+    "claimed_wattage_variant_unconfirmed", "missing_wattage_evidence"})
+
+
+def _verdict_emit_tier(v) -> int:
+    """featured-pick ordering tier ของ decided candidate — typed verdict
+    fields เท่านั้น (ไม่ parse reason text): 0=clean compatible ·
+    1=compatible + adequacy covers-target rc · 2=compatible + caveat rc ·
+    3=ไม่มี verdict (undecided) · 4=outcome อื่น (ไม่ควรถึง — incompatible
+    ถูก drop ก่อน emit)"""
+    if v is None:
+        return 3
+    if v.decision.outcome != "compatible":
+        return 4
+    rc = set(v.decision.reason_codes or ())
+    if not rc & (_VERDICT_COVER_RC | _VERDICT_CAVEAT_RC):
+        return 0
+    if rc & _VERDICT_COVER_RC and not rc & _VERDICT_CAVEAT_RC:
+        return 1
+    return 2
 
 
 def _verdict_hint(v: CompatVerdict) -> str:

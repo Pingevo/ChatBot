@@ -1241,6 +1241,36 @@ def test_decided_compat_below_min_watt_says_not_full_speed():
         f"answer:\n{answer}")
 
 
+def test_featured_pick_prefers_clean_verdict_over_caveated():
+    """verdict-aware emit order (A-330): subject cards ของ need เดียวกัน
+    ที่ decide compatible ทั้งคู่ — ตัวที่ verdict ดีกว่า (clean/covers
+    target) ต้องนำหน้าตัวที่ติด caveat (insufficient/unconfirmed) เป็น
+    featured card แม้ selection order ใส่ตัวแย่กว่าก่อน"""
+    need = _need_compat(subj=("LOW20", "HI100"), trefs=("dev-x",))
+    req = _req("req-0", types=("charger",), codes=("LOW20", "HI100"),
+               target="dev-x", cm="connector_required")
+    low = _sel_card("i:1", "subject", "req-0", "หัวชาร์จ USB-C 20W",
+                    model_codes=["LOW20"], connector="usb-c",
+                    output_power_w=20)
+    hi = _sel_card("i:2", "subject", "req-0", "หัวชาร์จ USB-C 100W",
+                   model_codes=["HI100"], connector="usb-c",
+                   output_power_w=100)
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "dev-x",
+         "data": {"connector": "usb-c", "min_watt": 90.0,
+                  "source": "spec-db"},
+         "subject_refs": ("i:1", "i:2")},))
+    sel = _selection((low, "req-0"), (hi, "req-0"))   # low ก่อนตาม selection
+    ctx = _compile((need,), sel, pool, (req,), _profile())
+    vmap = {v.subject_id: v for v in ctx.compat_verdicts}
+    assert vmap["i:1"].decision.outcome == "compatible" and \
+        "insufficient_wattage" in vmap["i:1"].decision.reason_codes, (
+            f"premise: i:1 = compatible+insufficient — {ctx.compat_verdicts}")
+    names = [p.get("name") or "" for p in ctx.products]
+    assert names[:1] and "100W" in names[0], (
+        f"featured card ต้องเป็น verdict ดีกว่า — products={names}")
+
+
 def test_decided_compat_ambiguous_variants_unconfirmed():
     """LOW-3 case5: card มี structured variants 65/100/140W แต่ไม่มี
     selected variant ที่ยืนยัน → ห้ามใช้ max(140W) เป็นหลักฐาน
