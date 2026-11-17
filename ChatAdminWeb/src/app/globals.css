@@ -2327,7 +2327,8 @@ body:has(.auth-gradient-bg) {
   }
 }
 
-@media (pointer: coarse) and (max-height: 500px) and (min-width: 768px) {
+@media (pointer: coarse) and (max-height: 500px) and (min-width: 768px),
+       (min-width: 768px) and (max-width: 1023.98px) and (max-height: 500px) {
   .phone-page-content {
     padding-bottom: calc(4rem + env(safe-area-inset-bottom, 0px));
   }
@@ -3565,8 +3566,9 @@ body {
   .phone-page-header { -webkit-backdrop-filter: none; backdrop-filter: none; }
 }
 
-/* Touch tablets use their own floating dock and landscape dashboard composition. */
-@media (pointer: coarse) and (min-width: 768px) and (max-width: 1279.98px) {
+/* Tablet widths use the floating dock even when viewport emulation reports a fine pointer. */
+@media (pointer: coarse) and (min-width: 768px) and (max-width: 1279.98px),
+       (min-width: 768px) and (max-width: 1023.98px) {
   .tablet-console-frame > .tablet-console-content {
     margin-left: 0 !important;
   }
@@ -3903,7 +3905,8 @@ body {
   .dashboard-mobile-breakdowns > div + div { margin-top: 0; }
 }
 
-@media (pointer: coarse) and (min-width: 960px) and (max-width: 1279.98px) {
+@media (pointer: coarse) and (min-width: 960px) and (max-width: 1279.98px),
+       (min-width: 960px) and (max-width: 1023.98px) {
   .dashboard-mobile-view {
     grid-template-columns: minmax(15rem, 0.85fr) minmax(0, 1.15fr);
     gap: 1rem;
@@ -3922,7 +3925,8 @@ body {
   .dashboard-mobile-status dl > div + div { border-left: 1px solid var(--color-border-subtle) !important; }
 }
 
-@media (pointer: coarse) and (min-width: 768px) and (max-width: 1279.98px) and (prefers-reduced-motion: reduce) {
+@media (pointer: coarse) and (min-width: 768px) and (max-width: 1279.98px) and (prefers-reduced-motion: reduce),
+       (min-width: 768px) and (max-width: 1023.98px) and (prefers-reduced-motion: reduce) {
   .tablet-touch-nav > div > a,
   .tablet-touch-nav > div > button { transition: none; }
   .tablet-touch-nav > div > a:active,
@@ -4431,7 +4435,8 @@ html[data-chat-text-size="larger"] .chat-message-copy { font-size: 1.125rem; }
   .dashboard-desktop-overview::after { display: none; }
 }
 
-@media (pointer: coarse) and (min-width: 768px) and (max-width: 1279.98px) {
+@media (pointer: coarse) and (min-width: 768px) and (max-width: 1279.98px),
+       (min-width: 768px) and (max-width: 1023.98px) {
   .tablet-touch-nav + .mobile-menu-overlay { padding: 1.5rem; }
   .tablet-touch-nav + .mobile-menu-overlay .mobile-menu-dialog {
     width: min(46rem, calc(100vw - 4rem));
