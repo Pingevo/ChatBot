@@ -7,6 +7,11 @@ F2  claimed wattage tier — verdict wattage: structured ก่อน, ถ้า
     ค่อยใช้ seller-claimed watts (parse จาก name/desc/variants) พร้อม
     reason code เฉพาะ + segment ที่บอกแหล่ง "ตามข้อมูลสินค้า"
 F3  unanswered ask wording — "ไม่มีระบุ" ตรงๆ แทน boilerplate กว้าง
+G1  compat verdict → model context (anonymous recommend) — verdict ของ
+    candidate ที่ไม่ใช่ตัวที่ลูกค้าถามตรงไหลเป็น typed data ใน
+    context_text ให้ model ปั้นประโยค (ไม่ render deterministic
+    segment ซ้ำทุกบรรทัด); candidate ที่ไม่ผ่านไม่กล่าวถึงกับลูกค้า —
+    named subject (ลูกค้าถามตรง) ยัง render verdict เดิมทั้งผ่าน/ไม่ผ่าน
 """
 import sys
 from pathlib import Path
@@ -180,3 +185,81 @@ def test_unanswered_renders_confirmed_targets():
     assert "ไม่มีระบุ" in seg, seg          # ตอบตรงว่าไม่มีข้อมูลของ ask
     assert "Imilab Fit" in seg and "Glory Fit" in seg, seg
     assert "Strava" not in seg or "สตาวา" in seg  # ไม่สลับคำตอบ
+
+
+# ── G1 — compat verdict → context; เฉพาะตัวที่ผ่าน/ถามตรงที่บอกลูกค้า ──────
+
+def _cdec(outcome, *rc):
+    return pr.CompatDecision(outcome, (), tuple(rc))
+
+
+def _verdict(outcome, *, asked, sid="i:1", name="สาย A",
+             need_index=0, rc=()):
+    return ac.CompatVerdict(
+        need_index=need_index, subject_id=sid, subject_name=name,
+        target="xiaomi 17 ultra", relation="charges",
+        decision=_cdec(outcome, *rc), asked=asked)
+
+
+def _ctx_v(*verdicts):
+    task = ac.AnswerTask(tasks=(ac.NeedTask(
+        kind="compat", operation="compat", need_index=0,
+        target="xiaomi 17 ultra"),))
+    return ac.AnswerContext(
+        task=task, products=(), evidence=(), availability_notes=(),
+        unanswered_needs=(), estimated_tokens=0,
+        compat_verdicts=tuple(verdicts))
+
+
+def _compat_need(subj=()):
+    from shopeechat import turn_decision as td
+    return td.TurnNeed(kind="compat", operation="compat",
+                       subject_refs=tuple(subj))
+
+
+def test_anonymous_compatible_verdict_goes_to_context_not_segment():
+    ctx = _ctx_v(_verdict("compatible", asked=False,
+                          rc=("claimed_wattage_covers_target",)))
+    text = ctx.context_text()
+    assert "ผลตรวจความเข้ากันได้" in text, text
+    assert "สาย A" in text and "ใช้งานร่วมกันได้" in text
+    comp = ac.compose_answer(needs=(_compat_need(),), context=ctx,
+                             product_text="สาย A ใช้กับ xiaomi ได้ค่ะ")
+    assert not any("ใช้งานร่วมกับ" in (r.text or "")
+                   for r in comp.results), comp.results
+
+
+def test_anonymous_incompatible_candidate_is_silent():
+    ctx = _ctx_v(_verdict("incompatible", asked=False, sid="i:9",
+                          name="สาย X"))
+    comp = ac.compose_answer(needs=(_compat_need(),), context=ctx,
+                             product_text="แนะนำสาย A ค่ะ")
+    assert not any("ใช้งานร่วมกับ" in (r.text or "")
+                   for r in comp.results), comp.results
+    # model ยังต้องรู้ว่าตัวนี้ไม่ผ่าน — context mark ห้ามแนะนำ
+    text = ctx.context_text()
+    assert "สาย X" in text and "ไม่ได้" in text
+
+
+def test_asked_subject_incompatible_still_renders():
+    ctx = _ctx_v(_verdict("incompatible", asked=True, name="CTL301"))
+    comp = ac.compose_answer(needs=(_compat_need(("CTL301",)),),
+                             context=ctx, product_text="")
+    assert any("ใช้งานร่วมกับ" in (r.text or "") and "ไม่ได้" in r.text
+               for r in comp.results), comp.results
+
+
+def test_anonymous_compatible_falls_back_when_no_model_text():
+    ctx = _ctx_v(_verdict("compatible", asked=False))
+    comp = ac.compose_answer(needs=(_compat_need(),), context=ctx,
+                             product_text="")
+    assert any("ใช้งานร่วมกับ" in (r.text or "")
+               for r in comp.results), comp.results
+
+
+def test_anonymous_verdict_need_still_covered():
+    # silent verdict ห้ามทำ need กลายเป็น unanswered "ไม่มีระบุ"
+    ctx = _ctx_v(_verdict("compatible", asked=False))
+    comp = ac.compose_answer(needs=(_compat_need(),), context=ctx,
+                             product_text="สาย A ใช้ได้ค่ะ")
+    assert not comp.unanswered_needs, comp.unanswered_needs

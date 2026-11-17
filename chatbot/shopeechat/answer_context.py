@@ -295,6 +295,12 @@ class CompatVerdict:
     target: str                        # normalized verdict target
     relation: str                      # exact typed relation เดียว
     decision: CompatDecision
+    # asked = subject คือ named ref ที่ลูกค้าถามตรง (need.subject_refs) —
+    #   verdict ของมันคือคำตอบของคำถามนั้น → deterministic segment
+    #   render เสมอ (ทั้งผ่าน/ไม่ผ่าน); anonymous candidate (recommend
+    #   pool) = context data สำหรับ model เท่านั้น — compatible ไหลเป็น
+    #   verdict block ให้ model ปั้นประโยค, incompatible ไม่กล่าวถึง
+    asked: bool = False
 
 
 @dataclass(frozen=True)
@@ -402,6 +408,28 @@ class AnswerContext:
             out += ("\n\nข้อจำกัดที่ตรวจพบจาก evidence "
                     "(ห้ามสรุปเกิน — สินค้าที่ไม่ผ่านเงื่อนไข/พิสูจน์ว่า"
                     "ไม่เข้ากันถูกตัดออกแล้ว):\n" + "\n".join(lines))
+        if self.compat_verdicts:
+            vlines = []
+            for v in self.compat_verdicts:
+                ord_s = ordinal.get(v.need_index)
+                if ord_s is None:
+                    continue   # need ไม่มี surviving model task → ไม่เข้า context
+                pre = f"- (งานที่ {ord_s}) {v.subject_name} ↔ {v.target}: "
+                if v.decision.outcome == "compatible":
+                    vlines.append(pre + "ใช้งานร่วมกันได้"
+                                  + _verdict_hint(v))
+                elif v.asked:
+                    vlines.append(pre + "ใช้งานร่วมกันไม่ได้")
+                else:
+                    vlines.append(
+                        pre + "ใช้งานร่วมกันไม่ได้ — ไม่ใช่สินค้าที่จะ"
+                        "แนะนำ ห้ามเสนอหรือกล่าวถึงกับลูกค้า")
+            if vlines:
+                out += ("\n\nผลตรวจความเข้ากันได้ (ข้อเท็จจริงจาก "
+                        "evidence — authoritative ห้ามเปลี่ยนข้อสรุป; "
+                        "สินค้าที่ใช้งานร่วมกันได้ให้เล่าความเข้ากันได้"
+                        "รวมกับสเปคสินค้าเป็นภาษาธรรมชาติ ไม่ copy "
+                        "ข้อความผลตรวจตรงๆ):\n" + "\n".join(vlines))
         return out
 
 
@@ -881,7 +909,8 @@ def _verdict_target_decisions(i: int, tn: str, need, reqs_n, *, by_req,
                 need_index=i, subject_id=sid,
                 subject_name=(card.get("name")
                               or card.get("item_name") or sid),
-                target=tn, relation=rel, decision=dec))
+                target=tn, relation=rel, decision=dec,
+                asked=bool(matched)))
         else:
             unres.extend(matched or (sid,))
     return tuple(verdicts), tuple(dict.fromkeys(unres))
@@ -1554,7 +1583,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                         verdicts_here.append(CompatVerdict(
                             need_index=i, subject_id=sid,
                             subject_name=str(r), target=tn_i,
-                            relation=rel_i, decision=dec))
+                            relation=rel_i, decision=dec, asked=True))
                 covered = {str(v.subject_name) for v in verdicts_here}
                 unresolved = tuple(r for r in unresolved
                                    if r not in covered)
@@ -2272,6 +2301,43 @@ _DOMAIN_ORDER = {"claim": 0, "compat": 1, "constraint": 2,
                  "product": 3, "policy": 4}
 
 
+# verdict reason → hint สั้นสำหรับ model context (ลำดับตรวจเหมือน
+#   _compat_segment — reason เดียวกันต้องอ่านความหมายเดียวกัน)
+_VERDICT_RC_HINT: tuple[tuple[str, str], ...] = (
+    ("insufficient_wattage",
+     " — หัวต่อเข้ากันได้ แต่กำลังไฟที่ยืนยันได้ต่ำกว่าสเปคอุปกรณ์ "
+     "(อาจชาร์จช้ากว่า)"),
+    ("wattage_variant_unconfirmed",
+     " — หัวต่อเข้ากันได้ แต่มีหลายตัวเลือกกำลังไฟ ยังไม่ยืนยันตัวเลือก"
+     "ที่จะได้รับ"),
+    ("claimed_wattage_covers_target",
+     " — ตามข้อมูลสินค้ารองรับกำลังไฟครอบคลุมความต้องการของอุปกรณ์ "
+     "(กำลังชาร์จจริงขึ้นกับหัวชาร์จและโปรโตคอล)"),
+    ("claimed_insufficient_wattage",
+     " — หัวต่อเข้ากันได้ แต่ตามข้อมูลสินค้า กำลังไฟต่ำกว่าที่อุปกรณ์"
+     "ต้องการ (อาจชาร์จช้ากว่า)"),
+    ("claimed_wattage_variant_unconfirmed",
+     " — หัวต่อเข้ากันได้ แต่ตามข้อมูลสินค้ามีหลายตัวเลือกกำลังไฟ "
+     "ยังไม่ยืนยันตัวเลือกที่จะได้รับ"),
+    ("missing_wattage_evidence",
+     " — หัวต่อเข้ากันได้ แต่ยังไม่มีข้อมูลกำลังไฟพอยืนยันเต็มสเปค"),
+    ("cable_capacity_covers_target",
+     " — สายรองรับกำลังไฟตามที่อุปกรณ์ต้องการ (กำลังชาร์จจริงขึ้นกับ"
+     "หัวชาร์จ/อุปกรณ์/โปรโตคอล)"),
+)
+
+
+def _verdict_hint(v: CompatVerdict) -> str:
+    """reason-code → short parenthetical สำหรับ context verdict block —
+    codes เดียวกับ _compat_segment แต่เป็น data ให้ model ไม่ใช่ข้อความ
+    สำเร็จ; ไม่มี caveat code → "" (verdict clean)"""
+    rc = set(v.decision.reason_codes or ())
+    for code, hint in _VERDICT_RC_HINT:
+        if code in rc:
+            return hint
+    return ""
+
+
 def _compat_segment(v: CompatVerdict) -> str:
     """deterministic verdict segment — subject display + target +
     outcome เท่านั้น (typed fields; ไม่มี proof dict/prose เสริม);
@@ -2473,12 +2539,30 @@ def compose_answer(*, needs: tuple, context: AnswerContext | None = None,
         # boolean permission สำหรับ model)
         for v in context.compat_verdicts or ():
             seg = _compat_segment(v)
-            if not seg:
-                continue   # outcome นอก whitelist → ไม่ cover ด้วย claim ปลอม
+            if v.asked:
+                # subject ที่ลูกค้าถามตรง — verdict คือคำตอบของคำถาม:
+                #   deterministic segment render เสมอ (ทั้งผ่าน/ไม่ผ่าน)
+                if not seg:
+                    continue   # outcome นอก whitelist → ไม่ cover ด้วย claim ปลอม
+                covered.add(v.need_index)
+                results.append(DomainResult(
+                    "compat", (v.need_index,), text=seg,
+                    origin="deterministic",
+                    subject_ids=(v.subject_id,)))
+                continue
+            # anonymous candidate (recommend pool): verdict = typed data
+            #   ใน context verdict block — compatible ให้ model ปั้น
+            #   ประโยค (deterministic segment = fallback เมื่อ model ไม่
+            #   มี output เท่านั้น); incompatible = ตัวไม่ผ่าน ไม่ render
+            #   (ไม่ใช่คำแนะนำ ไม่บอกลูกค้า) — need นับ covered เสมอ
+            #   เพราะ outcome ตัดสินแล้ว ไม่ใช่ unresolved
             covered.add(v.need_index)
-            results.append(DomainResult(
-                "compat", (v.need_index,), text=seg,
-                origin="deterministic", subject_ids=(v.subject_id,)))
+            if v.decision.outcome == "compatible" \
+                    and not product_text and seg:
+                results.append(DomainResult(
+                    "compat", (v.need_index,), text=seg,
+                    origin="deterministic",
+                    subject_ids=(v.subject_id,)))
         # typed no-match verdicts (evaluated candidates ทั้งหมด proven-
         # fail) → deterministic segment เช่นเดียวกับ compat verdict
         for seg in context.constraint_segments or ():
