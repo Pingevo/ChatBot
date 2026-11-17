@@ -98,6 +98,16 @@ class MemoryColl:
     def count_documents(self, filt=None):
         return sum(1 for d in self.docs if _match(d, filt))
 
+    def distinct(self, key):
+        out = []
+        for d in self.docs:
+            v = _get_path(d, key)
+            if isinstance(v, list):
+                out.extend(v)
+            elif v is not None:
+                out.append(v)
+        return list(dict.fromkeys(out))
+
     def insert_one(self, doc, **kw):
         if (doc.get("_id") is not None
                 and any(x.get("_id") == doc["_id"] for x in self.docs)):
@@ -475,6 +485,100 @@ def test_known_qa_subject_is_not_widened_by_comparison_mentions(db, monkeypatch)
                      subject_bindings={"qa": {"refs": ["AC65B2"]}})
     monkeypatch.setattr(kb, "_admin_db", lambda: db)
     assert kb.search_qa("AC65B2 compared with AC65B", model_codes={"AC65B"}) == []
+
+
+# ── unbound rows → content-derived scope (file-009 pattern) ────────────
+
+def _clips_data():
+    """file-009 shape: คอลัมน์ แบรนด์ + รุ่นฝังในหัวข้อ — ไม่มี binding."""
+    return _xlsx_bytes({"clips": [
+        ["แบรนด์", "รุ่นและหัวข้อ/อาการ", "ลิงก์คลิป"],
+        ["Black Shark", "Black Shark GS 3 วิธีรีเซ็ตเมื่อเครื่องดับเอง ปุ่มกดไม่ได้",
+         "https://youtu.be/gs3"],
+        ["Black Shark", "Black Shark GS3 Ultra แก้อาการเครื่องดับเอง ปุ่มกดไม่ได้",
+         "https://youtu.be/ultra"],
+        ["Black Shark", "Black Shark A3 แก้อาการเครื่องดับเอง ปุ่มกดไม่ได้",
+         "https://youtu.be/a3"],
+        # ลิงก์คลิปเว้นว่าง → 'a' สั้นลง — ให้ trigram เหนือ _QA_MIN_SCORE
+        # ภายใต้ _no_embed (prod ใช้ embedding sim — ไม่ sensitive)
+        ["ทั่วไป (ทุกแบรนด์)", "เครื่องดับเอง ปุ่มกดไม่ได้ ชาร์จ 5V", ""],
+    ]})
+
+
+def _seed_vocab(db):
+    """bound file → model vocab มี GS3ULTRA + A3 (รุ่นที่ร้านเอกสารรู้)."""
+    zkf.apply_import(db, filename="spec.xlsx", data=_xlsx_bytes({"s": [
+        ["ชื่อสินค้า", "x"],
+        ["Black Shark GS3 Ultra", "spec"],
+        ["Black Shark A3", "spec"],
+    ]}), subject_bindings={"s": {"refs": ["black shark gs3 ultra",
+                                         "black shark a3"]}},
+        content_type="product", admin="t")
+
+
+def test_zaapi_unbound_row_scoped_by_declared_model(db, monkeypatch):
+    """subject_refs ว่างแต่เนื้อหาประกาศรุ่น → scope ตามเนื้อหา (contract
+    เดียวกับ legacy topic-regex fallback) — เดิม identity filter ตัดทิ้งหมด."""
+    from shopeechat import knowledge_base as kb
+    _no_embed(monkeypatch)
+    _seed_vocab(db)
+    zkf.apply_import(db, filename="clips.xlsx", data=_clips_data(),
+                     content_type="troubleshooting", admin="t")
+    monkeypatch.setattr(kb, "_admin_db", lambda: db)
+    hits = kb.search_qa("เครื่องดับเอง ปุ่มกดไม่ได้", model_codes={"GS3"},
+                        types=("troubleshooting",))
+    gs3 = [h for h in hits if "GS 3 วิธีรีเซ็ต" in h["a"]]
+    assert gs3 and gs3[0]["_qa_level"] == "model", \
+        "แถวที่ประกาศ GS 3 ในเนื้อหาต้องเป็น model-level"
+    assert not any("GS3 Ultra" in h["a"] for h in hits), \
+        "GS3 Ultra row ห้ามหลุดเข้า context GS3 (exact model isolation)"
+    assert not any("A3 แก้อาการ" in h["a"] for h in hits), \
+        "A3 row เป็น foreign model — ต้องถูกตัด"
+    gen = [h for h in hits if "ทั่วไป" in h["a"]]
+    assert gen and gen[0]["_qa_level"] == "generic", \
+        "แถวไม่ประกาศรุ่นต้องยังเป็น generic (5V ไม่ใช่ model declaration)"
+
+
+def test_zaapi_unbound_row_brand_and_generic(db, monkeypatch):
+    """ไม่รู้รุ่น (known ว่าง) → แถวแบรนด์เดียวกัน level=brand, ทั่วไป=generic —
+    foreign-model exclusion ใช้เฉพาะตอนมี known (parity legacy)."""
+    from shopeechat import knowledge_base as kb
+    _no_embed(monkeypatch)
+    _seed_vocab(db)
+    zkf.apply_import(db, filename="clips.xlsx", data=_clips_data(),
+                     content_type="troubleshooting", admin="t")
+    monkeypatch.setattr(kb, "_admin_db", lambda: db)
+    hits = kb.search_qa("เครื่องดับเอง ปุ่มกดไม่ได้", known_brand="black shark",
+                        types=("troubleshooting",), limit=6)
+    gs3 = [h for h in hits if "GS 3 วิธีรีเซ็ต" in h["a"]]
+    assert gs3 and gs3[0]["_qa_level"] == "brand"
+    gen = [h for h in hits if "ทั่วไป" in h["a"]]
+    assert gen and gen[0]["_qa_level"] == "generic"
+
+
+def test_qa_troubleshoot_tips_generic_admitted(db, monkeypatch):
+    """ทั่วไป row (ไม่ประกาศรุ่น) ผ่าน sim/len gate ต้องถูกยอมรับเป็น tip
+    เมื่อมี context — เดิม filter รับเฉพาะ model/item/brand ทำให้ generic
+    ไม่เคยยิง; และต้องไม่ยิงเมื่อไม่มี context เลย."""
+    from shopeechat import knowledge_base as kb, route_context as _rc
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="clips.xlsx", data=_xlsx_bytes({"clips": [
+        ["แบรนด์", "รุ่นและหัวข้อ/อาการ", "ลิงก์คลิป"],
+        ["ทั่วไป (ทุกแบรนด์)",
+         "วิธีตรวจสอบเมื่อเครื่องดับเอง ปุ่มกดไม่ได้: ชาร์จทิ้งไว้ 30 นาที "
+         "แล้วกดปุ่มค้าง 10 วินาทีเพื่อรีสตาร์ทเครื่อง",
+         "https://youtu.be/gen"],
+    ]}), content_type="troubleshooting", admin="t")
+    monkeypatch.setattr(kb, "_admin_db", lambda: db)
+    # ไม่มี context → ห้ามยิง generic tip (อาจเป็นคำแนะนำของสินค้าอื่น)
+    assert kb.qa_troubleshoot_tips("เครื่องดับเอง ปุ่มกดไม่ได้",
+                                   snap=None, min_sim=0.3) == []
+    # มี model context → generic row ยิงได้
+    monkeypatch.setattr(_rc, "resolve_route",
+                        lambda *a, **k: type("R", (), {"model_codes": ["GS3"]})())
+    tips = kb.qa_troubleshoot_tips("เครื่องดับเอง ปุ่มกดไม่ได้",
+                                   snap=None, min_sim=0.3)
+    assert tips and "รีสตาร์ท" in tips[0]
 
 
 def test_get_general_faq_zaapi(db, monkeypatch):

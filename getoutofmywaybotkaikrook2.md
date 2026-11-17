@@ -14632,3 +14632,15 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 
 - ผ่านแล้ว: repo รวม ~11G — exports 4.8G (gen 3.5G = 4 snapshot ×~900M อยู่ใน retention policy active+prev+3daily+2weekly+grace24h; maintenance 510M backup reset เก่า; live files ~770M), ChatAdminWeb 4.2G (.next 3.5G dev/turbopack+webpack cache regen ได้, node_modules 694M), .venv 1.2G (torch 536M), docs/test 306M, .git 116M — โค้ดจริง 7.2M ทุกอย่างใหญ่ gitignored/regenerable ไม่มีรั่ว
 - งานค้าง: ไม่มี (report-only ไม่ลบไฟล์) — จุดคืนพื้นที่ที่เสนอ: ChatAdminWeb/.next ~3.5G + exports/maintenance ~510M รอ user สั่งลบ
+
+## ผ่านแล้ว: malfunction tips — unbound Zaapi rows + tips gate (verified 2026-11-21)
+
+- ที่มา: user report — ลูกค้าแจ้งอาการ ("เครื่องดับเอง ปุ่มกดไม่ได้") บอทตอบแค่ "เดี๋ยวแอดมินติดต่อ" ไม่เสิร์ช KB ส่งวิธีแก้เบื้องต้น ทั้งที่ Zaapi ตอบจริงส่ง restart/reset+ลิงก์คลิป
+- root cause chain 3 ชั้น: (1) `zaapi_search` identity filter ตัดแถว `subject_refs=[]` ทิ้งทั้งหมด — ไฟล์ 009 (คลิปแก้ปัญหา 146 แถว) ไม่มี binding แต่ประกาศรุ่นในคอลัมน์ `แบรนด์`/`รุ่นและหัวข้อ`; (2) `qa_troubleshoot_tips` รับเฉพาะ level model/item/brand → generic ไม่เคยยิง; (3) `_already_handed` + non-claim malfunction ไม่มี owner → หล่น product pipeline "หาสินค้าไม่เจอ"
+- แก้: `zaapi_search` +`include_unbound` (แถว refs ว่าง+digest verify อยู่ใน pool เมื่อมี refs) +`extra_terms` (brand term นับ ref_hit ผ่าน prefilter ไม่กรอง identity); `_ref_declared` (space-insensitive code declaration, boundary reject `\s*[a-z0-9]` กัน "gs3"⊂"gs3 ultra"/"gs3ultra"); `search_qa` zaapi branch — unbound rows scope จากเนื้อหา: ประกาศ known → model, ประกาศ vocab-ref อื่น (`_model_vocab` = distinct subject_refs ∪ units.model_codes + brand-stripped, cached) → ตัด foreign, ประกาศแบรนด์เดียวกัน → brand, ไม่ประกาศ → generic (parity legacy topic-regex); tips เพิ่ม types=("troubleshooting",), min_sim 0.45 (คลิปที่ถูก sim~0.49 โดน 0.5 ตัด), context guard (ไม่มี codes+brand → []), spec-identity filter ("ประเภทสินค้า:" ไม่ใช่ tip), generic ต้อง unbound จริง
+- RED→GREEN: test_zaapi_kb_files +5 (unbound model/brand/generic/tips-admit) — bug ที่เจอระหว่างทาง: `\s*(?![a-z0-9])` lookahead ผิด (space=non-alnum ผ่านเสมอ → GS3 Ultra หลุด), MemoryColl ไม่มี distinct → vocab ว่าง (แก้ test double เพิ่ม flatten-array distinct)
+- real DB verify (ThaiSuperPhone/shopee): model ctx GS3 → top-3 คลิป GS3 เท่านั้น (รีเซ็ตแบบกดปุ่ม 0.495) Ultra/A3 ตัดหมด; brand ctx → GS 3 reset อันดับ 1; no ctx → [] ตาม design; 018 bound rows ใช้ path เดิมไม่กระทบ
+- suite: 122 zaapi files + 217 KB/warranty/claim ผ่าน 0 regression
+- ผลกระทบเคสอื่น: bound rows contract เดิมเป๊ะ (subject_refs+digest authoritative); spec tokens (5V/20W) ไม่เป็น model declaration; extra_terms default () ไม่แตะ callers เดิม (zaapi_kb_evidence/get_general_faq); brand ctx แถวประกาศรุ่นแบรนด์เดียวกันได้ brand level (legacy parity — ไม่รู้รุ่นกันข้ามรุ่นไม่ได้ ออกแบบไว้)
+- งานค้าง: warranty_flow wiring — malfunction non-claim ต้องมี owner ยิง tips ก่อน product fallback; post-handoff อาการใหม่ต้องได้ tips โดยไม่ mint episode/POST ซ้ำ; commit แยกทีละ fix
+
