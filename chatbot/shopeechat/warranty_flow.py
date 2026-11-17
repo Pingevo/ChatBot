@@ -1825,21 +1825,34 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
         try:
             from . import knowledge_base as _kbmod
             from . import generation_pointer as _gen
-            _tips = None if _already_handed else _kbmod.qa_troubleshoot_tips(
-                req.message, conversation_id=req.conversation_id,
-                item_id=req.item_id,
-                snap=ctx.get("snap", _gen.SNAP_UNSET),
-                shop=req.shop, platform=req.platform)
+            # already_handed → เฉพาะอาการใหม่ (malfunction evidence) ที่ให้
+            #   tips เสริม; status-only turns ตอบ CLAIM_STATUS_REPLY เดิม
+            _tips = None
+            if (not _already_handed
+                    or warranty.malfunction_safe_check(req.message)):
+                _tips = _kbmod.qa_troubleshoot_tips(
+                    req.message, conversation_id=req.conversation_id,
+                    item_id=req.item_id,
+                    snap=ctx.get("snap", _gen.SNAP_UNSET),
+                    shop=req.shop, platform=req.platform)
             if _tips:
                 _ts_lines = "\n".join(f"• {t}" for t in _tips)
-                _ts_answer = (
-                    f"เบื้องต้นลองทำตามนี้ก่อนนะคะ:\n{_ts_lines}\n\n"
-                    f"ถ้าลองแล้วยังไม่หาย แจ้ง{_bot_name}ได้เลยค่ะ "
-                    f"เดี๋ยวช่วยตรวจสอบเรื่องเคลม/รับประกันให้นะคะ")
-                # ⚡ 2B.4 — troubleshoot-first ตอบ explicit claim request → episode
-                #   ใหม่ที่ stage ts_suggested ผ่าน owner (fresh path เดียวกัน)
-                _claim_state = _claim_transition(req, _claim_state, "ts_suggested", fresh_claim=True)
-                print("[QA-KB] troubleshoot-first: แนะนำวิธีแก้ ยังไม่ handoff", file=sys.stderr)
+                if _already_handed:
+                    # เคสอยู่กับแอดมินแล้ว — supplemental tips เท่านั้น
+                    #   (ไม่ mint episode, ไม่ POST ซ้ำ, ไม่แตะ claim_state)
+                    _ts_answer = (
+                        f"{_bot_name}ส่งต่อให้แอดมินดูแลเคสนี้อยู่แล้วค่ะ\n"
+                        f"ระหว่างรอ ลองทำตามนี้ได้เลยค่ะ:\n{_ts_lines}")
+                    print("[QA-KB] post-handoff supplemental tips — ไม่ mint/POST ซ้ำ", file=sys.stderr)
+                else:
+                    _ts_answer = (
+                        f"เบื้องต้นลองทำตามนี้ก่อนนะคะ:\n{_ts_lines}\n\n"
+                        f"ถ้าลองแล้วยังไม่หาย แจ้ง{_bot_name}ได้เลยค่ะ "
+                        f"เดี๋ยวช่วยตรวจสอบเรื่องเคลม/รับประกันให้นะคะ")
+                    # ⚡ 2B.4 — troubleshoot-first ตอบ explicit claim request →
+                    #   episode ใหม่ที่ stage ts_suggested ผ่าน owner (fresh path)
+                    _claim_state = _claim_transition(req, _claim_state, "ts_suggested", fresh_claim=True)
+                    print("[QA-KB] troubleshoot-first: แนะนำวิธีแก้ ยังไม่ handoff", file=sys.stderr)
                 _total_elapsed = _time.time() - _total_start
                 return dict(
                     answer=_ts_answer,
@@ -1851,11 +1864,13 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     usage={},
                     elapsed=round(_total_elapsed, 2),
                     cost=0.0,
-                    warranty_disposition=_WarrantyDisposition.CONTINUE_PRODUCT,
+                    warranty_disposition=_WarrantyDisposition.TERMINAL,
                     timing=_timing_breakdown,
                     steps=_steps,
                     routing_decision=_app_module._routing(
                         "bot_reply",
+                        "warranty_claim: post-handoff supplemental tips — ไม่ POST ซ้ำ"
+                        if _already_handed else
                         "warranty_claim: troubleshoot-first (QA tips) — ยังไม่ handoff",
                     ),
                     image_desc=_image_desc_out,
@@ -1880,3 +1895,69 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
             _app_module, llm, source="warranty_claim_first_message",
             claim_state=_claim_state, already_handed=_already_handed,
         )
+
+    # ===== Malfunction non-claim troubleshoot-first =====
+    # pure symptom text ที่ไม่ใช่ claim request ห้ามหล่นไป product pipeline
+    #   ("หาข้อมูลสินค้าไม่ได้") — KB tips ก่อน; ไม่มี tip → safe-check floor.
+    #   buy-intent words → ambiguous → ปล่อย product path เดิม.
+    #   already_handed → supplemental เท่านั้น (ไม่ mint episode/ไม่ POST).
+    if warranty.malfunction_safe_check(req.message):
+        _buy_kws = ("แนะนำ", "อยากได้", "อยากซื้อ", "ตัวใหม่", "อันใหม่",
+                    "รุ่นไหน", "รุ่นอะไร", "เปรียบเทียบ")
+        if not any(k in req.message.lower() for k in _buy_kws):
+            try:
+                from . import knowledge_base as _kbmod
+                from . import generation_pointer as _gen
+                _tips = _kbmod.qa_troubleshoot_tips(
+                    req.message, conversation_id=req.conversation_id,
+                    item_id=req.item_id,
+                    snap=ctx.get("snap", _gen.SNAP_UNSET),
+                    shop=req.shop, platform=req.platform)
+            except Exception as _qa_exc:
+                print(f"[QA-KB] malfunction tips error: {_qa_exc}", file=sys.stderr)
+                _tips = []
+            if _already_handed:
+                # เคสอยู่กับแอดมินแล้ว — supplemental เท่านั้น ไม่แตะ episode
+                _ts_lines = ("\n".join(f"• {t}" for t in _tips)
+                             if _tips
+                             else warranty.malfunction_safe_check(req.message).strip())
+                _ts_answer = (
+                    f"{_bot_name}ส่งต่อให้แอดมินดูแลเคสนี้อยู่แล้วค่ะ\n"
+                    f"ระหว่างรอ ลองทำตามนี้ได้เลยค่ะ:\n{_ts_lines}")
+            elif _tips:
+                _ts_answer = (
+                    f"เบื้องต้นลองทำตามนี้ก่อนนะคะ:\n"
+                    + "\n".join(f"• {t}" for t in _tips)
+                    + f"\n\nถ้าลองแล้วยังไม่หาย แจ้ง{_bot_name}ได้เลยค่ะ "
+                      f"เดี๋ยวช่วยตรวจสอบเรื่องเคลม/รับประกันให้นะคะ")
+                _claim_state = _claim_transition(req, _claim_state, "ts_suggested", fresh_claim=True)
+            else:
+                _ts_answer = (
+                    warranty.malfunction_safe_check(req.message)
+                    + f"ถ้าลองแล้วยังไม่หาย แจ้ง{_bot_name}ได้เลยค่ะ "
+                      f"เดี๋ยวช่วยตรวจสอบเรื่องเคลม/รับประกันให้นะคะ")
+                _claim_state = _claim_transition(req, _claim_state, "ts_suggested", fresh_claim=True)
+            _total_elapsed = _time.time() - _total_start
+            print(f"[MALFUNCTION] non-claim symptom → troubleshoot-first "
+                  f"(tips={len(_tips)} handed={_already_handed})", file=sys.stderr)
+            return dict(
+                answer=_ts_answer,
+                answer_segments=llm.split_segments(_ts_answer),
+                products=[],
+                shop=req.shop,
+                model=model_name,
+                source="warranty_troubleshoot",
+                usage={},
+                elapsed=round(_total_elapsed, 2),
+                cost=0.0,
+                warranty_disposition=_WarrantyDisposition.TERMINAL,
+                timing=_timing_breakdown,
+                steps=_steps,
+                routing_decision=_app_module._routing(
+                    "bot_reply",
+                    "malfunction non-claim: post-handoff supplemental — ไม่ POST ซ้ำ"
+                    if _already_handed else
+                    "malfunction non-claim: troubleshoot-first — ยังไม่ขอข้อมูลเคลม",
+                ),
+                image_desc=_image_desc_out,
+            )

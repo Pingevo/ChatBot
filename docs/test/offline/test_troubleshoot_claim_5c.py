@@ -64,3 +64,111 @@ def test_first_claim_answer_has_safe_checks():
     assert "ลอง" in ans or "เช็ก" in ans          # safe checks
     assert "เลขที่คำสั่งซื้อ" in ans              # claim path intact
     assert "ชาร์จด่วน" not in ans                 # ไม่เดาสเปค
+
+
+# ── malfunction troubleshoot-first coverage (unbound-Zaapi KB fix) ──
+
+def _wf_req(msg, conv=None, shop="ThaiSuperPhone"):
+    return SimpleNamespace(message=msg, conversation_id=conv,
+                           platform="shopee", shop=shop, item_id=None,
+                           ticket_state=None, claim_outcome=None,
+                           simulate_assignment=False)
+
+
+def _wf_ctx(claim=False):
+    return {"bot_name": "ทางร้าน", "steps": [], "timing_breakdown": {},
+            "total_start": 0.0, "t0": 0.0, "image_desc_out": "",
+            "model_name": "test", "is_claim_request": claim,
+            "is_followup_policy": False, "is_tax_invoice": False,
+            "qa10": [], "warranty_auto_answer": "", "warranty_auto_ctx": "",
+            "intent_result": {}, "anchor_compare_ctx": None, "snap": None}
+
+
+def test_nonclaim_malfunction_gets_tips_not_product_fallthrough(monkeypatch):
+    """อาการที่ไม่ใช่ claim request ("เครื่องติดดับเอง" — ไม่มีเคลม/ซ่อม keyword)
+    ต้องได้ troubleshoot tips + episode ts_suggested — เดิมคืน None →
+    หล่นไป product pipeline "หาข้อมูลสินค้าไม่ได้"."""
+    from shopeechat import knowledge_base as kb
+    monkeypatch.setattr(kb, "qa_troubleshoot_tips",
+                        lambda *a, **k: ["กดปุ่มค้าง 10 วินาทีเพื่อรีสตาร์ทเครื่อง"])
+    minted = []
+    monkeypatch.setattr(
+        warranty_flow, "_claim_transition",
+        lambda req, cs, to, fields=None, fresh_claim=False:
+            minted.append(to) or dict(cs, stage=to))
+    out = warranty_flow.handle_warranty_flow_legacy(
+        _wf_req("เครื่องติดดับเอง"), _wf_ctx(claim=False), [], None)
+    assert out is not None, "malfunction ต้องไม่หล่นไป product pipeline"
+    assert out["source"] == "warranty_troubleshoot"
+    assert "รีสตาร์ท" in out["answer"]
+    assert "ลองทำตามนี้ก่อน" in out["answer"]
+    assert minted == ["ts_suggested"], \
+        "ต้อง mint ts_suggested เพื่อให้ 'ไม่หาย' turn ถัดไปเข้า claim intake"
+
+
+def test_nonclaim_malfunction_no_tips_safe_check_floor(monkeypatch):
+    """ไม่มี KB tip → floor = malfunction safe-check + เส้นทางเคลม —
+    ยังดีกว่า 'หาสินค้าไม่เจอ' แต่ไม่ขอข้อมูลเคลมก่อนเหตุ."""
+    from shopeechat import knowledge_base as kb
+    monkeypatch.setattr(kb, "qa_troubleshoot_tips", lambda *a, **k: [])
+    monkeypatch.setattr(warranty_flow, "_claim_transition",
+                        lambda req, cs, to, fields=None, fresh_claim=False:
+                            dict(cs, stage=to))
+    out = warranty_flow.handle_warranty_flow_legacy(
+        _wf_req("เครื่องติดดับเอง"), _wf_ctx(claim=False), [], None)
+    assert out is not None
+    assert "เช็ก" in out["answer"] or "ลอง" in out["answer"]
+    assert "เลขที่คำสั่งซื้อ" not in out["answer"]  # ยังไม่ขอข้อมูลเคลม
+
+
+def test_nonclaim_malfunction_buy_intent_passthrough(monkeypatch):
+    """"เครื่องเก่าพัง อยากได้ตัวใหม่แนะนำหน่อย" = buy intent — ห้ามกลืน
+    product recommendation turn."""
+    from shopeechat import knowledge_base as kb
+    calls = []
+    monkeypatch.setattr(kb, "qa_troubleshoot_tips",
+                        lambda *a, **k: calls.append(1) or ["tip"])
+    out = warranty_flow.handle_warranty_flow_legacy(
+        _wf_req("เครื่องเก่าพัง อยากได้ตัวใหม่แนะนำหน่อย"),
+        _wf_ctx(claim=False), [], None)
+    assert out is None and calls == [], \
+        "buy-intent ต้องปล่อยไป product pipeline เดิม"
+
+
+def test_post_handoff_new_symptom_supplemental_tips(monkeypatch):
+    """already_handed + อาการใหม่ → tips เสริมใต้ human ownership —
+    ไม่ mint episode/transition, ไม่ตอบ status reply เฉยๆ."""
+    from shopeechat import knowledge_base as kb, conversation_products as cp
+    monkeypatch.setattr(cp, "load_claim_state", lambda *a, **k: {
+        "handed_off_at": "2026-11-20T00:00:00Z",
+        "stage": "collecting", "episode_id": "e1"})
+    monkeypatch.setattr(kb, "qa_troubleshoot_tips",
+                        lambda *a, **k: ["รีเซ็ตตามคลิปนี้ดูนะคะ"])
+    trans = []
+    monkeypatch.setattr(warranty_flow, "_claim_transition",
+                        lambda *a, **k: trans.append(1) or {})
+    out = warranty_flow.handle_warranty_flow_legacy(
+        _wf_req("เครื่องดับเอง ปุ่มกดไม่ได้", conv="c1"), _wf_ctx(claim=True),
+        [{"role": "model", "text": "แอดมินดูแลเคสอยู่นะคะ"}], None)
+    assert out is not None
+    assert "รีเซ็ต" in out["answer"], "อาการใหม่ต้องได้วิธีแก้เสริม"
+    assert "แอดมิน" in out["answer"], "ต้องบอกว่าเคสอยู่กับแอดมินแล้ว"
+    assert trans == [], "ห้าม mint/merge episode ใหม่ post-handoff"
+
+
+def test_post_handoff_status_only_keeps_status_reply(monkeypatch):
+    """already_handed + ข้อความไร้อาการ (status question) → CLAIM_STATUS_REPLY
+    เดิม — tips ห้ามยิง (ไม่มี malfunction evidence)."""
+    from shopeechat import knowledge_base as kb, conversation_products as cp, responses
+    monkeypatch.setattr(cp, "load_claim_state", lambda *a, **k: {
+        "handed_off_at": "2026-11-20T00:00:00Z",
+        "stage": "collecting", "episode_id": "e1"})
+    calls = []
+    monkeypatch.setattr(kb, "qa_troubleshoot_tips",
+                        lambda *a, **k: calls.append(1) or ["tip"])
+    out = warranty_flow.handle_warranty_flow_legacy(
+        _wf_req("เคลมตรวจสอบยังครับ", conv="c1"), _wf_ctx(claim=True),
+        [{"role": "model", "text": "แอดมินดูแลเคสอยู่นะคะ"}], None)
+    assert out is not None
+    assert calls == [], "status-only turn ห้ามเรียก tips"
+    assert responses.CLAIM_STATUS_REPLY in out["answer"]

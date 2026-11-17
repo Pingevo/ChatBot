@@ -14644,3 +14644,14 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ผลกระทบเคสอื่น: bound rows contract เดิมเป๊ะ (subject_refs+digest authoritative); spec tokens (5V/20W) ไม่เป็น model declaration; extra_terms default () ไม่แตะ callers เดิม (zaapi_kb_evidence/get_general_faq); brand ctx แถวประกาศรุ่นแบรนด์เดียวกันได้ brand level (legacy parity — ไม่รู้รุ่นกันข้ามรุ่นไม่ได้ ออกแบบไว้)
 - งานค้าง: warranty_flow wiring — malfunction non-claim ต้องมี owner ยิง tips ก่อน product fallback; post-handoff อาการใหม่ต้องได้ tips โดยไม่ mint episode/POST ซ้ำ; commit แยกทีละ fix
 
+
+## ผ่านแล้ว: warranty_flow troubleshoot-first wiring (verified 2026-11-21)
+
+- T4 post-handoff supplemental: เดิม `_tips=None if _already_handed` ตัด tips ทิ้งทุกเคส → อาการใหม่หลังส่งแอดมินได้แค่ CLAIM_STATUS_REPLY; แก้ให้ยิง tips เมื่อมี malfunction evidence เท่านั้น — wording "ส่งต่อแอดมินอยู่แล้ว ลองทำตามนี้ระหว่างรอ" ไม่ mint episode/merge/POST; status-only turns คง status reply + ไม่เรียก tips
+- T3 non-claim malfunction owner: เดิมข้อความอาการที่ไม่ใช่ claim request ตกท้ายฟังก์ชัน → product pipeline "หาสินค้าไม่เจอ"; เพิ่ม tail block — malfunction_safe_check เป็นประตู → KB tips → ไม่มี tip ใช้ safe-check floor + บอกเส้นทางเคลม (ไม่ขอข้อมูล); mint ts_suggested ให้ "ไม่หาย" turn ถัดไปเข้า claim intake; buy-intent words (แนะนำ/อยากได้/ซื้อ/ตัวใหม่) → passthrough product path
+- tips answers ทั้ง 3 จุด disposition=TERMINAL (เดิม CONTINUE_PRODUCT ปล่อย product pipeline แปะ pitch+การ์ดหลัง tips — verify บน live เจอ product recs 4 ใบหลุดหลัง malfunction tips ผิด requirement no product leak)
+- verify live bot (ThaiSuperPhone): "นาฬิกา Black Shark GS3 เครื่องดับเอง ปุ่มกดไม่ได้" → warranty_troubleshoot + คลิป GS3 reset/แก้เข็มขัด+ลิงก์, PRODUCTS:0; "เครื่องติดดับเอง" contextless → intent=claim → safe-check+ขอข้อมูลเดิม (contract)
+- รู้จำกัด: clip ranking ตาม cosine — "เข็มขัดล็อคสาย" เหนือ reset clip 0.662/0.659 (ผลิตภัณฑ์เดียวกัน ไม่ใช่ข้ามรุ่น)
+- tests: test_troubleshoot_claim_5c +5 (tips/safe-check/buy-intent passthrough/supplemental/status-only), warranty+claim regression 103+427 passed
+- งานค้าง: replay_200 baseline เทียบหลังแก้; real-Gemini verify รอบคำถามอื่น; commit แยก T3/T4
+
