@@ -21,13 +21,14 @@ const API = "/chatbot/shopee/admin/generations";
 const STEP_ORDER = [
   "export", "image_texts_sellable", "image_texts_nonsellable",
   "sellable_units", "unit_embeddings", "product_embeddings",
-  "description_embeddings", "import_db", "validate",
+  "description_embeddings", "zaapi_kb_embeddings", "import_db", "validate",
 ];
 const STEP_LABEL: Record<string, string> = {
   export: "Export สินค้า", image_texts_sellable: "OCR รูป (ขายได้)",
   image_texts_nonsellable: "OCR รูป (ไม่ขาย)", sellable_units: "สร้าง units",
   unit_embeddings: "Unit vectors", product_embeddings: "Product vectors",
-  description_embeddings: "Description vectors", import_db: "Import DB",
+  description_embeddings: "Description vectors", zaapi_kb_embeddings: "Zaapi KB vectors",
+  import_db: "Import DB",
   validate: "Validate + Manifest",
 };
 const MASCOT_OUTFITS: PixelCatOutfit[] = ["classic", "maroon", "hoodie"];
