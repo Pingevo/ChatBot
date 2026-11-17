@@ -230,3 +230,46 @@ def test_message_still_grounds_model_identity():
     guards.enforce(r, _req("WPB100L ใช้กับโทรศัพท์ได้ไหม"))
     assert "WPB100L" in r.answer
     assert not r.routing_decision.get("guard_rewritten")
+
+
+# ---------- markdown spans: token ใน link/image ไม่ใช่ claim — defer text
+#   ห้ามแทรกกลาง ![alt](url) / [text](url) (A-331 defect) ----------
+
+def test_spec_token_inside_image_url_not_a_claim():
+    img = "![GS3 Ultra](https://img.example/x/th-1113abc-150w5atm.png)"
+    r = _resp(
+        f"รุ่นนี้สเปกตามรูปเลยค่ะ\n{img}",
+        products=[{"name": "Watch A", "description_excerpt": "สมาร์ทวอทช์"}])
+    guards.enforce(r, _req("ขอรูปสินค้า"))
+    assert img in r.answer, f"markdown image พัง — got {r.answer!r}"
+    assert "เดี๋ยวขอให้แอดมิน" not in r.answer
+
+
+def test_spec_token_inside_link_text_not_a_claim():
+    link = "[สายชาร์จ 65W](https://shop.example/item/abc)"
+    r = _resp(
+        f"ดูรายละเอียดได้ที่ลิงก์นี้ค่ะ {link}",
+        products=[{"name": "Charger A", "description_excerpt": "สายชาร์จ"}])
+    guards.enforce(r, _req("ขอลิงก์"))
+    assert link in r.answer, f"markdown link พัง — got {r.answer!r}"
+
+
+def test_model_token_inside_link_not_a_claim():
+    link = "[ดู PB200N](https://shop.example/item/xyz)"
+    r = _resp(
+        f"เปิดลิงก์นี้ได้เลยค่ะ {link}",
+        products=[{"name": "Powerbank X", "description_excerpt": "พาวเวอร์แบงค์"}])
+    guards.enforce(r, _req("ส่งลิงก์หน่อย"))
+    assert link in r.answer, f"markdown link พัง — got {r.answer!r}"
+    assert not r.routing_decision.get("guard_rewritten")
+
+
+def test_ungrounded_spec_outside_markdown_still_rewritten():
+    img = "![pic](https://img.example/x/p.png)"
+    r = _resp(
+        f"แบตใช้ได้ 30 วันค่ะ\n{img}",
+        products=[{"name": "Watch A", "description_excerpt": "สมาร์ทวอทช์"}])
+    guards.enforce(r, _req("แบตทนไหม"))
+    assert "30 วัน" not in r.answer
+    assert img in r.answer
+    assert r.routing_decision.get("guard_rewritten") == "spec_claim"

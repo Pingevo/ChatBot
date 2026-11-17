@@ -250,6 +250,10 @@ def _evidence_pool(resp) -> str:
 _CLAUSE_BOUNDARY = re.compile(
     r"\n|\|\|\||(?<=[.!?])\s|(?:ค่ะ|คะ|ครับ|ครับผม|จ้า|จ๊ะ|นะคะ|นะค่ะ|นะครับ)\s+")
 
+# markdown link/image spans — token ใน ![alt](url)/[text](url) = markup
+#   syntax ไม่ใช่ customer claim; rewrite ที่ครอบ span พังลิงก์/รูปทั้งก้อน
+_MD_SPAN_RE = re.compile(r"!?\[[^\]\n]*\]\([^)\n]*\)")
+
 
 def _subject_cards(resp, _cp) -> list:
     """resp.products ผ่าน subject scope เดียวกับ _spec_fact_grounded —
@@ -560,11 +564,15 @@ def enforce(resp, req):
                         _rend = _ridx + len(_repl) if _ridx != -1 else -1
                         _det = [(p, p + len(t)) for t in _det_texts
                                 if (p := resp.answer.find(t)) >= 0]
+                        _md = [(_s.start(), _s.end())
+                               for _s in _MD_SPAN_RE.finditer(resp.answer)]
                         _m = next(
                             (c for c in _rx.finditer(resp.answer)
                              if not (_ridx <= c.start() < _rend)
                              and not any(a <= c.start() < b
-                                         for a, b in _det)),
+                                         for a, b in _det)
+                             and not any(a <= c.start() < b
+                                         for a, b in _md)),
                             None,
                         )
                         if not _m or _claim_grounded(resp, _pos_rx, _gflags, _mode):
@@ -603,10 +611,14 @@ def enforce(resp, req):
                         _tm = None
                         _det = [(p, p + len(t)) for t in _det_texts
                                 if (p := _ans.find(t)) >= 0]
+                        _md = [(_s.start(), _s.end())
+                               for _s in _MD_SPAN_RE.finditer(_ans)]
                         for _tm in _MODEL_TOKEN_RE.finditer(_ans):
                             if _ridx <= _tm.start() < _rend:
                                 continue
                             if any(a <= _tm.start() < b for a, b in _det):
+                                continue
+                            if any(a <= _tm.start() < b for a, b in _md):
                                 continue
                             if _MODEL_TOKEN_STOP.match(_tm.group(0)):
                                 continue
@@ -654,10 +666,14 @@ def enforce(resp, req):
                         _bad_spec = None
                         _det = [(p, p + len(t)) for t in _det_texts
                                 if (p := _ans.find(t)) >= 0]
+                        _md = [(_s.start(), _s.end())
+                               for _s in _MD_SPAN_RE.finditer(_ans)]
                         for _sm in _SPEC_CLAIM_RE.finditer(_ans):
                             if _ridx <= _sm.start() < _rend:
                                 continue
                             if any(a <= _sm.start() < b for a, b in _det):
+                                continue
+                            if any(a <= _sm.start() < b for a, b in _md):
                                 continue
                             if _NEGATION_RE.search(_ans[max(0, _sm.start() - 20):_sm.start()]):
                                 continue
