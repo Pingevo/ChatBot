@@ -139,3 +139,44 @@ def test_unanswered_ask_says_not_listed():
     assert "ไม่มีระบุ" in seg, seg
     assert "ไม่สามารถยืนยัน" in seg, seg  # outcome ต้องชัด ไม่หายเงียบ
     assert "ไม่มีข้อมูลยืนยันจากข้อมูลสินค้าที่มี" not in seg
+
+
+# ── F4 — confirmed-alternatives ใน unanswered asks ───────────────────────────
+
+def test_declared_apps_from_desc_text():
+    card = {"name": "IMILAB W01 สมาร์ทวอทช์",
+            "description_excerpt":
+                "ตัวเรือนน้ำหนักเบา 38 กรัม\n"
+                "- รองรับแอปฯ Imilab Fit , Glory Fit ตั้งค่า "
+                "ดูข้อมูลเพิ่มเติมได้ละเอียดขึ้น\n"}
+    assert pr.declared_compat_targets(card) == ("Imilab Fit", "Glory Fit")
+
+
+def test_declared_apps_none_when_no_pattern():
+    card = {"name": "สายชาร์จ USB-C",
+            "description_excerpt": "สายชาร์จเร็ว 240W รองรับ PD3.1"}
+    assert pr.declared_compat_targets(card) == ()
+
+
+def test_declared_apps_ignore_thai_following_text():
+    card = {"description_excerpt": "ใช้แอปนี้ตั้งค่าง่ายมาก แอปพลิเคชันนี้ฟรี"}
+    assert pr.declared_compat_targets(card) == ()
+
+
+def test_declared_device_targets_from_name():
+    # spec-db key ที่ card text ประกาศตรง → declared target
+    card = {"name": "สายชาร์จ ใช้ร่วมกับ iPhone 15 Pro Max",
+            "description_excerpt": ""}
+    tgts = pr.declared_compat_targets(card)
+    assert any("iphone 15" in t for t in tgts), tgts
+
+
+def test_unanswered_renders_confirmed_targets():
+    u = ac.UnansweredNeed(0, "product", "compat", ("i:1",), ("W01",),
+                          "สตาวา", "no_evidence",
+                          capability_asks=("เชื่อมเข้ากับแอปสตาวา",),
+                          confirmed_targets=("Imilab Fit", "Glory Fit"))
+    seg = ac._unanswered_segment(u)
+    assert "ไม่มีระบุ" in seg, seg          # ตอบตรงว่าไม่มีข้อมูลของ ask
+    assert "Imilab Fit" in seg and "Glory Fit" in seg, seg
+    assert "Strava" not in seg or "สตาวา" in seg  # ไม่สลับคำตอบ

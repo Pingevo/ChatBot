@@ -276,6 +276,11 @@ class UnansweredNeed:
     #   ที่ทำให้ scope กว้างเกิน (≥2 types, ไม่มี requested type/subtype) —
     #   renderer name ผ่าน _type_query_word (ไม่ใช่ prose inference)
     clarify_types: tuple[str, ...] = ()
+    # declared-compat targets ของ subject (typed จาก
+    #   policy_resolver.declared_compat_targets — device ที่ card
+    #   ประกาศ + app ที่ card ระบุ) — renderer ใช้ตอบส่วนที่ยืนยัน
+    #   ว่ารองรับ ข้างๆ ส่วนที่ verify ไม่ได้ (ไม่ใช่ verdict proof)
+    confirmed_targets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1879,10 +1884,27 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                     " ของรุ่นนี้ — ห้ามยืนยันเงื่อนไขนั้น")
             for s in cands:
                 note_extra.setdefault(s.identity, []).append(_lbl)
+            # declared-compat targets ของ subject cards (device ที่
+            #   card ประกาศ + app ที่ card ระบุ) — renderer ตอบข้างๆ
+            #   ส่วนที่ verify ไม่ได้ ("ใช้ได้กับอะไรชัวร์ๆ")
+            _ctgts: list[str] = []
+            _srefs = {_norm_ref(r) for r in (n.subject_refs or ())}
+            if _srefs:
+                for _r in reqs_n:
+                    for _s in by_req.get(_r.request_id, ()):
+                        _c = _s.card or {}
+                        if not (_cand_keys(
+                                _s.identity, _c.get("item_id"),
+                                _c.get("model_id"), _c) & _srefs):
+                            continue
+                        for _a in _pr.declared_compat_targets(_c):
+                            if _a not in _ctgts:
+                                _ctgts.append(_a)
             unanswered.append(UnansweredNeed(
                 i, n.kind, n.operation, tuple(n.subject_refs or ()),
                 scope, target_of[i], "no_evidence",
-                capability_asks=_asks))
+                capability_asks=_asks,
+                confirmed_targets=tuple(_ctgts)))
             _ask_unanswered.add(i)
         took = 0
         union_hit = False   # union ownership = emitted coverage ของ need นี้
@@ -2372,8 +2394,12 @@ def _unanswered_segment(u: UnansweredNeed) -> str:
             else:
                 topic = f"{topic} — {_asks_txt}" if topic else _asks_txt
     when = f"สำหรับ{topic}" if topic else "สำหรับคำถามนี้"
-    return (f"{when} — ไม่มีระบุไว้ในข้อมูลสินค้า "
-            f"จึงไม่สามารถยืนยันได้ค่ะ")
+    seg = (f"{when} — ไม่มีระบุไว้ในข้อมูลสินค้า "
+           f"จึงไม่สามารถยืนยันได้ค่ะ")
+    if u.confirmed_targets:
+        seg += (" — ที่ระบุไว้ว่ารองรับตามข้อมูลสินค้า: "
+                + ", ".join(u.confirmed_targets))
+    return seg
 
 
 @dataclass(frozen=True)

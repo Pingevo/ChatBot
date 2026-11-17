@@ -427,6 +427,50 @@ def _declares(card: dict, device: str) -> bool:
                for v in (low, low.replace(" ", "")))
 
 
+_APP_KW_RE = re.compile(r"แอปพลิเคชัน|แอปฯ|แอป")
+_APP_NAME_RE = re.compile(
+    r"^\s*([A-Za-z][A-Za-z0-9._+]*(?:\s+[A-Za-z0-9._+]+){0,2})")
+
+
+def _declared_apps(card: dict) -> tuple[str, ...]:
+    """app names ที่ card text ประกาศรองรับ — pattern 'แอปพลิเคชัน/
+    แอปฯ/แอป <Latin name>[,|และ|หรือ <name>…]' — คืน names ตามลำดับ
+    ที่พบ (dedupe, ≤6); ไม่เจอ → ()."""
+    text = _card_text(card)
+    out: list[str] = []
+    for m in _APP_KW_RE.finditer(text):
+        seg = text[m.end():m.end() + 80]
+        for part in re.split(r",| และ | หรือ ", seg):
+            nm = _APP_NAME_RE.match(part)
+            if not nm:
+                break            # ส่วนแรกที่ไม่ใช่ชื่อ → จบ run นี้
+            name = nm.group(1).strip().rstrip(".,;")
+            if len(name) >= 3 and name not in out:
+                out.append(name)
+                if len(out) >= 6:
+                    return tuple(out)
+    return tuple(out)
+
+
+def declared_compat_targets(card: dict) -> tuple[str, ...]:
+    """targets ที่ card ประกาศใช้งานร่วมได้ (declared compat) —
+    spec-db device keys ผ่าน `_declares` + app names ผ่าน
+    `_declared_apps`; display data สำหรับ unresolved-ask renderer
+    (ไม่ใช่ verdict proof — declare ไม่มี relation/negation check)."""
+    out: list[str] = []
+    for dev in device_compat._DEVICE_SPECS:
+        if _declares(card, dev) and dev not in out:
+            out.append(dev)
+    for a in _declared_apps(card):
+        if a not in out:
+            out.append(a)
+    # ชื่อซ้อนกัน (generic 'iphone' ⊂ 'iphone 14 pro') → เก็บเฉพาะ
+    #   ชื่อที่ไม่เป็น substring ของชื่ออื่นใน list; cap 8 display
+    out = [n for n in out
+           if not any(n != o and n in o for o in out)][:8]
+    return tuple(out)
+
+
 def extract_field_facts(card: dict, *, subject_id: str = "",
                         source_version: str = "",
                         mentions: tuple[str, ...] = ()
