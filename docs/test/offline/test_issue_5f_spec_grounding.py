@@ -112,6 +112,20 @@ def test_grounded_spec_from_card_passes():
                    "description_excerpt": "แบตเตอรี่ 500mAh ใช้งานได้ 3 วัน"}])
     guards.enforce(r, _req("แบตกี่ mAh ใช้ได้กี่วัน"))
     assert "500mAh" in r.answer.replace(" ", "") or "500mAh" in r.answer
+
+
+def test_deterministic_cert_answer_not_rewritten():
+    """cert_answer = DB-derived list (products=[] ไม่มี LLM) — model codes/
+    spec numbers ในชื่อสินค้าไม่ใช่ claim → ห้าม splice defer text กลาง list"""
+    ans = ("ค่ะ สินค้าที่มี มอก. ในร้าน ได้แก่:\n"
+           "• CUKTECH AD653T / CMC610 / PB200 ชุดชาร์จ 65W "
+           "(หมดสต็อกชั่วคราว)\n"
+           "• CUKTECH AURA LPB100 33W 10000mAh Powerbank "
+           "(หมดสต็อกชั่วคราว)\n\n"
+           "สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ")
+    r = _resp(ans, source="cert_answer")
+    guards.enforce(r, _req("มี มอก. ไหม"))
+    assert r.answer == ans
     assert not r.routing_decision.get("guard_rewritten")
 
 

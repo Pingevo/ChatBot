@@ -14655,3 +14655,23 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - tests: test_troubleshoot_claim_5c +5 (tips/safe-check/buy-intent passthrough/supplemental/status-only), warranty+claim regression 103+427 passed
 - งานค้าง: replay_200 baseline เทียบหลังแก้; real-Gemini verify รอบคำถามอื่น; commit แยก T3/T4
 
+
+## ผ่านแล้ว: cert deictic binding + deterministic-source guard splice (verified 2026-11-21)
+
+- ที่มา: live check บน local bot — "พาวเวอร์แบงค์ตัวนี้มี มอก. ไหมคะ" (deictic อ้างสินค้าที่บอทแนะนำ) ได้ list cert ทั้งร้าน (ทั้งหมดหมดสต็อก) แทนคำตอบเฉพาะรุ่น + ข้อความ "เรื่องรุ่น/สเปคที่กล่าวถึง เดี๋ยวขอให้แอดมินตรวจสอบ" แทรกกลาง bullet list
+- error → cause → fix:
+  - deictic ask ไม่ผูก subject → `_tisi_model_kw` ว่าง → generic dump: bind model_keyword จาก active anchor (`model_codes[0]` → fallback ชื่อเต็ม substring match) เมื่อ message มี `_SINGLE_ITEM_REF_KW`; anchor fetch hoisted (ใช้ร่วม type carry เดิม)
+  - model ask ไม่เจอ → fallback เอาสินค้าอื่นมาตอบราวกับเป็นรุ่นที่ถาม ("สินค้า X มี มอก." X≠ของที่ถาม): model_kw path ตอบเฉพาะ `_tisi_products` เท่านั้น; ไม่เจอ → "สำหรับ{subject} ยังไม่พบข้อมูล {cert} ในระบบ" (ทั้ง explicit kw และ deictic — ไม่ dump alternatives); type-ask (ไม่เจาะจงรุ่น) ยังได้ fallback list เดิม
+  - cert_answer source ไม่อยู่ใน `_REWRITE_SKIP_PREFIXES` → model_claim/spec_claim splice defer text กลาง deterministic list (products=[] ไม่มี identity pool): เพิ่ม "cert_" ใน skip tuple — deterministic source ทุก token คือชื่อ DB จริง ไม่ใช่ LLM claim
+- ผลกระทบเคสอื่น: explicit model ask ("AC65B2 มี มอก.") ไม่เจอ → เปลี่ยนจาก fallback dump เป็น specific negative (ตรงคำถามกว่า); type-ask unchanged; ไม่มี anchor/deictic → generic list เดิม; guards.enforce แตะแค่ cert_* sources
+- verify: 4 RED tests → 55/55 cert+spec file; regression 203 + 1068 passed; live bot: defer splice หาย list สะอาด; deictic path ต้องมี anchor จริง (fresh conv ไม่มี → fallback ตาม design)
+
+## ผ่านแล้ว: cert deictic binding + deterministic-source guard splice (verified 2026-11-21)
+
+- ที่มา: live check บน local bot — "พาวเวอร์แบงค์ตัวนี้มี มอก. ไหมคะ" (deictic อ้างสินค้าที่บอทแนะนำ) ได้ list cert ทั้งร้าน (ทั้งหมดหมดสต็อก) แทนคำตอบเฉพาะรุ่น + ข้อความ "เรื่องรุ่น/สเปคที่กล่าวถึง เดี๋ยวขอให้แอดมินตรวจสอบ" แทรกกลาง bullet list
+- error → cause → fix:
+  - deictic ask ไม่ผูก subject → `_tisi_model_kw` ว่าง → generic dump: bind model_keyword จาก active anchor (`model_codes[0]` → fallback ชื่อเต็ม substring match) เมื่อ message มี `_SINGLE_ITEM_REF_KW`; anchor fetch hoisted (ใช้ร่วม type carry เดิม)
+  - model ask ไม่เจอ → fallback เอาสินค้าอื่นมาตอบราวกับเป็นรุ่นที่ถาม ("สินค้า X มี มอก." X≠ของที่ถาม): model_kw path ตอบเฉพาะ `_tisi_products` เท่านั้น; ไม่เจอ → "สำหรับ{subject} ยังไม่พบข้อมูล {cert} ในระบบ" (ทั้ง explicit kw และ deictic — ไม่ dump alternatives); type-ask (ไม่เจาะจงรุ่น) ยังได้ fallback list เดิม
+  - cert_answer source ไม่อยู่ใน `_REWRITE_SKIP_PREFIXES` → model_claim/spec_claim splice defer text กลาง deterministic list (products=[] ไม่มี identity pool): เพิ่ม "cert_" ใน skip tuple — deterministic source ทุก token คือชื่อ DB จริง ไม่ใช่ LLM claim
+- ผลกระทบเคสอื่น: explicit model ask ("AC65B2 มี มอก.") ไม่เจอ → เปลี่ยนจาก fallback dump เป็น specific negative (ตรงคำถามกว่า); type-ask unchanged; ไม่มี anchor/deictic → generic list เดิม; guards.enforce แตะแค่ cert_* sources
+- verify: 4 RED tests → 55/55 cert+spec file; regression 203 + 1068 passed; live bot: defer splice หาย list สะอาด; deictic path ต้องมี anchor จริง (fresh conv ไม่มี → fallback ตาม design)

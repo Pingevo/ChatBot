@@ -65,7 +65,7 @@ _ESCALATE_RULES = (
 #   claim pattern กัน negation ด้วย lookbehind ("ไม่มีของแถม" ไม่ใช่ claim)
 _REWRITE_SKIP_PREFIXES = (
     "general:", "order_", "warranty", "return_refund", "order_problem",
-    "human_request", "item_tag_warranty",
+    "human_request", "item_tag_warranty", "cert_",
 )
 
 # (name, claim_regex, pos_ground_regex, grounding_card_flags, mode, replacement)
