@@ -151,7 +151,7 @@ _tl: dict = {}
 _claim: dict = {}
 
 
-def _get(cid):
+def _get(cid, *a, **k):
     st = _mem.get(cid)
     timeline = _tl.get(cid) or {}
     products = tuple(timeline.get("products") or ())
@@ -186,7 +186,7 @@ def _rec(cid, ss, *, expected_prior=None, platform=None, shop=None):
 
 
 cp.record_subject_set = _rec
-cp.load_timeline = lambda cid: _tl.get(cid)
+cp.load_timeline = lambda cid, *a, **k: _tl.get(cid)
 
 
 def _save_tl(cid, platform, shop, products, active_item_id):
@@ -196,10 +196,10 @@ def _save_tl(cid, platform, shop, products, active_item_id):
 
 
 cp.save_timeline = _save_tl
-cp.load_claim_state = lambda cid: _claim.get(cid)
+cp.load_claim_state = lambda cid, *a, **k: _claim.get(cid)
 
 
-def _transition(cid, platform, shop, *, expected_episode_id, expected_stage,
+def _transition(cid, platform=None, shop=None, *, expected_episode_id, expected_stage,
                 claim_state):
     cur = _claim.get(cid)
     if cur and (cur.get("episode_id") != expected_episode_id
@@ -212,7 +212,8 @@ def _transition(cid, platform, shop, *, expected_episode_id, expected_stage,
 cp.transition_claim_state = _transition
 
 
-def _merge(cid, *, episode_id, expected_stage, fields):
+def _merge(cid, *, episode_id, expected_stage, fields,
+           platform=None, shop=None):
     cur = _claim.get(cid)
     if not cur or cur.get("episode_id") != episode_id \
             or (expected_stage is not None

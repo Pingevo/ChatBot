@@ -158,14 +158,27 @@ CLARIFY_TEXT = ("ขอโทษค่ะ ลูกค้าหมายถึ�
 
 # ── G1 human_wait ────────────────────────────────────────────────────────────
 
-def test_human_wait_locks_turn_no_work(monkeypatch):
-    """Active ticket → wait-only response; no LLM, no handoff POST."""
+def test_post_handoff_noise_placeholder_silent(monkeypatch):
+    """Active ticket + non-text noise (sticker placeholder) → silent no_reply;
+    no LLM, no handoff POST. (text turns ใต้ human ownership ถูกประเมินเป็น
+    claim/status ตอบจากบริบทเคส — ไม่ใช่ wait-text ซ้ำทุกข้อความ)"""
+    resp, captured, handoffs, _ = _turn(
+        monkeypatch, _fx("g1-lock"),
+        message="[สติกเกอร์]", ticket_state="handoff")
+    assert (resp.answer or "").strip() == ""
+    assert not getattr(resp, "handoff_to_admin", False)
+    assert captured.calls == []
+    assert handoffs == []
+
+
+def test_post_handoff_status_question_is_answered(monkeypatch):
+    """Active ticket + status/follow-up ที่ตอบได้ → bot ตอบ (ไม่ใช่ wait-only
+    ซ้ำ) — human ownership คงอยู่ + ไม่มี handoff POST ซ้ำ."""
     resp, captured, handoffs, _ = _turn(
         monkeypatch, _fx("g1-lock"),
         message="แอดมินยังไม่ตอบเลยครับ", ticket_state="handoff")
-    assert getattr(resp, "routing_decision", {}).get("path") == "human_wait"
+    assert getattr(resp, "routing_decision", {}).get("path") != "handoff"
     assert not getattr(resp, "handoff_to_admin", False)
-    assert captured.calls == []
     assert handoffs == []
 
 

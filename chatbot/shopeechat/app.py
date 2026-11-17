@@ -879,18 +879,22 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
     llm._ai_call_ctx.set({"shop": req.shop, "conv_id": req.conversation_id,
                           "platform": req.platform,
                           "request_id": str(_uuid.uuid4())[:12]})
-    # ⚡ 2B.5 — post-handoff ownership lock (production owner เดียวที่ /chat
-    #   boundary): ticket_state = authority เดียว — handoff/open/pending →
-    #   wait-admin response ทุกข้อความ ก่อน engine dispatch (v3/v2/legacy),
-    #   Mongo, vision, persona, TurnDecision shadow, deterministic
-    #   responders, intent, retrieval, LLM; closed/resolved/bot → pipeline
-    #   ปกติ (evaluator: warranty_flow._is_active_post_handoff — marker
-    #   fallback เฉพาะตอนไม่ทราบ state)
+    # ⚡ 2B.5 — post-handoff ownership: engine dispatch แยก owner —
+    #   v3/v2 ไม่มี post-handoff need-evaluation → strict boundary lock เดิม
+    #   (wait-admin ทุกข้อความ); legacy path → TurnPlan เป็น owner
+    #   (ownership=human คงอยู่ + needs ประเมินปกติ — supplemental claim
+    #   evidence/คำถามตอบได้ไหล pipeline, noise → human_wait ที่ action
+    #   switch) — evaluator: warranty_flow._is_active_post_handoff
+    #   (marker fallback เฉพาะตอนไม่ทราบ state)
     from . import warranty_flow as _wf_lock
     if _wf_lock._is_active_post_handoff(req, req.history):
-        return ChatResponse(**_wf_lock._build_post_handoff_response(
-            req, {"steps": [], "total_start": _total_start},
-            sys.modules[__name__], llm))
+        _locked_engine = (
+            req.use_v3 or os.environ.get("USE_CHAT_V3", "0") == "1"
+            or req.use_v2 or os.environ.get("USE_LEGACY_CHAT", "1") != "1")
+        if _locked_engine:
+            return ChatResponse(**_wf_lock._build_post_handoff_response(
+                req, {"steps": [], "total_start": _total_start},
+                sys.modules[__name__], llm))
     # ⚡ Phase 4B — request-wide EvidenceSnapshot (request owner = _chat_impl):
     #   resolve pointer ครั้งเดียวต่อ /chat request — consumer generated-source
     #   ทุกตัวรับ captured value เดียวกัน (None คือ captured-None, ไม่ re-resolve);
@@ -1369,8 +1373,22 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
             if _clean_message:
                 req.message = _clean_message
             elif anchor_card:
-                req.message = ("ลูกค้าส่งการ์ดสินค้าชิ้นนี้มาในแชท "
-                               "สนใจสอบถามว่ามีของไหม และอยากดูรายละเอียดสินค้า")
+                # claim episode เปิดอยู่ → card = typed evidence ระบุสินค้า
+                #   ที่เคลม (plan bind เข้าเคสผ่าน tag_item_ids) — ห้าม rewrite
+                #   เป็นข้อความขอซื้อ เดี๋ยว pipeline ขายของผิดบริบท (Q4)
+                _claim_open_tag = False
+                if req.conversation_id:
+                    try:
+                        _claim_open_tag = _wf_lock._claim_lifecycle(
+                            conversation_products.load_claim_state(
+                                req.conversation_id,
+                                platform=req.platform, shop=req.shop)
+                        ).lifecycle_open
+                    except Exception:
+                        _claim_open_tag = False
+                if not _claim_open_tag:
+                    req.message = ("ลูกค้าส่งการ์ดสินค้าชิ้นนี้มาในแชท "
+                                   "สนใจสอบถามว่ามีของไหม และอยากดูรายละเอียดสินค้า")
         # ⚡ T9 — image_desc → model keywords → match สินค้าร้าน → hybrid anchor (NEW-6)
         #   เดิม: vision อ่านรูปได้แต่ไม่เคยผูกกับสินค้าในร้าน (ค้นด้วย desc ดิบ fuzzy พลาด)
         #   guard: ข้อความไม่มี product ref ชัด (ไม่มี model kw / ไม่มี tag / ไม่มี anchor อยู่แล้ว)
@@ -1672,6 +1690,9 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 #   เพื่ออ่านใน turn นี้ (req.images + history ที่ยังไม่มี
                 #   desc + text URL) — ไม่ใช่ text placeholder อย่างเดียว
                 has_visual_media=bool(_urls_to_read),
+                # current-turn vision evidence — None = ไม่มี media ให้อ่าน,
+                #   "" = vision ล้ม/อ่านไม่ได้ (typed contract ของ plan)
+                image_desc=(_image_desc_out if _urls_to_read else None),
             )
         except Exception:
             _turn_decision_shadow(None, _steps)
@@ -1682,6 +1703,16 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 status_code=500,
                 detail="Internal error during AI response processing")
         _turn_decision_shadow(_turn_plan, _steps)
+
+        # typed claim signal จาก plan — vision desc/item-card ที่ message text
+        #   ไม่มี claim keyword ("[รูปภาพ]" อาการจอเสีย) → plan เป็น owner ของ
+        #   need; promote เข้า flag เดียวกันให้ SM gate เห็น (ไม่ใช่ re-detect)
+        if (not _is_claim_request
+                and any(n.kind == "claim" and n.operation in ("collect", "status")
+                        for n in _turn_plan.needs)):
+            _is_claim_request = True
+            print("[TURN] claim need จาก plan → _is_claim_request=True "
+                  "(media/desc evidence)", file=sys.stderr)
 
         # ⚡ Phase 2C.3 — action switch (owner เดียว): TurnPlan.primary_action
         #   ตัดสิน action ของ turn นี้ — non-execute actions return ตรงนี้ก่อน
@@ -1708,8 +1739,14 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 image_desc=_image_desc_out)
         if _turn_action == "clarify":
             from . import responses as _resp_mod
+            # media_unreadable = vision อ่านรูปเทิร์นนี้ไม่ได้ — ขอคำอธิบาย
+            #   (ต่างจาก subject clarify ที่ถามว่าสินค้าตัวไหน)
+            _clarify_text = (
+                _resp_mod.MEDIA_UNREADABLE_REPLY
+                if "media_unreadable" in _turn_plan.flags
+                else _resp_mod.CLARIFY_REPLY)
             return ChatResponse(
-                answer=_resp_mod.CLARIFY_REPLY,
+                answer=_clarify_text,
                 products=[], source="subject_clarify", shop=req.shop,
                 model=model_name,
                 usage={"prompt": 0, "output": 0, "total": 0},

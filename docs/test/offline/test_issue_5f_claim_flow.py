@@ -25,7 +25,7 @@ import dotenv as _dotenv  # noqa: E402
 _orig_load_dotenv = _dotenv.load_dotenv
 _dotenv.load_dotenv = lambda *a, **k: False
 try:
-    from shopeechat import warranty, warranty_flow  # noqa: E402
+    from shopeechat import warranty, warranty_flow, turn_decision  # noqa: E402
     from shopeechat.handoffs import detect_human_request  # noqa: E402
     import shopeechat.app as _app_mod  # noqa: E402
 finally:
@@ -267,56 +267,86 @@ def _assert_wait_only(out):
 
 
 def test_active_handoff_without_history_marker_still_locks():
-    # ticket_state="handoff" + history ไม่มี handoff marker → lock ต้องทำงาน
+    # v2/v3 boundary lock ยังคงเดิม — ticket_state="handoff" + history ไม่มี
+    #   handoff marker → lock ต้องทำงาน (legacy path เป็น TurnPlan-owned —
+    #   ดู plan-level assertions ด้านล่าง)
     out = _chat_boundary(
         message="ทำไมยังไม่มีคนตอบ", conversation_id=None, shop=None,
         platform=None, ticket_state="handoff", simulate_assignment=False,
-        history=[{"role": "model", "text": "สวัสดีค่ะ มีอะไรให้ช่วยไหมคะ"}])
+        history=[{"role": "model", "text": "สวัสดีค่ะ มีอะไรให้ช่วยไหมคะ"}],
+        use_v2=True)
     _assert_wait_only(out)
 
 
 def test_active_handoff_empty_history_still_locks():
-    # ticket_state="handoff" + history ว่าง (history fetch fail) → ยังต้อง lock
+    # ticket_state="handoff" + history ว่าง (history fetch fail) → v2/v3
+    #   ยังต้อง lock
     out = _chat_boundary(
         message="ทำไมยังไม่มีคนตอบ", conversation_id=None, shop=None,
         platform=None, ticket_state="handoff", simulate_assignment=False,
-        history=[])
+        history=[], use_v2=True)
     _assert_wait_only(out)
 
 
 def test_open_state_locks_too():
-    # open = แอดมินรับงานจริงแล้ว (botWorkerService: assign สำเร็จ → open)
+    # open = แอดมินรับงานจริงแล้ว (botWorkerService: assign สำเร็จ → open) —
+    #   v2/v3 boundary lock เหมือนกัน
     out = _chat_boundary(
         message="แล้วไงต่อ", conversation_id=None, shop=None,
         platform=None, ticket_state="open", simulate_assignment=False,
-        history=[])
+        history=[], use_v2=True)
     _assert_wait_only(out)
 
 
-def test_active_handoff_claim_info_locked():
-    # Phase 2B.5 — ticket active = unconditional lock: claim info
-    # (เบอร์/order) ไม่ override ownership — ต้อง wait-admin, ไม่มี claim write
+def test_active_handoff_claim_info_bound_not_waited():
+    # legacy path (TurnPlan owner): claim info ระหว่าง active ticket =
+    #   supplemental ที่ผูกเข้าเคส — ownership คง human แต่ need ถูกประเมิน
+    #   (ไม่ใช่ wait-only ทุกข้อความ)
+    plan = turn_decision.decide_turn(
+        "เบอร์ 0812345678 order 2508088B5T4W1D",
+        ticket_state="handoff")
+    assert plan.ownership == "human"
+    assert "post_handoff" in plan.flags
+    assert plan.primary_action == "execute_needs"
+    assert any(n.kind == "claim" and n.operation == "collect"
+               for n in plan.needs)
+    # v2/v3 boundary ยัง lock เหมือนเดิม
     out = _chat_boundary(
         message="เบอร์ 0812345678 order 2508088B5T4W1D", conversation_id=None,
         shop=None, platform=None, ticket_state="handoff",
-        simulate_assignment=False, history=[])
+        simulate_assignment=False, history=[], use_v2=True)
     _assert_wait_only(out)
 
 
-def test_active_handoff_image_locked():
-    # รูปเคลมระหว่าง active ticket → lock เช่นกัน (ไม่มี media escape)
+def test_active_handoff_image_bound_not_waited():
+    # รูปเคลมระหว่าง active ticket → supplemental media ผูกเคส (ไม่ใช่
+    #   wait-only)
+    plan = turn_decision.decide_turn(
+        "[รูปภาพ]", ticket_state="open", has_visual_media=False)
+    assert plan.ownership == "human"
+    assert plan.primary_action == "execute_needs"
+    assert any(n.kind == "claim" and n.operation == "collect"
+               for n in plan.needs)
     out = _chat_boundary(
         message="[รูปภาพ]", conversation_id=None, shop=None, platform=None,
-        ticket_state="open", simulate_assignment=False, images=[], history=[])
+        ticket_state="open", simulate_assignment=False, images=[],
+        history=[], use_v2=True)
     _assert_wait_only(out)
 
 
-def test_active_handoff_product_question_locked():
-    # product question ระหว่าง active ticket → lock (ไม่มี product escape)
+def test_active_handoff_product_question_answerable():
+    # product question ระหว่าง active ticket → plan ตอบได้ด้วย human
+    #   ownership (ไม่ใช่ product escape — ownership ไม่เปลี่ยน)
+    plan = turn_decision.decide_turn(
+        "มีสายชาร์จไหมครับ", ticket_state="pending",
+        claim_state={"stage": "collecting", "episode_id": "e1"})
+    assert plan.ownership == "human"
+    assert plan.primary_action == "execute_needs"
+    assert any(n.kind == "product" for n in plan.needs)
     out = _chat_boundary(
         message="มีสายชาร์จไหมครับ", conversation_id=None, shop=None,
         platform=None, ticket_state="pending", simulate_assignment=False,
-        history=[])
+        history=[], use_v2=True)
     _assert_wait_only(out)
 
 
