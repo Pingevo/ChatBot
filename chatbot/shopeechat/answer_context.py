@@ -2372,7 +2372,7 @@ def _unanswered_segment(u: UnansweredNeed) -> str:
             else:
                 topic = f"{topic} — {_asks_txt}" if topic else _asks_txt
     when = f"สำหรับ{topic}" if topic else "สำหรับคำถามนี้"
-    return (f"{when} — ไม่มีข้อมูลยืนยันจากข้อมูลสินค้าที่มี "
+    return (f"{when} — ไม่มีระบุไว้ในข้อมูลสินค้า "
             f"จึงไม่สามารถยืนยันได้ค่ะ")
 
 
