@@ -276,6 +276,11 @@ class UnansweredNeed:
     #   ที่ทำให้ scope กว้างเกิน (≥2 types, ไม่มี requested type/subtype) —
     #   renderer name ผ่าน _type_query_word (ไม่ใช่ prose inference)
     clarify_types: tuple[str, ...] = ()
+    # TurnNeed.provenance verbatim — renderer ใช้เพื่อแยก unresolved
+    #   need ที่เกิดจากเทิร์นภาพล้วน (real_visual_media): subject/target
+    #   ของ need นั้นมาจาก image text ไม่ใช่คำถามลูกค้า → ตอบแบบถาม
+    #   กลับว่าต้องการเช็กเรื่องใด ไม่ render cannot-confirm ตามชื่อ
+    provenance: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -450,9 +455,20 @@ def _need_target(need, reqs, profile) -> str | None:
     นั้นกลายเป็น compatibility claim"""
     if need.kind != "compat":
         return None
+    _fs = dict(getattr(profile, "fact_sources", ()) or ())
+    _img_tgt = (getattr(profile, "target_device", None)
+                if _fs.get("target_device")
+                in ("image_desc", "history_image_desc") else None)
     for r in reqs:
-        if r.target_device:
+        if (r.target_device
+                and _norm_target(r.target_device) != _norm_target(_img_tgt)):
             return r.target_device
+    # image-provenanced profile target ไม่ใช่ compat ask ที่ลูกค้าพิมพ์ —
+    #   compat need ต้องไม่สร้างคำถามความเข้ากันได้จากบริบทภาพเอง;
+    #   typed target_refs (ข้อความลูกค้า) หรือ request target ที่ต่างจาก
+    #   visual fact เท่านั้นที่เป็น asked target
+    if _img_tgt is not None:
+        return next(iter(need.target_refs or ()), None)
     # non-device target (app/service label — route_context เก็บ device
     #   view เท่านั้นใน target_device): typed target_refs ของ need เป็น
     #   authoritative verbatim — ต้องไหลเข้า verdict/unresolved machinery
@@ -766,7 +782,7 @@ def _constraint_unknown_label(res: dict) -> str:
 def _verdict_target_decisions(i: int, tn: str, need, reqs_n, *, by_req,
                               pool, web_evidence, req_needs, idx_of,
                               need_by_idx, prodish_idx, target_of,
-                              ref_needs
+                              ref_needs, profile
                               ) -> tuple[tuple[CompatVerdict, ...],
                                          tuple[str, ...]]:
     """(subject,target,relation)-scoped verdict ของทุก subject ใน compat
@@ -786,6 +802,20 @@ def _verdict_target_decisions(i: int, tn: str, need, reqs_n, *, by_req,
     relation อื่น / web prose ไม่มี structured data → ไม่ใช่ coverage"""
     from . import candidate_pool as _cpool
     from . import policy_resolver as _pr
+
+    # image-derived target = retrieval/clarification context เท่านั้น —
+    #   ไม่ใช่ compat authorization: profile.target_device ที่ตรง tn แต่
+    #   provenance เป็น image_desc/history_image_desc → derived verdict
+    #   (card/target field-facts + resolve_compat) ถูกปิด; declared
+    #   typed proof ที่ผูก subject+target+relation ยัง authorize ได้ตามเดิม
+    #   (หลักฐานมาจาก record ไม่ใช่ภาพ); target ที่ลูกค้าระบุในข้อความ
+    #   (fact_sources ไม่ใช่ image) → path เดิม
+    _fs_t = dict(getattr(profile, "fact_sources", ()) or ())
+    _img_only = bool(
+        tn and _fs_t.get("target_device")
+        in ("image_desc", "history_image_desc")
+        and _norm_target(getattr(profile, "target_device", "") or "")
+        == tn)
 
     rel = _need_relation(reqs_n, tn)
     refs = {_norm_ref(r) for r in (need.subject_refs or ())}
@@ -865,11 +895,12 @@ def _verdict_target_decisions(i: int, tn: str, need, reqs_n, *, by_req,
                 p.source, p.source_version)
             for p in declared
             if _norm_ref(p.subject_id) in card_keys)
-        s_facts = _pr.extract_field_facts(card, subject_id=sid,
-                                          mentions=(tn,))
+        s_facts = () if _img_only else _pr.extract_field_facts(
+            card, subject_id=sid, mentions=(tn,))
         dec = _pr.resolve_compat(
             subject_id=sid, target=f"device:{tn}", relation=rel,
-            subject_facts=s_facts, target_facts=tuple(t_facts),
+            subject_facts=s_facts,
+            target_facts=() if _img_only else tuple(t_facts),
             declared=decl_n)
         if dec.outcome in ("compatible", "incompatible"):
             verdicts.append(CompatVerdict(
@@ -1067,7 +1098,8 @@ def compile_answer_task(*, needs: tuple, selection: SelectionResult,
             if n.kind in _POLICY_NEED_KINDS:
                 deferred.append(UnansweredNeed(
                     i, n.kind, n.operation, tuple(n.subject_refs or ()),
-                    _need_scope(n), None, "deferred"))
+                    _need_scope(n), None, "deferred",
+                    provenance=tuple(n.provenance or ())))
             continue
         reqs_n = _need_requests(n, requests, req_needs)
         cands = [s for r in reqs_n for s in by_req.get(r.request_id, ())]
@@ -1212,7 +1244,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             # evidence/context target = task target (compat เท่านั้น) หรือ
             # request-carried target (attribution context — ไม่ใช่ claim)
             target_of[i] = _need_target(n, reqs_i, profile) or next(
-                (r.target_device for r in reqs_i if r.target_device),
+                (r.target_device for r in reqs_i
+                 if r.target_device and n.kind != "compat"),
                 None)
     uncovered: set[int] = set()
     decided: dict[int, tuple[CompatVerdict, ...]] = {}
@@ -1240,7 +1273,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 web_evidence=web_evidence, req_needs=req_needs,
                 idx_of=idx_of, need_by_idx=need_by_idx,
                 prodish_idx=prodish_idx,
-                target_of=target_of, ref_needs=ref_needs)
+                target_of=target_of, ref_needs=ref_needs,
+                profile=profile)
         for v in verdicts:
             trace.append(f"need[{i}] verdict target={tn!r} "
                          f"subject={v.subject_id} "
@@ -1559,7 +1593,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                     unresolved or tuple(n.subject_refs or ()),
                     scope, target_of[i], "no_evidence",
                     capability_asks=tuple(
-                        getattr(n, "capability_asks", ()) or ())))
+                        getattr(n, "capability_asks", ()) or ()),
+                    provenance=tuple(n.provenance or ())))
                 if verdicts_here:
                     decided[i] = decided.get(i, ()) \
                         + tuple(verdicts_here)
@@ -1575,12 +1610,20 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         tainted = False
         cands = [s for r in reqs_n for s in by_req.get(r.request_id, ())]
         if ((n.operation in LOCAL_FACT_OPS
-             or any(str(r).isdigit() for r in (n.subject_refs or ())))
+             or getattr(n, "subject_scope", "none")
+                in ("current_single", "current_set")
+             or any(str(r).isdigit()
+                    or (str(r).lower().startswith("i:")
+                        and str(r)[2:].isdigit())
+                    for r in (n.subject_refs or ())))
                 and any(r.source == "subjects" for r in reqs_n)):
-            # fact-op (price/stock/link) หรือ exact-item pinned need —
-            #   คำตอบเป็นของ resolved subject เท่านั้น; slot/history/
-            #   context candidates ไม่ใช่ fact ของ item นี้ (sibling
-            #   ห้ามข้าม exact-item boundary)
+            # fact-op (price/stock/link), deictic scope (current_single/
+            #   current_set — referent คือ resolved subjects ตาม
+            #   needs_for_request contract; pair resolution ไม่ stamp
+            #   refs) หรือ exact-item pinned need — คำตอบเป็นของ resolved
+            #   subject เท่านั้น; slot/history/context candidates ไม่ใช่
+            #   fact ของ item นี้ (sibling ห้ามข้าม exact-item boundary)
+            #   — refs ถือ schema "i:<id>" ของ identity owner
             cands = [s for s in cands if s.role == "subject"]
         if n.operation != "recommend" and any(
                 s.role == "subject" for s in cands):
@@ -1753,7 +1796,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 web_evidence=web_evidence, req_needs=req_needs,
                 idx_of=idx_of, need_by_idx=need_by_idx,
                 prodish_idx=prodish_idx,
-                target_of=target_of, ref_needs=ref_needs)
+                target_of=target_of, ref_needs=ref_needs,
+                profile=profile)
             # verdicts เฉพาะ candidates ที่ผ่าน current-need eligibility —
             #   card ที่ตก scope ไม่ใช่ candidate → ไม่สมควรได้ verdict/
             #   segment บน need นี้ (adapter turn ไม่ narrate cable)
@@ -1831,7 +1875,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                     scope, target_of[i],
                     "no_evidence" if tainted else "no_selection",
                     capability_asks=tuple(
-                        getattr(n, "capability_asks", ()) or ())))
+                        getattr(n, "capability_asks", ()) or ()),
+                    provenance=tuple(n.provenance or ())))
             continue
         # ── FIX-5 type-ambiguous compat/recommend ask → typed clarify
         #   outcome (D2): need ไม่ declare product scope — need-level
@@ -1856,7 +1901,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                     unanswered.append(UnansweredNeed(
                         i, n.kind, n.operation,
                         tuple(n.subject_refs or ()), scope, target_of[i],
-                        "clarify", clarify_types=_ctypes))
+                        "clarify", clarify_types=_ctypes,
+                        provenance=tuple(n.provenance or ())))
                     clarify.add(i)
                     decided.pop(i, None)
                     trace.append(f"need[{i}] clarify types={list(_ctypes)}")
@@ -1882,7 +1928,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             unanswered.append(UnansweredNeed(
                 i, n.kind, n.operation, tuple(n.subject_refs or ()),
                 scope, target_of[i], "no_evidence",
-                capability_asks=_asks))
+                capability_asks=_asks,
+                provenance=tuple(n.provenance or ())))
             _ask_unanswered.add(i)
         took = 0
         union_hit = False   # union ownership = emitted coverage ของ need นี้
@@ -1993,7 +2040,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                     scope, target_of[i],
                     "no_evidence" if tainted else "no_selection",
                     capability_asks=tuple(
-                        getattr(n, "capability_asks", ()) or ())))
+                        getattr(n, "capability_asks", ()) or ()),
+                    provenance=tuple(n.provenance or ())))
                 no_emit.add(i)
     # unsupported relation decline — productish need ขอ compatibility
     #   ผูก subject_refs แต่ owner ไม่มี typed relation result ชุดใด
@@ -2033,7 +2081,8 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
                 i, n.kind, n.operation, tuple(n.subject_refs or ()),
                 _need_scope(n), target_of[i], "no_evidence",
                 capability_asks=tuple(
-                    getattr(n, "capability_asks", ()) or ())))
+                    getattr(n, "capability_asks", ()) or ()),
+                provenance=tuple(n.provenance or ())))
     # uncovered (no_evidence) + decided (verdict → deterministic segment)
     # ทั้งหมดไม่เป็น model task; evidence ที่ attribute เฉพาะ needs เหล่านี้
     # ไม่เข้า model context (proof/verdict ถูก consume โดย decision แล้ว) —
@@ -2191,7 +2240,8 @@ def decide_web_admission(*, needs: tuple, selection: SelectionResult,
             selected_n = [s for r in reqs_n
                           for s in by_req.get(r.request_id, ())]
             target = _need_target(n, reqs_n, profile) or next(
-                (r.target_device for r in reqs_n if r.target_device),
+                (r.target_device for r in reqs_n
+                 if r.target_device and n.kind != "compat"),
                 None)
             tn = _norm_target(target)
             if tn and tn in spec_targets:
@@ -2305,6 +2355,11 @@ def _unanswered_segment(u: UnansweredNeed) -> str:
                  if str(x).strip())
     named = [x for x in refs if not x.isdigit() and ":" not in x]
     target = str(u.target or "").strip()
+    if (u.reason in ("no_evidence", "no_selection")
+            and "real_visual_media" in (u.provenance or ())):
+        # เทิร์นภาพล้วน — ไม่มีคำถาม typed ให้ ground: ถามกลับว่าต้องการ
+        #   เช็กเรื่องใด ไม่ render cannot-confirm บน image-derived refs
+        return "สำหรับภาพที่ส่งมา — อยากให้ช่วยเช็กเรื่องไหนคะ"
     if u.reason == "clarify":
         # D2 — decided candidates span ≥2 types + no requested scope:
         #   ถาม type กลับจาก canonical types เท่านั้น (name ผ่าน

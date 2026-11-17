@@ -786,7 +786,9 @@ def _render_composition(comp) -> str:
                 tuple(dict.fromkeys(
                     a for w in us for a in w.capability_asks)),
                 clarify_types=tuple(dict.fromkeys(
-                    t for w in us for t in (w.clarify_types or ()))))
+                    t for w in us for t in (w.clarify_types or ()))),
+                provenance=tuple(dict.fromkeys(
+                    p for w in us for p in (w.provenance or ()))))
         seg = _acx._unanswered_segment(u)
         if seg and seg not in seen:
             seen.add(seg)
@@ -1833,6 +1835,12 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
         #   → resolver ไม่ consult (explicit ชนะ precedence เสมอ)
         _subject_ev = {"explicit_ids": (), "pair_ids": (), "ops": (),
                        "stored": _subject_stored, "resolved": None}
+        # ops evidence = operation ที่ TurnPlan ตัดสินจริงบน productish
+        #   needs (recommend/describe/compare/…) — subject-set writer
+        #   downstream อ่าน ops นี้ ห้าม fallback เป็น recommend
+        _subject_ev["ops"] = tuple(dict.fromkeys(
+            _n.operation for _n in _turn_plan.needs
+            if _n.kind in ("product", "compare", "compat") and _n.operation))
         # ⚡ Phase 2C.3 — resolver อ่าน subject signal ทั้งหมดจาก TurnPlan
         #   เดียวที่คำนวณ post-classify (ไม่ใช่ _intent_result ตรง):
         #   scope/count จาก product need + signal conf จาก plan
@@ -5522,7 +5530,7 @@ def _record_suggestion_products(req, products: list[dict],
                 and any(kw in (req.message or "").lower()
                         for kw in _COMPARISON_FOLLOWUP_KW)):
             _pair = [str(i) for i in _matched_item_ids[:2]]
-        _ops = tuple(_ev.get("ops") or ()) or (("recommend",) if products else ())
+        _ops = tuple(_ev.get("ops") or ())
         _decided = _cp.decide_subject_set(
             _ev.get("stored"),
             explicit_ids=_explicit,

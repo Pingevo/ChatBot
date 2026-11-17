@@ -1235,8 +1235,12 @@ def resolve_subjects(
     if explicit_without_refs and sig not in ("singular", "generic"):
         return SubjectResolution("no_subject_ref", None)
     if sig == "pair":
+        # pair sig ต้องการคู่ที่ระบุได้ — resolved เฉพาะ set 2 ใบ;
+        #   n==1 (คู่เดียวขาดอีกใบ) หรือ n>=3 (ชุดหลายใบยังไม่ระบุคู่)
+        #   → clarify ถามว่าหมายถึงคู่ไหน ห้ามเลือกเอง
         return SubjectResolution(
-            "resolved" if n else "clarify", persisted if n else None)
+            "resolved" if n == 2 else "clarify",
+            persisted if n == 2 else None)
     if sig == "singular":
         return SubjectResolution(
             "resolved" if n == 1 else "clarify",
@@ -1273,9 +1277,28 @@ def decide_subject_set(
     e = _norm_subject_ids(explicit_ids)
     p = _norm_subject_ids(pair_ids)
     s = _norm_subject_ids(selected_ids)
+    ops_n = _norm_ops(requested_operations)
     if e:
         if len(p) >= 2 and set(e) <= set(p):
             ids, rel = p, "compare"
+        elif (len(e) == 1 and "item_card" in ops_n
+                and persisted is not None
+                and "item_card" in (persisted.requested_operations or ())
+                and e[0] not in persisted.subject_ids):
+            # การ์ดลูกค้าใบต่อไป = merge เข้า set ของ customer-card chain
+            #   เดิม (A → B → pair); 2 ใบ = compare pair ที่ระบุตัวตนได้,
+            #   3+ ใบ = ชุดหลายรายการที่ยังไม่ระบุคู่ (alternatives — ห้าม
+            #   เรียก compare pair / ห้ามสุ่มเลือกสองใบ); bot batch แทรก
+            #   (ops อื่น) ตัด chain; bounded ≤5
+            _u = tuple(dict.fromkeys(persisted.subject_ids + e))
+            if len(_u) > 5:
+                ids, rel = e, "single"
+            elif len(_u) == 1:
+                ids, rel = _u, "single"
+            elif len(_u) == 2:
+                ids, rel = _u, "compare"
+            else:
+                ids, rel = _u, "alternatives"
         elif len(e) == 1:
             ids, rel = e, "single"
         else:
@@ -1296,7 +1319,10 @@ def decide_subject_set(
             requested_operations=_norm_ops(requested_operations)
             or r.requested_operations,
             confidence=r.confidence)
-    elif s:
+    elif s and "recommend" in ops_n:
+        # selected batch = subject set เฉพาะ turn ที่ plan ตัดสินเป็น
+        #   recommendation จริง — describe/compat display batch ไม่ใช่
+        #   selection ของลูกค้า (ห้ามเขียน alternatives ทับ persisted)
         ids, rel = s, ("single" if len(s) == 1 else "alternatives")
     else:
         return None

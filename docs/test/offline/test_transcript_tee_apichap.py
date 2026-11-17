@@ -203,8 +203,12 @@ def test_q3_visual_device_becomes_compat_target_with_single_evidence_bound():
         f"Q3 attach {len(resp.products or ())} products (guessing)")
     ans = resp.answer or ""
     assert ans.count("|||\n**") <= 1
-    assert "ไม่สามารถยืนยัน" in ans or "ไม่มีข้อมูล" in ans, (
-        f"Q3 ต้องเป็น cannot-confirm ไม่ใช่ positive claim: {ans!r}")
+    # contract change (elite2 conv-quality): image-only unresolved ไม่ใช่
+    #   cannot-confirm บน image-derived name อีกต่อไป — deterministic
+    #   fallback = ถามว่าต้องการเช็กเรื่องใด (ไม่ fabricate subject/relation)
+    assert "ไม่สามารถยืนยัน" in ans or "ไม่มีข้อมูล" in ans \
+        or "อยากให้ช่วยเช็กเรื่องไหน" in ans, (
+            f"Q3 ต้องไม่ใช่ positive claim: {ans!r}")
 
 
 def test_q4_this_model_retains_visual_target():
