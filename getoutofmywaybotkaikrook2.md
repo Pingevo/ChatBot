@@ -14702,3 +14702,15 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
   - `shp_94432506531100117` ลูกค้า `may3144` (BlackShark) — แอดมิน [openapi] ตอบ "ครับลูกค้าง" เมื่อ 2026-11-16 08:06:01 (ข้อความสุดท้ายของแชท หลังลูกค้าบอก "ขอบคุณค่ะ" ปิดเคส troubleshoot นาฬิกา) — ตรง "เมื่อวาน" ตามเวลา
 - join เช็คแล้ว: 14 convs ที่ zaapi เคยตอบ "ครับลูกค้า" มี "เมื่อวาน" ในแชทแค่ 1 (`s8c9fikgds` KieslectThailand — ลูกค้าเป็นคนพูด "ชาร์ตเต็มเมื่อวาน" ไม่ใช่แอดมิน) → ไม่ใช่เคสที่ถาม
 - verify: full context 16 msgs ของ may3144 ตรวจแล้ว — 0 msgs มี "เมื่อวาน" ในเนื้อ ยืนยัน interpretation เวลาไม่ใช่เนื้อ
+
+## กำลังจะทำ — spec_claim guard ทำลายคำตอบ LLM ที่ถูก (GS3 Ultra กันน้ำระดับไหน)
+- error: provider ตอบ spec ถูก (5ATM/IP69K/1.43") แต่ guards.enforce spec_claim rewrite เห็น '1.43 นิ้ว' ungrounded → _replace_clause ลบทั้ง clause → เหลือ defer + "ไม่มีระบุ" tail; PB100P '33W' ซ้ำ pattern เดียวกัน
+- เกิดเพราะ: (1) kb_zaapi.py spec_tokens สกัดเฉพาะ top-3 selected passages ที่ rank มา — token อื่นของ row เดียวกัน (ที่ผูก identity แล้ว) ไม่เข้า spec_measured → _spec_fact_grounded false-positive; (2) regression T3: 'ดับ' keyword match 'ระดับ' ใน 'กันน้ำระดับไหน' → malfunction_safe_check กลืน spec question; (3) verify: no_evidence tail อาจขัด kb evidence ที่มีจริง
+- แผน: F1 spec_tokens จาก row ทั้งใบ (identity-bound → measured facts ของ subject เดียวกันเท่านั้น) → F2 'ดับ' boundary-aware → F3 verify+fix no_evidence — แยก commit ทีละจุด RED→green
+
+## ผ่านแล้ว — F1: spec_tokens ครอบทั้ง bound row (kb_zaapi.py)
+- error: guard spec_claim rewrite ลบทั้ง clause เพราะ '1.43 นิ้ว'/'33W' ungrounded ทั้งที่ LLM ตอบถูก → เหลือ defer + "ไม่มีระบุ" tail
+- เกิดเพราะ: spec_tokens fact สกัดเฉพาะ top-3 selected passages ที่ rank+1000B budget เลือกให้ model เห็น — token อื่นของ row เดียวกัน (identity-bound แล้ว) ไม่เข้า spec_measured → _spec_fact_grounded false-positive
+- แก้: _spec_tokens(h.get("a")) ทั้ง row text (bounded [:64] ตาม closed-schema fact cap) — row ผูก identity+digest แล้ว ทุก token เป็น measured evidence ของ subject นั้นเท่านั้น (identity-scoped เหมือนเดิม ไม่กว้าง)
+- verify: test_kb_spec_tokens_cover_whole_bound_row RED {'5atm'}→GREEN ครบ; e2e live 'GS3 Ultra กันน้ำไหม' → spec_tokens 32 tokens + ไม่มี GUARD-ENFORCE rewrite + คำตอบเต็ม (1.43"/466x466/1000nits/5ATM/IP69K/50m/80°C)
+- ผลกระทบเคสอื่น: row ที่ bound subject ทุกตัวได้ token ครบขึ้น — ground เพิ่มเฉพาะ claim ของ subject นั้น (sids scope เดิม); cross-product ไม่ leak; row ไม่ bound → identity ไม่มี → spec_measured ไม่สร้าง (fail-closed เดิม); PB100P '33W' เคสรอดด้วยกลไกเดียวกัน

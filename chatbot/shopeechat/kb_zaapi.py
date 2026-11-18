@@ -137,16 +137,18 @@ def zaapi_kb_evidence(
                 break
         # identity = declared ref ที่ match จริง (row binding ผ่าน digest
         #   แล้ว — canonical identity ของ record เดียวกัน, ไม่ใช่ hint ฝั่ง
-        #   request); facts += spec_tokens จาก selected passages เท่านั้น —
-        #   measured-facts channel เดิม ให้ spec_claim ground ด้วย typed
-        #   evidence ของ subject นั้น (extractor owner เดียวกับ card facts)
+        #   request); facts += spec_tokens จาก row text ทั้งใบ — selected
+        #   passages เป็นแค่ context budget ของ model แต่ทุก token ใน row
+        #   ที่ผูก identity คือ measured evidence ของ subject นั้น (guard
+        #   spec_claim ground ผ่าน channel เดียวกับ card facts)
         _matched = sorted(
             s for s in (h.get("subject_refs") or ())
             if _idnorm(s) in _refs_n)
         facts = list(h.get("facts") or ())
         try:
             from . import policy_resolver as _pr
-            _toks = _pr._spec_tokens("\n".join(selected))
+            _toks = _pr._spec_tokens(
+                h.get("a") or "\n".join(selected))[:64]
         except Exception:
             _toks = ()
         if _toks:

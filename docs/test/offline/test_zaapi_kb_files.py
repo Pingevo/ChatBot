@@ -835,6 +835,38 @@ def test_kb_evidence_emits_identity_and_spec_token_facts(db, monkeypatch):
     assert not any("evidence_fact_unresolved" in t for t in trace)
 
 
+def test_kb_spec_tokens_cover_whole_bound_row(db, monkeypatch):
+    """spec_tokens fact ต้องครอบทั้ง row ที่ผูก identity — ไม่ใช่แค่
+    passages ที่ context budget เลือกให้ model เห็น; token ใน field ที่
+    ไม่ถูก select เป็น measured evidence ของ subject เดียวกัน (guard
+    spec_claim ground ผ่าน channel นี้ — ตัดทิ้ง = false-positive
+    ungrounded → clause ที่มี claim ถูกถูกทำลาย)"""
+    from shopeechat import kb_zaapi
+    from shopeechat.turn_decision import TurnNeed
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="watch.xlsx", data=_xlsx_bytes({"S1": [
+        ["รุ่น", "ชื่อย่อ", "จุดเด่น", "รายละเอียด", "ขนาดหน้าจอ"],
+        ["Black Shark GS3 Ultra", "GS3 Ultra",
+         "กันน้ำ 5ATM & IP69K",
+         "ข้อมูลทั่วไป " * 200,
+         "AMOLED 1.43 นิ้ว 60Hz"],
+    ]}), content_type="product", subject_bindings={"S1": {"columns": [
+        {"column_index": 1, "header": "รุ่น"},
+        {"column_index": 2, "header": "ชื่อย่อ"}]}})
+    need = TurnNeed("product", "describe", subject_refs=("GS3 Ultra",),
+                    capability_asks=("กันน้ำ",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="GS3 Ultra กันน้ำไหม")
+    assert len(res.supporting_evidence) == 1
+    ev = res.supporting_evidence[0]
+    # context budget — หน้าจอ field ไม่เข้า passages ที่ model เห็น
+    assert "1.43" not in ev["payload"]["text"]
+    toks = set(({f["key"]: f["value"] for f in ev.get("facts") or ()})
+              .get("spec_tokens") or ())
+    # แต่ทั้ง row เป็น measured evidence ของ identity เดียวกัน → fact ครอบ
+    assert {"1.43นิ้ว", "60hz", "5atm"} <= toks
+
+
 def test_kb_warranty_fact_still_resolves_to_unique_candidate(db, monkeypatch):
     """import-bound warranty fact path เดิม — candidate resolve +
     identity rewrite ไม่ถูก spec_tokens admission ทำลาย"""
