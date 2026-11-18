@@ -14694,3 +14694,11 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ใกล้เคียงเพิ่มเติม: `shp_458397960770069788` ลูกค้า `tanatouchkajan` (ZMIThailand): "รูปนี้ คือลูกค้าส่งเมื่อวานเหรอครับ" — 2026-11-12 04:44:47, source=openapi
 - admin/out ที่มี "เมื่อวาน" ทั้งหมด 140 docs (sources: data_mirror_backfill_history/openapi/webhook/server/new_webchat/crm — ไม่มี source="zaapi"; zaapi ส่งผ่าน Shopee API → openapi)
 - verify: counts + full-text + conversation join (to_name/shop) ตรวจแล้วทุกเคส
+
+## ผ่านแล้ว (follow-up): user ยืนยัน keyword "ลูกค้าง" — เจอข้อความจริง "ครับลูกค้าง" (verified 2026-11-18)
+
+- user feedback: "ลูกค้าง" → แอดมินพิมพ์ "ครับลูกค้าง" ตรงๆ (ลูกค้า+ง typo) — "เมื่อวาน" น่าจะหมายถึงเวลาที่ตอบ (ย้อนหลัง 1-2 วัน) ไม่ใช่เนื้อข้อความ
+- literal "ลูกค้าง" ใน messages_shp admin/out: เจอ standalone "ครับลูกค้าง" เคสเดียวที่ใช้ได้จริง (ที่เหลือคือ "ลูกค้างด/ง่าย" เป็นคำอื่น):
+  - `shp_94432506531100117` ลูกค้า `may3144` (BlackShark) — แอดมิน [openapi] ตอบ "ครับลูกค้าง" เมื่อ 2026-11-16 08:06:01 (ข้อความสุดท้ายของแชท หลังลูกค้าบอก "ขอบคุณค่ะ" ปิดเคส troubleshoot นาฬิกา) — ตรง "เมื่อวาน" ตามเวลา
+- join เช็คแล้ว: 14 convs ที่ zaapi เคยตอบ "ครับลูกค้า" มี "เมื่อวาน" ในแชทแค่ 1 (`s8c9fikgds` KieslectThailand — ลูกค้าเป็นคนพูด "ชาร์ตเต็มเมื่อวาน" ไม่ใช่แอดมิน) → ไม่ใช่เคสที่ถาม
+- verify: full context 16 msgs ของ may3144 ตรวจแล้ว — 0 msgs มี "เมื่อวาน" ในเนื้อ ยืนยัน interpretation เวลาไม่ใช่เนื้อ
