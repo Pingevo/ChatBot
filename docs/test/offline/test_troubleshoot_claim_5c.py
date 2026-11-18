@@ -47,6 +47,27 @@ def test_safe_check_empty_for_non_malfunction():
     assert warranty.malfunction_safe_check("ส่งเคลมสินค้า") == ""
 
 
+def test_safe_check_keyword_boundaries():
+    """keyword สั้นห้าม match substring ของคำอื่น — 'ระดับ' มี 'ดับ',
+    'เสียง' มี 'เสีย' — spec/audio questions ต้องไม่ถูกกลืนเป็น malfunction"""
+    for msg in ("GS3 Ultra กันน้ำระดับไหน",
+                "กันน้ำระดับ IP68 ไหม",
+                "ปรับระดับความสว่างได้ไหม",
+                "หูฟังเสียงดีไหม",
+                "ลำโพงเสียงดังพอไหม",
+                "งงไม่เข้าใจว่าทำไมต้อง 20W"):
+        assert warranty.malfunction_safe_check(msg) == "", msg
+
+
+def test_safe_check_still_matches_real_symptoms():
+    for msg in ("เครื่องดับเอง", "จอดับค้าง", "ไฟดับ",
+                "สินค้าเสีย", "เสียหายแล้ว", "เสียแล้วค่ะ",
+                "พังแล้ว", "ของพังงับ", "ชาร์จไม่เข้า",
+                "ใช้งานไม่ได้", "เสียบแล้วไม่ชาร์จ", "หน้าจอค้าง",
+                "เสียบสายแล้วไม่ชาร์จ"):
+        assert warranty.malfunction_safe_check(msg), msg
+
+
 def test_first_claim_answer_has_safe_checks():
     """first-message malfunction claim → acknowledge + safe checks + ขอข้อมูลเคลม"""
     from shopeechat import app as _app_module, llm

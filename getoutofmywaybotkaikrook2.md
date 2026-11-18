@@ -14714,3 +14714,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แก้: _spec_tokens(h.get("a")) ทั้ง row text (bounded [:64] ตาม closed-schema fact cap) — row ผูก identity+digest แล้ว ทุก token เป็น measured evidence ของ subject นั้นเท่านั้น (identity-scoped เหมือนเดิม ไม่กว้าง)
 - verify: test_kb_spec_tokens_cover_whole_bound_row RED {'5atm'}→GREEN ครบ; e2e live 'GS3 Ultra กันน้ำไหม' → spec_tokens 32 tokens + ไม่มี GUARD-ENFORCE rewrite + คำตอบเต็ม (1.43"/466x466/1000nits/5ATM/IP69K/50m/80°C)
 - ผลกระทบเคสอื่น: row ที่ bound subject ทุกตัวได้ token ครบขึ้น — ground เพิ่มเฉพาะ claim ของ subject นั้น (sids scope เดิม); cross-product ไม่ leak; row ไม่ bound → identity ไม่มี → spec_measured ไม่สร้าง (fail-closed เดิม); PB100P '33W' เคสรอดด้วยกลไกเดียวกัน
+
+## ผ่านแล้ว — F2: malfunction keyword boundary ('ดับ'⊂'ระดับ')
+- error: 'GS3 Ultra กันน้ำระดับไหน' โดน malfunction_safe_check จับ 'ดับ' ใน 'ระดับ' → troubleshoot tail กลืนคำถาม spec ทั้งเทิร์น (regression จาก T3 wiring — ก่อนหน้า flow นี้ไม่ own turn)
+- เกิดเพราะ: substring match `k in msg` — keyword สั้น (ดับ/เสีย/พัง/ไม่เข้า) ปะติดคำอื่นได้: ระดับ/เสียง/พังงา/ไม่เข้าใจ
+- แก้: alternation regex ตัวเดียว — `(?<!ระ)ดับ`, `เสีย(?!ง|ใจ|ดาย|เวลา|เงิน|ค่า)` (เสียหาย/เสียแล้ว/เสียบแล้วไม่ชาร์จ ยังจับ), `พัง(?!งา)`, `ไม่เข้า(?!ใจ)`; kw อื่นคงเดิม
+- verify: RED 'ระดับไหน' จับ → GREEN คืน ''; real symptom (ดับเอง/เสีย/เสียหาย/พังงับ/ค้าง) ยังจับครบ; e2e 'GS3 Ultra กันน้ำระดับไหน' → intent=product_spec ตอบ 5ATM/IP69K/50m/80°C เต็ม ไม่มี rewrite/tail
+- ผลกระทบเคสอื่น: คำถามระดับ/เสียงทุก product_type รอด — ของพังงับ (particle งับ) ยังจับเพราะ lookahead เจาะ 'งา' เท่านั้น; 'ค้าง'/'ไม่ขึ้น'/'ไม่ติด' คง substring เดิม (compound ที่ชนน้อย/ambiguous — ไม่แตะ)

@@ -580,7 +580,7 @@ listing path:
 | `parse_purchase_date` | parse วันที่ซื้อ | text | datetime/None | regex TH formats | claim flow | dd/mm/yy, บริบทไทย | — |
 | `strip_warranty_keywords` | ลบคำประกันออกจาก msg | message | str | kw list | flow | เหลือข้อมูลจริง | — |
 | `detect_claim_request` | detect เคลมจริง | message | bool | `_CLAIM_REQUEST_INDICATORS` + negation guards | warranty_flow, v3 engine, chat_v2._classify_intent | kw + กัน "ถามเฉยๆ" (⚠️ "เสีย" substring latent §10#3); Task 5C-F +คำ "ใช้งานไม่ได้"/"ชาร์จไฟไม่ได้"/"ชาร์จไม่ขึ้น"/"เสียบแล้วไม่ชาร์จ" (เคยหลุดเพราะมีตัวคั่นกลาง) | — |
-| `malfunction_safe_check` | safe checks สำหรับแจ้งอาการเสีย (Task 5C-F) | message | str ("" หรือ paragraph) | `_mal` kw list | warranty_flow._handle_first_message_claim + legacy claim site | malfunction kw → "ขออภัย + เช็กสาย/หัว/ปลั๊ก/เครื่องอื่น/พอร์ต + หยุดใช้ถ้าร้อน/ไหม้" — ไม่เดาสเปค; ไม่ใช่ malfunction → "" | — |
+| `malfunction_safe_check` | safe checks สำหรับแจ้งอาการเสีย (Task 5C-F) | message | str ("" หรือ paragraph) | `_mal_re` regex alternation (lexical-aware: `(?<!ระ)ดับ`, `เสีย(?!ง|ใจ|ดาย|เวลา|เงิน|ค่า)`, `พัง(?!งา)`, `ไม่เข้า(?!ใจ)` — keyword สั้นห้าม match substring คำอื่น เช่น 'ระดับ'/'เสียง') | warranty_flow._handle_first_message_claim + legacy claim site + turn_decision malfunction needs | malfunction kw → "ขออภัย + เช็กสาย/หัว/ปลั๊ก/เครื่องอื่น/พอร์ต + หยุดใช้ถ้าร้อน/ไหม้" — ไม่เดาสเปค; ไม่ใช่ malfunction → "" | — |
 | `detect_consent` | detect ตกลง | message | bool | kw | claim SM | — | — |
 | `detect_confirmation` | detect ยืนยัน | message | bool | kw | claim SM State 4 | — | — |
 | `_mask_digits` | mask เลข | msg, digits | str | — | NER preprocess | กัน NER กลืนเบอร์/order | — |
