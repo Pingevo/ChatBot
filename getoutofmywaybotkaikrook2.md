@@ -14721,3 +14721,10 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - แก้: alternation regex ตัวเดียว — `(?<!ระ)ดับ`, `เสีย(?!ง|ใจ|ดาย|เวลา|เงิน|ค่า)` (เสียหาย/เสียแล้ว/เสียบแล้วไม่ชาร์จ ยังจับ), `พัง(?!งา)`, `ไม่เข้า(?!ใจ)`; kw อื่นคงเดิม
 - verify: RED 'ระดับไหน' จับ → GREEN คืน ''; real symptom (ดับเอง/เสีย/เสียหาย/พังงับ/ค้าง) ยังจับครบ; e2e 'GS3 Ultra กันน้ำระดับไหน' → intent=product_spec ตอบ 5ATM/IP69K/50m/80°C เต็ม ไม่มี rewrite/tail
 - ผลกระทบเคสอื่น: คำถามระดับ/เสียงทุก product_type รอด — ของพังงับ (particle งับ) ยังจับเพราะ lookahead เจาะ 'งา' เท่านั้น; 'ค้าง'/'ไม่ขึ้น'/'ไม่ติด' คง substring เดิม (compound ที่ชนน้อย/ambiguous — ไม่แตะ)
+
+## ผ่านแล้ว — F3 (verify): no_evidence tail 'ไม่มีระบุ' ขัด kb evidence — โค้ดปัจจุบันแก้อยู่แล้ว
+- สงสัยจาก log จริง: unanswered (1,'no_evidence') → tail 'ไม่มีระบุไว้ในข้อมูลสินค้า' ทั้งที่ ev kb(1,) มี
+- verify: ทุก no_evidence path ใน answer_context ต้องมี i ∉ _ev_idx หรือไม่มี subject evidence — need ที่มี attributed evidence (bound หรือ unbound) → 'evidence kept' (1910/2113) task ไม่ถูก drop → tail ไม่เกิด; asks-path ข้ามเมื่อ _subj_evid (identity evidence) — log จริงมาจาก code ก่อน A-328 evidence-gap fix
+- regression lock: test_kb_evidence_keeps_task_alive_without_candidates — need+kb evidence+0 candidates → task คงอยู่ unanswered ว่าง
+- ข้อยกเว้นที่ถูกต้อง: relation decline (requested_facts=['compatibility']) ยัง no_evidence ได้แม้มี kb evidence — relation claim ต้อง typed verdict ไม่ใช่ spec prose (by design)
+- e2e confirm: 'GS3 Ultra กันน้ำระดับไหน' หลัง F1+F2 → คำตอบเต็ม ไม่มี defer splice ไม่มี 'ไม่มีระบุ' tail

@@ -867,6 +867,45 @@ def test_kb_spec_tokens_cover_whole_bound_row(db, monkeypatch):
     assert {"1.43นิ้ว", "60hz", "5atm"} <= toks
 
 
+def test_kb_evidence_keeps_task_alive_without_candidates(db, monkeypatch):
+    """need ที่มี attributed kb evidence แต่ไม่มี product candidate →
+    task คงอยู่ให้ model ตอบจาก evidence — ห้ามกลายเป็น UnansweredNeed
+    'ไม่มีระบุไว้ในข้อมูลสินค้า' (tail จะขัดหลักฐานที่ emit มาจริง)"""
+    from shopeechat import kb_zaapi
+    from shopeechat import answer_context as acx
+    from shopeechat.candidate_pool import CandidatePool
+    from shopeechat.retrieval_selection import SelectionResult
+    from shopeechat.retrieval_planner import RetrievalRequest
+    from shopeechat.turn_decision import TurnNeed
+    from types import SimpleNamespace
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="watch2.xlsx", data=_xlsx_bytes({"S1": [
+        ["รุ่น", "ชื่อย่อ", "จุดเด่น"],
+        ["Black Shark GS3 Ultra", "GS3 Ultra", "กันน้ำ 5ATM & IP69K"],
+    ]}), content_type="product", subject_bindings={"S1": {"columns": [
+        {"column_index": 1, "header": "รุ่น"},
+        {"column_index": 2, "header": "ชื่อย่อ"}]}})
+    need = TurnNeed("product", "describe", subject_refs=("GS3 Ultra",),
+                    capability_asks=("กันน้ำ",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="GS3 Ultra กันน้ำไหม")
+    assert res.supporting_evidence
+    req = RetrievalRequest(
+        request_id="ch:kb:0", slot_id="", source="kb",
+        product_types=frozenset(), subtypes=frozenset(), model_codes=(),
+        target_device=None, availability_mode="", compat_mode="",
+        subject_refs=("GS3 Ultra",), target_refs=())
+    pool = CandidatePool((), (), (), (), (),
+                         res.supporting_evidence, ())
+    ctx = acx.compile_answer_context(
+        needs=(need,), selection=SelectionResult((), (), (), ()),
+        pool=pool, requests=(req,),
+        profile=SimpleNamespace(target_device=None, fact_sources=(),
+                                model_terms=()))
+    assert not ctx.unanswered_needs, ctx.unanswered_needs
+    assert ctx.task.tasks, "task ต้องคงอยู่ให้ model ตอบจาก evidence"
+
+
 def test_kb_warranty_fact_still_resolves_to_unique_candidate(db, monkeypatch):
     """import-bound warranty fact path เดิม — candidate resolve +
     identity rewrite ไม่ถูก spec_tokens admission ทำลาย"""
