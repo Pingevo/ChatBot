@@ -14675,3 +14675,22 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
   - cert_answer source ไม่อยู่ใน `_REWRITE_SKIP_PREFIXES` → model_claim/spec_claim splice defer text กลาง deterministic list (products=[] ไม่มี identity pool): เพิ่ม "cert_" ใน skip tuple — deterministic source ทุก token คือชื่อ DB จริง ไม่ใช่ LLM claim
 - ผลกระทบเคสอื่น: explicit model ask ("AC65B2 มี มอก.") ไม่เจอ → เปลี่ยนจาก fallback dump เป็น specific negative (ตรงคำถามกว่า); type-ask unchanged; ไม่มี anchor/deictic → generic list เดิม; guards.enforce แตะแค่ cert_* sources
 - verify: 4 RED tests → 55/55 cert+spec file; regression 203 + 1068 passed; live bot: defer splice หาย list สะอาด; deictic path ต้องมี anchor จริง (fresh conv ไม่มี → fallback ตาม design)
+
+## กำลังจะทำ: ค้น mongo messages — ข้อความแอดมิน zaapi "ครับลูกค้า...เมื่อวาน" ว่าเป็นแชทลูกค้าคนไหน (2026-11-18)
+
+- ที่มา: user สั่งให้หาใน mongo messages ว่าแอดมิน zaapi ตอบข้อความแนว "ครับลูกค้า ... เมื่อวาน" ในแชทของลูกค้าคนไหน
+- scope: read-only query บน admin Mongo (chatbot) — collections ข้อความ/สนทนา; หา message ฝั่ง admin/seller/zaapi ที่ text match แล้วระบุ conversation + ลูกค้า + เวลา
+- ห้าม: เขียน DB, อ่าน/พิมพ์ .env หรือ secret, แตะ production code, customer send
+- ขั้นตอน: ดู schema + sender field → เชื่อมต่อผ่าน load_dotenv (ไม่พิมพ์ URI) → query → รายงานเคส
+
+## ผ่านแล้ว: ค้น mongo messages — ข้อความแอดมิน zaapi "ครับลูกค้า...เมื่อวาน" (verified 2026-11-18)
+
+- วิธี: read-only query บน admin Mongo `chatbot` — `messages_shp` (1,331,534 docs, role=admin+direction=out = ข้อความฝั่งร้าน/zaapi) + `shadow_replies.zaapi_reply_text`; เชื่อมผ่าน load_dotenv(ChatAdminWeb/.env) ไม่พิมพ์ secret; 0 writes
+- ผล literal "ครับลูกค้า"+ใกล้"เมื่อวาน" (admin/out) = 1 รายการเดียว:
+  - `shp_422144437185711748` ลูกค้า `atipornparinun` (ZMIThailand, shop_id 106727613): "สวัสดีครับลูกค้า สินค้าพึ่งได้รับเมื่อวานครับ 30/3/26" — 2026-03-31 03:38:38, source=data_mirror_backfill_history
+- `shadow_replies.zaapi_reply_text` มี "ลูกค้า"+"เมื่อวาน" = 2 รายการ:
+  - `shp_4710269267683590145` ลูกค้า `wsuthapongwsuthapong` (BlackShark): "📋 สรุปเรื่อง...เรื่อง: เมื่อวานชาร์จเสร็จแล้วปุ่มบนขวากดไม่ขึ้นนาฬิกา..." — 2026-11-17 (ใหม่สุด)
+  - `shp_278560189757076949` ลูกค้า `gamkri` (BlackShark): "...คำสั่งซื้อที่คุณลูกค้าทำรายการเข้ามาเมื่อวานในช่วงเย็น..." — ส่งโดยผู้ช่วย iSuper AI (msg เดิม 2026-07-10)
+- ใกล้เคียงเพิ่มเติม: `shp_458397960770069788` ลูกค้า `tanatouchkajan` (ZMIThailand): "รูปนี้ คือลูกค้าส่งเมื่อวานเหรอครับ" — 2026-11-12 04:44:47, source=openapi
+- admin/out ที่มี "เมื่อวาน" ทั้งหมด 140 docs (sources: data_mirror_backfill_history/openapi/webhook/server/new_webchat/crm — ไม่มี source="zaapi"; zaapi ส่งผ่าน Shopee API → openapi)
+- verify: counts + full-text + conversation join (to_name/shop) ตรวจแล้วทุกเคส
