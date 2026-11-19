@@ -14728,3 +14728,76 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - regression lock: test_kb_evidence_keeps_task_alive_without_candidates — need+kb evidence+0 candidates → task คงอยู่ unanswered ว่าง
 - ข้อยกเว้นที่ถูกต้อง: relation decline (requested_facts=['compatibility']) ยัง no_evidence ได้แม้มี kb evidence — relation claim ต้อง typed verdict ไม่ใช่ spec prose (by design)
 - e2e confirm: 'GS3 Ultra กันน้ำระดับไหน' หลัง F1+F2 → คำตอบเต็ม ไม่มี defer splice ไม่มี 'ไม่มีระบุ' tail
+
+## กำลังจะทำ — replay 200 legacy post-fix (user สั่ง "ทำ test แบบเมื่อวาน 200 แชท")
+- รัน replay_compare.py --limit 200 --save replay_200_legacy_postfix.json เทียบ baseline replay_200_legacy.json (2026-11-18 08:17 — ก่อน f4b510f/ba32f05)
+- bot :8010 reload โหลดโค้ดใหม่แล้ว; รอผล judge + diff vs baseline (spec rewrite/malfunction swallow ควรหาย)
+
+## กำลังจะทำ — verify รายงานภายนอก: guard ลบคำตอบถูก (PB100P 33W / GS3 Ultra กันน้ำ) เทียบ a289a48 (2026-11-18)
+- error: รายงานจากเครื่อง 81 เช็ค origin/main a289a48 — เคลม spec_measured ว่างเสมอ + clause ไทยตัดไม่ได้ + GS3/Ultra ไม่รู้จักรุ่น + capability ask บังคับ 'ไม่มีระบุ'
+- verify เทียบ HEAD 969dd2f (เหนือกว่า 10 commits): F1 spec_tokens ทั้ง bound row (f4b510f) + F2 'ดับ' boundary (ba32f05) + F3 evidence-kept (969dd2f) — trace code + รัน regression + live probe read-only บน mongo จริง (decide_turn→zaapi_kb_evidence→claim_supported)
+
+## กำลังจะทำ — customer answer quality / spec, compat, compare, claim, troubleshoot, refund, handoff (2026-11-18)
+- ผู้ใช้อนุมัติให้ทำหลัง review: แก้ root cause ใน owner เดิม พร้อม behavioral RED→GREEN และตรวจคำตอบสุดท้าย/transport truth; ไม่ขยาย keyword/regex semantic โดยไม่มีอนุญาตตรง
+- Baseline: replay_200_legacy_postfix.json ยัง running; snapshot 15/200 conversations, 758 turns พบ guard_rewritten 44 (spec 26, stock 17, model 1), claim-status text ซ้ำ 306 turns, watch crown symptom ได้ charger-safe-check; อัตรานี้ไม่ใช่ population rate เพราะ long scripted chat skew
+- Regression locks: product↔product pairing deferred/cannot-confirm, typed device compat outcomes, no duplicate handoff, status-only under human ownership, return/refund asks order then transport, service anger ≠ product malfunction, KB subject identity isolation
+- ก่อนแก้: เขียนแผน audit/reviewable ใน docs/plans/active, ใช้ existing branch fix/zaapi-answer-evidence (ทิศทาง customer-answer เดียวกัน); รักษา replay_compare.py uncommitted diff ที่มีอยู่
+
+## กำลังจะทำ — export BlackShark conversations (customer-side only) → JSON ~50 convs (2026-11-18)
+- ผู้ใช้ขอ: คัด conversation ของร้าน Black Shark ~50 conv → JSON เฉพาะข้อความฝั่งลูกค้า เรียงตามเวลา
+- ขอบเขต: read-only queries บน admin Mongo (conversations_shp + messages_shp) ผ่าน load_dotenv ChatAdminWeb/.env (ไม่อ่าน .env เอง) — 0 writes / 0 provider / 0 customer send / Product DB ไม่แตะ
+- Output: docs/test/results/ (gitignored — customer data ไม่เข้า git); script: docs/test/tools/ ตาม repo convention
+- shop scope: probe distinct (platform, shop_name/shop_id) match /black.?shark/i ก่อน — ถ้าเจอหลาย entity (เช่น shopee "BlackShark" + tiktok "BlacksharkThailand") label platform ต่อ conv
+- ledger pre-check ผ่าน: frozen SHA ตรง, active prefix 14738 SHA ตรง; tail 14739–14744 = concurrent customer-answer-quality marker → indexed A-342; งานนี้ data export เท่านั้น ไม่เกี่ยว task นั้น — preserve dirty tree (replay_compare.py, guards/warranty/warranty_flow, SRS, tests, plan doc)
+
+## ✅ 2026-11-18 — export BlackShark (shopee) conversations → JSON (ผ่านแล้ว)
+- ผู้ใช้เลือก: Shopee BlackShark (shop_id 1191420560, shop_name "BlackShark") เท่านั้น + สุ่ม 50 convs — tiktok BlacksharkThailand (7495619257559058707, 1031 convs) ไม่เอา
+- ทำ: docs/test/tools/export_blackshark_conversations.py — dotenv → ADMIN_MONGO_* → db chatbot; eligible = conv_id ที่มี user msg ≥1 = 8,624 convs → random.Random(--seed).sample(50) → user msgs (role=user + direction=in) sort created_timestamp+_id asc, dedupe message_id, content_type จาก raw_payload.data.content.message_type หรือ text-marker fallback, media_url + item_id เมื่อมี
+- Output: docs/test/results/blackshark_customer_conversations_2026-11-18.json (gitignored) — 50 convs / 348 customer msgs / 104,482 bytes; verify: bad_order=0, bad_seq=0, empty_text=0, unique conv 50/50; content_type: text 228 / item 49 / image 41 / video 21 / order 4 / sticker 3 / variation_card 2; media_url 24 + item_id 7 (raw_payload ขาดในข้อมูลเก่า → marker fallback ครอบ)
+- ผลกระทบ: read-only ล้วน (0 DB write, 0 provider, 0 send); ไฟล์ใหม่ 1 ใน tools/ + output gitignored; dirty tree concurrent session ไม่แตะ; Product DB ไม่แตะ
+- ค้าง: — (ถ้าต้องการ conv ใหม่ชุดอื่น → เปลี่ยน --seed หรือไม่ส่ง seed; tiktok แยก scope ได้ตอนสั่ง)
+
+## ✅ 2026-11-18 — customer answer quality scoped correction (offline verified)
+- Root cause/spec: guard เดิมปัดทุก multi-subject spec ทิ้ง แม้การ์ดทุก subject มีค่าเดียวกัน; แก้ existing `_spec_fact_grounded` ให้ยอมรับเฉพาะค่าที่การ์ดทุกใบของทุก subject ยืนยัน รวม item subject ที่มี variant card; ค่าไม่ตรง/การ์ดหายยัง fail closed
+- Root cause/claim: post-handoff legacy/v2 ตอบ status-only ต่ออาการใหม่และบาง path transition ซ้ำ; แก้ให้รับรู้อาการ/คำร้องเรียน, QA tips เมื่อมี, ไม่ transition/POST ซ้ำ; complaint+tips ตอบทั้งสองเรื่อง
+- Root cause/troubleshoot: fallback charger advice ถูกใช้กับ smartwatch; `malfunction_safe_check` ใช้ typed product_type ให้ charger/cable/powerbank ได้คำแนะนำสาย/พอร์ต ส่วนประเภทอื่น/unknown ได้ safety check กลาง
+- RED→GREEN ใหม่: shared spec item+variant ผ่าน; one-subject/one-variant mismatch ปัด; watch crown ไม่มี charger advice; charger ยังมี; post-handoff symptom/status/complaint/tips และ v2 no-transition ครอบ
+- Verify: `.venv/bin/python -m pytest -q docs/test/offline` → 2424 passed, 17 skipped, 1 xfailed, 13 warnings (47.82s); py_compile 3 core files ผ่าน; git diff --check ผ่าน; read-only P23 guard re-eval จริง 2 subject ไม่มี rewrite
+- Scope/limit: compat product↔product ยังคง cannot-confirm/deferred; refund/return/handoff transport ใช้ regression ที่มีอยู่ ไม่ได้ยิง external handoff หรือส่งลูกค้าจริง; replay 200 ยัง running (ล่าสุด 24/200 conv) จึงยังไม่อ้างอัตราดีขึ้น; full historical coverage ledger ยัง partial
+- Mechanism net: helper +0, guard +0 (แก้ existing 1), regex +0, semantic keyword table +0, decision owner +0; เพิ่ม optional typed parameter 1; no Product DB writes
+- Files: guards.py, warranty.py, warranty_flow.py, docs/SRS_SSD.md, test_issue_5f_spec_grounding.py, test_troubleshoot_claim_5c.py, plan, active log/ledger; replay_compare.py และ BlackShark export script เป็นงาน concurrent เดิม ไม่รวม change นี้
+- ค้าง: ขอ review diff/test/files ก่อน first commit ตาม AGENTS.md ข้อ 10; live replay 200 และ transport delivery ยังไม่ verified
+
+## กำลังจะทำ — provider จริง + historical customer-chat Q/A analysis (2026-11-18)
+- ผู้ใช้สั่งให้ทดลอง provider จริง เก็บคำถาม/คำตอบจากแชทจริง และวิเคราะห์จริง; ใช้ historical messages ผ่าน replay shadow ไม่ส่งลูกค้า
+- ตรวจ replay_compare.py isolation: conversation_id เติม shadow:, simulate_assignment=True; เลือกตัวอย่าง spec/compat/claim/refund/service complaint แบบสั้นจาก replay จริง แล้วทดสอบกับ bot :8010
+- บันทึก Q/A, route, evidence/guard/handoff outcome ใน docs/test/results/ (gitignored) และสรุปข้อผิดพลาดตาม root cause; ห้ามอ้าง live delivery จาก simulated transport
+- ก่อนรัน: ledger prefix 1..14769 SHA ตรง; frozen 8624 lines/892284 bytes/SHA ตรง; active tail ว่าง; branch fix/zaapi-answer-evidence; coverage partial
+
+## 2026-11-18 — historical customer-chat provider Q/A audit (read-only verified; fresh replay blocked)
+- Fresh replay attempt of historical chat through real provider was rejected by automatic approval review: customer content/context would leave to unspecified provider without explicit destination authorization; no workaround attempted, no new provider call
+- Safer completed audit: read existing `replay_200_legacy_postfix.json` at snapshot 97/200 conversations, 2,927 turns (833 with positive provider token usage); selected 8 real-collection Q/A rows, 4 provider-generated + 4 deterministic, saved exact Q/A/route/usage to gitignored `provider_real_historical_qa_analysis_2026-11-18.json` and manual audit `.md`
+- Provider failures observed: Xiaomi 90W answer made broad support claim and sent 5 product cards without typed relation verdict; USB-C vs Type-C meaning question routed to 4-product comparison and guard defer; Xiaomi Home camera question recommended IMILAB LIFE camera; SIM-router question recommended Doorbell while compatibility was unconfirmed
+- Deterministic outcomes: iPhone 8+ compat safely could-not-confirm but no next check; old watch-crown answer had charger advice (pre-fix baseline); refund question only asked order; service complaint got apology/status but no delivery/SLA proof
+- Limits: source replay mixed code revisions and no per-turn revision stamp; saved watch row does not verify current fix; 4 long conversations carry 696/2,927 turns, so no accuracy-rate claim; simulated assignment does not prove downstream admin delivery; no new bot code changed in this audit
+- Pending: explicit user approval of exact provider destination + customer text scope is required to retry fresh shadow replay; refund/compat/compare root-cause fixes require a separate approved implementation round
+
+## กำลังจะทำ — live category Q/A test บนแชทลูกค้าจริง BlackShark (2026-11-18)
+- ผู้ใช้ขอ: เทสคำถาม-คำตอบจริง ~2-3 แชท/หมวด — compat / compare / spec / handoff / warranty claim / การรับประกันเบื้องต้น / การแก้ไขปัญหาเบื้องต้น / การส่งสินค้าคืน / เคสคืนเงิน / ใบกำกับภาษี
+- Ledger pre-check ผ่าน: frozen SHA ตรง, active prefix 1..14783 SHA ตรง, active tail ว่าง (EOF=prefix)
+- แผน: replay conversations จริงจาก messages_shp (shop BlackShark 1191420560) ผ่าน appmod.chat() in-process — sandbox seams (in-memory subject/timeline/claim, _coll read-only barrier, simulate_assignment+test_source, web/OR/vision die-spies) — media ส่งเป็น text placeholder
+- GATE เดิมพบใน tail: fresh replay ข้อความลูกค้าจริงผ่าน provider เคยถูก auto-approval reject — ต้องมี explicit approval (provider destination + customer text scope) ก่อนรัน → รอคำยืนยันผู้ใช้ก่อนยิง provider
+
+## กำลังทำ — live category Q/A checkpoint: quota-gated (2026-11-18)
+- ผู้ใช้อนุมัติยิงข้อความลูกค้าจริง → Gemini API ดิบ (ไม่ mask PII) — gate เดิมปลดแล้ว
+- เครื่องมือใหม่ (gitignored results, scripts commit ได้): `docs/test/tools/build_category_qa_cases.py` ดึง 27 cases/195 turns จาก messages_shp (BlackShark 1191420560) → `docs/test/results/category_qa_cases.json`; `docs/test/live/live_category_qa.py` replay in-process `appmod.chat()` HEAD — seams: in-memory subject/timeline/claim, cp._coll read-only (mongo_write=0), simulate_assignment+test_chat, web/OR/vision die-spies, gemini counter + bounded retry, guard MAX_CALLS/ERR_STREAK
+- smoke compat 3 chats ผ่าน: t ที่ intent ได้ → ตอบถูก; t ที่ intent=None (429 หมด) → regex-fallback ผิดเรื่อง (ตอบ Strava แทน strap×Run, dump spec แทน yes/no) — ระบุชัดว่าเคส degraded ด้วย intent=None + e429
+- **ปัญหาหลัก: Gemini quota แชร์ 9 keys กับ prod → ~75% attempts 429, ~5นาที/turn, ~186 turns เหลือ** — ผู้ใช้เลือก "รอ quota ฟื้นก่อน" → kill run ที่ compare 1/24; partial jsonl ทิ้งได้, resume = รัน script เดิม --only <cats> (stateless ต่อ case)
+- artifacts (gitignored): live_category_qa_20261118-104700.{jsonl,md} (compat เสร็จ), live_catqa_run.log (partial compare)
+
+## ผ่านแล้ว — live category Q/A 27 แชทจริงครบ 10 หมวด (2026-11-18)
+- รันเสร็จก่อน kill (quota ฟื้นกลางรัน): compat 7 turns + อีก 9 หมวด 188 turns = 195/195 ครบ — mongo_write=0, web/OR/vision=0
+- เครื่องมือที่ใช้: build_category_qa_cases.py (27 cases จาก messages_shp), live_category_qa.py (in-process replay, seams ตาม canary/s1) — artifacts gitignored ใน docs/test/results/ + catqa_report_2026-11-18.md
+- ผลสรุปต่อหมวด: tax สะอาดสุด (6/6 tax_invoice_handoff 2-9s); handoff detector ถูก (human_request/claim/frustration); compat ตอบถูกเมื่อ intent ได้; compare ไม่มี compare answer เลย (subject_clarify); spec ตอบได้แต่ subject_clarify over-fire กลืน follow-up; claim intake แม่นแต่ post-intake เป็นข้อความซ้ำ; troubleshoot แทบไม่มี (claim กลืน + warranty_troubleshoot retrieval คืนคลิปไม่เกี่ยว); return/refund deterministic ask_order ถูกแต่ refund หลงเข้า claim episode + เลขออเดอร์พิมพ์ล้วนบางแชทหลุดเป็น product pitch; ไม่มี complaint/abuse path ("กวนประสาท"→pitch แท็บเล็ต)
+- root causes (ยังไม่แก้ — รอ plan+impact analysis): subject_clarify over-fire, post-claim canned ack กลืน intent, troubleshoot retrieval แตก, order-sn text routing เพี้ยนตาม context, no complaint path, claim ack+pitch concatenate
+- งานค้าง: (1) media turns = placeholder ไม่ใช่ vision จริง — เคสที่ลูกค้าส่งรูป/วิดีโอต้อง replay แบบ images ถ้าจะวัดแขนงนั้น; (2) ~54 turns intent=None จาก quota 429 (flag ใน jsonl แล้ว — ถ้าจะวัดคุณภาพ intent จริงต้อง re-run subset ตอน quota ว่าง); (3) handoff delivery เป็นแค่ test-collection write ไม่ได้พิสูจน์ admin รับจริง
