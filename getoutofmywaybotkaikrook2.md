@@ -14801,3 +14801,13 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ผลสรุปต่อหมวด: tax สะอาดสุด (6/6 tax_invoice_handoff 2-9s); handoff detector ถูก (human_request/claim/frustration); compat ตอบถูกเมื่อ intent ได้; compare ไม่มี compare answer เลย (subject_clarify); spec ตอบได้แต่ subject_clarify over-fire กลืน follow-up; claim intake แม่นแต่ post-intake เป็นข้อความซ้ำ; troubleshoot แทบไม่มี (claim กลืน + warranty_troubleshoot retrieval คืนคลิปไม่เกี่ยว); return/refund deterministic ask_order ถูกแต่ refund หลงเข้า claim episode + เลขออเดอร์พิมพ์ล้วนบางแชทหลุดเป็น product pitch; ไม่มี complaint/abuse path ("กวนประสาท"→pitch แท็บเล็ต)
 - root causes (ยังไม่แก้ — รอ plan+impact analysis): subject_clarify over-fire, post-claim canned ack กลืน intent, troubleshoot retrieval แตก, order-sn text routing เพี้ยนตาม context, no complaint path, claim ack+pitch concatenate
 - งานค้าง: (1) media turns = placeholder ไม่ใช่ vision จริง — เคสที่ลูกค้าส่งรูป/วิดีโอต้อง replay แบบ images ถ้าจะวัดแขนงนั้น; (2) ~54 turns intent=None จาก quota 429 (flag ใน jsonl แล้ว — ถ้าจะวัดคุณภาพ intent จริงต้อง re-run subset ตอน quota ว่าง); (3) handoff delivery เป็นแค่ test-collection write ไม่ได้พิสูจน์ admin รับจริง
+
+## กำลังจะทำ — /llm model dropdown filter ตาม provider ต่อ role (2026-11-19)
+- ผู้ใช้ขอ: หน้า /llm ช่องเลือก model — provider=gemini แสดงเฉพาะ gemini models, provider=openrouter แสดงเฉพาะ openrouter models, openrouter_search แสดงเฉพาะโมเดลที่ทำ web search ได้ (:online)
+- Ledger pre-check ผ่าน: frozen 8624 lines/892284 bytes/SHA ตรง, active prefix 1..14803 SHA ตรง, active tail ว่าง (EOF=prefix); coverage partial
+- แผน: filter options ของ SearchableSelect ตาม providers[role] ใน page.tsx เท่านั้น — ไม่แตะ service/bot
+
+## ผ่านแล้ว — /llm model dropdown filter: implement อยู่แล้ว ไม่มี code change (2026-11-19)
+- page.tsx:486-491 ทำตามที่ขอครบอยู่แล้ว (commit 6567099 "/llm v3", 2026-11-14): isSearch→OR models+`:online`; provider=openrouter→avail.openrouter; else→avail.gemini
+- avail.gemini = live list Google API filter startsWith("gemini") / fallback gemini-*; avail.openrouter = OR catalog ids; llmConfigService.ts:282 บังคับเติม :online ตอน save ของ openrouter_search
+- grep ทั้ง src ไม่มี model dropdown ที่อื่น — ถ้าหน้าจริงยังเห็น list ผสม = instance เก่ากว่า 6567099 → restart dev/rebuild admin image
