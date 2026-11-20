@@ -14597,3 +14597,9 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - test แก้: r12 test_verdict_segment_* fixture เติม subject_refs=("9") ให้ตรง production deictic stamping
 - suite: 2383 passed 0 regressions (+5 tests ใน test_evidence_gap_fixes); อยู่บน branch fix/compat-verdict-llm-context
 - เหลือ: live verify pingevox Q3/Q4 หลัง merge; featured-card pick ยังไม่ผูก verdict (ข้อ 3 ที่ user สั่งรอ)
+
+## 2026-11-20 — ChatBlackshark engine v4 bridge
+- Scope: BotWorker test mode and exact allowlisted shop IDs call ChatBlackshark /api/engine/answer with conversation_id, message_id, shop_id, platform. Other shops retain the existing engine.
+- Response identity is checked; image_desc is saved to messages_shp; answered shadow replies label v4; handoff uses existing assignment and workflow suppresses customer delivery.
+- Verification on exact GitHub main: typecheck, v4 behavioral test, BotWorker boundary 25/25, diff check. No customer message sent.
+- Pending controlled activation: legacy runtime URL/token/shop allowlist and end-to-end BotWorker/provider run.

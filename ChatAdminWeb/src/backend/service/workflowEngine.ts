@@ -1744,6 +1744,7 @@ async function performAction(
       const botResp = await callBot({
         platform: msg.platform,
         message: promptPrefix + msg.text,
+        messageId: msg.message_id,
         shopId: msg.shop_id,
         shopName,
         history,
@@ -1757,7 +1758,9 @@ async function performAction(
       context.bot_source = botResp.source;
       context.bot_model = botResp.model;
       context.bot_products = botResp.products;
-      if (botResp.answer) {
+      context.bot_handoff_required = botResp.handoff_required === true;
+      context.bot_handoff_reason = botResp.handoff_reason;
+      if (botResp.answer && !botResp.handoff_required) {
         delivered.push({ text: botResp.answer, source: "workflow.let_ai_respond", node_id: node.node_id, products: botResp.products, request_id: botResp.request_id });
       }
       return {};

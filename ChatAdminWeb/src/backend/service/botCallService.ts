@@ -20,6 +20,7 @@ export interface BotCallParams {
   // ⚡ Phase 2A — state-driven handoff: conversation_id + simulate flag
   //    ถ้ามี → ดึง status จาก DB แล้วส่ง ticket_state ให้บอท
   conversationId?: string;
+  messageId?: string;
   simulate?: boolean;
   // ⚡ botworker parallel — ระบุ test source ("botworker" ฯลฯ)
   //    → ticket_state อ่านจาก test_status_conversation(source)
@@ -42,7 +43,9 @@ export interface BotCallResponse {
   //    caller เก็บไว้ใน message doc เพื่อส่งกลับใน history ของ turn ถัดไป
   image_desc?: string;
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2 / v3)
-  chat_engine?: "legacy" | "v2" | "v3";
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
+  handoff_required?: boolean;
+  handoff_reason?: string;
   // ⚡ R5 — turn correlation id จาก Python (ตรง ai_usage.request_id) → shadow chain
   request_id?: string;
 }
@@ -199,6 +202,40 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       ])
     : params.signal;
   try {
+    const v4Shops = new Set((process.env.CHATBLACKSHARK_BOTWORKER_SHOP_IDS || "")
+      .split(",").map((value) => value.trim()).filter(Boolean));
+    if (isWorkerCall && params.messageId && params.conversationId && v4Shops.has(params.shopId)) {
+      const v4BaseUrl = process.env.CHATBLACKSHARK_ENGINE_URL?.replace(/\/$/, "");
+      const v4Token = process.env.CHATBLACKSHARK_ENGINE_TOKEN;
+      if (!v4BaseUrl || !v4Token) throw new Error("chatblackshark_engine_not_configured");
+      const resp = await fetch(`${v4BaseUrl}/api/engine/answer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${v4Token}` },
+        body: JSON.stringify({ conversation_id: params.conversationId,
+          message_id: params.messageId, shop_id: params.shopId, platform: params.platform }),
+        ...(fetchSignal ? { signal: fetchSignal } : {}),
+      });
+      if (!resp.ok) throw new Error(`chatblackshark_engine_failed:${resp.status}`);
+      const data = await resp.json() as Record<string, unknown>;
+      if (data.conversation_id !== params.conversationId || data.message_id !== params.messageId) {
+        throw new Error("chatblackshark_engine_identity_mismatch");
+      }
+      const imageDesc = typeof data.image_desc === "string" ? data.image_desc : "";
+      if (imageDesc) {
+        const messages = await getCollection(COLLECTIONS.messages);
+        await messages.updateOne({ message_id: params.messageId, conversation_id: params.conversationId,
+          shop_id: params.shopId, platform: params.platform, image_desc: { $exists: false } },
+          { $set: { image_desc: imageDesc } });
+      }
+      return {
+        answer: typeof data.answer === "string" ? data.answer : "",
+        source: "chatblackshark", products: Array.isArray(data.products) ? data.products : [],
+        image_desc: imageDesc, chat_engine: "v4",
+        handoff_required: data.handoff_required === true,
+        handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
+        request_id: typeof data.request_id === "string" ? data.request_id : undefined,
+      };
+    }
     const resp = await fetch(url, {
       method: "POST",
       headers: {
