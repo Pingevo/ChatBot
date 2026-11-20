@@ -14603,3 +14603,8 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Response identity is checked; image_desc is saved to messages_shp; answered shadow replies label v4; handoff uses existing assignment and workflow suppresses customer delivery.
 - Verification on exact GitHub main: typecheck, v4 behavioral test, BotWorker boundary 25/25, diff check. No customer message sent.
 - Pending controlled activation: legacy runtime URL/token/shop allowlist and end-to-end BotWorker/provider run.
+
+## 2026-11-20 — ChatBlackshark v4 deployment config example
+- Added CHATBLACKSHARK_ENGINE_URL, CHATBLACKSHARK_ENGINE_TOKEN, and CHATBLACKSHARK_BOTWORKER_SHOP_IDS to ChatAdminWeb/.env.example with Docker .env.web placement note.
+- Documentation-only change; no runtime code or secrets committed. Confirmed .env.example has all three names and git diff --check passes.
+- Local ChatAdminWeb/.env configured for Black Shark test mode; remote Docker .env.web is inaccessible from this workspace and still requires server access.
