@@ -1084,15 +1084,26 @@ def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_mod
     _bot_name = ctx.get("bot_name", "เรา")
     # ⚡ Task 5C-F — malfunction claim ต้อง acknowledge + safe checks ก่อน
     #   ขอข้อมูลเคลม (ไม่เดาสเปค/สาเหตุเฉพาะรุ่น)
-    # already_handed → ไม่ถามข้อมูลซ้ำทั้งชุด: turn ที่มาถึงจุดนี้คือ claim-routed
-    #   ที่ collect SM ไม่ได้จับ (ไม่มี field ใหม่) = follow-up/status ของเคสที่
-    #   ส่งแอดมินแล้ว → status answer เดียว (ไม่ POST ซ้ำ)
+    # already_handed → ไม่ถามข้อมูลซ้ำ; อาการใหม่/คำร้องเรียนได้คำตอบเสริม
+    #   ส่วน status-only ใช้ status answer เดิม (ไม่ transition/POST ซ้ำ)
     if already_handed:
         from . import responses as _resp_mod
         _answer = _resp_mod.CLAIM_STATUS_REPLY
+        _intent_result = ctx.get("intent_result") or {}
+        _new_symptom = bool(_warranty_mod.malfunction_safe_check(req.message)) or bool(
+            _intent_result.get("capability_asks"))
+        if _new_symptom:
+            _answer = (
+                f"รับทราบอาการที่แจ้งเพิ่มเติมแล้วค่ะ {_bot_name}ส่งต่อเคสนี้ให้แอดมินดูแลอยู่แล้ว "
+                "หากอุปกรณ์ร้อนผิดปกติ มีกลิ่นไหม้ หรือมีรอยเสียหาย "
+                "รบกวนหยุดใช้งานไว้ก่อนนะคะ")
+        from . import handoffs as _handoffs
+        if _handoffs.is_service_anger(req.message):
+            _answer = "ขออภัยที่ต้องรอและยังไม่ได้รับคำตอบนะคะ " + _answer
     else:
         _answer = (
-            _warranty_mod.malfunction_safe_check(req.message)
+            _warranty_mod.malfunction_safe_check(
+                req.message, (ctx.get("intent_result") or {}).get("product_type"))
             + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
             f"• วันที่ซื้อสินค้า\n"
             f"• เลขที่คำสั่งซื้อ\n"
@@ -1104,7 +1115,8 @@ def _handle_first_message_claim(req, ctx, is_claim, _warranty_mod, llm, _app_mod
     # ⚡ 2B.4 — explicit fresh claim request → episode lifecycle ผ่าน owner เดียว
     #   (capture authoritative return — episode_id ของ episode ที่เพิ่ง mint
     #   อยู่ใน state นี้ ไม่ใช่ claim_state เดิม)
-    claim_state = _claim_transition(req, claim_state or {}, "collecting", fresh_claim=True)
+    if not already_handed:
+        claim_state = _claim_transition(req, claim_state or {}, "collecting", fresh_claim=True)
     _claim_ctx = {"claim_topic": "เคลม/ซ่อม/ประกันสินค้า", "handoff_reason": "claim"}
     return _build_warranty_claim_response(
         req, ctx, _answer, True, _claim_ctx, _app_module, llm,
@@ -1139,6 +1151,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
     _warranty_auto_answer = ctx.get("warranty_auto_answer", "")
     _warranty_auto_ctx = ctx.get("warranty_auto_ctx", "")
     _intent_result = ctx.get("intent_result") or {}
+    _claim_ptype = _intent_result.get("product_type") if isinstance(_intent_result, dict) else None
     model_name = ctx.get("model_name", "")
     _model_name = model_name  # ⚡ เดิม assign จาก os.environ GEMINI_MODEL — ค่าเดียวกับ model_name ที่ ctx ส่งมา
 
@@ -1802,14 +1815,14 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
 
         # ⚡ Task 5C-F — malfunction claim ต้อง acknowledge + safe checks ก่อน
         #   ขอข้อมูลเคลม (QA tips ถ้ามีจะชนะ — return ก่อนถึงข้อความนี้)
-        # already_handed → เคสส่งแอดมินแล้ว: claim-routed turn ที่ SM ไม่ได้จับ
-        #   = follow-up/status → status answer (ไม่ถามข้อมูลซ้ำ ไม่ POST ซ้ำ)
+        # already_handed → เคสส่งแอดมินแล้ว: ตอบอาการใหม่/ร้องเรียนบริการ
+        #   หรือสถานะ โดยไม่ถามข้อมูลซ้ำและไม่ POST ซ้ำ
         if _already_handed:
             from . import responses as _resp_mod
             _claim_first_answer = _resp_mod.CLAIM_STATUS_REPLY
         else:
             _claim_first_answer = (
-                warranty.malfunction_safe_check(req.message)
+                warranty.malfunction_safe_check(req.message, _claim_ptype)
                 + f"รบกวนแจ้งข้อมูลดังนี้เพื่อตรวจสอบสิทธิ์การรับประกันค่ะ:\n"
                 f"• วันที่ซื้อสินค้า\n"
                 f"• เลขที่คำสั่งซื้อ\n"
@@ -1821,15 +1834,17 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
         # ⚡ QA-KB troubleshoot-first — ถ้ามีวิธีแก้เบื้องต้นที่ตรงรุ่น/สินค้า
         #    → แนะนำก่อน ยังไม่ขอข้อมูลเคลม/ไม่ handoff
         #    ลูกค้าตอบ "ไม่หาย/ไม่ได้" → state machine (ts_suggested) เข้า claim info
-        #    (already_handed = เคสอยู่กับแอดมินแล้ว → ข้าม tips ตอบ status)
+        #    (already_handed = เคสอยู่กับแอดมินแล้ว → tips เฉพาะอาการใหม่)
+        _new_symptom = bool(warranty.malfunction_safe_check(req.message)) or (
+            _intent_result.get("intent") == "warranty_claim"
+            and bool(_intent_result.get("capability_asks")))
         try:
             from . import knowledge_base as _kbmod
             from . import generation_pointer as _gen
             # already_handed → เฉพาะอาการใหม่ (malfunction evidence) ที่ให้
             #   tips เสริม; status-only turns ตอบ CLAIM_STATUS_REPLY เดิม
             _tips = None
-            if (not _already_handed
-                    or warranty.malfunction_safe_check(req.message)):
+            if not _already_handed or _new_symptom:
                 _tips = _kbmod.qa_troubleshoot_tips(
                     req.message, conversation_id=req.conversation_id,
                     item_id=req.item_id,
@@ -1843,6 +1858,9 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                     _ts_answer = (
                         f"{_bot_name}ส่งต่อให้แอดมินดูแลเคสนี้อยู่แล้วค่ะ\n"
                         f"ระหว่างรอ ลองทำตามนี้ได้เลยค่ะ:\n{_ts_lines}")
+                    from . import handoffs as _handoffs
+                    if _handoffs.is_service_anger(req.message):
+                        _ts_answer = "ขออภัยที่ต้องรอและยังไม่ได้รับคำตอบนะคะ " + _ts_answer
                     print("[QA-KB] post-handoff supplemental tips — ไม่ mint/POST ซ้ำ", file=sys.stderr)
                 else:
                     _ts_answer = (
@@ -1877,6 +1895,18 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                 )
         except Exception as _qa_exc:
             print(f"[QA-KB] troubleshoot-first error: {_qa_exc}", file=sys.stderr)
+        if _already_handed and _new_symptom:
+            _claim_first_answer = (
+                f"รับทราบอาการที่แจ้งเพิ่มเติมแล้วค่ะ {_bot_name}ส่งต่อเคสนี้ให้แอดมินดูแลอยู่แล้ว "
+                "หากอุปกรณ์ร้อนผิดปกติ มีกลิ่นไหม้ หรือมีรอยเสียหาย "
+                "รบกวนหยุดใช้งานไว้ก่อนนะคะ")
+        if _already_handed:
+            from . import handoffs as _handoffs
+            if _handoffs.is_service_anger(req.message):
+                _claim_first_answer = (
+                    "ขออภัยที่ต้องรอและยังไม่ได้รับคำตอบนะคะ "
+                    + (_claim_first_answer if _new_symptom else
+                       f"เคสนี้อยู่กับแอดมินแล้ว {_bot_name}รับทราบข้อความที่แจ้งค่ะ"))
         # ⚡ Phase 1C — ถ้ามี warranty auto-check context (เช็คจาก order_sn แล้ว) → แนบ
         if _warranty_auto_ctx:
             _claim_first_answer = f"{_warranty_auto_ctx}\n\n{_claim_first_answer}"
@@ -1885,7 +1915,8 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
 
         # ⚡ 2B.4 — explicit fresh claim request → episode ใหม่เมื่อ absent/terminal
         #   ผ่าน transition owner เดียว (open → episode เดิม)
-        _claim_state = _claim_transition(req, _claim_state, "collecting", fresh_claim=True)
+        if not _already_handed:
+            _claim_state = _claim_transition(req, _claim_state, "collecting", fresh_claim=True)
 
         # ⚡ handoff ทันที — canonical builder เป็น owner เดียวของ transport/result/flag/answer
         #   already_handed → supplemental only (ห้าม POST ซ้ำเข้า episode เดิม)
@@ -1920,7 +1951,8 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                 # เคสอยู่กับแอดมินแล้ว — supplemental เท่านั้น ไม่แตะ episode
                 _ts_lines = ("\n".join(f"• {t}" for t in _tips)
                              if _tips
-                             else warranty.malfunction_safe_check(req.message).strip())
+                             else warranty.malfunction_safe_check(
+                                 req.message, _claim_ptype).strip())
                 _ts_answer = (
                     f"{_bot_name}ส่งต่อให้แอดมินดูแลเคสนี้อยู่แล้วค่ะ\n"
                     f"ระหว่างรอ ลองทำตามนี้ได้เลยค่ะ:\n{_ts_lines}")
@@ -1933,7 +1965,7 @@ def handle_warranty_flow_legacy(req, ctx: dict, history: list[dict], db) -> dict
                 _claim_state = _claim_transition(req, _claim_state, "ts_suggested", fresh_claim=True)
             else:
                 _ts_answer = (
-                    warranty.malfunction_safe_check(req.message)
+                    warranty.malfunction_safe_check(req.message, _claim_ptype)
                     + f"ถ้าลองแล้วยังไม่หาย แจ้ง{_bot_name}ได้เลยค่ะ "
                       f"เดี๋ยวช่วยตรวจสอบเรื่องเคลม/รับประกันให้นะคะ")
                 _claim_state = _claim_transition(req, _claim_state, "ts_suggested", fresh_claim=True)

@@ -473,7 +473,7 @@ async function storeBotReply(opts: {
     cost?: number;
     products?: unknown[];
     image_desc?: string;
-    chat_engine?: "legacy" | "v2" | "v3";
+    chat_engine?: "legacy" | "v2" | "v3" | "v4";
     request_id?: string;
   };
   triggerId?: string;
@@ -1025,6 +1025,7 @@ async function processClaimedMessage(msg: {
         const botResp = await callBot({
           platform: msg.platform,
           message: botText,
+          messageId: msg.message_id,
           shopId: msg.shop_id,
           shopName,
           history,
@@ -1038,6 +1039,21 @@ async function processClaimedMessage(msg: {
         });
         // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
         if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
+        if (botResp.handoff_required) {
+          const reason = botResp.handoff_reason || "engine requested handoff";
+          const { agentId, mode, inFlight } = await pickAgent(
+            configShopKey, msg.platform, msg.conversation_id, reason,
+            opIdFor(ctx.claim_id, "handoff")
+          );
+          if (inFlight) return { status: "in_flight", detail: `handoff op in-flight for ${msg.conversation_id}` };
+          await logBotworkerEvent({ type: "bot_handoff", actor: "bot-worker",
+            conversation_id: msg.conversation_id, shop_id: msg.shop_id, platform: msg.platform,
+            metadata: { trigger_id: trigger.trigger_id, reason, assigned_to: agentId, delivered_to_platform: false } });
+          return { status: "handed_off", detail: `trigger→engine handoff→${agentId || "no agent"}`,
+            outcome: { type: "handed_off", reply_ids: [],
+              side_effects: [{ type: "handoff", ref: agentId, at: new Date() }],
+              extra: { trigger_id: trigger.trigger_id, assigned_to: agentId || undefined, assignment_mode: mode } } };
+        }
         const shadowReplyId = await storeBotReply({
           messageId: msg.message_id,
           messageText: botText,
@@ -1083,6 +1099,7 @@ async function processClaimedMessage(msg: {
         const botResp = await callBot({
           platform: msg.platform,
           message: botText,
+          messageId: msg.message_id,
           shopId: msg.shop_id,
           shopName,
           history,
@@ -1097,10 +1114,11 @@ async function processClaimedMessage(msg: {
         // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
         if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
 
-        if (!botResp.answer || botResp.answer.trim() === "") {
+        if (botResp.handoff_required || !botResp.answer || botResp.answer.trim() === "") {
           // บอทตอบไม่ได้ → ส่งต่อแอดมิน
+          const reason = botResp.handoff_reason || "bot empty answer";
           const { agentId, mode, inFlight } = await pickAgent(
-            configShopKey, msg.platform, msg.conversation_id, "bot empty answer",
+            configShopKey, msg.platform, msg.conversation_id, reason,
             opIdFor(ctx.claim_id, "handoff")
           );
           if (inFlight) {
@@ -1113,7 +1131,7 @@ async function processClaimedMessage(msg: {
             conversation_id: msg.conversation_id,
             shop_id: msg.shop_id,
             platform: msg.platform,
-            metadata: { reason: "bot empty answer", assigned_to: agentId, delivered_to_platform: false },
+            metadata: { reason, assigned_to: agentId, delivered_to_platform: false },
           });
           return {
             status: "handed_off",

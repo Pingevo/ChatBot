@@ -235,6 +235,64 @@ def test_product_context_spec_is_evidence():
     assert not r.routing_decision.get("guard_rewritten")
 
 
+def test_multi_subject_shared_spec_survives_guard():
+    cards = [
+        {"item_id": "1", "name": "P23 variant A",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+        {"item_id": "2", "name": "P23 variant B",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+    ]
+    r = _resp("P23 จ่ายไฟรวมสูงสุด 210W ค่ะ", products=cards)
+    r.routing_decision["subject_ids"] = ["i:1", "i:2"]
+    guards.enforce(r, _req("P23 ชาร์จได้สูงสุดกี่วัตต์"))
+    assert "210W" in r.answer
+    assert not r.routing_decision.get("guard_rewritten")
+
+
+def test_multi_item_subjects_accept_shared_spec_from_variant_cards():
+    cards = [
+        {"item_id": "1", "model_id": "a", "name": "P23 variant A",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+        {"item_id": "2", "model_id": "b", "name": "P23 variant B",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+    ]
+    r = _resp("ทั้งสองรายการจ่ายไฟรวมสูงสุด 210W ค่ะ", products=cards)
+    r.routing_decision["subject_ids"] = ["i:1", "i:2"]
+    guards.enforce(r, _req("สองรายการนี้จ่ายไฟสูงสุดเท่าไหร่"))
+    assert "210W" in r.answer
+    assert not r.routing_decision.get("guard_rewritten")
+
+
+def test_multi_item_subjects_reject_spec_when_one_variant_disagrees():
+    cards = [
+        {"item_id": "1", "model_id": "a", "name": "P23 variant A",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+        {"item_id": "1", "model_id": "b", "name": "P23 variant B",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 140W"},
+        {"item_id": "2", "model_id": "c", "name": "P23 variant C",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+    ]
+    r = _resp("ทั้งสองรายการจ่ายไฟรวมสูงสุด 210W ค่ะ", products=cards)
+    r.routing_decision["subject_ids"] = ["i:1", "i:2"]
+    guards.enforce(r, _req("สองรายการนี้จ่ายไฟสูงสุดเท่าไหร่"))
+    assert "210W" not in r.answer
+    assert r.routing_decision.get("guard_rewritten") == "spec_claim"
+
+
+def test_multi_subject_spec_from_only_one_subject_is_rejected():
+    cards = [
+        {"item_id": "1", "name": "Product A",
+         "description_excerpt": "จ่ายไฟรวม 210W"},
+        {"item_id": "2", "name": "Product B",
+         "description_excerpt": "จ่ายไฟรวม 65W"},
+    ]
+    r = _resp("สองรุ่นนี้จ่ายไฟ 210W ค่ะ", products=cards)
+    r.routing_decision["subject_ids"] = ["i:1", "i:2"]
+    guards.enforce(r, _req("สองรุ่นนี้กี่วัตต์"))
+    assert "210W" not in r.answer
+    assert r.routing_decision.get("guard_rewritten") == "spec_claim"
+
+
 def test_message_still_grounds_model_identity():
     # identity pool คงเดิม — รุ่นที่ลูกค้าพิมพ์เอง echo กลับได้ (model_claim ใช้ message)
     r = _resp(

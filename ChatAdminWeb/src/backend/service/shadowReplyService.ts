@@ -74,7 +74,7 @@ export interface ShadowReplyDoc extends Document {
   bot_image_desc?: string;           // ⚡ A2 — vision description ของรูป current turn (cache กัน re-read)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้มาจาก engine ไหน (legacy / v2 / v3)
   //    ใช้ตอนเปรียบเทียบ — แยกคำตอบ legacy vs v2 vs v3 ใน shadow inbox
-  chat_engine?: "legacy" | "v2" | "v3";
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
   // ⚡ R5 — turn correlation id จาก bot response (ตรง ai_usage.request_id)
   //   ใช้ join shadow_reply ↔ LLM calls ของ turn เดียวกันใน probe-observability-trace
   request_id?: string;

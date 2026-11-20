@@ -276,9 +276,9 @@ def _spec_fact_grounded(resp, tok: str, raw_ctx: str = "") -> bool:
 
     - 0 subject_ids → legacy pool: cards ทั้งหมด + grounding_text
     - 1 subject_id → facts ของ subject นั้นเท่านั้น
-    - >1 subject_ids → fail closed เสมอ: free-form answer ไม่มีโครงสร้าง
-      ผูก claim↔subject (answer_segments = plain text) — fact ของ A ห้าม
-      ไป ground claim ของ B และไม่มีทางรู้ว่า claim พูดถึงใคร
+    - >1 subject_ids → รับเฉพาะ fact ที่การ์ดของทุก subject ยืนยันตรงกัน
+      เพราะ free-form answer ไม่มีโครงสร้างผูก claim↔subject; ถ้าขาด
+      การ์ดหรือค่าของ subject ใดต้อง fail closed
     - deterministic segment claims (typed verdict/constraint/policy) ไม่
       เข้าฟังก์ชันนี้ — enforce exempt ผ่าน composition segment marker
       (origin+exact-text provenance) ก่อนเรียก: evidence ownership เป็น
@@ -288,7 +288,18 @@ def _spec_fact_grounded(resp, tok: str, raw_ctx: str = "") -> bool:
     _rd = getattr(resp, "routing_decision", None)
     _sids = set(_rd.get("subject_ids") or ()) if isinstance(_rd, dict) else set()
     if len(_sids) > 1:
-        return False
+        cards = _subject_cards(resp, _cp)
+        for sid in _sids:
+            subject_cards = [p for p in cards
+                             if _cp._identity_key(p)[0] == sid
+                             or (sid.startswith("i:")
+                                 and _cp._card_ids(p)[2] == sid[2:])]
+            if not subject_cards or not all(
+                    _pr.claim_supported(_pr.extract_field_facts(p),
+                                        _cp._identity_key(p)[0], tok)
+                    for p in subject_cards):
+                return False
+        return True
     cards = _subject_cards(resp, _cp)
     for _p in cards:
         _sid = _cp._identity_key(_p)[0]

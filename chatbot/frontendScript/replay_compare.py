@@ -606,6 +606,10 @@ def replay_one(admin_db, prod_db, conv_id: str, verbose: bool = True,
             'bot_timing': bot_timing,
             'bot_routing': bot_routing,
             'bot_steps': bot_steps,
+            'bot_usage': bot.get('usage') or {},
+            'bot_cost': bot.get('cost') or 0.0,
+            'bot_elapsed': bot.get('elapsed') or 0.0,
+            'bot_products': bot_products,
             'bot_product_names': bot_product_names,
             'bot_products_count': len(bot_products),
         })
@@ -691,13 +695,16 @@ def list_conversations(admin_db, shop: str | None, platform: str, limit: int,
     return convs[:limit]
 
 
-def analyze_results(results: list) -> dict:
+def analyze_results(results: list, judge: bool = True) -> dict:
     """วิเคราะห์ผล replay ทั้งหมด สรุปปัญหา/จุดดี/จุดที่ต้องปรับทั่วไป.
 
     ใช้ 2 ขั้นตอน:
     1. rule-based stats (ความยาว/ลิงก์/error/source)
     2. LLM judge (เรียก Gemini ตรงๆ ผ่าน llm._client()) — วิเคราะห์เนื้อหา
        ว่า bot ตอบถูกต้องไหม ตรงประเด็นไหม มีข้อมูลเพียงพอไหม
+
+    judge=False → ข้ามขั้น 2 (stream save ระหว่างรัน — judge ทุก sample
+    ซ้ำทุก save = quadratic provider calls บน run ใหญ่)
     """
     total_convs = len(results)
     total_qa = 0
@@ -843,7 +850,7 @@ def analyze_results(results: list) -> dict:
 
     # ── LLM judge: วิเคราะห์เนื้อหา QA samples ──
     llm_judgments = []
-    if judge_samples:
+    if judge and judge_samples:
         # ⚡ เอาทั้งหมด — ไม่จำกัด 30 (แชททุกตัวควรมี review)
         llm_judgments = llm_judge_batch(judge_samples)
 
@@ -1076,7 +1083,7 @@ def _stream_save(save_path: str, results: list, args, status: str = "running",
     - progress: { current, total }
     - analysis: คำนวณจาก results ที่มีตอนนี้ (อาจไม่ครบ)
     """
-    analysis = analyze_results(results) if results else {}
+    analysis = analyze_results(results, judge=(status == "done")) if results else {}
     output = {
         'generated_at': datetime.now().isoformat(),
         'bot_url': BOT_URL,
