@@ -1445,6 +1445,16 @@ module ใหม่ที่แยก pure detectors ออกจาก `knowled
 | Side effects | gen dirs/collections ใหม่, `generation_runs` writes, pointer CAS เฉพาะ publish endpoint; start/resume spawn subprocess (session leader — รอดแม้ bot restart) |
 | Error/fallback | ขั้นใด raise → status=failed + error; build lock `_check_build_lock` ปฏิเสธ concurrent build (run ที่ pid ตายไม่บล็อก → resume/start ใหม่ได้); stop บน run ไม่ building → 409; resume บน pending/published → 409, บน building ที่ process ยังมีชีวิต (เช็ค `_build_pid_alive` ชุดเดียวกับ list/UI: pid→kill0, no-pid→<10min) → 409 (ต้อง stop ก่อน); CAS conflict → gen เก่าคง active; cleanup_generations keep = active+previous+3 daily+2 weekly ล่าสุด (build_kind จาก generation_runs) |
 
+### 6.42 ChatBlackshark v4 BotWorker adapter (opt-in)
+
+- **Purpose:** ให้ BotWorker ทดสอบ answer engine ที่แยกจาก Python bot เดิม โดยไม่เปลี่ยน buffer, workflow, review หรือการส่งข้อความของระบบเดิม
+- **Input:** `callBot({platform, shopId, conversationId, messageId, message, history, testSource, signal})`; เปิดใช้เฉพาะ `testSource=botworker` และ `shopId` อยู่ใน `CHATBLACKSHARK_BOTWORKER_SHOP_IDS`
+- **Output:** `BotCallResponse` (`answer`, `products`, `image_desc`, `handoff_required`, `handoff_reason`, `chat_engine=v4`); คำตอบจาก API ต้องคืน `conversation_id/message_id` ตรง request
+- **Calls / Called by:** `botWorkerService.processClaimedMessage` ทั้ง trigger bot_answer และ direct bot, รวมถึง `workflowEngine` node let_ai_respond → `botCallService.callBot` → `POST /api/engine/answer` ของ ChatBlackshark; BotWorker เดิมยังเป็นเจ้าของ persist shadow reply และ pickAgent
+- **How it works:** ตรวจ opt-in ต่อร้าน; ส่ง identity ผ่าน Bearer token; ตรวจ identity ใน response; เก็บ `image_desc` ใน `messages_shp` เมื่อยังไม่มี; BotWorker ส่งต่อเจ้าหน้าที่เมื่อ `handoff_required`; workflow บันทึก flag ใน context และไม่ deliver คำตอบที่ต้องส่งต่อ
+- **Side effects:** HTTP ไป API ที่ตั้งค่า; conditional update `messages_shp.image_desc`; BotWorker เดิมยังเขียน shadow reply, event, test assignment ตาม flow ปกติ; ไม่มีการส่ง Shopee ตรงจาก adapter
+- **Error/fallback:** ร้านที่ไม่ได้ opt-in ใช้ engine เดิม; ร้านที่ opt-in แต่ URL/token หายหรือ API/identity ผิด จะ throw เพื่อให้ BotWorker จัดการ error ตาม policy เดิม ไม่สลับไป engine อื่นเงียบๆ
+
 ## 7. คอนฟิกและตัวแปรสำคัญ
 
 ### 7.1 Engine / app
