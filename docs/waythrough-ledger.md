@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 14840 |
-| active_integrity_prefix_sha256 | `06da2f09c3795c176fa11a7532134a8422c889008e59751c21c55490d71f376a` |
-| active_line_count_at_baseline | 14840 |
-| active_integrity_recorded_at | 2026-11-20 (+0700), pending Zaapi answer quality checkpoint indexed (A-350); semantic coverage remains partial |
+| active_integrity_prefix_lines | 14851 |
+| active_integrity_prefix_sha256 | `464e7b22359a5c08a8047ec3580952553ececac738b4cf9ee67c8a3282d853cf` |
+| active_line_count_at_baseline | 14851 |
+| active_integrity_recorded_at | 2026-11-20 (+0700), reconciled main append-only tail as A-351/A-352; checkpoint A-350 retained; semantic coverage partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -399,6 +399,8 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 14814–14825 | read + indexed (A-348) |
 | 14826–14833 | read + indexed (A-349 ChatBlackshark bridge; exact task tail) |
 | 14834–14840 | read + indexed (A-350 Zaapi quality checkpoint; exact task tail) |
+| 14841–14846 | read + indexed (A-351 imported main v4 bridge tail; source main A-331) |
+| 14847–14851 | read + indexed (A-352 imported main v4 config tail; source main A-332) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -871,3 +873,5 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-348 | 14814–14825 | ChatBlackshark engine v4 feasibility audit / 2026-11-20 | decision/approval | Read-only feasibility audit: inspected checkout and origin/main; no engine_v4 exists in the available source, only engine_v2. The engine obtains bot_products/bot_faqs through cached PostgREST table reads, then Python/LLM selects evidence; no Supabase vector search/RPC. Existing catalog has no shop/platform scope and fits one Black Shark catalog. Feasible to adapt its grounded answer approach behind ChatBotProductMS typed evidence while keeping current shop-scoped order_store, ShpProducts identity/live stock, and current retrieval owners; multi-shop use needs an explicit scoped spec crosswalk. No implementation or tests. | verified | Feasibility only; design/implementation not yet authorized under rule 9. No code/config/DB/provider/customer changes; no secrets read. Semantic coverage partial. |
 | A-349 | 14826–14833 | ChatBlackshark BotWorker v4 adapter / 2026-11-20 | passed behavior | BotWorker now opts into the external v4 answer API only for explicitly listed shop IDs in botworker test mode; request includes conversation/message/shop/platform identity, response identity is checked, image_desc is persisted to messages_shp, and handoff follows existing BotWorker assignment. Workflow AI node records handoff context and suppresses delivery. New mock routing test passed; BotWorker boundary 25/25, tsc and diff checks pass. | verified | Not enabled in production: Vercel LEGACY_ENGINE_TOKEN and legacy CHATBLACKSHARK_ENGINE_URL/TOKEN/SHOP_IDS remain unset; no end-to-end BotWorker/provider run or customer delivery. Other dirty files preserved; semantic coverage partial. |
 | A-350 | 14834–14840 | Pending Zaapi answer quality worktree checkpoint / 2026-11-20 | decision/approval | Saved all 19 pending files in a branch-local commit at user request to clean the worktree. Focused 66 passed; offline 2424 passed/17 skipped/1 xfailed; BotWorker boundary 25/25, v4 mock, typecheck, diff check passed. | verified | No PR or main merge of the answer-quality branch; live answer replay remains. v4 files duplicate remote main byte-for-byte and are kept in checkpoint only for lossless preservation. |
+| A-351 | 14841–14846 | ChatBlackshark v4 bridge log reconciled from main / 2026-11-20 | passed behavior | Preserved main-side append-only record during merge; BotWorker test-mode allowlist, identity-checked call, image description persistence and handoff routing; verification claims remain those recorded on main. | verified | Imported raw log content; legacy production activation remains pending. |
+| A-352 | 14847–14851 | ChatBlackshark v4 config example reconciled from main / 2026-11-20 | documentation | Preserved main-side deployment config record during merge; three env variable placeholders and .env.web placement note. | verified | No secret value; production server configuration remains pending. |

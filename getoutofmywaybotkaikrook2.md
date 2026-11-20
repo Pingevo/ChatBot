@@ -14838,3 +14838,14 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Verification: focused pytest 66 passed; full offline pytest 2424 passed, 17 skipped, 1 xfailed; BotWorker v4 mock passed, boundary 25/25, TypeScript typecheck and git diff --check passed. First full-suite run hit sandbox fixture write errors, rerun with permission passed. No live customer/provider replay of pending Zaapi quality fixes.
 - Net mechanisms in this checkpoint: new helpers 0, guards 0, regexes 0, semantic keyword tables 0, decision owners 0. The uncommitted v4 files are byte-identical to current remote main, but remain in this branch checkpoint for lossless preservation.
 - Commit is a preservation checkpoint; do not infer production readiness or merge safety from offline tests alone.
+
+## 2026-11-20 — ChatBlackshark engine v4 bridge
+- Scope: BotWorker test mode and exact allowlisted shop IDs call ChatBlackshark /api/engine/answer with conversation_id, message_id, shop_id, platform. Other shops retain the existing engine.
+- Response identity is checked; image_desc is saved to messages_shp; answered shadow replies label v4; handoff uses existing assignment and workflow suppresses customer delivery.
+- Verification on exact GitHub main: typecheck, v4 behavioral test, BotWorker boundary 25/25, diff check. No customer message sent.
+- Pending controlled activation: legacy runtime URL/token/shop allowlist and end-to-end BotWorker/provider run.
+
+## 2026-11-20 — ChatBlackshark v4 deployment config example
+- Added CHATBLACKSHARK_ENGINE_URL, CHATBLACKSHARK_ENGINE_TOKEN, and CHATBLACKSHARK_BOTWORKER_SHOP_IDS to ChatAdminWeb/.env.example with Docker .env.web placement note.
+- Documentation-only change; no runtime code or secrets committed. Confirmed .env.example has all three names and git diff --check passes.
+- Local ChatAdminWeb/.env configured for Black Shark test mode; remote Docker .env.web is inaccessible from this workspace and still requires server access.
