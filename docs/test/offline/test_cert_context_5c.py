@@ -15,7 +15,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "chatbot"))
 
-from shopeechat import handoffs, product_store  # noqa: E402
+from shopeechat import handoffs, product_store, conversation_products  # noqa: E402
 
 
 def _req(msg, hist=(), conv=None):
@@ -166,3 +166,60 @@ def test_cert_device_only_message_keeps_model_keyword(monkeypatch):
     seen = _seen_type_filter(monkeypatch)
     handoffs.post_intent_handoffs(_req("AC65B2 มี มอก. ไหม"), _ctx(), db=None)
     assert seen["model_keyword"] == "AC65B2"
+
+
+# ── deictic cert ask ("ตัวนี้") — subject = active anchor ไม่ใช่ list ทั้งร้าน ──
+
+
+def _anchor(name="CUKTECH 20 Power Bank 25000mAh 210W",
+            codes=("LPB200N",)):
+    return {"name": name, "item_id": 123,
+            "model_codes": list(codes)}
+
+
+def _stub_anchor(monkeypatch, card):
+    monkeypatch.setattr(conversation_products, "get_active_product",
+                        lambda *a, **kw: card)
+
+
+def test_cert_deictic_binds_to_active_anchor(monkeypatch):
+    """"ตัวนี้มี มอก. ไหม" → model_keyword ผูก anchor model_code ไม่ใช่ list ทั้งร้าน"""
+    seen = _seen_type_filter(monkeypatch)
+    _stub_anchor(monkeypatch, _anchor())
+    req = _req("พาวเวอร์แบงค์ตัวนี้มี มอก. ไหมคะ", conv="c1")
+    out = handoffs.post_intent_handoffs(req, _ctx(), db=None)
+    assert seen["model_keyword"] == "LPB200N"
+    assert out and "cert item" in out["answer"]
+
+
+def test_cert_deictic_anchor_without_codes_uses_name(monkeypatch):
+    """anchor ไม่มี model_codes → ผูกด้วยชื่อเต็ม (substring match item_name)"""
+    seen = _seen_type_filter(monkeypatch)
+    _stub_anchor(monkeypatch, _anchor(name="Eloop E52 แบตสำรอง", codes=()))
+    req = _req("ตัวนี้มี มอก. ไหมคะ", conv="c1")
+    handoffs.post_intent_handoffs(req, _ctx(), db=None)
+    assert seen["model_keyword"] == "Eloop E52 แบตสำรอง"
+
+
+def test_cert_deictic_anchor_no_cert_specific_negative(monkeypatch):
+    """anchor bound แต่สินค้านั้นไม่มี cert → ตอบไม่พบของรุ่นนั้น ไม่ dump list ร้าน"""
+    def fake_search(db, certs, **kw):
+        return [] if kw.get("model_keyword") else _hit("สินค้าอื่น มอก.", n=3)
+
+    monkeypatch.setattr(product_store, "search_cert_products", fake_search)
+    _stub_anchor(monkeypatch, _anchor())
+    req = _req("ตัวนี้มี มอก. ไหมคะ", conv="c1")
+    out = handoffs.post_intent_handoffs(req, _ctx(), db=None)
+    assert out
+    assert "สินค้าอื่น" not in out["answer"]
+    assert "ไม่พบ" in out["answer"] or "ยังไม่พบ" in out["answer"]
+
+
+def test_cert_deictic_no_anchor_keeps_generic_list(monkeypatch):
+    """deictic แต่ไม่มี anchor → contract เดิม (list ตามหมวด/ทั้งร้าน)"""
+    monkeypatch.setattr(product_store, "search_cert_products",
+                        lambda db, certs, **kw: _hit("cert item มอก."))
+    _stub_anchor(monkeypatch, None)
+    req = _req("ตัวนี้มี มอก. ไหมคะ", conv="c1")
+    out = handoffs.post_intent_handoffs(req, _ctx(), db=None)
+    assert out and "cert item" in out["answer"]

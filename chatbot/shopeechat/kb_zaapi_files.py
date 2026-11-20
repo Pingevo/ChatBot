@@ -18,6 +18,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import time as _time
 from pathlib import PurePosixPath
 
@@ -1147,6 +1148,24 @@ def _code_edge(c: str) -> bool:
     return bool(c) and c.isascii() and (c.isalnum() or c in "-_")
 
 
+_REF_RE_CACHE: dict = {}
+
+
+def _ref_declared(ref_ns: str, text_low: str, text_ns: str) -> bool:
+    """ref (nospace-casefold) ถูกประกาศใน text — 'gs3' ≡ 'g s 3' (space
+    ระหว่างตัวอักษร) แต่ 'gs3ultra' ไม่นับเป็น 'gs3' — normalization owner
+    เดียวกับ identity refs; text_low=text casefold, text_ns=nospace."""
+    if not ref_ns or ref_ns not in text_ns:
+        return False
+    pat = _REF_RE_CACHE.get(ref_ns)
+    if pat is None:
+        pat = re.compile(
+            r"(?<![a-z0-9])" + r"\s*".join(re.escape(c) for c in ref_ns)
+            + r"(?!\s*[a-z0-9])")
+        _REF_RE_CACHE[ref_ns] = pat
+    return pat.search(text_low) is not None
+
+
 def _ref_hit(ref: str, hay: str) -> bool:
     """ref พบใน hay แบบติดขอบ code-edge ไม่ได้ — 'ac65b' ห้ามนับใน
     'ac65b2'/'ac65b-2' (near-model); ภาษาไทยต่อท้ายนับปกติ (ไม่มีวรรค)."""
@@ -1181,7 +1200,9 @@ def _manual_scope_ok(d: dict, shop, platform) -> bool:
 
 def zaapi_search(db, *, shop=None, platform=None, query: str = "",
                  refs=(), limit: int = 5, types=None,
-                 include_manual: bool = False) -> tuple[list[dict], tuple]:
+                 include_manual: bool = False,
+                 include_unbound: bool = False,
+                 extra_terms=()) -> tuple[list[dict], tuple]:
     """ค้น active rows → hits [{a,q,_qa_score,_qa_sim,record_id,meta,...}].
 
     registry resolve → $or visible pairs (file rows, content_type filter
@@ -1190,7 +1211,11 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
     ห้ามรวม) → Python prefilter (refs boundary-match + trigram
     = ขอบเขตงานเดียว) → lazy-embed cosine บนทุก candidate ที่ผ่าน —
     ไม่ตัด rank ก่อน cosine (แถวที่ถูกต้องทางความหมายห้ามหลุดก่อน rerank;
-    cost ผูกกับจำนวน prefilter-admitted ไม่ใช่ cap ตายตัว)."""
+    cost ผูกกับจำนวน prefilter-admitted ไม่ใช่ cap ตายตัว).
+
+    include_unbound=True → เมื่อ refs ระบุ ให้แถวที่ subject_refs ว่าง
+    (ไฟล์ไม่มี binding แต่ digest ยัง verify ผ่าน) อยู่ใน candidate pool
+    ด้วย — caller ตัดสิน scope จากเนื้อหาเอง (model/generic/foreign)."""
     if not _zaapi_files_allowed():
         return [], ("zaapi_files_gate_closed",)
     try:
@@ -1222,11 +1247,17 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
             or _manual_scope_ok(d, shop, platform)]
     if not docs:
         return [], (f"zaapi_files_empty reg={nreg}",)
-    identity_refs = {" ".join(str(r).casefold().split()) for r in refs if str(r).strip()}
+    # identity normalization owner เดียวทั้งสองฝั่ง — space-insensitive
+    #   casefold ('GS3ULTRA' ≡ 'gs3 ultra'; bound refs เก็บ normalized อยู่แล้ว)
+    identity_refs = {"".join(str(r).casefold().split())
+                     for r in refs if str(r).strip()}
     if identity_refs:
         docs = [d for d in docs if isinstance(d.get("subject_refs"), list)
-                and identity_refs.intersection(d["subject_refs"])
-                and d.get("subject_digest") == _subject_digest(d)]
+                and d.get("subject_digest") == _subject_digest(d)
+                and (identity_refs.intersection(
+                        "".join(str(s).casefold().split())
+                        for s in d["subject_refs"])
+                     or (include_unbound and not d["subject_refs"]))]
         if not docs:
             return [], ("zaapi_files_subject_unverified_or_mismatch",)
     ref_l = [str(r).lower() for r in refs if str(r).strip()]
@@ -1234,12 +1265,26 @@ def zaapi_search(db, *, shop=None, platform=None, query: str = "",
     qfull = (query or "").strip().lower()
     if len(qfull) >= 4 and qfull not in ref_l:
         ref_l.append(qfull)
+    # brand ฯลฯ ที่ไม่ใช่ subject identity — นับ ref_hit ผ่าน prefilter
+    # แต่ไม่กรอง bound docs (อยู่นอก identity_refs)
+    ref_l += [str(t).strip().lower() for t in extra_terms if str(t).strip()]
     scored: list[tuple[float, dict]] = []
     for d in docs:
         text = d.get("text") or ""
         hay = text.lower()
-        ref_hits = (len(identity_refs.intersection(d["subject_refs"])) if identity_refs else
-                    sum(1 for r in ref_l if _ref_hit(r, hay)))
+        if identity_refs and d.get("subject_refs"):
+            ref_hits = len(identity_refs.intersection(
+                "".join(str(s).casefold().split())
+                for s in d["subject_refs"]))
+        else:
+            # ไม่มี refs หรือ unbound doc — ref ที่ประกาศในเนื้อหา (รวมรูปแบบ
+            # เว้นวรรค "gs 3") นับเป็น ref_hit ด้วย — contract เดียวกับ
+            # _ref_hit แต่ทน space ภายใน code
+            hay_ns = "".join(hay.split())
+            ref_hits = sum(
+                1 for r in ref_l
+                if _ref_hit(r, hay)
+                or _ref_declared("".join(r.casefold().split()), hay, hay_ns))
         tri = _trigram_dice(query, text)
         if ref_hits or tri >= 0.08:
             scored.append((ref_hits * 0.5 + tri, d))

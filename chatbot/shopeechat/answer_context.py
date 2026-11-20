@@ -1011,23 +1011,46 @@ def _compile_evidence(pool: CandidatePool, web_evidence: tuple, *,
             candidates = {c.identity: c for c in tuple(pool.eligible or ())
                           + tuple(pool.unavailable or ()) + tuple(pool.rejected or ())
                           if refs & _cand_keys(c.identity, c.item_id, c.model_id, c.card)}
-            valid = (isinstance(facts, (list, tuple)) and len(facts) == 1
-                     and isinstance(facts[0], dict) and set(facts[0]) == {"key", "value"}
-                     and facts[0]["key"] == "warranty"
-                     and type(facts[0]["value"]) is int and facts[0]["value"] > 0
-                     and refs and all(isinstance(r, str) and r.strip() for r in subject_refs)
-                     and isinstance(filename, str) and bool(filename.strip())
-                     and isinstance(e.get("record_id"), str)
-                     and e["record_id"].startswith(filename + "::")
-                     and len(candidates) == 1)
+            prov_ok = (isinstance(filename, str) and bool(filename.strip())
+                       and isinstance(e.get("record_id"), str)
+                       and e["record_id"].startswith(filename + "::"))
+            _flist = facts if isinstance(facts, (list, tuple)) else ()
+            w_facts = [f for f in _flist
+                       if isinstance(f, dict) and set(f) == {"key", "value"}
+                       and f["key"] == "warranty"
+                       and type(f["value"]) is int and f["value"] > 0]
+            s_facts = [f for f in _flist
+                       if isinstance(f, dict) and set(f) == {"key", "value"}
+                       and f["key"] == "spec_tokens"
+                       and isinstance(f["value"], (list, tuple))
+                       and 0 < len(f["value"]) <= 64
+                       and all(isinstance(v, str) and v.strip()
+                               for v in f["value"])]
             e = {k: v for k, v in e.items() if k != "facts"}
-            if valid:
+            keep: list = []
+            if (len(w_facts) == 1 and prov_ok and refs
+                    and all(isinstance(r, str) and r.strip()
+                            for r in subject_refs)
+                    and len(candidates) == 1):
                 candidate = next(iter(candidates.values()))
                 identity = candidate.identity
-                if identity.startswith(("i:", "u:", "v:")) and e.get("identity", identity) == identity:
-                    e = {**e, "identity": identity, "facts": facts,
+                _eident = e.get("identity")
+                # identity ที่ emit มา = row-declared ref (∈ refs) =
+                #   alias ของ subject เดียวกัน → resolve → canonical;
+                #   identity อื่นนอก refs = spoofed → ตัดทิ้งเดิม
+                if identity.startswith(("i:", "u:", "v:")) and (
+                        _eident is None or _norm_ref(_eident) in refs):
+                    e = {**e, "identity": identity,
                          "subject_refs": tuple(sorted(refs | _cand_keys(
-                             identity, candidate.item_id, candidate.model_id, candidate.card)))}
+                             identity, candidate.item_id, candidate.model_id,
+                             candidate.card)))}
+                    keep += w_facts
+            if (s_facts and prov_ok
+                    and isinstance(e.get("identity"), str)
+                    and e["identity"].strip()):
+                keep += s_facts
+            if keep:
+                e = {**e, "facts": keep}
             if "facts" not in e:
                 trace.append("evidence_fact_unresolved:kind=kb")
         idxs = _attribute(e, req_needs=req_needs, idx_of=idx_of,
@@ -1096,6 +1119,25 @@ def compile_answer_task(*, needs: tuple, selection: SelectionResult,
     req_needs = _req_needs_map(requests, needs)
     by_req = dict(selection.by_request)
     vc = tuple(getattr(profile, "value_constraints", ()) or ())
+    # serialized subject evidence per need (attribution owner เดียวกับ
+    #   compile — raw supporting records; identity-scoped, ไม่นับ
+    #   target-scoped evidence) — capability asks ride task เมื่อ subject
+    #   มีหลักฐานจริงแม้ไม่มี subject-role card (hint-matched kb row)
+    _prodish = {i for i, n in enumerate(needs)
+                if n.kind in PRODUCTISH_NEED_KINDS}
+    _idx_of = {id(n): i for i, n in enumerate(needs)}
+    _need_by_idx = dict(enumerate(needs))
+    _target_of = {i: _need_target(
+        n, _need_requests(n, requests, req_needs), profile)
+        for i, n in enumerate(needs)}
+    _ref_needs = _ref_needs_map(needs, requests, selection, pool, _prodish)
+    _subj_evid = {i for e in (pool.supporting_evidence or ())
+                  if e.get("identity") and not e.get("target")
+                  and e.get("kind") != "device_spec"
+                  for i in _attribute(
+                      e, req_needs=req_needs, idx_of=_idx_of,
+                      need_by_idx=_need_by_idx, prodish_idx=_prodish,
+                      target_of=_target_of, ref_needs=_ref_needs)}
     for i, n in enumerate(needs):
         if n.kind not in PRODUCTISH_NEED_KINDS:
             if n.kind in _POLICY_NEED_KINDS:
@@ -1138,7 +1180,7 @@ def compile_answer_task(*, needs: tuple, selection: SelectionResult,
                 getattr(n, "requested_facts", ()) or ()),
             capability_asks=tuple(
                 getattr(n, "capability_asks", ()) or ()
-                if any(
+                if i in _subj_evid or any(
                     s.role == "subject" or s.identity in {
                         _s.identity for _r in reqs_n
                         for _s in by_req.get(_r.request_id, ())
@@ -1623,7 +1665,17 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             #   drift ที่ลูกค้าไม่ได้ขอ (W02 ใน W01 follow-up); subject
             #   ไม่มี card เลย → alternative = substitute answer เจตนา
             #   (มี WPB100L ไหม → เสนอ AC65B แทน — ห้าม filter)
-            cands = [s for s in cands if s.role != "alternative"]
+            subject_keys = set().union(*(
+                _cand_keys(s.identity, s.card.get("item_id"),
+                           s.card.get("model_id"), s.card)
+                for s in cands if s.role == "subject"))
+            cands = [s for s in cands
+                     if s.role != "alternative"
+                     and (s.role != "description"
+                          or bool(_cand_keys(
+                              s.identity, s.card.get("item_id"),
+                              s.card.get("model_id"), s.card)
+                              & subject_keys))]
         if tainted_reqs or tainted_pairs:
             kept = [s for s in cands
                     if s.request_id not in tainted_reqs
@@ -1780,6 +1832,7 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         #   decided-incompatible → drop (+note); undecided → เก็บเป็น
         #   candidate พร้อม limitation (unverified ≠ catalog-empty);
         #   decided-compatible verdicts ไหลเป็น typed proof artifact
+        vmap: dict = {}
         ptn = _norm_target(target_of.get(i))
         if ptn and n.kind != "compat":
             verdicts_t, _unres_t = _verdict_target_decisions(
@@ -1903,12 +1956,21 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
         #   deterministic UnansweredNeed ที่ name ทุก ask — missing
         #   evidence = cannot-confirm เสมอ ไม่ใช่ negative claim
         _asks = tuple(getattr(n, "capability_asks", ()) or ())
-        if _asks and not any(
+        # serialized subject evidence = record ที่ attribute เข้า need นี้
+        #   + พก identity (kb row bound/matched, listing/image ของ subject)
+        #   — ไม่นับ target-scoped evidence (device_spec/web target =
+        #   หลักฐานของ counterpart ไม่ใช่ของ subject)
+        _subj_evid = any(
+            i in (e.get("need_indices") or ())
+            and e.get("identity") and not e.get("target")
+            and e.get("kind") != "device_spec"
+            for e in evidence)
+        if _asks and not (_subj_evid or any(
                 s.role == "subject" or s.identity in {
                     _s.identity for _r in reqs_n
                     for _s in by_req.get(_r.request_id, ())
                     if _s.role == "subject"}
-                for s in cands):
+                for s in cands)):
             _lbl = ("ยังไม่มีข้อมูลยืนยัน " + "/".join(_asks) +
                     " ของรุ่นนี้ — ห้ามยืนยันเงื่อนไขนั้น")
             for s in cands:
@@ -1983,6 +2045,18 @@ def compile_answer_context(*, needs: tuple, selection: SelectionResult,
             _prim_ok = any(
                 c.role != "alternative" and c.identity in _ok_ids
                 for c in cands)
+        # verdict-aware emit order (A-330): need ที่มี typed verdicts →
+        #   featured pick ต้องเป็นตัวที่ verdict ดีกว่า — partition ตาม
+        #   verdict tier (stable: ลำดับใน tier เดียวกัน = selection order
+        #   verbatim ของ owner เดิม); candidate ไร้ verdict = undecided
+        #   อยู่หลัง decided; decided-incompatible ออกจาก cands แล้ว
+        _vmap_i = vmap or {v.subject_id: v for v in decided.get(i, ())}
+        if _vmap_i and len(cands) > 1:
+            cands = sorted(
+                cands,
+                key=lambda _s: _verdict_emit_tier(
+                    _vmap_i.get(_cpool._identity_key(_s.card or {})[0]
+                                or _s.identity)))
         for s in cands:
             prev = emitted.get(s.identity)
             if prev is not None:
@@ -2325,6 +2399,32 @@ _VERDICT_RC_HINT: tuple[tuple[str, str], ...] = (
      " — สายรองรับกำลังไฟตามที่อุปกรณ์ต้องการ (กำลังชาร์จจริงขึ้นกับ"
      "หัวชาร์จ/อุปกรณ์/โปรโตคอล)"),
 )
+
+
+_VERDICT_COVER_RC = frozenset({
+    "claimed_wattage_covers_target", "cable_capacity_covers_target"})
+_VERDICT_CAVEAT_RC = frozenset({
+    "insufficient_wattage", "wattage_variant_unconfirmed",
+    "claimed_insufficient_wattage",
+    "claimed_wattage_variant_unconfirmed", "missing_wattage_evidence"})
+
+
+def _verdict_emit_tier(v) -> int:
+    """featured-pick ordering tier ของ decided candidate — typed verdict
+    fields เท่านั้น (ไม่ parse reason text): 0=clean compatible ·
+    1=compatible + adequacy covers-target rc · 2=compatible + caveat rc ·
+    3=ไม่มี verdict (undecided) · 4=outcome อื่น (ไม่ควรถึง — incompatible
+    ถูก drop ก่อน emit)"""
+    if v is None:
+        return 3
+    if v.decision.outcome != "compatible":
+        return 4
+    rc = set(v.decision.reason_codes or ())
+    if not rc & (_VERDICT_COVER_RC | _VERDICT_CAVEAT_RC):
+        return 0
+    if rc & _VERDICT_COVER_RC and not rc & _VERDICT_CAVEAT_RC:
+        return 1
+    return 2
 
 
 def _verdict_hint(v: CompatVerdict) -> str:

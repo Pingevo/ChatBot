@@ -453,17 +453,30 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
             if getattr(m, "role", "") == "user")
         if not _cert_types and _cert_ctx_text:
             _cert_types = _rc_cert.requested_product_types(_cert_ctx_text)
-        if not _cert_types and req.conversation_id:
+        # anchor resolve ครั้งเดียว — ใช้ทั้ง type carry + deictic subject binding
+        _ac = None
+        if req.conversation_id:
             try:
                 from . import conversation_products as _cp_cert
                 _ac = _cp_cert.get_active_product(
                     req.conversation_id, snap=_snap,
                     platform=req.platform, shop=req.shop)
-                if _ac:
-                    _cert_types = _rc_cert.requested_product_types(
-                        _ac.get("name") or "")
             except Exception:
                 pass
+        if not _cert_types and _ac:
+            _cert_types = _rc_cert.requested_product_types(
+                _ac.get("name") or "")
+        # deictic ask ("ตัวนี้/รุ่นนี้") ไม่มี explicit model → subject = anchor
+        #   card: bind model_keyword ให้ตอบเฉพาะรุ่นที่ถาม ไม่ใช่ dump list ทั้งร้าน
+        _asked_subject = None
+        if (not _tisi_model_kw and _ac
+                and any(kw in req.message
+                        for kw in _rc_cert._SINGLE_ITEM_REF_KW)):
+            _codes = [c for c in (_ac.get("model_codes") or ())
+                      if isinstance(c, str) and c.strip()]
+            _asked_subject = re.sub(
+                r"^\[.*?\]\s*", "", _ac.get("name") or "").strip()
+            _tisi_model_kw = _codes[0] if _codes else _asked_subject
         print(f"[CERT] cert question detected certs={_certs}, model_keyword={_tisi_model_kw!r}, types={_cert_types}", file=sys.stderr)
         _cert_fallback_products = []
         try:
@@ -531,26 +544,34 @@ def post_intent_handoffs(req, ctx: dict, db) -> dict | None:
                     _clean_name = f"{_clean_name} ({_lab})"
                 _tisi_names.append(_clean_name)
             if _tisi_model_kw:
-                # ลูกค้าเจาะจงรุ่น → ตอบเฉพาะรุ่นนั้น
-                if len(_tisi_names) == 1:
-                    # stock DB มีเลข มอก./ใบอนุญาตจริง → แสดงเฉพาะตอนถาม มอก.
-                    # (cert_ids เป็น metadata รวม — คำถาม CE/CCC ไม่แปะเลข มอก. กันสับสน)
-                    _cids = (_tisi_products[0].get("cert_ids") or {}) if _tisi_products else {}
-                    _cids_txt = ""
-                    if _cids.get("tis_id") and "tisi" in _certs:
-                        _cids_txt = f" (เลข มอก. {_cids['tis_id']}"
-                        if _cids.get("tis_license_id"):
-                            _cids_txt += f" ใบอนุญาต {_cids['tis_license_id']}"
-                        _cids_txt += ")"
-                    _tisi_answer = (
-                        f"ค่ะ สินค้า{_tisi_names[0]} มี {_cert_label}{_cids_txt} ค่ะ "
-                        f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
-                    )
+                # ลูกค้าเจาะจงรุ่น (explicit หรือ deictic-bound) → ตอบเฉพาะรุ่นนั้น
+                if _tisi_products:
+                    if len(_tisi_names) == 1:
+                        # stock DB มีเลข มอก./ใบอนุญาตจริง → แสดงเฉพาะตอนถาม มอก.
+                        # (cert_ids เป็น metadata รวม — คำถาม CE/CCC ไม่แปะเลข มอก. กันสับสน)
+                        _cids = _tisi_products[0].get("cert_ids") or {}
+                        _cids_txt = ""
+                        if _cids.get("tis_id") and "tisi" in _certs:
+                            _cids_txt = f" (เลข มอก. {_cids['tis_id']}"
+                            if _cids.get("tis_license_id"):
+                                _cids_txt += f" ใบอนุญาต {_cids['tis_license_id']}"
+                            _cids_txt += ")"
+                        _tisi_answer = (
+                            f"ค่ะ สินค้า{_tisi_names[0]} มี {_cert_label}{_cids_txt} ค่ะ "
+                            f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
+                        )
+                    else:
+                        _tisi_list = "\n".join(f"• {n}" for n in _tisi_names)
+                        _tisi_answer = (
+                            f"ค่ะ สินค้าที่มี {_cert_label} ในร้าน ได้แก่:\n{_tisi_list}\n\n"
+                            f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
+                        )
                 else:
-                    _tisi_list = "\n".join(f"• {n}" for n in _tisi_names)
+                    # model ask ไม่เจอ → ตอบไม่พบของรุ่นนั้นตรงๆ ไม่ dump สินค้าอื่น
+                    _subj = _asked_subject or _tisi_model_kw
                     _tisi_answer = (
-                        f"ค่ะ สินค้าที่มี {_cert_label} ในร้าน ได้แก่:\n{_tisi_list}\n\n"
-                        f"สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ"
+                        f"ค่ะ สำหรับ{_subj} ยังไม่พบข้อมูล {_cert_label} ในระบบค่ะ "
+                        f"หากต้องการให้แอดมินช่วยตรวจสอบเพิ่มเติมแจ้งได้นะคะ"
                     )
             elif not _tisi_products and _cert_fallback_products:
                 # ไม่เจอในหมวดที่ถาม → ตอบตรงๆ + เสนอสินค้าหมวดอื่นที่มี cert

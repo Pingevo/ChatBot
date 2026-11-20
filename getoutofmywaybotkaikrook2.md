@@ -14598,6 +14598,247 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - suite: 2383 passed 0 regressions (+5 tests ใน test_evidence_gap_fixes); อยู่บน branch fix/compat-verdict-llm-context
 - เหลือ: live verify pingevox Q3/Q4 หลัง merge; featured-card pick ยังไม่ผูก verdict (ข้อ 3 ที่ user สั่งรอ)
 
+---
+
+## 2026-11-17 — Live verify post-G1-merge: gemini provider Q&A check (กำลังจะทำ)
+
+- user สั่ง "call gemini provider เช็คคำตอบคำถาม" → ตรงกับงานค้าง A-330: live verify pingevox Q3/Q4 หลัง merge fix/compat-verdict-llm-context
+- วิธี: รัน `docs/test/live/live_matrix_abc.py --smoke` (3 convs wattaka/pingevox/aumporn × A legacy/B grouped+zaapi/C grouped+legacy) — real Gemini calls ผ่าน app.chat pipeline, Mongo read-only seams, web/OR/vision die-spies
+- เช็คเฉพาะคำตอบ (verdict→model context, claimed wattage, confirmed targets) — ไม่แก้โค้ด/DB/config, ไม่มี customer send
+
+### ผ่านแล้ว: live verify post-G1-merge — matrix A/B/C real Gemini run 20261117-082250
+
+- วิธี: re-pin `NEW_GID` → `g20261117-020003-ff01306c` (active gen จริง — pin เดิม g20261027 npz ถูกลบไปแล้ว ทำ B/C รัน degraded); artifact `docs/test/results/live_matrix_abc_20261117-082250.{json,md}`
+- infra: 33 turns / 61 gemini calls / 62 attempts (e503×1 retried ผ่าน), e429=0, mongo_write=0, web=0, openrouter=0, vision=0, quota alive — SMOKE PASS
+- fixed-reply check: product questions ทุก turn src=product_store / knowledge_base+mongo + g=2 (intent+answer gen) — ไม่มี fixed-reply constant ในคำตอบสินค้าเลย; greeting turns (pingevox t2/t5) src=greeting = GREETING_REPLY deterministic (by design ไม่ใช่ defect)
+- G1 verify (pingevox-t3): typed verdicts — 3 anonymous compatible (connector_match + claimed_wattage_covers_target) → model แต่ง prose เองไม่ใช่ template verdict list; CTL301 historical = incompatible connector_disjoint → เงียบตามสัญญาไม่ถูกเสนอ; candidates ที่ verify ไม่ได้ → tail "สินค้าที่ตรวจสอบไม่ได้" honest-by-design (partial coverage)
+- context/history carry ถูก: wattaka t2 anchor 27639651334 → 480Mbps ตรง spec; pingevox t4 รับ target xiaomi 17 ultra + subtype adapter จาก t3; aumporn W01 subject anchor ครบ 3 turns; Strava ask → fail-closed no_evidence ซื่อสัตย์ทั้ง B/C (A ชื่อ Imilab Fit/Glory Fit ในคำตอบ)
+- defect ใหม่ (A-path legacy เท่านั้น): spec-defer guard rewrite แทรกข้อความกลาง image markdown `![name](url)` — aumporn t1/t2/t3 answer มี `![` ค้างไม่มี `](url)` เลย (markup พัง 3/3 turns); B/C ไม่พบเพราะ card render deterministic แยก bubble
+- ยืนยัน deferred item 3 (A-330) เห็น live: featured card ไม่ verdict-aware — pingevox-t4 emit `24929355322` (20W, verdict claimed_insufficient_wattage vs 90W target) ทั้งที่ `53617544035` (claimed_wattage_covers_target) มี verdict ดีกว่าแต่ไม่ถูก emit เป็น card
+- gap: confirmed_targets (A-329) ไม่ยิงใน grouped path — compat need subj_refs ว่าง → fail-closed by design ไม่มี declared list (B/C aumporn-t3); B ยังตอบชื่อ app ที่รองรับเองในส่วน model-composed
+- minor: B|wattaka-t3 มี greeting prefix "สวัสดีค่ะ abubu ยินดีให้บริการนะคะ" กลาง conversation; C|wattaka-t3 ไม่บอกตรงๆ ว่าไม่มีรุ่น 10Gbps (unanswered=[] แต่ constraint ไม่ถูกกล่าวใน prose)
+- งานค้าง: A-path image-markup corruption (defer rewrite ทับ span `](url)`) — defect จริงควร fix; verdict-aware featured pick (deferred item 3); confirmed_targets ใน grouped path; ไม่มี code fix ใน task นี้ (QA audit เท่านั้น)
+
+## Legacy answer quality — กำลังจะทำ (Devin session, 2026-11-17)
+
+- port uncommitted work จาก codex worktree `codex/zaapi-answer-evidence` (kb_zaapi field-passage selection + answer_context desc-card subject filter + 3 behavioral tests + SRS entry) → branch `fix/zaapi-answer-evidence` บน main a54cf08
+- scope: legacy `chat()` path เท่านั้น (user สั่งไม่แตะ chat_v2/chatbotv3) — requirements: spec ตอบถูกไม่ defer แอดมิน, compat มีข้อมูลต้องไม่บอก "ไม่มีข้อมูลยืนยัน", handoff ส่งจริง+เข้าใจบริบท, แนะนำตรง compat, การ์ด 1-2 ใบ spec text, มอก. scope ตามบริบท, เอาประโยคล็อกออก, ตอบเบื้องต้น+ส่งต่อแอดมินแบบธรรมชาติ
+- เป้าหมาย trace ต่อ: subject_refs=() → zaapi_subject_unresolved (GS3 Ultra), vague task → Gemini, compose "ไม่มีระบุ", spec-claim guard ตัดตัวเลขจาก kb row, A-path image-markup corruption, verdict-aware featured pick, confirmed_targets grouped path
+
+## Repo disk-usage audit — กำลังจะทำ (Devin session, 2026-11-17)
+
+- user ถาม "folder งานไฟล์อะไรใหญ่ ทำไมใหญ่" — audit ขนาด read-only เท่านั้น (du/fd) ไม่แก้โค้ด ไม่ลบไฟล์
+- protocol: frozen sha ตรง + active prefix 14620 ตรง; tail อ่าน 14621–14626 = pre-work ของ concurrent session (zaapi-answer-evidence port) ยังไม่มี closeout
+
+- ผ่านแล้ว: repo รวม ~11G — exports 4.8G (gen 3.5G = 4 snapshot ×~900M อยู่ใน retention policy active+prev+3daily+2weekly+grace24h; maintenance 510M backup reset เก่า; live files ~770M), ChatAdminWeb 4.2G (.next 3.5G dev/turbopack+webpack cache regen ได้, node_modules 694M), .venv 1.2G (torch 536M), docs/test 306M, .git 116M — โค้ดจริง 7.2M ทุกอย่างใหญ่ gitignored/regenerable ไม่มีรั่ว
+- งานค้าง: ไม่มี (report-only ไม่ลบไฟล์) — จุดคืนพื้นที่ที่เสนอ: ChatAdminWeb/.next ~3.5G + exports/maintenance ~510M รอ user สั่งลบ
+
+## ผ่านแล้ว: malfunction tips — unbound Zaapi rows + tips gate (verified 2026-11-21)
+
+- ที่มา: user report — ลูกค้าแจ้งอาการ ("เครื่องดับเอง ปุ่มกดไม่ได้") บอทตอบแค่ "เดี๋ยวแอดมินติดต่อ" ไม่เสิร์ช KB ส่งวิธีแก้เบื้องต้น ทั้งที่ Zaapi ตอบจริงส่ง restart/reset+ลิงก์คลิป
+- root cause chain 3 ชั้น: (1) `zaapi_search` identity filter ตัดแถว `subject_refs=[]` ทิ้งทั้งหมด — ไฟล์ 009 (คลิปแก้ปัญหา 146 แถว) ไม่มี binding แต่ประกาศรุ่นในคอลัมน์ `แบรนด์`/`รุ่นและหัวข้อ`; (2) `qa_troubleshoot_tips` รับเฉพาะ level model/item/brand → generic ไม่เคยยิง; (3) `_already_handed` + non-claim malfunction ไม่มี owner → หล่น product pipeline "หาสินค้าไม่เจอ"
+- แก้: `zaapi_search` +`include_unbound` (แถว refs ว่าง+digest verify อยู่ใน pool เมื่อมี refs) +`extra_terms` (brand term นับ ref_hit ผ่าน prefilter ไม่กรอง identity); `_ref_declared` (space-insensitive code declaration, boundary reject `\s*[a-z0-9]` กัน "gs3"⊂"gs3 ultra"/"gs3ultra"); `search_qa` zaapi branch — unbound rows scope จากเนื้อหา: ประกาศ known → model, ประกาศ vocab-ref อื่น (`_model_vocab` = distinct subject_refs ∪ units.model_codes + brand-stripped, cached) → ตัด foreign, ประกาศแบรนด์เดียวกัน → brand, ไม่ประกาศ → generic (parity legacy topic-regex); tips เพิ่ม types=("troubleshooting",), min_sim 0.45 (คลิปที่ถูก sim~0.49 โดน 0.5 ตัด), context guard (ไม่มี codes+brand → []), spec-identity filter ("ประเภทสินค้า:" ไม่ใช่ tip), generic ต้อง unbound จริง
+- RED→GREEN: test_zaapi_kb_files +5 (unbound model/brand/generic/tips-admit) — bug ที่เจอระหว่างทาง: `\s*(?![a-z0-9])` lookahead ผิด (space=non-alnum ผ่านเสมอ → GS3 Ultra หลุด), MemoryColl ไม่มี distinct → vocab ว่าง (แก้ test double เพิ่ม flatten-array distinct)
+- real DB verify (ThaiSuperPhone/shopee): model ctx GS3 → top-3 คลิป GS3 เท่านั้น (รีเซ็ตแบบกดปุ่ม 0.495) Ultra/A3 ตัดหมด; brand ctx → GS 3 reset อันดับ 1; no ctx → [] ตาม design; 018 bound rows ใช้ path เดิมไม่กระทบ
+- suite: 122 zaapi files + 217 KB/warranty/claim ผ่าน 0 regression
+- ผลกระทบเคสอื่น: bound rows contract เดิมเป๊ะ (subject_refs+digest authoritative); spec tokens (5V/20W) ไม่เป็น model declaration; extra_terms default () ไม่แตะ callers เดิม (zaapi_kb_evidence/get_general_faq); brand ctx แถวประกาศรุ่นแบรนด์เดียวกันได้ brand level (legacy parity — ไม่รู้รุ่นกันข้ามรุ่นไม่ได้ ออกแบบไว้)
+- งานค้าง: warranty_flow wiring — malfunction non-claim ต้องมี owner ยิง tips ก่อน product fallback; post-handoff อาการใหม่ต้องได้ tips โดยไม่ mint episode/POST ซ้ำ; commit แยกทีละ fix
+
+
+## ผ่านแล้ว: warranty_flow troubleshoot-first wiring (verified 2026-11-21)
+
+- T4 post-handoff supplemental: เดิม `_tips=None if _already_handed` ตัด tips ทิ้งทุกเคส → อาการใหม่หลังส่งแอดมินได้แค่ CLAIM_STATUS_REPLY; แก้ให้ยิง tips เมื่อมี malfunction evidence เท่านั้น — wording "ส่งต่อแอดมินอยู่แล้ว ลองทำตามนี้ระหว่างรอ" ไม่ mint episode/merge/POST; status-only turns คง status reply + ไม่เรียก tips
+- T3 non-claim malfunction owner: เดิมข้อความอาการที่ไม่ใช่ claim request ตกท้ายฟังก์ชัน → product pipeline "หาสินค้าไม่เจอ"; เพิ่ม tail block — malfunction_safe_check เป็นประตู → KB tips → ไม่มี tip ใช้ safe-check floor + บอกเส้นทางเคลม (ไม่ขอข้อมูล); mint ts_suggested ให้ "ไม่หาย" turn ถัดไปเข้า claim intake; buy-intent words (แนะนำ/อยากได้/ซื้อ/ตัวใหม่) → passthrough product path
+- tips answers ทั้ง 3 จุด disposition=TERMINAL (เดิม CONTINUE_PRODUCT ปล่อย product pipeline แปะ pitch+การ์ดหลัง tips — verify บน live เจอ product recs 4 ใบหลุดหลัง malfunction tips ผิด requirement no product leak)
+- verify live bot (ThaiSuperPhone): "นาฬิกา Black Shark GS3 เครื่องดับเอง ปุ่มกดไม่ได้" → warranty_troubleshoot + คลิป GS3 reset/แก้เข็มขัด+ลิงก์, PRODUCTS:0; "เครื่องติดดับเอง" contextless → intent=claim → safe-check+ขอข้อมูลเดิม (contract)
+- รู้จำกัด: clip ranking ตาม cosine — "เข็มขัดล็อคสาย" เหนือ reset clip 0.662/0.659 (ผลิตภัณฑ์เดียวกัน ไม่ใช่ข้ามรุ่น)
+- tests: test_troubleshoot_claim_5c +5 (tips/safe-check/buy-intent passthrough/supplemental/status-only), warranty+claim regression 103+427 passed
+- งานค้าง: replay_200 baseline เทียบหลังแก้; real-Gemini verify รอบคำถามอื่น; commit แยก T3/T4
+
+
+## ผ่านแล้ว: cert deictic binding + deterministic-source guard splice (verified 2026-11-21)
+
+- ที่มา: live check บน local bot — "พาวเวอร์แบงค์ตัวนี้มี มอก. ไหมคะ" (deictic อ้างสินค้าที่บอทแนะนำ) ได้ list cert ทั้งร้าน (ทั้งหมดหมดสต็อก) แทนคำตอบเฉพาะรุ่น + ข้อความ "เรื่องรุ่น/สเปคที่กล่าวถึง เดี๋ยวขอให้แอดมินตรวจสอบ" แทรกกลาง bullet list
+- error → cause → fix:
+  - deictic ask ไม่ผูก subject → `_tisi_model_kw` ว่าง → generic dump: bind model_keyword จาก active anchor (`model_codes[0]` → fallback ชื่อเต็ม substring match) เมื่อ message มี `_SINGLE_ITEM_REF_KW`; anchor fetch hoisted (ใช้ร่วม type carry เดิม)
+  - model ask ไม่เจอ → fallback เอาสินค้าอื่นมาตอบราวกับเป็นรุ่นที่ถาม ("สินค้า X มี มอก." X≠ของที่ถาม): model_kw path ตอบเฉพาะ `_tisi_products` เท่านั้น; ไม่เจอ → "สำหรับ{subject} ยังไม่พบข้อมูล {cert} ในระบบ" (ทั้ง explicit kw และ deictic — ไม่ dump alternatives); type-ask (ไม่เจาะจงรุ่น) ยังได้ fallback list เดิม
+  - cert_answer source ไม่อยู่ใน `_REWRITE_SKIP_PREFIXES` → model_claim/spec_claim splice defer text กลาง deterministic list (products=[] ไม่มี identity pool): เพิ่ม "cert_" ใน skip tuple — deterministic source ทุก token คือชื่อ DB จริง ไม่ใช่ LLM claim
+- ผลกระทบเคสอื่น: explicit model ask ("AC65B2 มี มอก.") ไม่เจอ → เปลี่ยนจาก fallback dump เป็น specific negative (ตรงคำถามกว่า); type-ask unchanged; ไม่มี anchor/deictic → generic list เดิม; guards.enforce แตะแค่ cert_* sources
+- verify: 4 RED tests → 55/55 cert+spec file; regression 203 + 1068 passed; live bot: defer splice หาย list สะอาด; deictic path ต้องมี anchor จริง (fresh conv ไม่มี → fallback ตาม design)
+
+## ผ่านแล้ว: cert deictic binding + deterministic-source guard splice (verified 2026-11-21)
+
+- ที่มา: live check บน local bot — "พาวเวอร์แบงค์ตัวนี้มี มอก. ไหมคะ" (deictic อ้างสินค้าที่บอทแนะนำ) ได้ list cert ทั้งร้าน (ทั้งหมดหมดสต็อก) แทนคำตอบเฉพาะรุ่น + ข้อความ "เรื่องรุ่น/สเปคที่กล่าวถึง เดี๋ยวขอให้แอดมินตรวจสอบ" แทรกกลาง bullet list
+- error → cause → fix:
+  - deictic ask ไม่ผูก subject → `_tisi_model_kw` ว่าง → generic dump: bind model_keyword จาก active anchor (`model_codes[0]` → fallback ชื่อเต็ม substring match) เมื่อ message มี `_SINGLE_ITEM_REF_KW`; anchor fetch hoisted (ใช้ร่วม type carry เดิม)
+  - model ask ไม่เจอ → fallback เอาสินค้าอื่นมาตอบราวกับเป็นรุ่นที่ถาม ("สินค้า X มี มอก." X≠ของที่ถาม): model_kw path ตอบเฉพาะ `_tisi_products` เท่านั้น; ไม่เจอ → "สำหรับ{subject} ยังไม่พบข้อมูล {cert} ในระบบ" (ทั้ง explicit kw และ deictic — ไม่ dump alternatives); type-ask (ไม่เจาะจงรุ่น) ยังได้ fallback list เดิม
+  - cert_answer source ไม่อยู่ใน `_REWRITE_SKIP_PREFIXES` → model_claim/spec_claim splice defer text กลาง deterministic list (products=[] ไม่มี identity pool): เพิ่ม "cert_" ใน skip tuple — deterministic source ทุก token คือชื่อ DB จริง ไม่ใช่ LLM claim
+- ผลกระทบเคสอื่น: explicit model ask ("AC65B2 มี มอก.") ไม่เจอ → เปลี่ยนจาก fallback dump เป็น specific negative (ตรงคำถามกว่า); type-ask unchanged; ไม่มี anchor/deictic → generic list เดิม; guards.enforce แตะแค่ cert_* sources
+- verify: 4 RED tests → 55/55 cert+spec file; regression 203 + 1068 passed; live bot: defer splice หาย list สะอาด; deictic path ต้องมี anchor จริง (fresh conv ไม่มี → fallback ตาม design)
+
+## กำลังจะทำ: ค้น mongo messages — ข้อความแอดมิน zaapi "ครับลูกค้า...เมื่อวาน" ว่าเป็นแชทลูกค้าคนไหน (2026-11-18)
+
+- ที่มา: user สั่งให้หาใน mongo messages ว่าแอดมิน zaapi ตอบข้อความแนว "ครับลูกค้า ... เมื่อวาน" ในแชทของลูกค้าคนไหน
+- scope: read-only query บน admin Mongo (chatbot) — collections ข้อความ/สนทนา; หา message ฝั่ง admin/seller/zaapi ที่ text match แล้วระบุ conversation + ลูกค้า + เวลา
+- ห้าม: เขียน DB, อ่าน/พิมพ์ .env หรือ secret, แตะ production code, customer send
+- ขั้นตอน: ดู schema + sender field → เชื่อมต่อผ่าน load_dotenv (ไม่พิมพ์ URI) → query → รายงานเคส
+
+## ผ่านแล้ว: ค้น mongo messages — ข้อความแอดมิน zaapi "ครับลูกค้า...เมื่อวาน" (verified 2026-11-18)
+
+- วิธี: read-only query บน admin Mongo `chatbot` — `messages_shp` (1,331,534 docs, role=admin+direction=out = ข้อความฝั่งร้าน/zaapi) + `shadow_replies.zaapi_reply_text`; เชื่อมผ่าน load_dotenv(ChatAdminWeb/.env) ไม่พิมพ์ secret; 0 writes
+- ผล literal "ครับลูกค้า"+ใกล้"เมื่อวาน" (admin/out) = 1 รายการเดียว:
+  - `shp_422144437185711748` ลูกค้า `atipornparinun` (ZMIThailand, shop_id 106727613): "สวัสดีครับลูกค้า สินค้าพึ่งได้รับเมื่อวานครับ 30/3/26" — 2026-03-31 03:38:38, source=data_mirror_backfill_history
+- `shadow_replies.zaapi_reply_text` มี "ลูกค้า"+"เมื่อวาน" = 2 รายการ:
+  - `shp_4710269267683590145` ลูกค้า `wsuthapongwsuthapong` (BlackShark): "📋 สรุปเรื่อง...เรื่อง: เมื่อวานชาร์จเสร็จแล้วปุ่มบนขวากดไม่ขึ้นนาฬิกา..." — 2026-11-17 (ใหม่สุด)
+  - `shp_278560189757076949` ลูกค้า `gamkri` (BlackShark): "...คำสั่งซื้อที่คุณลูกค้าทำรายการเข้ามาเมื่อวานในช่วงเย็น..." — ส่งโดยผู้ช่วย iSuper AI (msg เดิม 2026-07-10)
+- ใกล้เคียงเพิ่มเติม: `shp_458397960770069788` ลูกค้า `tanatouchkajan` (ZMIThailand): "รูปนี้ คือลูกค้าส่งเมื่อวานเหรอครับ" — 2026-11-12 04:44:47, source=openapi
+- admin/out ที่มี "เมื่อวาน" ทั้งหมด 140 docs (sources: data_mirror_backfill_history/openapi/webhook/server/new_webchat/crm — ไม่มี source="zaapi"; zaapi ส่งผ่าน Shopee API → openapi)
+- verify: counts + full-text + conversation join (to_name/shop) ตรวจแล้วทุกเคส
+
+## ผ่านแล้ว (follow-up): user ยืนยัน keyword "ลูกค้าง" — เจอข้อความจริง "ครับลูกค้าง" (verified 2026-11-18)
+
+- user feedback: "ลูกค้าง" → แอดมินพิมพ์ "ครับลูกค้าง" ตรงๆ (ลูกค้า+ง typo) — "เมื่อวาน" น่าจะหมายถึงเวลาที่ตอบ (ย้อนหลัง 1-2 วัน) ไม่ใช่เนื้อข้อความ
+- literal "ลูกค้าง" ใน messages_shp admin/out: เจอ standalone "ครับลูกค้าง" เคสเดียวที่ใช้ได้จริง (ที่เหลือคือ "ลูกค้างด/ง่าย" เป็นคำอื่น):
+  - `shp_94432506531100117` ลูกค้า `may3144` (BlackShark) — แอดมิน [openapi] ตอบ "ครับลูกค้าง" เมื่อ 2026-11-16 08:06:01 (ข้อความสุดท้ายของแชท หลังลูกค้าบอก "ขอบคุณค่ะ" ปิดเคส troubleshoot นาฬิกา) — ตรง "เมื่อวาน" ตามเวลา
+- join เช็คแล้ว: 14 convs ที่ zaapi เคยตอบ "ครับลูกค้า" มี "เมื่อวาน" ในแชทแค่ 1 (`s8c9fikgds` KieslectThailand — ลูกค้าเป็นคนพูด "ชาร์ตเต็มเมื่อวาน" ไม่ใช่แอดมิน) → ไม่ใช่เคสที่ถาม
+- verify: full context 16 msgs ของ may3144 ตรวจแล้ว — 0 msgs มี "เมื่อวาน" ในเนื้อ ยืนยัน interpretation เวลาไม่ใช่เนื้อ
+
+## กำลังจะทำ — spec_claim guard ทำลายคำตอบ LLM ที่ถูก (GS3 Ultra กันน้ำระดับไหน)
+- error: provider ตอบ spec ถูก (5ATM/IP69K/1.43") แต่ guards.enforce spec_claim rewrite เห็น '1.43 นิ้ว' ungrounded → _replace_clause ลบทั้ง clause → เหลือ defer + "ไม่มีระบุ" tail; PB100P '33W' ซ้ำ pattern เดียวกัน
+- เกิดเพราะ: (1) kb_zaapi.py spec_tokens สกัดเฉพาะ top-3 selected passages ที่ rank มา — token อื่นของ row เดียวกัน (ที่ผูก identity แล้ว) ไม่เข้า spec_measured → _spec_fact_grounded false-positive; (2) regression T3: 'ดับ' keyword match 'ระดับ' ใน 'กันน้ำระดับไหน' → malfunction_safe_check กลืน spec question; (3) verify: no_evidence tail อาจขัด kb evidence ที่มีจริง
+- แผน: F1 spec_tokens จาก row ทั้งใบ (identity-bound → measured facts ของ subject เดียวกันเท่านั้น) → F2 'ดับ' boundary-aware → F3 verify+fix no_evidence — แยก commit ทีละจุด RED→green
+
+## ผ่านแล้ว — F1: spec_tokens ครอบทั้ง bound row (kb_zaapi.py)
+- error: guard spec_claim rewrite ลบทั้ง clause เพราะ '1.43 นิ้ว'/'33W' ungrounded ทั้งที่ LLM ตอบถูก → เหลือ defer + "ไม่มีระบุ" tail
+- เกิดเพราะ: spec_tokens fact สกัดเฉพาะ top-3 selected passages ที่ rank+1000B budget เลือกให้ model เห็น — token อื่นของ row เดียวกัน (identity-bound แล้ว) ไม่เข้า spec_measured → _spec_fact_grounded false-positive
+- แก้: _spec_tokens(h.get("a")) ทั้ง row text (bounded [:64] ตาม closed-schema fact cap) — row ผูก identity+digest แล้ว ทุก token เป็น measured evidence ของ subject นั้นเท่านั้น (identity-scoped เหมือนเดิม ไม่กว้าง)
+- verify: test_kb_spec_tokens_cover_whole_bound_row RED {'5atm'}→GREEN ครบ; e2e live 'GS3 Ultra กันน้ำไหม' → spec_tokens 32 tokens + ไม่มี GUARD-ENFORCE rewrite + คำตอบเต็ม (1.43"/466x466/1000nits/5ATM/IP69K/50m/80°C)
+- ผลกระทบเคสอื่น: row ที่ bound subject ทุกตัวได้ token ครบขึ้น — ground เพิ่มเฉพาะ claim ของ subject นั้น (sids scope เดิม); cross-product ไม่ leak; row ไม่ bound → identity ไม่มี → spec_measured ไม่สร้าง (fail-closed เดิม); PB100P '33W' เคสรอดด้วยกลไกเดียวกัน
+
+## ผ่านแล้ว — F2: malfunction keyword boundary ('ดับ'⊂'ระดับ')
+- error: 'GS3 Ultra กันน้ำระดับไหน' โดน malfunction_safe_check จับ 'ดับ' ใน 'ระดับ' → troubleshoot tail กลืนคำถาม spec ทั้งเทิร์น (regression จาก T3 wiring — ก่อนหน้า flow นี้ไม่ own turn)
+- เกิดเพราะ: substring match `k in msg` — keyword สั้น (ดับ/เสีย/พัง/ไม่เข้า) ปะติดคำอื่นได้: ระดับ/เสียง/พังงา/ไม่เข้าใจ
+- แก้: alternation regex ตัวเดียว — `(?<!ระ)ดับ`, `เสีย(?!ง|ใจ|ดาย|เวลา|เงิน|ค่า)` (เสียหาย/เสียแล้ว/เสียบแล้วไม่ชาร์จ ยังจับ), `พัง(?!งา)`, `ไม่เข้า(?!ใจ)`; kw อื่นคงเดิม
+- verify: RED 'ระดับไหน' จับ → GREEN คืน ''; real symptom (ดับเอง/เสีย/เสียหาย/พังงับ/ค้าง) ยังจับครบ; e2e 'GS3 Ultra กันน้ำระดับไหน' → intent=product_spec ตอบ 5ATM/IP69K/50m/80°C เต็ม ไม่มี rewrite/tail
+- ผลกระทบเคสอื่น: คำถามระดับ/เสียงทุก product_type รอด — ของพังงับ (particle งับ) ยังจับเพราะ lookahead เจาะ 'งา' เท่านั้น; 'ค้าง'/'ไม่ขึ้น'/'ไม่ติด' คง substring เดิม (compound ที่ชนน้อย/ambiguous — ไม่แตะ)
+
+## ผ่านแล้ว — F3 (verify): no_evidence tail 'ไม่มีระบุ' ขัด kb evidence — โค้ดปัจจุบันแก้อยู่แล้ว
+- สงสัยจาก log จริง: unanswered (1,'no_evidence') → tail 'ไม่มีระบุไว้ในข้อมูลสินค้า' ทั้งที่ ev kb(1,) มี
+- verify: ทุก no_evidence path ใน answer_context ต้องมี i ∉ _ev_idx หรือไม่มี subject evidence — need ที่มี attributed evidence (bound หรือ unbound) → 'evidence kept' (1910/2113) task ไม่ถูก drop → tail ไม่เกิด; asks-path ข้ามเมื่อ _subj_evid (identity evidence) — log จริงมาจาก code ก่อน A-328 evidence-gap fix
+- regression lock: test_kb_evidence_keeps_task_alive_without_candidates — need+kb evidence+0 candidates → task คงอยู่ unanswered ว่าง
+- ข้อยกเว้นที่ถูกต้อง: relation decline (requested_facts=['compatibility']) ยัง no_evidence ได้แม้มี kb evidence — relation claim ต้อง typed verdict ไม่ใช่ spec prose (by design)
+- e2e confirm: 'GS3 Ultra กันน้ำระดับไหน' หลัง F1+F2 → คำตอบเต็ม ไม่มี defer splice ไม่มี 'ไม่มีระบุ' tail
+
+## กำลังจะทำ — replay 200 legacy post-fix (user สั่ง "ทำ test แบบเมื่อวาน 200 แชท")
+- รัน replay_compare.py --limit 200 --save replay_200_legacy_postfix.json เทียบ baseline replay_200_legacy.json (2026-11-18 08:17 — ก่อน f4b510f/ba32f05)
+- bot :8010 reload โหลดโค้ดใหม่แล้ว; รอผล judge + diff vs baseline (spec rewrite/malfunction swallow ควรหาย)
+
+## กำลังจะทำ — verify รายงานภายนอก: guard ลบคำตอบถูก (PB100P 33W / GS3 Ultra กันน้ำ) เทียบ a289a48 (2026-11-18)
+- error: รายงานจากเครื่อง 81 เช็ค origin/main a289a48 — เคลม spec_measured ว่างเสมอ + clause ไทยตัดไม่ได้ + GS3/Ultra ไม่รู้จักรุ่น + capability ask บังคับ 'ไม่มีระบุ'
+- verify เทียบ HEAD 969dd2f (เหนือกว่า 10 commits): F1 spec_tokens ทั้ง bound row (f4b510f) + F2 'ดับ' boundary (ba32f05) + F3 evidence-kept (969dd2f) — trace code + รัน regression + live probe read-only บน mongo จริง (decide_turn→zaapi_kb_evidence→claim_supported)
+
+## กำลังจะทำ — customer answer quality / spec, compat, compare, claim, troubleshoot, refund, handoff (2026-11-18)
+- ผู้ใช้อนุมัติให้ทำหลัง review: แก้ root cause ใน owner เดิม พร้อม behavioral RED→GREEN และตรวจคำตอบสุดท้าย/transport truth; ไม่ขยาย keyword/regex semantic โดยไม่มีอนุญาตตรง
+- Baseline: replay_200_legacy_postfix.json ยัง running; snapshot 15/200 conversations, 758 turns พบ guard_rewritten 44 (spec 26, stock 17, model 1), claim-status text ซ้ำ 306 turns, watch crown symptom ได้ charger-safe-check; อัตรานี้ไม่ใช่ population rate เพราะ long scripted chat skew
+- Regression locks: product↔product pairing deferred/cannot-confirm, typed device compat outcomes, no duplicate handoff, status-only under human ownership, return/refund asks order then transport, service anger ≠ product malfunction, KB subject identity isolation
+- ก่อนแก้: เขียนแผน audit/reviewable ใน docs/plans/active, ใช้ existing branch fix/zaapi-answer-evidence (ทิศทาง customer-answer เดียวกัน); รักษา replay_compare.py uncommitted diff ที่มีอยู่
+
+## กำลังจะทำ — export BlackShark conversations (customer-side only) → JSON ~50 convs (2026-11-18)
+- ผู้ใช้ขอ: คัด conversation ของร้าน Black Shark ~50 conv → JSON เฉพาะข้อความฝั่งลูกค้า เรียงตามเวลา
+- ขอบเขต: read-only queries บน admin Mongo (conversations_shp + messages_shp) ผ่าน load_dotenv ChatAdminWeb/.env (ไม่อ่าน .env เอง) — 0 writes / 0 provider / 0 customer send / Product DB ไม่แตะ
+- Output: docs/test/results/ (gitignored — customer data ไม่เข้า git); script: docs/test/tools/ ตาม repo convention
+- shop scope: probe distinct (platform, shop_name/shop_id) match /black.?shark/i ก่อน — ถ้าเจอหลาย entity (เช่น shopee "BlackShark" + tiktok "BlacksharkThailand") label platform ต่อ conv
+- ledger pre-check ผ่าน: frozen SHA ตรง, active prefix 14738 SHA ตรง; tail 14739–14744 = concurrent customer-answer-quality marker → indexed A-342; งานนี้ data export เท่านั้น ไม่เกี่ยว task นั้น — preserve dirty tree (replay_compare.py, guards/warranty/warranty_flow, SRS, tests, plan doc)
+
+## ✅ 2026-11-18 — export BlackShark (shopee) conversations → JSON (ผ่านแล้ว)
+- ผู้ใช้เลือก: Shopee BlackShark (shop_id 1191420560, shop_name "BlackShark") เท่านั้น + สุ่ม 50 convs — tiktok BlacksharkThailand (7495619257559058707, 1031 convs) ไม่เอา
+- ทำ: docs/test/tools/export_blackshark_conversations.py — dotenv → ADMIN_MONGO_* → db chatbot; eligible = conv_id ที่มี user msg ≥1 = 8,624 convs → random.Random(--seed).sample(50) → user msgs (role=user + direction=in) sort created_timestamp+_id asc, dedupe message_id, content_type จาก raw_payload.data.content.message_type หรือ text-marker fallback, media_url + item_id เมื่อมี
+- Output: docs/test/results/blackshark_customer_conversations_2026-11-18.json (gitignored) — 50 convs / 348 customer msgs / 104,482 bytes; verify: bad_order=0, bad_seq=0, empty_text=0, unique conv 50/50; content_type: text 228 / item 49 / image 41 / video 21 / order 4 / sticker 3 / variation_card 2; media_url 24 + item_id 7 (raw_payload ขาดในข้อมูลเก่า → marker fallback ครอบ)
+- ผลกระทบ: read-only ล้วน (0 DB write, 0 provider, 0 send); ไฟล์ใหม่ 1 ใน tools/ + output gitignored; dirty tree concurrent session ไม่แตะ; Product DB ไม่แตะ
+- ค้าง: — (ถ้าต้องการ conv ใหม่ชุดอื่น → เปลี่ยน --seed หรือไม่ส่ง seed; tiktok แยก scope ได้ตอนสั่ง)
+
+## ✅ 2026-11-18 — customer answer quality scoped correction (offline verified)
+- Root cause/spec: guard เดิมปัดทุก multi-subject spec ทิ้ง แม้การ์ดทุก subject มีค่าเดียวกัน; แก้ existing `_spec_fact_grounded` ให้ยอมรับเฉพาะค่าที่การ์ดทุกใบของทุก subject ยืนยัน รวม item subject ที่มี variant card; ค่าไม่ตรง/การ์ดหายยัง fail closed
+- Root cause/claim: post-handoff legacy/v2 ตอบ status-only ต่ออาการใหม่และบาง path transition ซ้ำ; แก้ให้รับรู้อาการ/คำร้องเรียน, QA tips เมื่อมี, ไม่ transition/POST ซ้ำ; complaint+tips ตอบทั้งสองเรื่อง
+- Root cause/troubleshoot: fallback charger advice ถูกใช้กับ smartwatch; `malfunction_safe_check` ใช้ typed product_type ให้ charger/cable/powerbank ได้คำแนะนำสาย/พอร์ต ส่วนประเภทอื่น/unknown ได้ safety check กลาง
+- RED→GREEN ใหม่: shared spec item+variant ผ่าน; one-subject/one-variant mismatch ปัด; watch crown ไม่มี charger advice; charger ยังมี; post-handoff symptom/status/complaint/tips และ v2 no-transition ครอบ
+- Verify: `.venv/bin/python -m pytest -q docs/test/offline` → 2424 passed, 17 skipped, 1 xfailed, 13 warnings (47.82s); py_compile 3 core files ผ่าน; git diff --check ผ่าน; read-only P23 guard re-eval จริง 2 subject ไม่มี rewrite
+- Scope/limit: compat product↔product ยังคง cannot-confirm/deferred; refund/return/handoff transport ใช้ regression ที่มีอยู่ ไม่ได้ยิง external handoff หรือส่งลูกค้าจริง; replay 200 ยัง running (ล่าสุด 24/200 conv) จึงยังไม่อ้างอัตราดีขึ้น; full historical coverage ledger ยัง partial
+- Mechanism net: helper +0, guard +0 (แก้ existing 1), regex +0, semantic keyword table +0, decision owner +0; เพิ่ม optional typed parameter 1; no Product DB writes
+- Files: guards.py, warranty.py, warranty_flow.py, docs/SRS_SSD.md, test_issue_5f_spec_grounding.py, test_troubleshoot_claim_5c.py, plan, active log/ledger; replay_compare.py และ BlackShark export script เป็นงาน concurrent เดิม ไม่รวม change นี้
+- ค้าง: ขอ review diff/test/files ก่อน first commit ตาม AGENTS.md ข้อ 10; live replay 200 และ transport delivery ยังไม่ verified
+
+## กำลังจะทำ — provider จริง + historical customer-chat Q/A analysis (2026-11-18)
+- ผู้ใช้สั่งให้ทดลอง provider จริง เก็บคำถาม/คำตอบจากแชทจริง และวิเคราะห์จริง; ใช้ historical messages ผ่าน replay shadow ไม่ส่งลูกค้า
+- ตรวจ replay_compare.py isolation: conversation_id เติม shadow:, simulate_assignment=True; เลือกตัวอย่าง spec/compat/claim/refund/service complaint แบบสั้นจาก replay จริง แล้วทดสอบกับ bot :8010
+- บันทึก Q/A, route, evidence/guard/handoff outcome ใน docs/test/results/ (gitignored) และสรุปข้อผิดพลาดตาม root cause; ห้ามอ้าง live delivery จาก simulated transport
+- ก่อนรัน: ledger prefix 1..14769 SHA ตรง; frozen 8624 lines/892284 bytes/SHA ตรง; active tail ว่าง; branch fix/zaapi-answer-evidence; coverage partial
+
+## 2026-11-18 — historical customer-chat provider Q/A audit (read-only verified; fresh replay blocked)
+- Fresh replay attempt of historical chat through real provider was rejected by automatic approval review: customer content/context would leave to unspecified provider without explicit destination authorization; no workaround attempted, no new provider call
+- Safer completed audit: read existing `replay_200_legacy_postfix.json` at snapshot 97/200 conversations, 2,927 turns (833 with positive provider token usage); selected 8 real-collection Q/A rows, 4 provider-generated + 4 deterministic, saved exact Q/A/route/usage to gitignored `provider_real_historical_qa_analysis_2026-11-18.json` and manual audit `.md`
+- Provider failures observed: Xiaomi 90W answer made broad support claim and sent 5 product cards without typed relation verdict; USB-C vs Type-C meaning question routed to 4-product comparison and guard defer; Xiaomi Home camera question recommended IMILAB LIFE camera; SIM-router question recommended Doorbell while compatibility was unconfirmed
+- Deterministic outcomes: iPhone 8+ compat safely could-not-confirm but no next check; old watch-crown answer had charger advice (pre-fix baseline); refund question only asked order; service complaint got apology/status but no delivery/SLA proof
+- Limits: source replay mixed code revisions and no per-turn revision stamp; saved watch row does not verify current fix; 4 long conversations carry 696/2,927 turns, so no accuracy-rate claim; simulated assignment does not prove downstream admin delivery; no new bot code changed in this audit
+- Pending: explicit user approval of exact provider destination + customer text scope is required to retry fresh shadow replay; refund/compat/compare root-cause fixes require a separate approved implementation round
+
+## กำลังจะทำ — live category Q/A test บนแชทลูกค้าจริง BlackShark (2026-11-18)
+- ผู้ใช้ขอ: เทสคำถาม-คำตอบจริง ~2-3 แชท/หมวด — compat / compare / spec / handoff / warranty claim / การรับประกันเบื้องต้น / การแก้ไขปัญหาเบื้องต้น / การส่งสินค้าคืน / เคสคืนเงิน / ใบกำกับภาษี
+- Ledger pre-check ผ่าน: frozen SHA ตรง, active prefix 1..14783 SHA ตรง, active tail ว่าง (EOF=prefix)
+- แผน: replay conversations จริงจาก messages_shp (shop BlackShark 1191420560) ผ่าน appmod.chat() in-process — sandbox seams (in-memory subject/timeline/claim, _coll read-only barrier, simulate_assignment+test_source, web/OR/vision die-spies) — media ส่งเป็น text placeholder
+- GATE เดิมพบใน tail: fresh replay ข้อความลูกค้าจริงผ่าน provider เคยถูก auto-approval reject — ต้องมี explicit approval (provider destination + customer text scope) ก่อนรัน → รอคำยืนยันผู้ใช้ก่อนยิง provider
+
+## กำลังทำ — live category Q/A checkpoint: quota-gated (2026-11-18)
+- ผู้ใช้อนุมัติยิงข้อความลูกค้าจริง → Gemini API ดิบ (ไม่ mask PII) — gate เดิมปลดแล้ว
+- เครื่องมือใหม่ (gitignored results, scripts commit ได้): `docs/test/tools/build_category_qa_cases.py` ดึง 27 cases/195 turns จาก messages_shp (BlackShark 1191420560) → `docs/test/results/category_qa_cases.json`; `docs/test/live/live_category_qa.py` replay in-process `appmod.chat()` HEAD — seams: in-memory subject/timeline/claim, cp._coll read-only (mongo_write=0), simulate_assignment+test_chat, web/OR/vision die-spies, gemini counter + bounded retry, guard MAX_CALLS/ERR_STREAK
+- smoke compat 3 chats ผ่าน: t ที่ intent ได้ → ตอบถูก; t ที่ intent=None (429 หมด) → regex-fallback ผิดเรื่อง (ตอบ Strava แทน strap×Run, dump spec แทน yes/no) — ระบุชัดว่าเคส degraded ด้วย intent=None + e429
+- **ปัญหาหลัก: Gemini quota แชร์ 9 keys กับ prod → ~75% attempts 429, ~5นาที/turn, ~186 turns เหลือ** — ผู้ใช้เลือก "รอ quota ฟื้นก่อน" → kill run ที่ compare 1/24; partial jsonl ทิ้งได้, resume = รัน script เดิม --only <cats> (stateless ต่อ case)
+- artifacts (gitignored): live_category_qa_20261118-104700.{jsonl,md} (compat เสร็จ), live_catqa_run.log (partial compare)
+
+## ผ่านแล้ว — live category Q/A 27 แชทจริงครบ 10 หมวด (2026-11-18)
+- รันเสร็จก่อน kill (quota ฟื้นกลางรัน): compat 7 turns + อีก 9 หมวด 188 turns = 195/195 ครบ — mongo_write=0, web/OR/vision=0
+- เครื่องมือที่ใช้: build_category_qa_cases.py (27 cases จาก messages_shp), live_category_qa.py (in-process replay, seams ตาม canary/s1) — artifacts gitignored ใน docs/test/results/ + catqa_report_2026-11-18.md
+- ผลสรุปต่อหมวด: tax สะอาดสุด (6/6 tax_invoice_handoff 2-9s); handoff detector ถูก (human_request/claim/frustration); compat ตอบถูกเมื่อ intent ได้; compare ไม่มี compare answer เลย (subject_clarify); spec ตอบได้แต่ subject_clarify over-fire กลืน follow-up; claim intake แม่นแต่ post-intake เป็นข้อความซ้ำ; troubleshoot แทบไม่มี (claim กลืน + warranty_troubleshoot retrieval คืนคลิปไม่เกี่ยว); return/refund deterministic ask_order ถูกแต่ refund หลงเข้า claim episode + เลขออเดอร์พิมพ์ล้วนบางแชทหลุดเป็น product pitch; ไม่มี complaint/abuse path ("กวนประสาท"→pitch แท็บเล็ต)
+- root causes (ยังไม่แก้ — รอ plan+impact analysis): subject_clarify over-fire, post-claim canned ack กลืน intent, troubleshoot retrieval แตก, order-sn text routing เพี้ยนตาม context, no complaint path, claim ack+pitch concatenate
+- งานค้าง: (1) media turns = placeholder ไม่ใช่ vision จริง — เคสที่ลูกค้าส่งรูป/วิดีโอต้อง replay แบบ images ถ้าจะวัดแขนงนั้น; (2) ~54 turns intent=None จาก quota 429 (flag ใน jsonl แล้ว — ถ้าจะวัดคุณภาพ intent จริงต้อง re-run subset ตอน quota ว่าง); (3) handoff delivery เป็นแค่ test-collection write ไม่ได้พิสูจน์ admin รับจริง
+
+## กำลังจะทำ — /llm model dropdown filter ตาม provider ต่อ role (2026-11-19)
+- ผู้ใช้ขอ: หน้า /llm ช่องเลือก model — provider=gemini แสดงเฉพาะ gemini models, provider=openrouter แสดงเฉพาะ openrouter models, openrouter_search แสดงเฉพาะโมเดลที่ทำ web search ได้ (:online)
+- Ledger pre-check ผ่าน: frozen 8624 lines/892284 bytes/SHA ตรง, active prefix 1..14803 SHA ตรง, active tail ว่าง (EOF=prefix); coverage partial
+- แผน: filter options ของ SearchableSelect ตาม providers[role] ใน page.tsx เท่านั้น — ไม่แตะ service/bot
+
+## ผ่านแล้ว — /llm model dropdown filter: implement อยู่แล้ว ไม่มี code change (2026-11-19)
+- page.tsx:486-491 ทำตามที่ขอครบอยู่แล้ว (commit 6567099 "/llm v3", 2026-11-14): isSearch→OR models+`:online`; provider=openrouter→avail.openrouter; else→avail.gemini
+- avail.gemini = live list Google API filter startsWith("gemini") / fallback gemini-*; avail.openrouter = OR catalog ids; llmConfigService.ts:282 บังคับเติม :online ตอน save ของ openrouter_search
+- grep ทั้ง src ไม่มี model dropdown ที่อื่น — ถ้าหน้าจริงยังเห็น list ผสม = instance เก่ากว่า 6567099 → restart dev/rebuild admin image
+
+## กำลังจะทำ — ChatBlackshark engine v4 feasibility audit — 2026-11-20
+- อ่านอย่างเดียว: สำรวจ `/Users/itdev4/Documents/GitHub/ChatBlackshark/` และเทียบกับ ChatBotProductMS
+- ตอบ feasibility ของการนำ engine v4 มาใช้ โดย Shopee order, ShpProducts, stock ยังผูกกับ owner/data contract ของระบบนี้ และ product-spec search ใช้ Supabase ตาม implementation ของ ChatBlackshark
+- ตรวจขอบเขต engine, adapters, data schema, dependencies/config, Supabase search path และจุดเชื่อมกับ `app.py`, `order_store.py`, `product_store.py`, units และ Zoho/Shopee flows เท่าที่ source ยืนยันได้
+- ไม่มี code/config/data/DB/provider/customer changes, ไม่มี stage/commit/push/PR/deploy; ห้ามอ่าน `.env`/secret และรักษา dirty working tree ที่มีอยู่
+
+## ผ่านแล้ว — ChatBlackshark engine v4 feasibility audit — 2026-11-20
+- Read-only source audit completed. ChatBlackshark local checkout is `main` at 75ecbdb, one commit behind local `origin/main`; target working tree already has `.env.example` modified, preserved without reading it. Target search found no `engine_v4` file/reference; the implementation present is `backend/app/engine_v2.py`. `origin/main` commit 2a03425 changes only engine_v2 FAQ selection and its regression test: latest behavior selects FAQ rows only for troubleshooting.
+- `ProductChatEngine.answer` calls `SupabaseStore.knowledge()`; `store.py` server-side PostgREST fetches `public.bot_products` and `public.bot_faqs`, caches the full result for 60 seconds, then Python/LLM selects product and FAQ evidence and Gemini/OpenRouter writes the grounded answer. This is not a Supabase vector-search/RPC engine. Migration 001's catalog tables contain no shop/platform scope; README describes a single Black Shark catalog. `main.py` also owns its own guest/session persistence, card/history, media and escalation API, so that HTTP/UI layer is not a drop-in router for this bot.
+- ChatBotProductMS search found no Supabase integration. Existing `/chat` owner enforces guards and dispatches legacy/v2/v3; current `chat_v2` owns turn planning, deterministic order/warranty paths, product retrieval and typed answer composition. Shopee `ShpProducts`/units and `resolve_availability` remain the product/stock owners; `order_store.lookup_order` remains the shop-scoped `ShpOrders` owner; current Zaapi retrieval is separately scoped by shop/platform and emits supporting evidence.
+- Feasibility: yes, but adapt the BlackShark evidence/answer approach behind the current typed evidence boundary. Keep order lookup, ShpProducts/item identity and live stock with current owners. Resolve exact shop/platform/product identity first, then search Supabase spec rows and bind returned source records to that identity before answer composition. The BlackShark schema as checked only fits its single-store catalog; other shops require an explicit crosswalk and shop/platform-scoped Supabase contract. Do not silently merge/fallback between KB sources. No code/config/data/DB/provider/customer changes and no tests run; implementation/design approval remains pending under repo rule 9.
+## ผ่านการทดสอบเฉพาะจุด — ChatBlackshark engine v4 BotWorker adapter (2026-11-20)
+- ผู้ใช้อนุมัติให้ต่อ engine ใหม่กับ BotWorker โดยใช้ conversation_id/message_id/shop_id/platform และเก็บคำตอบ/vision ในโครงสร้างเดิม
+- BotWorker callBot เลือก v4 เฉพาะ testSource=botworker และ shop_id ใน CHATBLACKSHARK_BOTWORKER_SHOP_IDS; ร้านอื่นยังใช้ engine เดิม
+- v4 ส่ง request ไป /api/engine/answer พร้อม Bearer token; ตรวจ conversation_id/message_id ใน response; เก็บ image_desc ใน messages_shp เฉพาะเมื่อยังไม่มี; ไม่ส่งข้อความลูกค้าเอง
+- BotWorker รับ handoff_required แล้วใช้ pickAgent/test status เดิม; workflow let_ai_respond รับ handoff flag ใน context และไม่ส่งคำตอบที่ต้อง handoff; shadow reply เก็บ chat_engine=v4
+- ทดสอบ: v4 routing mock ผ่าน (exact shop, response, image_desc persistence, other-shop isolation); BotWorker boundary 25/25; tsc --noEmit --incremental false และ git diff --check ผ่าน
+- ข้อจำกัด: ยังไม่เปิด v4 บน production เพราะต้องตั้ง CHATBLACKSHARK_ENGINE_URL/TOKEN/SHOP_IDS ให้ระบบเดิมและ LEGACY_ENGINE_TOKEN ให้ Vercel API; ยังไม่ได้ทดสอบ BotWorker+provider end-to-end ผ่านระบบเดิม
+- ไฟล์ที่เปลี่ยน: botCallService.ts, botWorkerService.ts, workflowEngine.ts, shadowReplyService.ts และ scripts/test-chatblackshark-v4* เท่านั้น; ไม่แตะ Python bot core, DB commerce, live delivery หรือไฟล์งานค้างอื่น
+
+## 2026-11-20 — checkpoint of pending Zaapi answer quality worktree
+- User requested a clean worktree while preserving all 19 pending files. This is a branch-local checkpoint only; no PR or main merge of the Zaapi answer-quality branch.
+- Pending Python changes: multi-subject spec fact requires agreement across each subject card; post-handoff new symptoms and service complaints get supplemental context without duplicate handoff; malfunction safe checks use typed product category instead of charger advice for all products; replay stream skips repeated LLM judge calls until done.
+- Verification: focused pytest 66 passed; full offline pytest 2424 passed, 17 skipped, 1 xfailed; BotWorker v4 mock passed, boundary 25/25, TypeScript typecheck and git diff --check passed. First full-suite run hit sandbox fixture write errors, rerun with permission passed. No live customer/provider replay of pending Zaapi quality fixes.
+- Net mechanisms in this checkpoint: new helpers 0, guards 0, regexes 0, semantic keyword tables 0, decision owners 0. The uncommitted v4 files are byte-identical to current remote main, but remain in this branch checkpoint for lossless preservation.
+- Commit is a preservation checkpoint; do not infer production readiness or merge safety from offline tests alone.
+
 ## 2026-11-20 — ChatBlackshark engine v4 bridge
 - Scope: BotWorker test mode and exact allowlisted shop IDs call ChatBlackshark /api/engine/answer with conversation_id, message_id, shop_id, platform. Other shops retain the existing engine.
 - Response identity is checked; image_desc is saved to messages_shp; answered shadow replies label v4; handoff uses existing assignment and workflow suppresses customer delivery.

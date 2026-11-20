@@ -98,6 +98,16 @@ class MemoryColl:
     def count_documents(self, filt=None):
         return sum(1 for d in self.docs if _match(d, filt))
 
+    def distinct(self, key):
+        out = []
+        for d in self.docs:
+            v = _get_path(d, key)
+            if isinstance(v, list):
+                out.extend(v)
+            elif v is not None:
+                out.append(v)
+        return list(dict.fromkeys(out))
+
     def insert_one(self, doc, **kw):
         if (doc.get("_id") is not None
                 and any(x.get("_id") == doc["_id"] for x in self.docs)):
@@ -477,6 +487,100 @@ def test_known_qa_subject_is_not_widened_by_comparison_mentions(db, monkeypatch)
     assert kb.search_qa("AC65B2 compared with AC65B", model_codes={"AC65B"}) == []
 
 
+# ── unbound rows → content-derived scope (file-009 pattern) ────────────
+
+def _clips_data():
+    """file-009 shape: คอลัมน์ แบรนด์ + รุ่นฝังในหัวข้อ — ไม่มี binding."""
+    return _xlsx_bytes({"clips": [
+        ["แบรนด์", "รุ่นและหัวข้อ/อาการ", "ลิงก์คลิป"],
+        ["Black Shark", "Black Shark GS 3 วิธีรีเซ็ตเมื่อเครื่องดับเอง ปุ่มกดไม่ได้",
+         "https://youtu.be/gs3"],
+        ["Black Shark", "Black Shark GS3 Ultra แก้อาการเครื่องดับเอง ปุ่มกดไม่ได้",
+         "https://youtu.be/ultra"],
+        ["Black Shark", "Black Shark A3 แก้อาการเครื่องดับเอง ปุ่มกดไม่ได้",
+         "https://youtu.be/a3"],
+        # ลิงก์คลิปเว้นว่าง → 'a' สั้นลง — ให้ trigram เหนือ _QA_MIN_SCORE
+        # ภายใต้ _no_embed (prod ใช้ embedding sim — ไม่ sensitive)
+        ["ทั่วไป (ทุกแบรนด์)", "เครื่องดับเอง ปุ่มกดไม่ได้ ชาร์จ 5V", ""],
+    ]})
+
+
+def _seed_vocab(db):
+    """bound file → model vocab มี GS3ULTRA + A3 (รุ่นที่ร้านเอกสารรู้)."""
+    zkf.apply_import(db, filename="spec.xlsx", data=_xlsx_bytes({"s": [
+        ["ชื่อสินค้า", "x"],
+        ["Black Shark GS3 Ultra", "spec"],
+        ["Black Shark A3", "spec"],
+    ]}), subject_bindings={"s": {"refs": ["black shark gs3 ultra",
+                                         "black shark a3"]}},
+        content_type="product", admin="t")
+
+
+def test_zaapi_unbound_row_scoped_by_declared_model(db, monkeypatch):
+    """subject_refs ว่างแต่เนื้อหาประกาศรุ่น → scope ตามเนื้อหา (contract
+    เดียวกับ legacy topic-regex fallback) — เดิม identity filter ตัดทิ้งหมด."""
+    from shopeechat import knowledge_base as kb
+    _no_embed(monkeypatch)
+    _seed_vocab(db)
+    zkf.apply_import(db, filename="clips.xlsx", data=_clips_data(),
+                     content_type="troubleshooting", admin="t")
+    monkeypatch.setattr(kb, "_admin_db", lambda: db)
+    hits = kb.search_qa("เครื่องดับเอง ปุ่มกดไม่ได้", model_codes={"GS3"},
+                        types=("troubleshooting",))
+    gs3 = [h for h in hits if "GS 3 วิธีรีเซ็ต" in h["a"]]
+    assert gs3 and gs3[0]["_qa_level"] == "model", \
+        "แถวที่ประกาศ GS 3 ในเนื้อหาต้องเป็น model-level"
+    assert not any("GS3 Ultra" in h["a"] for h in hits), \
+        "GS3 Ultra row ห้ามหลุดเข้า context GS3 (exact model isolation)"
+    assert not any("A3 แก้อาการ" in h["a"] for h in hits), \
+        "A3 row เป็น foreign model — ต้องถูกตัด"
+    gen = [h for h in hits if "ทั่วไป" in h["a"]]
+    assert gen and gen[0]["_qa_level"] == "generic", \
+        "แถวไม่ประกาศรุ่นต้องยังเป็น generic (5V ไม่ใช่ model declaration)"
+
+
+def test_zaapi_unbound_row_brand_and_generic(db, monkeypatch):
+    """ไม่รู้รุ่น (known ว่าง) → แถวแบรนด์เดียวกัน level=brand, ทั่วไป=generic —
+    foreign-model exclusion ใช้เฉพาะตอนมี known (parity legacy)."""
+    from shopeechat import knowledge_base as kb
+    _no_embed(monkeypatch)
+    _seed_vocab(db)
+    zkf.apply_import(db, filename="clips.xlsx", data=_clips_data(),
+                     content_type="troubleshooting", admin="t")
+    monkeypatch.setattr(kb, "_admin_db", lambda: db)
+    hits = kb.search_qa("เครื่องดับเอง ปุ่มกดไม่ได้", known_brand="black shark",
+                        types=("troubleshooting",), limit=6)
+    gs3 = [h for h in hits if "GS 3 วิธีรีเซ็ต" in h["a"]]
+    assert gs3 and gs3[0]["_qa_level"] == "brand"
+    gen = [h for h in hits if "ทั่วไป" in h["a"]]
+    assert gen and gen[0]["_qa_level"] == "generic"
+
+
+def test_qa_troubleshoot_tips_generic_admitted(db, monkeypatch):
+    """ทั่วไป row (ไม่ประกาศรุ่น) ผ่าน sim/len gate ต้องถูกยอมรับเป็น tip
+    เมื่อมี context — เดิม filter รับเฉพาะ model/item/brand ทำให้ generic
+    ไม่เคยยิง; และต้องไม่ยิงเมื่อไม่มี context เลย."""
+    from shopeechat import knowledge_base as kb, route_context as _rc
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="clips.xlsx", data=_xlsx_bytes({"clips": [
+        ["แบรนด์", "รุ่นและหัวข้อ/อาการ", "ลิงก์คลิป"],
+        ["ทั่วไป (ทุกแบรนด์)",
+         "วิธีตรวจสอบเมื่อเครื่องดับเอง ปุ่มกดไม่ได้: ชาร์จทิ้งไว้ 30 นาที "
+         "แล้วกดปุ่มค้าง 10 วินาทีเพื่อรีสตาร์ทเครื่อง",
+         "https://youtu.be/gen"],
+    ]}), content_type="troubleshooting", admin="t")
+    monkeypatch.setattr(kb, "_admin_db", lambda: db)
+    # ไม่มี context → ห้ามยิง generic tip (อาจเป็นคำแนะนำของสินค้าอื่น)
+    assert kb.qa_troubleshoot_tips("เครื่องดับเอง ปุ่มกดไม่ได้",
+                                   snap=None, min_sim=0.3) == []
+    # มี model context → generic row ยิงได้
+    monkeypatch.setattr(_rc, "resolve_route",
+                        lambda *a, **k: type("R", (), {"model_codes": ["GS3"]})())
+    tips = kb.qa_troubleshoot_tips("เครื่องดับเอง ปุ่มกดไม่ได้",
+                                   snap=None, min_sim=0.3)
+    assert tips and "รีสตาร์ท" in tips[0]
+
+
 def test_get_general_faq_zaapi(db, monkeypatch):
     from shopeechat import knowledge_base as kb
     _no_embed(monkeypatch)
@@ -540,6 +644,55 @@ def test_zaapi_kb_evidence_nonproduct_type_visible(db, monkeypatch):
     assert "รีเซ็ตหูฟัง" in res.supporting_evidence[0]["payload"]["text"]
 
 
+def test_zaapi_evidence_preserves_relevant_late_column_within_context_budget(db, monkeypatch):
+    from shopeechat import kb_zaapi
+    from shopeechat import embedding as emb
+
+    monkeypatch.setattr(emb, "embed_query", lambda query, *a, **k:
+                        [0.0, 1.0] if "funcooler 5 pro" in query.lower()
+                        else [1.0, 0.0])
+    monkeypatch.setattr(emb, "embed_texts", lambda texts, *a, **k: [
+        [1.0, 0.0] if "ขาจับ x1" in text else
+        [0.0, 1.0] if "FunCooler 5 Pro" in text else [0.0, 0.0]
+        for text in texts])
+    monkeypatch.setattr(emb, "model_identity", lambda: {"name": "test", "dim": 2})
+    data = _xlsx_bytes({"Sheet1": [
+        ["รุ่นสินค้า", "ชื่อเต็ม", "ชื่อย่อ", "รายละเอียด", "อุปกรณ์ภายในกล่อง"],
+        ["FunCooler 5 Pro", "Black Shark FunCooler 5 Pro", "FunCooler 5 Pro",
+         "ข้อมูลทั่วไป " * 200,
+         "Black Shark FunCooler 5 Pro x1\nขาจับ x1\nคู่มือ x1"],
+    ]})
+    zkf.apply_import(db, filename="cooler.xlsx", data=data,
+                     content_type="product", subject_bindings={
+                         "Sheet1": {"rows": {"0": ["FunCooler 5 Pro"]}}})
+
+    class N:
+        kind = "product"
+        subject_refs = ("FunCooler 5 Pro",)
+        target_refs = ()
+        capability_asks = ()
+
+    need = N()
+    result = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="FunCooler 5 Pro ในกล่องมีอะไร")
+    assert len(result.supporting_evidence) == 1
+    text = result.supporting_evidence[0]["payload"]["text"]
+    assert "ขาจับ x1" in text
+    assert len(text.encode("utf-8")) <= 1000
+    from shopeechat import answer_context as acx
+    from shopeechat.candidate_pool import CandidatePool
+    pool = CandidatePool((), (), (), (), (),
+                         result.supporting_evidence, ())
+    trace = []
+    evidence = acx._compile_evidence(
+        pool, (), req_needs={"ch:kb": (need,)}, idx_of={id(need): 0},
+        need_by_idx={0: need}, prodish_idx={0}, target_of={},
+        ref_needs={}, trace=trace)
+    assert len(evidence) == 1
+    assert "ขาจับ x1" in evidence[0]["payload"]
+    assert not any("evidence_truncated" in event for event in trace)
+
+
 @pytest.mark.parametrize("need_kind", ["product", "compare", "compat"])
 @pytest.mark.parametrize("primary_present", [False, True])
 def test_product_evidence_does_not_promote_target_row_to_subject(db, monkeypatch, primary_present, need_kind):
@@ -592,6 +745,198 @@ def test_resolved_current_subject_remains_identity_authority_over_target(db, mon
     result = kb_zaapi.zaapi_kb_evidence(db=db, needs=needs, message="This product warranty with ZX200")
     assert len(result.supporting_evidence) == 1
     assert "Subject warranty" in result.supporting_evidence[0]["payload"]["text"]
+
+
+def test_named_product_phrase_hint_reaches_bound_row(db, monkeypatch):
+    """subject_hints = phrase candidates ฝั่ง subject (รูป model_terms เช่น
+    'GS3ULTRA' ที่ _extract_codes ไม่จับ) — identity match เทียบแบบ
+    space-insensitive กับ declared subject binding; row binding +
+    subject_digest เป็น proof เดิม"""
+    from shopeechat import kb_zaapi
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="watch.xlsx", data=_xlsx_bytes({"Sheet1": [
+        ["รุ่นสินค้า", "ชื่อรุ่นสินค้าย่อ", "spec"],
+        ["Black Shark GS3 Ultra", "GS3 Ultra", "กันน้ำ 5ATM & IP69K"],
+    ]}), content_type="product", subject_bindings={"Sheet1": {"columns": [
+        {"column_index": 1, "header": "รุ่นสินค้า"},
+        {"column_index": 2, "header": "ชื่อรุ่นสินค้าย่อ"}]}})
+
+    class N:
+        kind = "product"
+        subject_refs = ()
+        target_refs = ()
+        capability_asks = ("กันน้ำ",)
+
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(N(),), message="GS3 Ultra กันน้ำระดับไหน",
+        subject_hints=("GS3ULTRA",))
+    assert res.supporting_evidence
+    assert "5ATM" in res.supporting_evidence[0]["payload"]["text"]
+
+
+def test_hint_never_substitutes_target_identity(db, monkeypatch):
+    """hint ที่ normalize ตรง target_refs ของ need → ถูกตัดออกจาก subject
+    refs — hint เป็น subject-side candidate เท่านั้น"""
+    from shopeechat import kb_zaapi
+    from shopeechat.turn_decision import TurnNeed
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="dev.txt", data=b"iphone 15 spec detail",
+                     content_type="product",
+                     subject_bindings={"-": {"refs": ["iphone 15"]}})
+    need = TurnNeed("compat", "verify", target_refs=("iphone 15",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="สายใช้กับ iphone 15 ไหม",
+        subject_hints=("IPHONE15",))
+    assert not res.supporting_evidence
+
+
+def test_kb_evidence_emits_identity_and_spec_token_facts(db, monkeypatch):
+    """subject-matched row → evidence พก identity = declared ref ที่ match +
+    spec_tokens fact จาก selected passages — typed measured-facts channel
+    เดิมสำหรับ spec_claim grounding (ไม่ใช่ authority ใหม่)"""
+    from shopeechat import kb_zaapi
+    from shopeechat.turn_decision import TurnNeed
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="power.xlsx", data=_xlsx_bytes({"Sheet1": [
+        ["รุ่น", "ชื่อย่อ", "กำลังไฟ"],
+        ["CUKTECH PB100P", "PB100P",
+         "Output: USB-C 120W + USB-A 33W = เฉลี่ยรวมไม่เกิน 150W"],
+    ]}), content_type="product", subject_bindings={"Sheet1": {"columns": [
+        {"column_index": 1, "header": "รุ่น"},
+        {"column_index": 2, "header": "ชื่อย่อ"}]}})
+    need = TurnNeed("product", "describe", subject_refs=("PB100P",),
+                    capability_asks=("กำลังไฟ",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="PB100P ชาร์จได้สูงสุดกี่วัตต์")
+    assert len(res.supporting_evidence) == 1
+    ev = res.supporting_evidence[0]
+    assert "pb100p" in ev["identity"].lower()
+    facts = {f["key"]: f["value"] for f in ev.get("facts") or ()}
+    assert "spec_tokens" in facts
+    toks = set(facts["spec_tokens"])
+    assert {"120w", "33w", "150w"} <= toks
+    # compile boundary — spec_tokens fact ต้องผ่าน fact-validation gate
+    #   (row-declared identity + file/record provenance เดียวกับ warranty
+    #   path) ไม่ใช่ถูก strip เป็น unresolved
+    from shopeechat import answer_context as acx
+    from shopeechat.candidate_pool import CandidatePool
+    pool = CandidatePool((), (), (), (), (),
+                         res.supporting_evidence, ())
+    trace = []
+    evidence = acx._compile_evidence(
+        pool, (), req_needs={"ch:kb": (need,)}, idx_of={id(need): 0},
+        need_by_idx={0: need}, prodish_idx={0}, target_of={},
+        ref_needs={}, trace=trace)
+    assert len(evidence) == 1
+    ev2 = evidence[0]
+    assert ev2.get("identity") == ev["identity"]
+    facts2 = {f["key"]: f["value"] for f in ev2.get("facts") or ()}
+    assert {"120w", "33w", "150w"} <= set(facts2.get("spec_tokens") or ())
+    assert not any("evidence_fact_unresolved" in t for t in trace)
+
+
+def test_kb_spec_tokens_cover_whole_bound_row(db, monkeypatch):
+    """spec_tokens fact ต้องครอบทั้ง row ที่ผูก identity — ไม่ใช่แค่
+    passages ที่ context budget เลือกให้ model เห็น; token ใน field ที่
+    ไม่ถูก select เป็น measured evidence ของ subject เดียวกัน (guard
+    spec_claim ground ผ่าน channel นี้ — ตัดทิ้ง = false-positive
+    ungrounded → clause ที่มี claim ถูกถูกทำลาย)"""
+    from shopeechat import kb_zaapi
+    from shopeechat.turn_decision import TurnNeed
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="watch.xlsx", data=_xlsx_bytes({"S1": [
+        ["รุ่น", "ชื่อย่อ", "จุดเด่น", "รายละเอียด", "ขนาดหน้าจอ"],
+        ["Black Shark GS3 Ultra", "GS3 Ultra",
+         "กันน้ำ 5ATM & IP69K",
+         "ข้อมูลทั่วไป " * 200,
+         "AMOLED 1.43 นิ้ว 60Hz"],
+    ]}), content_type="product", subject_bindings={"S1": {"columns": [
+        {"column_index": 1, "header": "รุ่น"},
+        {"column_index": 2, "header": "ชื่อย่อ"}]}})
+    need = TurnNeed("product", "describe", subject_refs=("GS3 Ultra",),
+                    capability_asks=("กันน้ำ",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="GS3 Ultra กันน้ำไหม")
+    assert len(res.supporting_evidence) == 1
+    ev = res.supporting_evidence[0]
+    # context budget — หน้าจอ field ไม่เข้า passages ที่ model เห็น
+    assert "1.43" not in ev["payload"]["text"]
+    toks = set(({f["key"]: f["value"] for f in ev.get("facts") or ()})
+              .get("spec_tokens") or ())
+    # แต่ทั้ง row เป็น measured evidence ของ identity เดียวกัน → fact ครอบ
+    assert {"1.43นิ้ว", "60hz", "5atm"} <= toks
+
+
+def test_kb_evidence_keeps_task_alive_without_candidates(db, monkeypatch):
+    """need ที่มี attributed kb evidence แต่ไม่มี product candidate →
+    task คงอยู่ให้ model ตอบจาก evidence — ห้ามกลายเป็น UnansweredNeed
+    'ไม่มีระบุไว้ในข้อมูลสินค้า' (tail จะขัดหลักฐานที่ emit มาจริง)"""
+    from shopeechat import kb_zaapi
+    from shopeechat import answer_context as acx
+    from shopeechat.candidate_pool import CandidatePool
+    from shopeechat.retrieval_selection import SelectionResult
+    from shopeechat.retrieval_planner import RetrievalRequest
+    from shopeechat.turn_decision import TurnNeed
+    from types import SimpleNamespace
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="watch2.xlsx", data=_xlsx_bytes({"S1": [
+        ["รุ่น", "ชื่อย่อ", "จุดเด่น"],
+        ["Black Shark GS3 Ultra", "GS3 Ultra", "กันน้ำ 5ATM & IP69K"],
+    ]}), content_type="product", subject_bindings={"S1": {"columns": [
+        {"column_index": 1, "header": "รุ่น"},
+        {"column_index": 2, "header": "ชื่อย่อ"}]}})
+    need = TurnNeed("product", "describe", subject_refs=("GS3 Ultra",),
+                    capability_asks=("กันน้ำ",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="GS3 Ultra กันน้ำไหม")
+    assert res.supporting_evidence
+    req = RetrievalRequest(
+        request_id="ch:kb:0", slot_id="", source="kb",
+        product_types=frozenset(), subtypes=frozenset(), model_codes=(),
+        target_device=None, availability_mode="", compat_mode="",
+        subject_refs=("GS3 Ultra",), target_refs=())
+    pool = CandidatePool((), (), (), (), (),
+                         res.supporting_evidence, ())
+    ctx = acx.compile_answer_context(
+        needs=(need,), selection=SelectionResult((), (), (), ()),
+        pool=pool, requests=(req,),
+        profile=SimpleNamespace(target_device=None, fact_sources=(),
+                                model_terms=()))
+    assert not ctx.unanswered_needs, ctx.unanswered_needs
+    assert ctx.task.tasks, "task ต้องคงอยู่ให้ model ตอบจาก evidence"
+
+
+def test_kb_warranty_fact_still_resolves_to_unique_candidate(db, monkeypatch):
+    """import-bound warranty fact path เดิม — candidate resolve +
+    identity rewrite ไม่ถูก spec_tokens admission ทำลาย"""
+    from shopeechat import kb_zaapi
+    from shopeechat import answer_context as acx
+    from shopeechat.candidate_pool import CandidatePool
+    from shopeechat.turn_decision import TurnNeed
+    _no_embed(monkeypatch)
+    zkf.apply_import(db, filename="w.xlsx", data=_xlsx_bytes({"S1": [
+        ["model", "warranty"], ["AB100", "12 เดือน"],
+    ]}), content_type="product", subject_bindings={"S1": {
+        "columns": [{"column_index": 1, "header": "model"}],
+        "facts": {"warranty": {"column_index": 2, "header": "warranty"}}}})
+    need = TurnNeed("product", "describe", subject_refs=("AB100",),
+                    capability_asks=("warranty",))
+    res = kb_zaapi.zaapi_kb_evidence(
+        db=db, needs=(need,), message="AB100 ประกันกี่เดือน")
+    card = {"item_id": "999", "name": "AB100 thing",
+            "model_codes": ["AB100"]}
+    sel_c = type("S", (), {"identity": "i:999", "item_id": "999",
+                           "model_id": None, "card": card})()
+    pool = CandidatePool((), (sel_c,), (), (), (),
+                         res.supporting_evidence, ())
+    trace = []
+    evidence = acx._compile_evidence(
+        pool, (), req_needs={"ch:kb": (need,)}, idx_of={id(need): 0},
+        need_by_idx={0: need}, prodish_idx={0}, target_of={},
+        ref_needs={}, trace=trace)
+    assert len(evidence) == 1
+    w = [f for f in evidence[0].get("facts") or () if f["key"] == "warranty"]
+    assert w and w[0]["value"] == 12
 
 
 def test_readiness_searchable(db):

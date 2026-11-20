@@ -1242,6 +1242,8 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
                 **k: _kbz.zaapi_kb_evidence(
                 shop=req.shop, platform=req.platform or "shopee",
                 message=req.message, request_id=request_id,
+                subject_hints=(getattr(_retrieval_profile, "model_terms", ())
+                               or ()),
                 needs=((need,) if need is not None
                        else (_turn_plan.needs if _turn_plan else ())))
         _tagged_item_id = req.item_id or _extract_item_id_tag(req.message)

@@ -389,6 +389,39 @@ def test_generic_subject_never_its_own_compat_target():
     assert "ZX200" in prod.subject_refs
 
 
+def test_capability_asks_ride_task_on_attributed_subject_evidence():
+    """serialized subject evidence ที่ attribute เข้า need (kb row ที่
+    bound+matched ผ่าน per-need channel — need.subject_refs ว่างก็ตาม)
+    นับเป็น exact-subject evidence เดียวกับ subject-role card: asks ride
+    task ให้ model แยก subclaim ไม่ใช่ deterministic cannot-confirm"""
+    need = TurnNeed(
+        kind="product", operation="describe",
+        product_types=frozenset({"smartwatch"}),
+        requested_facts=("description",),
+        capability_asks=("กันน้ำ",))
+    slot_req = _req("req-x", types=("smartwatch",))
+    kb_req = _req("ch:kb:0", source="kb")   # per-need channel — refs ว่าง
+    evid = {"kind": "kb", "request_id": "ch:kb:0",
+            "record_id": "w.xlsx::s::0", "identity": "gs3 ultra",
+            "meta": {"file": "w.xlsx"},
+            "facts": [{"key": "spec_tokens", "value": ("5atm",)}],
+            "payload": "จุดเด่นสินค้า: กันน้ำ 5ATM & IP69K"}
+    sel = _selection(
+        (_sel_card("i:1", "candidate", "req-x", "GS3 Ultra Watch"), "req-x"))
+    pool = _pool((_pooled("i:1", codes=("GS3",), request_ids=("req-x",)),),
+                 supporting=(evid,))
+    ctx = _compile((need,), sel, pool, (slot_req, kb_req), _profile())
+    assert not [u for u in ctx.unanswered_needs
+                if u.need_index == 0 and u.reason == "no_evidence"], (
+        f"attributed subject evidence ต้องนับเป็น coverage ของ asks — "
+        f"got {ctx.unanswered_needs}")
+    assert "กันน้ำ" in {a for t in ctx.task.tasks
+                       for a in (t.capability_asks or ())}, (
+        "ask ต้องไหลเข้า task ให้ model แยก subclaim")
+    assert any(f["fact_key"] == "spec_tokens"
+               for f in ctx.spec_measured_facts)
+
+
 def test_capability_asks_named_when_whole_need_uncovered():
     """need ไม่มี coverage เลย (subject ไม่อยู่ในระบบ) — asks ยังถูก name
     ใน outcome เดิม ไม่หายไปพร้อม need."""
@@ -1206,6 +1239,36 @@ def test_decided_compat_below_min_watt_says_not_full_speed():
     assert "ยังยืนยันไม่ได้" not in answer, (
         f"known-below ห้ามใช้ unknown phrasing (มีหลักฐานแล้ว) — "
         f"answer:\n{answer}")
+
+
+def test_featured_pick_prefers_clean_verdict_over_caveated():
+    """verdict-aware emit order (A-330): subject cards ของ need เดียวกัน
+    ที่ decide compatible ทั้งคู่ — ตัวที่ verdict ดีกว่า (clean/covers
+    target) ต้องนำหน้าตัวที่ติด caveat (insufficient/unconfirmed) เป็น
+    featured card แม้ selection order ใส่ตัวแย่กว่าก่อน"""
+    need = _need_compat(subj=("LOW20", "HI100"), trefs=("dev-x",))
+    req = _req("req-0", types=("charger",), codes=("LOW20", "HI100"),
+               target="dev-x", cm="connector_required")
+    low = _sel_card("i:1", "subject", "req-0", "หัวชาร์จ USB-C 20W",
+                    model_codes=["LOW20"], connector="usb-c",
+                    output_power_w=20)
+    hi = _sel_card("i:2", "subject", "req-0", "หัวชาร์จ USB-C 100W",
+                   model_codes=["HI100"], connector="usb-c",
+                   output_power_w=100)
+    pool = _pool(supporting=(
+        {"kind": "device_spec", "target": "dev-x",
+         "data": {"connector": "usb-c", "min_watt": 90.0,
+                  "source": "spec-db"},
+         "subject_refs": ("i:1", "i:2")},))
+    sel = _selection((low, "req-0"), (hi, "req-0"))   # low ก่อนตาม selection
+    ctx = _compile((need,), sel, pool, (req,), _profile())
+    vmap = {v.subject_id: v for v in ctx.compat_verdicts}
+    assert vmap["i:1"].decision.outcome == "compatible" and \
+        "insufficient_wattage" in vmap["i:1"].decision.reason_codes, (
+            f"premise: i:1 = compatible+insufficient — {ctx.compat_verdicts}")
+    names = [p.get("name") or "" for p in ctx.products]
+    assert names[:1] and "100W" in names[0], (
+        f"featured card ต้องเป็น verdict ดีกว่า — products={names}")
 
 
 def test_decided_compat_ambiguous_variants_unconfirmed():

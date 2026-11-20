@@ -932,6 +932,57 @@ def _known_brands(snap=_gen.SNAP_UNSET) -> set[str]:
     return _brand_cache["brands"]
 
 
+_model_vocab_cache: dict | None = None
+
+
+def _model_vocab(adb, snap=_gen.SNAP_UNSET) -> frozenset:
+    """รหัสรุ่นที่เอกสารร้านรู้ = distinct subject_refs (zaapi coll)
+    ∪ model_codes (units) — nospace-casefold + brand-stripped form.
+
+    ใช้แยก "แถวประกาศรุ่นอื่น" (ต้องตัด — cross-model guard) ออกจาก
+    spec tokens (5ATM/20W — ไม่ใช่รุ่น อยู่ generic ได้)."""
+    global _model_vocab_cache
+    gen = None if snap is None else getattr(snap, "generation_id", None)
+    if snap is _gen.SNAP_UNSET:
+        try:
+            rs = _gen.resolve_snapshot()
+            gen = getattr(rs, "generation_id", None)
+        except Exception:
+            pass
+    key = (id(adb), gen)
+    if (_model_vocab_cache is not None and _model_vocab_cache["key"] == key
+            and time.time() - _model_vocab_cache["ts"] < _QA_DOCS_TTL):
+        return _model_vocab_cache["vocab"]
+    vocab: set = set()
+    try:
+        from . import kb_zaapi_files as _zkf
+        raw_refs = adb[_zkf._COLL].distinct("subject_refs")
+    except Exception:
+        raw_refs = []
+    try:
+        from . import units as _u
+        coll = _u._units_coll(
+            _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap)
+        raw_refs = list(raw_refs) + list(coll.distinct("model_codes"))
+    except Exception:
+        pass
+    brands = _known_brands(snap)
+    for r in raw_refs:
+        s = " ".join(str(r).casefold().split())
+        if len(s) < 2:
+            continue
+        vocab.add("".join(s.split()))
+        # brand-stripped form — "black shark gs3 ultra" → "gs3ultra"
+        # (แถวที่เขียนแค่ "GS3 Ultra" ไม่ใส่แบรนด์ก็ยังจับได้)
+        short = next((s[len(b):].strip() for b in brands
+                      if s.startswith(b)), None)
+        if short and len("".join(short.split())) >= 2:
+            vocab.add("".join(short.split()))
+    _model_vocab_cache = {"key": key, "ts": time.time(),
+                          "vocab": frozenset(vocab)}
+    return _model_vocab_cache["vocab"]
+
+
 # recall gate เท่านั้น — precision อยู่ที่ scoring (substring/sim/anchor)
 _QA_TRIGGER_KWS = (
     "วิธี", "ตั้งค่า", "ติดตั้ง", "รีเซ็ต", "reset", "ใช้งาน", "เชื่อมต่อ",
@@ -1045,23 +1096,50 @@ def search_qa(message: str, *, model_codes: set[str] | None = None,
     if _za_mode:
         from . import kb_zaapi_files as _zkf
         known = {" ".join(str(c).upper().split()) for c in (model_codes or set())}
+        known_ns = {"".join(c.casefold().split()) for c in known}
         _refs = tuple(sorted(known)) or tuple(extract_model_keywords(message))
+        adb = _admin_db()
         hits, _tr = _zkf.zaapi_search(
-            _admin_db(), shop=shop, platform=platform,
+            adb, shop=shop, platform=platform,
             query=message, refs=_refs,
             limit=max(limit, 1) * 3,
             types=types or ("faq", "troubleshooting", "warranty"),
-            include_manual=True)
+            include_manual=True, include_unbound=True,
+            extra_terms=(known_brand,) if known_brand else ())
+        # unbound rows (subject_refs ว่าง — ไฟล์ไม่มี binding) — scope จาก
+        # เนื้อหาแถวเอง เหมือน legacy topic-regex fallback: ประกาศรุ่นที่ตรง
+        # known → model; ประกาศรุ่นอื่นที่ vocab รู้ → ตัด (cross-model guard);
+        # ไม่ประกาศรุ่น → brand (แบรนด์ตรง context) / generic
+        vocab = _model_vocab(adb, snap) - known_ns if hits else frozenset()
         za_hits: list[dict] = []
         for h in hits:
             dcodes = known.intersection(str(r).upper() for r in h.get("subject_refs") or ())
-            if known and not dcodes:
-                continue  # คำแนะนำผูกรุ่นอื่น — guard เดิม ห้ามข้ามรุ่น
+            level = "model" if (known and dcodes) else "generic"
+            if not dcodes:
+                ctext = (h.get("a") or "").casefold()
+                ctext_ns = "".join(ctext.split())
+                decl = {c for c in known
+                        if _zkf._ref_declared("".join(c.casefold().split()),
+                                              ctext, ctext_ns)}
+                if decl:
+                    dcodes, level = decl, "model"
+                elif known and any(_zkf._ref_declared(v, ctext, ctext_ns)
+                                   for v in vocab):
+                    continue  # เนื้อหาประกาศรุ่นอื่น — guard เดิม ห้ามข้ามรุ่น
+                elif known_brand:
+                    row_brand = next((b for b in _known_brands(snap)
+                                      if b in ctext), None)
+                    if row_brand and row_brand != known_brand.lower():
+                        continue  # เนื้อหาเป็นแบรนด์อื่น — ตัดเหมือน legacy
+                    if row_brand:
+                        level = "brand"
             h["model_codes"] = sorted(dcodes)
             h["q"] = h.get("q") or h.get("record_id") or ""
-            h["_qa_level"] = "model" if (known and dcodes) else "generic"
-            if h["_qa_level"] == "model":
+            h["_qa_level"] = level
+            if level == "model":
                 h["_qa_score"] = h.get("_qa_sim", 0.0) + 0.5
+            elif level == "brand":
+                h["_qa_score"] = h.get("_qa_score", 0.0) + 0.2
             if h.get("_qa_score", 0.0) >= _QA_MIN_SCORE:
                 za_hits.append(h)
         za_hits.sort(key=lambda x: -x["_qa_score"])
@@ -1195,17 +1273,20 @@ def qa_context(message: str, *, conversation_id=None, claim: bool = False,
 
 
 def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
-                         min_sim: float = 0.5, min_answer_len: int = 30,
+                         min_sim: float = 0.45, min_answer_len: int = 30,
                          limit: int = 2, snap=_gen.SNAP_UNSET,
                          shop: str | None = None,
                          platform: str | None = None) -> list[str]:
     """คืน list คำแนะนำแก้ปัญหาเบื้องต้น (field `a`) สำหรับ troubleshoot-first claim flow.
 
     Gate 3 ชั้น (กัน tips ไม่เกี่ยว):
-    - level ∈ {model, item, brand} — ต้องรู้รุ่น/สินค้า/แบรนด์ที่คุยอยู่
-      (claim เฉยๆ ไม่มี context → ไม่แนะนำ)
+    - level ∈ {model, item, brand, generic} — model/item/brand เมื่อมี context;
+      generic คือแถวที่ไม่ประกาศรุ่น (แนะนำทั่วไปได้ปลอดภัย — รุ่นอื่นถูกตัด
+      ก่อนหน้าแล้วใน search_qa)
     - _qa_sim ≥ min_sim — คำถามใน KB ต้องเกี่ยวกับอาการจริง (กัน "ชาร์จไม่เข้า" ได้ tip เรื่องกลับจอ)
     - len(a) ≥ min_answer_len — คำตอบต้องมีสาระ (กัน a="ทำไม่ได้" หลุด)
+    - แถว product-identity/spec (มี "ประเภทสินค้า:" ในเนื้อหา) ไม่ใช่ tip —
+      ตัดออกแม้ผ่าน sim
     """
     if os.environ.get("USE_QA_KB", "1").strip() == "0":
         return []
@@ -1241,13 +1322,19 @@ def qa_troubleshoot_tips(message: str, *, conversation_id=None, item_id=None,
     if not known_brand:
         low = message.lower()
         known_brand = next((b for b in _known_brands(snap) if b in low), None)
+    if not codes and not known_brand:
+        return []   # ไม่มี context เลย — generic อาจเป็นคำแนะนำของสินค้าอื่น
     hits = search_qa(message, model_codes=codes, anchor_item_id=anchor_iid,
                      known_brand=known_brand, snap=snap,
                      shop=shop, platform=platform,
-                     types=("faq", "troubleshooting"))
+                     types=("troubleshooting",))
     return [(h.get("a") or "").strip() for h in hits
-            if h.get("_qa_level") in ("model", "item", "brand")
+            if h.get("_qa_level") in ("model", "item", "brand", "generic")
+            # generic ต้องเป็นแถว unbound จริง — bound-to-other-model ที่
+            # เนื้อหาไม่ได้ประกาศรุ่นใน vocab ไม่ใช่คำแนะนำทั่วไป
+            and (h.get("_qa_level") != "generic" or not h.get("subject_refs"))
             and h.get("_qa_sim", 0.0) >= min_sim
+            and "ประเภทสินค้า" not in (h.get("a") or "")
             and len((h.get("a") or "").strip()) >= min_answer_len][:limit]
 
 

@@ -112,6 +112,20 @@ def test_grounded_spec_from_card_passes():
                    "description_excerpt": "แบตเตอรี่ 500mAh ใช้งานได้ 3 วัน"}])
     guards.enforce(r, _req("แบตกี่ mAh ใช้ได้กี่วัน"))
     assert "500mAh" in r.answer.replace(" ", "") or "500mAh" in r.answer
+
+
+def test_deterministic_cert_answer_not_rewritten():
+    """cert_answer = DB-derived list (products=[] ไม่มี LLM) — model codes/
+    spec numbers ในชื่อสินค้าไม่ใช่ claim → ห้าม splice defer text กลาง list"""
+    ans = ("ค่ะ สินค้าที่มี มอก. ในร้าน ได้แก่:\n"
+           "• CUKTECH AD653T / CMC610 / PB200 ชุดชาร์จ 65W "
+           "(หมดสต็อกชั่วคราว)\n"
+           "• CUKTECH AURA LPB100 33W 10000mAh Powerbank "
+           "(หมดสต็อกชั่วคราว)\n\n"
+           "สามารถสอบถามรายละเอียดเพิ่มเติมได้นะคะ")
+    r = _resp(ans, source="cert_answer")
+    guards.enforce(r, _req("มี มอก. ไหม"))
+    assert r.answer == ans
     assert not r.routing_decision.get("guard_rewritten")
 
 
@@ -221,6 +235,64 @@ def test_product_context_spec_is_evidence():
     assert not r.routing_decision.get("guard_rewritten")
 
 
+def test_multi_subject_shared_spec_survives_guard():
+    cards = [
+        {"item_id": "1", "name": "P23 variant A",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+        {"item_id": "2", "name": "P23 variant B",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+    ]
+    r = _resp("P23 จ่ายไฟรวมสูงสุด 210W ค่ะ", products=cards)
+    r.routing_decision["subject_ids"] = ["i:1", "i:2"]
+    guards.enforce(r, _req("P23 ชาร์จได้สูงสุดกี่วัตต์"))
+    assert "210W" in r.answer
+    assert not r.routing_decision.get("guard_rewritten")
+
+
+def test_multi_item_subjects_accept_shared_spec_from_variant_cards():
+    cards = [
+        {"item_id": "1", "model_id": "a", "name": "P23 variant A",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+        {"item_id": "2", "model_id": "b", "name": "P23 variant B",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+    ]
+    r = _resp("ทั้งสองรายการจ่ายไฟรวมสูงสุด 210W ค่ะ", products=cards)
+    r.routing_decision["subject_ids"] = ["i:1", "i:2"]
+    guards.enforce(r, _req("สองรายการนี้จ่ายไฟสูงสุดเท่าไหร่"))
+    assert "210W" in r.answer
+    assert not r.routing_decision.get("guard_rewritten")
+
+
+def test_multi_item_subjects_reject_spec_when_one_variant_disagrees():
+    cards = [
+        {"item_id": "1", "model_id": "a", "name": "P23 variant A",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+        {"item_id": "1", "model_id": "b", "name": "P23 variant B",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 140W"},
+        {"item_id": "2", "model_id": "c", "name": "P23 variant C",
+         "description_excerpt": "จ่ายไฟรวมสูงสุด 210W"},
+    ]
+    r = _resp("ทั้งสองรายการจ่ายไฟรวมสูงสุด 210W ค่ะ", products=cards)
+    r.routing_decision["subject_ids"] = ["i:1", "i:2"]
+    guards.enforce(r, _req("สองรายการนี้จ่ายไฟสูงสุดเท่าไหร่"))
+    assert "210W" not in r.answer
+    assert r.routing_decision.get("guard_rewritten") == "spec_claim"
+
+
+def test_multi_subject_spec_from_only_one_subject_is_rejected():
+    cards = [
+        {"item_id": "1", "name": "Product A",
+         "description_excerpt": "จ่ายไฟรวม 210W"},
+        {"item_id": "2", "name": "Product B",
+         "description_excerpt": "จ่ายไฟรวม 65W"},
+    ]
+    r = _resp("สองรุ่นนี้จ่ายไฟ 210W ค่ะ", products=cards)
+    r.routing_decision["subject_ids"] = ["i:1", "i:2"]
+    guards.enforce(r, _req("สองรุ่นนี้กี่วัตต์"))
+    assert "210W" not in r.answer
+    assert r.routing_decision.get("guard_rewritten") == "spec_claim"
+
+
 def test_message_still_grounds_model_identity():
     # identity pool คงเดิม — รุ่นที่ลูกค้าพิมพ์เอง echo กลับได้ (model_claim ใช้ message)
     r = _resp(
@@ -230,3 +302,46 @@ def test_message_still_grounds_model_identity():
     guards.enforce(r, _req("WPB100L ใช้กับโทรศัพท์ได้ไหม"))
     assert "WPB100L" in r.answer
     assert not r.routing_decision.get("guard_rewritten")
+
+
+# ---------- markdown spans: token ใน link/image ไม่ใช่ claim — defer text
+#   ห้ามแทรกกลาง ![alt](url) / [text](url) (A-331 defect) ----------
+
+def test_spec_token_inside_image_url_not_a_claim():
+    img = "![GS3 Ultra](https://img.example/x/th-1113abc-150w5atm.png)"
+    r = _resp(
+        f"รุ่นนี้สเปกตามรูปเลยค่ะ\n{img}",
+        products=[{"name": "Watch A", "description_excerpt": "สมาร์ทวอทช์"}])
+    guards.enforce(r, _req("ขอรูปสินค้า"))
+    assert img in r.answer, f"markdown image พัง — got {r.answer!r}"
+    assert "เดี๋ยวขอให้แอดมิน" not in r.answer
+
+
+def test_spec_token_inside_link_text_not_a_claim():
+    link = "[สายชาร์จ 65W](https://shop.example/item/abc)"
+    r = _resp(
+        f"ดูรายละเอียดได้ที่ลิงก์นี้ค่ะ {link}",
+        products=[{"name": "Charger A", "description_excerpt": "สายชาร์จ"}])
+    guards.enforce(r, _req("ขอลิงก์"))
+    assert link in r.answer, f"markdown link พัง — got {r.answer!r}"
+
+
+def test_model_token_inside_link_not_a_claim():
+    link = "[ดู PB200N](https://shop.example/item/xyz)"
+    r = _resp(
+        f"เปิดลิงก์นี้ได้เลยค่ะ {link}",
+        products=[{"name": "Powerbank X", "description_excerpt": "พาวเวอร์แบงค์"}])
+    guards.enforce(r, _req("ส่งลิงก์หน่อย"))
+    assert link in r.answer, f"markdown link พัง — got {r.answer!r}"
+    assert not r.routing_decision.get("guard_rewritten")
+
+
+def test_ungrounded_spec_outside_markdown_still_rewritten():
+    img = "![pic](https://img.example/x/p.png)"
+    r = _resp(
+        f"แบตใช้ได้ 30 วันค่ะ\n{img}",
+        products=[{"name": "Watch A", "description_excerpt": "สมาร์ทวอทช์"}])
+    guards.enforce(r, _req("แบตทนไหม"))
+    assert "30 วัน" not in r.answer
+    assert img in r.answer
+    assert r.routing_decision.get("guard_rewritten") == "spec_claim"
