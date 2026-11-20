@@ -55,6 +55,10 @@ export async function PUT(req: NextRequest) {
   const body = await readJson<Record<string, unknown>>(req);
   if (!body) return error("invalid body");
 
+  if ("chat_engine" in body && !["legacy", "v2", "v3", "v4"].includes(String(body.chat_engine))) {
+    return error("chat_engine must be 'legacy', 'v2', 'v3', or 'v4'", 422);
+  }
+
   // ป้องกัน: ถ้ามีคนส่งสวิตช์อันตรายมา ปฏิเสธทันที (ทุก platform)
   const dangerousKeys = [
     'shopee_live_read_enabled',

@@ -16,7 +16,8 @@ import { json, error, readJson } from "@/backend/lib/http";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { serverConfig } from "@/backend/lib/config";
-import { shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "@/backend/service/systemConfigService";
+import { getChatEngine, getBotProductLimit } from "@/backend/service/systemConfigService";
+import { callChatBlacksharkV4 } from "@/backend/service/botCallService";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import type { Platform } from "@/backend/lib/safety";
 
@@ -31,10 +32,9 @@ async function callOurBot(params: {
   history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[];
   shopId: string;
   shopName?: string;
+  messageId?: string;
   images?: string[];
   conversationId?: string;  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
-  use_v2?: boolean;
-  use_v3?: boolean;
 }): Promise<{
   answer: string;
   source?: string;
@@ -47,8 +47,16 @@ async function callOurBot(params: {
   handoff_to_admin?: boolean;
   handoff_reason?: string;
   routing_decision?: unknown;
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
 }> {
-  const { platform, message, history, shopId, shopName, images, conversationId, use_v2, use_v3 } = params;
+  const { platform, message, history, shopId, shopName, images, conversationId, messageId } = params;
+  const chatEngine = await getChatEngine();
+  if (chatEngine === "v4") {
+    const data = await callChatBlacksharkV4({ platform, message, history, shopId, shopName,
+      images, conversationId, messageId, simulate: true, testSource: "shadow" });
+    return { ...data, handoff_to_admin: data.handoff_required === true,
+      handoff_reason: data.handoff_reason };
+  }
   // ใช้ platform-specific bot URL (shopee/tiktok/lazada แยกกัน)
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
@@ -83,9 +91,8 @@ async function callOurBot(params: {
   //   ไม่แตะ conversations/status_conversation ของแชทจริง (bot ยังได้ชื่อ admin มาใส่คำตอบ)
   body.simulate_assignment = true;
   // ⚡ chat_v3 — ส่ง use_v3 เพื่อบังคับใช้ chatbotv3 (มี priority เหนือ v2)
-  if (use_v3) body.use_v3 = true;
-  // ⚡ chat_v2 — ส่ง use_v2 เพื่อบังคับใช้ chat_v2 (replay test) — ไม่ส่งถ้า v3
-  else if (use_v2) body.use_v2 = true;
+  body.use_v3 = chatEngine === "v3";
+  body.use_v2 = chatEngine === "v2";
 
   const resp = await fetch(url, {
     method: "POST",
@@ -271,19 +278,8 @@ export async function POST(req: NextRequest) {
   const conversationId = String(body.conversation_id);
   const inboundMessageId = body.inbound_message_id != null ? String(body.inbound_message_id) : undefined;
 
-  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-  //    ถ้า body ส่ง use_v2/use_v3 มา explicit → override config
-  //    v3 มี priority เหนือ v2
-  const configUseV2 = await shouldUseChatV2();
-  const configUseV3 = await shouldUseChatV3();
-  const useV3 = body.use_v3 === true || (body.use_v3 === undefined && configUseV3);
-  const useV2 = !useV3 && (body.use_v2 === true || (body.use_v2 === undefined && configUseV2));
-  const chatEngine = useV3 ? "v3" : useV2 ? "v2" : "legacy";
-  const botCaller = useV3
-    ? (p: Parameters<typeof callOurBot>[0]) => callOurBot({ ...p, use_v3: true })
-    : useV2
-    ? (p: Parameters<typeof callOurBot>[0]) => callOurBot({ ...p, use_v2: true })
-    : callOurBot;
+  const chatEngine = await getChatEngine();
+  const botCaller = callOurBot;
 
   try {
     const doc = await shadowReplyService.generate({

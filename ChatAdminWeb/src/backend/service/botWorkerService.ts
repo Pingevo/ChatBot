@@ -597,7 +597,7 @@ async function storeWorkflowDelivered(opts: {
       rating: "unrated",
       origin: "workflow",  // สร้างจาก workflow engine (Flow Builder)
       mode: "standalone",  // ⚡ Phase 2R — โหมด standalone (worker path)
-      chat_engine: "legacy", // ⚡ workflow ยังใช้ legacy path (ไม่ผ่าน callBot)
+      chat_engine: d.chat_engine || "legacy", // Workflow AI actions persist the engine that answered.
       request_id: d.request_id, // ⚡ R5 — turn correlation → ai_usage join (let_ai_respond เท่านั้น)
       created_at: now,
       updated_at: now,

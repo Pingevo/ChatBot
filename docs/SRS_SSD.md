@@ -56,11 +56,12 @@
 
 | Engine | Entry | เลือกเมื่อ | แนวคิด |
 |---|---|---|---|
-| Legacy | `app._chat_impl(req)` | `USE_LEGACY_CHAT=1` (default) | deterministic flow → intent → hybrid retrieval → compat → search fallback → LLM |
-| chat_v2 | `chat_v2.chat_v2(req)` | `req.use_v2=True` หรือ `USE_LEGACY_CHAT != "1"` | 8-stage pipeline สะอาด แชร์โมดูลเดิม |
-| chatbotv3 | `chatbotv3.engine.chat_v3(req)` | `req.use_v3=True` หรือ `USE_CHAT_V3=1` | OpenRouter-first: safety checks → ส่ง catalog context ให้ LLM → match ชื่อสินค้ากลับ DB |
+| Legacy | `app._chat_impl(req)` | ChatAdminWeb `SystemConfig.chat_engine=legacy`; direct callers ที่ไม่ส่ง selector ใช้ `USE_LEGACY_CHAT=1` (default) | deterministic flow → intent → hybrid retrieval → compat → search fallback → LLM |
+| chat_v2 | `chat_v2.chat_v2(req)` | ChatAdminWeb `SystemConfig.chat_engine=v2`; direct callers ที่ไม่ส่ง selector ใช้ `req.use_v2=True` หรือ `USE_LEGACY_CHAT != "1"` | 8-stage pipeline สะอาด แชร์โมดูลเดิม |
+| chatbotv3 | `chatbotv3.engine.chat_v3(req)` | ChatAdminWeb `SystemConfig.chat_engine=v3`; direct callers ที่ไม่ส่ง selector ใช้ `req.use_v3=True` หรือ `USE_CHAT_V3=1` | OpenRouter-first: safety checks → ส่ง catalog context ให้ LLM → match ชื่อสินค้ากลับ DB |
+| ChatBlackshark v4 | ChatAdminWeb `botCallService.callChatBlacksharkV4` → `/api/engine/answer` หรือ `/api/engine/test-answer` | ChatAdminWeb `SystemConfig.chat_engine=v4` และร้านอยู่ใน `CHATBLACKSHARK_BOTWORKER_SHOP_IDS` | ใช้ engine/KB ของ Blackshark; stored conversation ใช้ conversation/message ID อ่าน Mongo, test/shadow ส่ง question/history/media/item IDs โดยตรง |
 
-ทุก engine คืน dict เดียวกัน (ChatResponse-compatible) และผ่าน `guards.enforce()` ด่านสุดท้ายเสมอ
+ChatAdminWeb ใช้ `SystemConfig.chat_engine` เป็นตัวเลือกกลางเดียวสำหรับทุกหน้าและ API ที่เรียกคำตอบ AI: `legacy|v2|v3` ส่งไป Python `/chat` พร้อม flags แบบ explicit (รวม `false/false` เพื่อบังคับ legacy ไม่ให้ env เปลี่ยนผล); `v4` เรียก ChatBlackshark โดยตรงและตรวจ allowlist ของร้านก่อน ทุก engine คืน response ที่ ChatAdminWeb แปลงเข้า contract เดียวกัน ส่วน Python legacy/v2/v3 ยังผ่าน `guards.enforce()` ด่านสุดท้ายตามเดิม
 
 ---
 
@@ -210,22 +211,29 @@ sellcenter dump แชท Shopee ลง `conversations_shp`/`messages_shp` (เ�
 
 `POST /chat` — header `X-Internal-Secret` → `chat(req: ChatRequest) → ChatResponse`
 
-**ChatRequest fields:** `message` (จำเป็น) · `shop` · `item_id` (การ์ดสินค้าที่ส่งมา) · `order_sn` (การ์ด order) · `history[]` (`{role, text, images[], image_desc}`) · `limit` (1-50, default 10) · `images[]` (≤3 รูป/turn) · `conversation_id` · `platform` · `simulate_assignment` (test/shadow) · `ticket_state` (`handoff|open|pending|closed|resolved|bot` — handoff/open/pending = active lock; closed/resolved/bot = ปกติ; None → marker fallback) · `claim_outcome` (2B.6 — `{episode_id, outcome: resolved|cancelled, actor_id, occurred_at(ISO)}` จาก `status_conversation` prod เท่านั้น; test/simulate ไม่ส่ง) · `use_v2`/`use_v3` (override engine) · `llm_context_limit` (10-50)
+**ChatRequest fields:** `message` (จำเป็น) · `shop` · `item_id` (การ์ดสินค้าที่ส่งมา) · `order_sn` (การ์ด order) · `history[]` (`{role, text, images[], image_desc}`) · `limit` (1-50, default 10) · `images[]` (≤3 รูป/turn) · `conversation_id` · `platform` · `simulate_assignment` (test/shadow) · `ticket_state` (`handoff|open|pending|closed|resolved|bot` — handoff/open/pending = active lock; closed/resolved/bot = ปกติ; None → marker fallback) · `claim_outcome` (2B.6 — `{episode_id, outcome: resolved|cancelled, actor_id, occurred_at(ISO)}` จาก `status_conversation` prod เท่านั้น; test/simulate ไม่ส่ง) · `use_v2`/`use_v3` (ChatAdminWeb ส่งเป็น selector แบบ explicit; เมื่อมี field ใด field หนึ่ง Python ใช้ค่าทั้งคู่ รวม `false/false` = legacy; env fallback ใช้เฉพาะเมื่อไม่มีทั้งสอง field) · `llm_context_limit` (10-50)
 
 **ChatResponse fields:** `answer` · `answer_segments[]` (split `|||`) · `products[]` (cards) · `shop` · `model` · `source` · `chat_engine` (`legacy|v2|v3`) · `usage{prompt,output,total}` · `elapsed` · `cost` · `handoff_to_admin`/`handoff_reason`/`handoff_claim` — **command fields: True/non-None = "เพิ่ง verify/s่ง handoff ใหม่" เท่านั้น (downstream เช่น liveAssignmentService เอาไป handoff ต่อ) — human-wait state ต้อง `False`/`None` + routing path `"human_wait"`** · `intent` · `timing` · `retrieval_info` · `web_search_used`/`web_search_reason`/`web_search_model` · `image_desc` (cache ให้ turn ถัดไป) · `steps[]` (per-stage breakdown) · `routing_decision{path, reason, …}` · `request_id` (R5 — turn correlation id ตัวเดียวกับ `ai_usage.request_id`; `chat()` stamp หลัง enforce จาก `llm._ai_call_ctx` → caller ผูก shadow_reply/ai_usage ตรง turn)
 
 `ChatResponse.model_post_init` เรียก `guards.check_output` (observe-only log) เสมอ; `chat()` เรียก `guards.enforce` (อาจแก้/escalate) ครอบทุก engine แล้ว stamp `resp.request_id` จาก `llm._ai_call_ctx` ทุก return path
 
+`ChatResponse.chat_engine` ของ Python ระบุ `legacy|v2|v3`; `BotCallResponse` ของ ChatAdminWeb ขยายค่าเป็น `legacy|v2|v3|v4` เพื่อบันทึก engine เดียวกันในหน้าทดสอบ, shadow, assignment และ BotWorker
+
 ### 5.1 Engine routing
 
 ```
 POST /chat → _require_internal_secret → chat(req)
-  → _chat_impl(req)
-      ├─ req.use_v3 | USE_CHAT_V3=1          → chatbotv3.engine.chat_v3(req)
-      ├─ req.use_v2 | USE_LEGACY_CHAT!="1"   → chat_v2.chat_v2(req)
-      └─ else                                → legacy pipeline (§5.2)
-  → guards.enforce(resp, req) → stamp resp.request_id (จาก _ai_call_ctx) → ChatResponse
+  → ChatAdminWeb reads SystemConfig.chat_engine
+      ├─ v4 → ChatBlackshark /api/engine/answer (stored conversation)
+      │       or /api/engine/test-answer (test/shadow without stored message)
+      └─ legacy|v2|v3 → Python /chat with explicit use_v2/use_v3 flags
+            ├─ use_v3=true                  → chatbotv3.engine.chat_v3(req)
+            ├─ use_v2=true                  → chat_v2.chat_v2(req)
+            └─ false/false                  → legacy pipeline (§5.2)
+  → Python legacy/v2/v3: guards.enforce(resp, req) → stamp request_id → ChatResponse
 ```
+
+The same `getChatEngine()` selector is used by BotWorker/workflow AI, Test Chat, Test Assignment, Live Assignment, Shadow Inbox, Replay Compare, and the generic ChatBot proxy. V4 is refused for shop IDs outside the configured allowlist.
 
 ### 5.2 Legacy pipeline (`_chat_impl`) — ลำดับจริง
 

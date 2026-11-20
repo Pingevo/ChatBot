@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 14851 |
-| active_integrity_prefix_sha256 | `464e7b22359a5c08a8047ec3580952553ececac738b4cf9ee67c8a3282d853cf` |
-| active_line_count_at_baseline | 14851 |
-| active_integrity_recorded_at | 2026-11-20 (+0700), reconciled main append-only tail as A-351/A-352; checkpoint A-350 retained; semantic coverage partial |
+| active_integrity_prefix_lines | 14865 |
+| active_integrity_prefix_sha256 | `e7be557ac91cb5bc1d06616723d1ccc70afe5f759045979e88e9250bc231af8f` |
+| active_line_count_at_baseline | 14865 |
+| active_integrity_recorded_at | 2026-11-20 (+0700), indexed global engine selector closeout A-353 after A-351/A-352; checkpoint A-350 retained; semantic coverage partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -401,6 +401,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 14834–14840 | read + indexed (A-350 Zaapi quality checkpoint; exact task tail) |
 | 14841–14846 | read + indexed (A-351 imported main v4 bridge tail; source main A-331) |
 | 14847–14851 | read + indexed (A-352 imported main v4 config tail; source main A-332) |
+| 14853–14865 | read + indexed (A-353 global engine selector and integration closeout) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -875,3 +876,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-350 | 14834–14840 | Pending Zaapi answer quality worktree checkpoint / 2026-11-20 | decision/approval | Saved all 19 pending files in a branch-local commit at user request to clean the worktree. Focused 66 passed; offline 2424 passed/17 skipped/1 xfailed; BotWorker boundary 25/25, v4 mock, typecheck, diff check passed. | verified | No PR or main merge of the answer-quality branch; live answer replay remains. v4 files duplicate remote main byte-for-byte and are kept in checkpoint only for lossless preservation. |
 | A-351 | 14841–14846 | ChatBlackshark v4 bridge log reconciled from main / 2026-11-20 | passed behavior | Preserved main-side append-only record during merge; BotWorker test-mode allowlist, identity-checked call, image description persistence and handoff routing; verification claims remain those recorded on main. | verified | Imported raw log content; legacy production activation remains pending. |
 | A-352 | 14847–14851 | ChatBlackshark v4 config example reconciled from main / 2026-11-20 | documentation | Preserved main-side deployment config record during merge; three env variable placeholders and .env.web placement note. | verified | No secret value; production server configuration remains pending. |
+| A-353 | 14853–14865 | Global Chat Engine selector v4 integration / 2026-11-20 | passed behavior | `SystemConfig.chat_engine` selects legacy/v2/v3/v4 across AI-answer entry points; Python receives explicit flags including false/false for legacy; v4 is gated by shop allowlist and uses ChatBlackshark answer/test-answer APIs. Regression tests: selector 2 passed; offline suite 2,426 passed/17 skipped/1 xfailed; TypeScript check passed. ChatBlackshark PR #15/#16 already merged with backend suites 75/76 and Vercel checks green. | verified | ChatBotProductMS branch review/PR/merge remains pending at this log point. All verification offline/mock; no provider/customer traffic, Mongo/Supabase writes, or Zaapi DB import. Coverage remains partial. |

@@ -21,11 +21,11 @@ import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { serverConfig } from "@/backend/lib/config";
 import {
-  shouldUseChatV2,
-  shouldUseChatV3,
+  getChatEngine,
   getBotProductLimit,
   type Platform,
 } from "@/backend/service/systemConfigService";
+import { callChatBlacksharkV4, resolveChatShopId } from "@/backend/service/botCallService";
 import { workflowEngine } from "@/backend/service/workflowEngine";
 import { handoffService } from "@/backend/service/handoffService";
 
@@ -94,6 +94,25 @@ export async function POST(req: NextRequest) {
 
   // ── bot leaf — Python /chat (payload เดียวกับ /api/chatbot/chat + flush เดิม) ──
   const callTestBot = async (): Promise<{ ok: boolean; body: Record<string, unknown>; httpStatus?: number }> => {
+    const chatEngine = await getChatEngine();
+    if (chatEngine === "v4") {
+      try {
+        if (!shop) throw new Error("chat_engine_shop_required");
+        const shopId = await resolveChatShopId(platform, shop);
+        const data = await callChatBlacksharkV4({
+          platform, message: combinedText, shopId, shopName: shop, history,
+          images: absImages, simulate: true, testSource: "test_chat",
+        });
+        return { ok: true, body: {
+          answer: data.answer, products: data.products || [], source: data.source,
+          chat_engine: data.chat_engine, image_desc: data.image_desc,
+          handoff_to_admin: data.handoff_required === true,
+          handoff_reason: data.handoff_reason,
+        } };
+      } catch (err) {
+        return { ok: false, httpStatus: 502, body: { error: err instanceof Error ? err.message : "ChatBlackshark unavailable" } };
+      }
+    }
     const baseUrl = serverConfig.chatbotBaseUrls[platform] || serverConfig.chatbotBaseUrls.shopee;
     const url = baseUrl.replace(/\/$/, "") + "/chat";
     const payload: Record<string, unknown> = { message: combinedText, limit, history };
@@ -102,10 +121,10 @@ export async function POST(req: NextRequest) {
     payload.simulate_assignment = true;
     if (body.ticket_state) payload.ticket_state = body.ticket_state;
     if (absImages.length > 0) payload.images = absImages;
-    const useV3 = await shouldUseChatV3();
-    const useV2 = !useV3 && await shouldUseChatV2();
-    if (useV3) payload.use_v3 = true;
-    else if (useV2) payload.use_v2 = true;
+    const useV3 = chatEngine === "v3";
+    const useV2 = chatEngine === "v2";
+    payload.use_v3 = useV3;
+    payload.use_v2 = useV2;
     try {
       const resp = await fetch(url, {
         method: "POST",
@@ -130,6 +149,7 @@ export async function POST(req: NextRequest) {
         ok: true,
         body: {
           answer: data.answer || "",
+          chat_engine: data.chat_engine || chatEngine,
           answer_segments: data.answer_segments,
           products: data.products || [],
           elapsed: typeof data.elapsed === "number" ? data.elapsed : undefined,

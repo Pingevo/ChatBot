@@ -160,13 +160,14 @@ export async function generateShadowReply(opts: {
   inboundMessageId?: string;
   generatedBy?: string;  // ⚡ Phase 3A — admin_id ของคนกด Generate (KPI)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chatEngine?: "legacy" | "v2" | "v3";
+  chatEngine?: "legacy" | "v2" | "v3" | "v4";
   botCaller: (params: {
     platform: Platform;
     message: string;
     history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[];
     shopId: string;
     shopName?: string;
+    messageId?: string;
     images?: string[];
     conversationId?: string;  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
   }) => Promise<{
@@ -277,6 +278,7 @@ export async function generateShadowReply(opts: {
     history,
     shopId: conv.shop_id,
     shopName: conv.shop_name,
+    messageId: inboundMsg.message_id,
     conversationId,  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
     ...(botImages.length > 0 ? { images: botImages } : {}),
   });
@@ -375,13 +377,14 @@ export async function generateConversationShadowReplies(opts: {
   conversationId: string;
   generatedBy?: string;  // ⚡ Phase 3A — admin_id ของคนกด Generate (KPI)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chatEngine?: "legacy" | "v2" | "v3";
+  chatEngine?: "legacy" | "v2" | "v3" | "v4";
   botCaller: (params: {
     platform: Platform;
     message: string;
     history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[];
     shopId: string;
     shopName?: string;
+    messageId?: string;
     images?: string[];
     conversationId?: string;  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
   }) => Promise<{
@@ -465,6 +468,7 @@ export async function generateConversationShadowReplies(opts: {
       history: [...trimmedHistory], // copy เพื่อกัน mutation
       shopId: conv.shop_id,
       shopName: conv.shop_name,
+      messageId: pair.inboundMsg.message_id,
       conversationId: botStateConversationId,  // ⚡ ส่ง conversation_id ให้ bot เพื่อบันทึก/ดึง anchor จาก timeline
       ...(botImages.length > 0 ? { images: botImages } : {}),
     });

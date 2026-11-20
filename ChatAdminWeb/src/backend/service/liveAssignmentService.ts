@@ -16,7 +16,8 @@ import { handoffService } from "./handoffService";
 import { triggerService } from "./triggerService";
 import { logAdminEvent } from "./adminLogService";
 import { serverConfig } from "../lib/config";
-import { shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "./systemConfigService";
+import { getChatEngine, getBotProductLimit } from "./systemConfigService";
+import { callChatBlacksharkV4 } from "./botCallService";
 import { parseRawMessage, toProductCard } from "./messageMediaParser";
 import { productService } from "./productService";
 import { toBotText, toBotImages } from "./messageService";
@@ -50,7 +51,7 @@ export interface LiveQaItem {
   bot_model?: string;
   bot_elapsed?: number;
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chat_engine?: "legacy" | "v2" | "v3";
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
   bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   bot_intent?: unknown;
   bot_retrieval_info?: unknown;
@@ -111,6 +112,8 @@ async function callBot(params: {
   itemId?: string;
   orderSn?: string;  // ⚡ Phase 3C — order_sn จากการ์ดคำสั่งซื้อที่ลูกค้าแชร์
   images?: string[];  // ⚡ Phase 1A — URL รูป/วิดีโอที่ลูกค้าส่ง (ส่งให้ bot vision pass)
+  conversationId?: string;
+  messageId?: string;
 }): Promise<{
   answer: string;
   source?: string;
@@ -125,9 +128,17 @@ async function callBot(params: {
   handoff_reason?: string;
   image_desc?: string;  // ⚡ vision description ของรูป current turn (cache กัน re-read)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chat_engine?: "legacy" | "v2" | "v3";
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
 }> {
-  const { platform, message, history, shopId, shopName, itemId, orderSn, images } = params;
+  const { platform, message, history, shopId, shopName, itemId, orderSn, images, conversationId, messageId } = params;
+  const chatEngine = await getChatEngine();
+  if (chatEngine === "v4") {
+    const data = await callChatBlacksharkV4({ platform, message, history, shopId, shopName,
+      itemId, orderSn, images, conversationId, messageId,
+      simulate: true, testSource: "test_assignment" });
+    return { ...data, handoff_to_admin: data.handoff_required === true,
+      handoff_reason: data.handoff_reason };
+  }
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
   const headers: Record<string, string> = {
@@ -144,10 +155,10 @@ async function callBot(params: {
   if (images && images.length > 0) body.images = images;
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
   //    v3 มี priority เหนือ v2
-  const useV3 = await shouldUseChatV3();
-  const useV2 = !useV3 && await shouldUseChatV2();
-  if (useV3) body.use_v3 = true;
-  else if (useV2) body.use_v2 = true;
+  const useV3 = chatEngine === "v3";
+  const useV2 = chatEngine === "v2";
+  body.use_v3 = useV3;
+  body.use_v2 = useV2;
 
   const MAX_429_RETRIES = 3;
   const RATE_LIMIT_WAIT_MS = 60_000;
@@ -634,6 +645,8 @@ export async function closeChat(opts: {
         itemId: userItemId,
         orderSn: userOrderSn,  // ⚡ Phase 3C
         images: userImages.length > 0 ? userImages : undefined,  // ⚡ Phase 1A
+        conversationId,
+        messageId: msg.message_id,
       });
 
       if (!botResp.answer || botResp.answer.trim() === "") {
@@ -1000,6 +1013,8 @@ export async function batchReplay(opts: {
             itemId: userItemId,
             orderSn: userOrderSn,  // ⚡ Phase 3C
             images: userImages.length > 0 ? userImages : undefined,  // ⚡ Phase 1A
+            conversationId: convId,
+            messageId: msg.message_id,
           });
 
           if (!botResp.answer || botResp.answer.trim() === "") {

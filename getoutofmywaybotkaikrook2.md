@@ -14849,3 +14849,17 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Added CHATBLACKSHARK_ENGINE_URL, CHATBLACKSHARK_ENGINE_TOKEN, and CHATBLACKSHARK_BOTWORKER_SHOP_IDS to ChatAdminWeb/.env.example with Docker .env.web placement note.
 - Documentation-only change; no runtime code or secrets committed. Confirmed .env.example has all three names and git diff --check passes.
 - Local ChatAdminWeb/.env configured for Black Shark test mode; remote Docker .env.web is inaccessible from this workspace and still requires server access.
+
+## กำลังจะทำ — global Chat Engine selector ทุกหน้าที่เรียก AI + PR เข้า main (2026-11-20)
+- ผู้ใช้ยืนยันให้สวิตช์ legacy/v2/v3/v4 มีผลทุกหน้า และสั่ง commit/PR/merge เข้า main พร้อมตรวจ ChatBlackshark
+- ขอบเขต: ChatBotProductMS ทุก AI-answer entry point; ChatBlackshark `/api/engine/test-answer` สำหรับหน้า synthetic/test ที่ไม่มี message row
+- ตรวจ PR #13/#14 ของ ChatBlackshark ว่า merge เข้า main แล้ว; branch API ใหม่ต้องเริ่มจาก main ปัจจุบัน ไม่ duplicate adapter/tickets commits
+- ตรวจไฟล์ค้างใน ChatBlackshark main; แยกงาน Zaapi import/data ออกจาก v4 endpoint, ไม่แตะ main worktree ที่มี dirty/untracked files
+- Verification ก่อน publish: ChatBotProductMS offline suite + TypeScript check + diff check; ChatBlackshark backend tests + syntax/diff checks; ไม่มี provider/customer/DB writes
+
+## ผ่านแล้ว — global Chat Engine selector v4 integration (2026-11-20)
+- ใช้ `SystemConfig.chat_engine` เป็น selector กลาง `legacy|v2|v3|v4` สำหรับ BotWorker/workflow, Test Chat, Test Assignment, Live Assignment, Shadow Inbox, Replay Compare และ generic chatbot proxy; v4 ยืนยัน shop allowlist ก่อนเรียก Blackshark
+- Python รับ `use_v2/use_v3` แบบ explicit รวม `false/false` เพื่อบังคับ legacy ไม่ให้ environment ของ deployment แทรกการเลือก engine; เพิ่ม regression test 2 เคส
+- ChatBlackshark PR #15 test-answer adapter และ PR #16 Zaapi data/import แยกงานและ merge แล้ว; backend tests ผ่าน 75 และ 76 ตาม branch; Vercel check ผ่านทั้งคู่
+- ChatBotProductMS ตรวจ `pytest docs/test/offline`: 2,426 passed, 17 skipped, 1 xfailed; TypeScript `tsc --noEmit --incremental false` และ `git diff --check` ผ่าน
+- ทดสอบแบบ offline/mock เท่านั้น; ไม่ยิง provider/customer, ไม่เขียน Mongo/Supabase และไม่ import Zaapi เข้า DB; ChatBotProductMS PR ยังรอ review/merge ณ เวลาบันทึก

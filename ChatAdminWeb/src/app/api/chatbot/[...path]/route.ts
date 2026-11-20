@@ -12,7 +12,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { serverConfig } from "@/backend/lib/config";
 import { requireAuth } from "@/backend/middleware/authorize";
-import { shouldUseChatV2, shouldUseChatV3 } from "@/backend/service/systemConfigService";
+import { getChatEngine } from "@/backend/service/systemConfigService";
+import { callChatBlacksharkV4, resolveChatShopId } from "@/backend/service/botCallService";
 
 type Platform = "shopee" | "lazada" | "tiktok";
 
@@ -56,25 +57,47 @@ async function proxy(req: NextRequest, segments: string[]) {
   let body: BodyInit | undefined;
   if (method !== "GET" && method !== "HEAD") {
     const rawBody = await req.text();
-    // ⚡ chat_engine — ถ้าเป็น POST /chat ให้ inject use_v2/use_v3 จาก SystemConfig
+    // The global SystemConfig value overrides request-provided engine flags.
     if (method === "POST" && path === "chat") {
+      let parsed: Record<string, any>;
       try {
-        const parsed = JSON.parse(rawBody);
-        // ⚡ chat_v3 — ส่ง use_v3 ถ้า config เลือก v3 (มี priority เหนือ v2)
-        if (parsed.use_v3 === undefined) {
-          const useV3 = await shouldUseChatV3();
-          if (useV3) parsed.use_v3 = true;
-        }
-        // ⚡ chat_v2 — ส่ง use_v2 ถ้า config เลือก v2 และไม่ได้เลือก v3
-        if (parsed.use_v2 === undefined && parsed.use_v3 !== true) {
-          const useV2 = await shouldUseChatV2();
-          if (useV2) parsed.use_v2 = true;
-        }
-        body = JSON.stringify(parsed);
+        const value = JSON.parse(rawBody);
+        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid_body");
+        parsed = value;
       } catch {
-        // ถ้า parse ไม่ได้ → ส่ง body เดิม
-        body = rawBody;
+        return NextResponse.json({ error: "invalid_json_body" }, { status: 400 });
       }
+      const chatEngine = await getChatEngine();
+      if (chatEngine === "v4") {
+        try {
+          const requestedPlatform = (segments[0] || "").toLowerCase();
+          const platform: Platform = ["shopee", "lazada", "tiktok"].includes(requestedPlatform)
+            ? requestedPlatform as Platform : "shopee";
+          const shopName = typeof parsed.shop_name === "string" ? parsed.shop_name :
+            typeof parsed.shop === "string" ? parsed.shop : "";
+          const shopId = typeof parsed.shop_id === "string" ? parsed.shop_id :
+            await resolveChatShopId(platform, shopName);
+          const result = await callChatBlacksharkV4({
+            platform, shopId, shopName,
+            message: typeof parsed.message === "string" ? parsed.message : "",
+            history: Array.isArray(parsed.history) ? parsed.history : [],
+            images: Array.isArray(parsed.images) ? parsed.images : [],
+            itemId: typeof parsed.item_id === "string" ? parsed.item_id : undefined,
+            orderSn: typeof parsed.order_sn === "string" ? parsed.order_sn : undefined,
+            conversationId: typeof parsed.conversation_id === "string" ? parsed.conversation_id : undefined,
+            messageId: typeof parsed.message_id === "string" ? parsed.message_id : undefined,
+            simulate: parsed.simulate_assignment === true,
+            testSource: parsed.simulate_assignment === true ? "test_chat" : undefined,
+          });
+          return NextResponse.json(result);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "chat_engine_unavailable";
+          return NextResponse.json({ error: "chat_engine_unavailable", message }, { status: 502 });
+        }
+      }
+      parsed.use_v2 = chatEngine === "v2";
+      parsed.use_v3 = chatEngine === "v3";
+      body = JSON.stringify(parsed);
     } else {
       body = rawBody;
     }

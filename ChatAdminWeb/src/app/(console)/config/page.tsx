@@ -45,8 +45,8 @@ interface SystemConfig {
   shopee_bot_url: string;
   tiktok_bot_url: string;
   lazada_bot_url: string;
-  // ⚡ chat_engine — "legacy" (app.py) หรือ "v2" (chat_v2.py) หรือ "v3" (chatbotv3)
-  chat_engine: "legacy" | "v2" | "v3";
+  // Global answer engine — every page and API entry point reads this value.
+  chat_engine: "legacy" | "v2" | "v3" | "v4";
   // ⚡ Phase 8 — LLM context limit (จำนวนสินค้าสูงสุดที่ส่งเข้า LLM)
   llm_context_limit: number;
   // ⚡ Task 5B3-D — grouped retrieval flags (bot อ่านจาก DB, env fallback)
@@ -160,7 +160,7 @@ export default function ConfigPage() {
   // ⚡ Workflow engine settings ย้ายไป /admin-config แล้ว
   const [editingBotUrl, setEditingBotUrl] = useState<Platform | null>(null);
   const [botUrlDraft, setBotUrlDraft] = useState("");
-  const [chatEngineDraft, setChatEngineDraft] = useState<"legacy" | "v2" | "v3">("legacy");
+  const [chatEngineDraft, setChatEngineDraft] = useState<"legacy" | "v2" | "v3" | "v4">("legacy");
   const [kbReadiness, setKbReadiness] = useState<{ ready: boolean; reason: string } | null>(null);
 
   const load = useCallback(async () => {
@@ -301,14 +301,14 @@ export default function ConfigPage() {
     }
   }
 
-  // ⚡ chat_engine — เลือก logic ตอบของบอท (legacy / v2)
+  // Global chat engine selection — persisted in SystemConfig for every page.
   async function handleSaveChatEngine() {
     if (!config) return;
     const ok = await confirm.ask({
       title: `เปลี่ยน Chat Engine เป็น "${chatEngineDraft}"?`,
-      message: chatEngineDraft === "v2"
-        ? "⚠️ จะใช้ chat_v2 (pipeline ใหม่ 8 stages) สำหรับทุกหน้า — shadowbot, botworker, test-assignment, live-assignment, replay-compare, testchat"
-        : "จะกลับใช้ legacy app.py chat() สำหรับทุกหน้า (default ปลอดภัย)",
+      message: chatEngineDraft === "v4"
+        ? "ทุกหน้าที่เรียก AI จะใช้ ChatBlackshark v4 หลังบันทึก ร้านที่ยังไม่ได้เปิดใช้ v4 จะไม่ถูกส่งไปตอบด้วยข้อมูลผิดร้าน"
+        : `ทุกหน้าที่เรียก AI จะเปลี่ยนไปใช้ ${chatEngineDraft} หลังบันทึก ส่วนข้อความเดิมที่บันทึกไปแล้วจะไม่เปลี่ยน`,
       confirmText: "บันทึก",
     });
     if (!ok) return;
@@ -527,31 +527,32 @@ export default function ConfigPage() {
           </div>
         </Card>
 
-        {/* ⚡ Chat Engine — เลือก logic ตอบของบอท (legacy / v2) */}
+        {/* Global Chat Engine — one selector for all answer entry points */}
         <Card className="p-4">
           <div className="flex items-center gap-2 mb-3">
             <Cpu size={14} className="text-brand" />
             <h2 className="text-sm font-semibold text-text">Chat Engine (logic ตอบของบอท)</h2>
-            <Badge tone={config?.chat_engine === "v2" ? "brand" : "neutral"} className="ml-auto">
-              {config?.chat_engine === "v2" ? "v2" : "legacy"}
+            <Badge tone={config?.chat_engine === "v4" ? "brand" : config?.chat_engine === "v2" ? "brand" : "neutral"} className="ml-auto">
+              {config?.chat_engine || "legacy"}
             </Badge>
           </div>
           <div className="border-t border-border/60 pt-3">
             <div className="flex items-center justify-between mb-2">
               <div className="text-xs text-text-muted">
-                มีผลทุกหน้า: shadowbot, botworker, test-assignment, live-assignment, replay-compare, testchat
+                ค่ากลางเดียวสำหรับทุกหน้าที่เรียก AI: BotWorker, Test Chat, Shadow Inbox, Assignment, Live Assignment, Replay และ API
               </div>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <SelectField
                 value={chatEngineDraft}
-                onChange={(e) => setChatEngineDraft(e.target.value as "legacy" | "v2" | "v3")}
+                onChange={(e) => setChatEngineDraft(e.target.value as "legacy" | "v2" | "v3" | "v4")}
                 disabled={!editable || saving}
                 className="min-w-0 max-w-full flex-1 rounded-md bg-surface border border-border px-2 py-1 text-xs text-text"
               >
                 <option value="legacy">legacy — app.py chat() (default, ปลอดภัย)</option>
                 <option value="v2">v2 — chat_v2.py (pipeline ใหม่ 8 stages)</option>
                 <option value="v3">v3 — chatbotv3 (OpenRouter-first, LLM ตอบเอง + match สินค้าจริง)</option>
+                <option value="v4">v4 — ChatBlackshark (intent + KB + legacy context)</option>
               </SelectField>
               <Button size="sm" className="shrink-0" onClick={handleSaveChatEngine} disabled={saving || !editable || chatEngineDraft === config?.chat_engine}>
                 {saving ? <Loading size={12} /> : "บันทึก"}
@@ -567,6 +568,12 @@ export default function ConfigPage() {
               <div className="mt-2 text-[11px] text-info flex items-center gap-1">
                 <AlertCircle size={11} />
                 กำลังใช้ chatbotv3 — ส่ง context ดิบให้ OpenRouter, LLM ตอบเอง + match สินค้าจริงจาก ShpProducts
+              </div>
+            )}
+            {config?.chat_engine === "v4" && (
+              <div className="mt-2 text-[11px] text-info flex items-center gap-1">
+                <AlertCircle size={11} />
+                กำลังใช้ ChatBlackshark v4 ทุกหน้าที่เรียก AI; ต้องตั้งค่า URL, token และร้านที่อนุญาตบน API
               </div>
             )}
           </div>

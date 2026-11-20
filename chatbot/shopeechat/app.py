@@ -170,14 +170,13 @@ class ChatRequest(BaseModel):
     #    status_conversation): {episode_id, outcome: resolved|cancelled,
     #    actor_id, occurred_at (ISO)} — apply เฉพาะ episode ตรง + open เท่านั้น
     claim_outcome: dict[str, Any] | None = Field(None, description="admin claim outcome event: {episode_id, outcome: resolved|cancelled, actor_id, occurred_at}")
-    # ⚡ per-request chat_v2 override — shadowbot/replay ส่ง use_v2=true เพื่อทดสอบ chat_v2
-    #    โดยไม่กระทบ traffic จริง (ที่ยังใช้ legacy ตาม USE_LEGACY_CHAT env)
-    use_v2: bool | None = Field(None, description="ถ้า true → บังคับใช้ chat_v2 แม้ USE_LEGACY_CHAT=1 (สำหรับ shadowbot/replay)")
+    # Server-owned global engine selector. When either field is present, the
+    # pair is authoritative, including (False, False) for explicit legacy.
+    use_v2: bool | None = Field(None, description="เลือก chat_v2; ใช้คู่กับ use_v3 เพื่อระบุ engine กลาง")
     # ⚡ chatbotv3 — OpenRouter-first paradigm (2026-09-20)
     #   ส่ง raw context ให้ OpenRouter ตอบ → match สินค้ากับ ShpProducts
-    #   เปิดใช้ผ่าน env USE_CHAT_V3=1 หรือ per-request req.use_v3=True
-    #   ไม่กระทบ legacy/v2 (default ยังใช้ legacy/v2 ตาม USE_LEGACY_CHAT)
-    use_v3: bool | None = Field(None, description="ถ้า true → บังคับใช้ chatbotv3 (สำหรับ shadowbot/replay โดยไม่กระทบ traffic จริง)")
+    #   env เป็น default เฉพาะ request ที่ไม่ได้ส่ง engine selector จาก ChatAdminWeb
+    use_v3: bool | None = Field(None, description="เลือก chatbotv3; ใช้คู่กับ use_v2 เพื่อระบุ engine กลาง")
     # ⚡ Phase 8 — LLM context limit (จำนวนสินค้าสูงสุดที่ส่งเข้า LLM เป็น context)
     #    แยกจาก limit (frontend display) — ปรับได้จากหน้า config (default 30, range 10-50)
     #    ถ้า None → ใช้ _LLM_CONTEXT_LIMIT (30) ตาม default
@@ -888,9 +887,11 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
     #   (marker fallback เฉพาะตอนไม่ทราบ state)
     from . import warranty_flow as _wf_lock
     if _wf_lock._is_active_post_handoff(req, req.history):
+        _explicit_engine = req.use_v2 is not None or req.use_v3 is not None
         _locked_engine = (
-            req.use_v3 or os.environ.get("USE_CHAT_V3", "0") == "1"
-            or req.use_v2 or os.environ.get("USE_LEGACY_CHAT", "1") != "1")
+            bool(req.use_v3 or req.use_v2) if _explicit_engine else
+            os.environ.get("USE_CHAT_V3", "0") == "1"
+            or os.environ.get("USE_LEGACY_CHAT", "1") != "1")
         if _locked_engine:
             return ChatResponse(**_wf_lock._build_post_handoff_response(
                 req, {"steps": [], "total_start": _total_start},
@@ -900,19 +901,20 @@ def _chat_impl(req: ChatRequest, snap=_gen.SNAP_UNSET) -> ChatResponse:
     #   ทุกตัวรับ captured value เดียวกัน (None คือ captured-None, ไม่ re-resolve);
     #   pointer flip/TTL expiry ระหว่าง request ไม่เปลี่ยน generation ที่เห็น
     _snap = _gen.resolve_snapshot() if snap is _gen.SNAP_UNSET else snap
+    # A server-selected engine is explicit, including explicit False values,
+    # so a global SystemConfig selection cannot be overridden by deployment env.
+    _explicit_engine = req.use_v2 is not None or req.use_v3 is not None
+    _use_v3 = bool(req.use_v3) if _explicit_engine else os.environ.get("USE_CHAT_V3", "0") == "1"
+    _use_v2 = bool(req.use_v2) if _explicit_engine else os.environ.get("USE_LEGACY_CHAT", "1") != "1"
     # ⚡ chatbotv3 — OpenRouter-first paradigm (2026-09-20)
-    #   USE_CHAT_V3=1 หรือ req.use_v3=True → route ไป chatbotv3.engine.chat_v3
-    #   ไม่กระทบ legacy/v2 (default ยังใช้ legacy/v2 ตาม USE_LEGACY_CHAT)
-    if req.use_v3 or os.environ.get("USE_CHAT_V3", "0") == "1":
+    if _use_v3:
         from . import chatbotv3
         _resp = chatbotv3.chat_v3(req, snap=_snap)
         _resp["chat_engine"] = "v3"  # ⚡ บันทึกว่าใช้ chatbotv3
         return ChatResponse(**_resp)
-    # ⚡ chat_v2 — pipeline ใหม่ สลับด้วย env var หรือ per-request flag
-    #   USE_LEGACY_CHAT=1 (default) → legacy chat()
-    #   USE_LEGACY_CHAT=0          → chat_v2 ทั้งหมด
-    #   req.use_v2=True            → บังคับ chat_v2 (สำหรับ shadowbot/replay โดยไม่กระทบ traffic จริง)
-    if req.use_v2 or os.environ.get("USE_LEGACY_CHAT", "1") != "1":
+    # ⚡ chat_v2 — global SystemConfig selection takes precedence; env is
+    # retained only for callers that omit both per-request selector fields.
+    if _use_v2:
         from . import chat_v2
         _resp = chat_v2.chat_v2(req, snap=_snap)
         _resp["chat_engine"] = "v2"  # ⚡ บันทึกว่าใช้ chat_v2
