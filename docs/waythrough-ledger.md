@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 14605 |
-| active_integrity_prefix_sha256 | `2fb1ae8979a54c76b2822b78825e1fe9d4a0b21cc09ff40fa2636ed9204e6d11` |
-| active_line_count_at_baseline | 14605 |
-| active_integrity_recorded_at | 2026-11-20 (+0700), ChatBlackshark v4 bridge indexed (A-331); semantic coverage remains partial |
+| active_integrity_prefix_lines | 14610 |
+| active_integrity_prefix_sha256 | `a20bb84dbc03cabf7db2b353520f1e530a44d4f2421886aeb006483f8f8cb401` |
+| active_line_count_at_baseline | 14610 |
+| active_integrity_recorded_at | 2026-11-20 (+0700), ChatBlackshark v4 config example indexed (A-332); semantic coverage remains partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -380,6 +380,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 14583–14590 | read + indexed (A-329 confirmed-compat targets in unanswered asks — declared_compat_targets + confirmed_targets field; exact task tail) |
 | 14591–14599 | read + indexed (A-330 G1 compat verdict → model context — CompatVerdict.asked + context verdict block + compose split; exact task tail) |
 | 14600–14605 | read + indexed (A-331 ChatBlackshark v4 bridge; exact task tail) |
+| 14606–14610 | read + indexed (A-332 ChatBlackshark v4 config example; exact task tail) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -833,3 +834,4 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-329 | 14583–14590 | Confirmed-compat targets in unanswered asks (aumporn Strava gap) / 2026-11-21 | regression lock | Aumporn replay: Strava asks answered with generic boilerplate although W01 desc declares supported apps (Imilab Fit, Glory Fit); user wants direct answer plus the definitely-supported list. New policy_resolver.declared_compat_targets enumerates spec-db device keys matched by _declares plus Latin app names after แอปพลิเคชัน/แอปฯ/แอป (split on ,|และ|หรือ; containment-dedupe, cap 8) — display data only, same declare semantics as declares_device (no relation/negation check). UnansweredNeed gains confirmed_targets, populated at the capability-ask no_evidence site by resolving subject cards via by_req+subject_refs (empty refs → nothing, fail closed); _unanswered_segment appends "ที่ระบุไว้ว่ารองรับตามข้อมูลสินค้า: X, Y". Real docs: W01 -> pixel+Imilab Fit+Glory Fit; CTL301 -> iphone 14 pro/13/12/11/x/7, ipad pro/air. Suite 2378 passed 0 regressions; commit 7e1606b. | verified | Leading-negative polarity ("ไม่ซิงค์ใช่ไหม" confirm-the-guess) still untyped in TurnPlan; live matrix rerun in flight for F1-F3 answer verification. Coverage partial. |
 | A-330 | 14591–14599 | G1: compat verdict as model context, render only passing/asked subjects / 2026-11-21 | regression lock | User review of pingevox replay: recommend answers listed a deterministic verdict line per candidate (verbose, templated) including failing ones; user wants verdict data fed to LLM for natural spec+compat prose and failing candidates not mentioned. CompatVerdict gains `asked` (named subject_refs match — deictic asks get stamped via apply_resolved_subject_refs; zaapi verdicts always asked). context_text serializes a "ผลตรวจความเข้ากันได้" verdict block for ALL verdicts (compatible + _verdict_hint table; asked-incompatible plain; anonymous-incompatible marked "ห้ามเสนอ/กล่าวถึง" so model knows not to recommend). compose_answer splits: asked → deterministic segment (direct answer to a direct question); anonymous compatible → model composes (deterministic fallback when product_text empty); anonymous incompatible → silent, need still covered. Suite 2383 passed 0 regressions (+5 tests); branch fix/compat-verdict-llm-context. | verified | Featured-card pick still not verdict-aware (user-deferred item 3). Live replay verify pending post-merge. Coverage partial. |
 | A-331 | 14600–14605 | ChatBlackshark BotWorker v4 bridge / 2026-11-20 | passed behavior | Exact-shop test-mode opt-in to external answer API; typed conversation/message/shop/platform identity; checked response identity; persisted image description; v4 shadow label; existing handoff assignment and workflow delivery suppression. Typecheck, v4 behavioral test, BotWorker boundary 25/25 passed. | verified | Production BotWorker routing not enabled; URL/token/shop allowlist and controlled end-to-end run remain. Semantic coverage partial. |
+| A-332 | 14606–14610 | ChatBlackshark v4 deployment config example / 2026-11-20 | passed behavior | Added URL, bearer token, and shop allowlist placeholders to ChatAdminWeb/.env.example with Docker .env.web placement note; no secret value committed. | verified | Documentation only. Production Docker .env.web and restart require server access. Semantic coverage partial. |
