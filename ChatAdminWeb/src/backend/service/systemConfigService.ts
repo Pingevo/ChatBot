@@ -19,6 +19,7 @@ import { SAFETY } from "../lib/safety";
 import { isSafeFetchUrl } from "../lib/urlSafety";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
+export type ChatEngine = "legacy" | "v2" | "v3" | "v4";
 
 export interface SystemConfigDoc extends Document {
   config_key: string;
@@ -87,8 +88,9 @@ export interface SystemConfigDoc extends Document {
   // "legacy" = app.py chat() (default, ปลอดภัย)
   // "v2"     = chat_v2.py (pipeline ใหม่ 8 stages)
   // "v3"     = chatbotv3/ (OpenRouter-first, LLM ตอบเอง + match สินค้าจริง)
-  // มีผลทุกหน้า: shadowbot, botworker, test-assignment, live-assignment, replay-compare, testchat
-  chat_engine: 'legacy' | 'v2' | 'v3';
+  // "v4"     = ChatBlackshark engine with shop-scoped legacy context
+  // มีผลกับทุกหน้า/API ที่เรียก AI: shadowbot, botworker, assignments, replay, testchat
+  chat_engine: ChatEngine;
 
   // ⚡ Phase 8 — LLM context limit (จำนวนสินค้าสูงสุดที่ส่งเข้า LLM เป็น context)
   // แยกจาก frontend display limit (req.limit) — ค่านี้ควบคุมว่า LLM เห็นสินค้ากี่ชิ้น
@@ -162,7 +164,7 @@ function getSafeDefaults(): Partial<SystemConfigDoc> {
     tiktok_bot_url: process.env.CHATBOT_BASE_URL_TIKTOK || 'http://127.0.0.1:8012',
     lazada_bot_url: process.env.CHATBOT_BASE_URL_LAZADA || 'http://127.0.0.1:8011',
     // ⚡ chat_engine — default "legacy" (ปลอดภัย), เปลี่ยนได้จากหน้า config
-    chat_engine: (process.env.CHAT_ENGINE as 'legacy' | 'v2' | 'v3') || 'legacy',
+    chat_engine: parseChatEngine(process.env.CHAT_ENGINE),
     // ⚡ Phase 8 — LLM context limit (default 30, range 10-50)
     llm_context_limit: Number(process.env.LLM_CONTEXT_LIMIT || 30),
     // ⚡ Task 5B3-D — grouped retrieval flags (default ปิด — DB เป็น owner หลังเขียน)
@@ -234,7 +236,7 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     lazada_bot_url: dbConfig.lazada_bot_url ?? safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8011',
 
     // ⚡ chat_engine — "legacy" (default) หรือ "v2"
-    chat_engine: dbConfig.chat_engine ?? safeDefaults.chat_engine ?? 'legacy',
+    chat_engine: parseChatEngine(dbConfig.chat_engine ?? safeDefaults.chat_engine),
 
     // ⚡ Phase 8 — LLM context limit (default 30, range 10-50)
     llm_context_limit: dbConfig.llm_context_limit ?? safeDefaults.llm_context_limit ?? 30,
@@ -312,7 +314,7 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         tiktok_bot_url: safeDefaults.tiktok_bot_url ?? 'http://127.0.0.1:8012',
         lazada_bot_url: safeDefaults.lazada_bot_url ?? 'http://127.0.0.1:8011',
         // ⚡ chat_engine — default "legacy"
-        chat_engine: safeDefaults.chat_engine ?? 'legacy',
+        chat_engine: parseChatEngine(safeDefaults.chat_engine),
         // ⚡ Phase 8 — LLM context limit (default 30)
         llm_context_limit: safeDefaults.llm_context_limit ?? 30,
         // ⚡ Task 5B3-D — grouped retrieval (default ปิด)
@@ -637,6 +639,16 @@ export async function shouldUseChatV2(): Promise<boolean> {
 export async function shouldUseChatV3(): Promise<boolean> {
   const config = await getSystemConfig();
   return config.chat_engine === 'v3';
+}
+
+/** Single persisted selector used by every UI and bot-answer entry point. */
+export async function getChatEngine(): Promise<ChatEngine> {
+  const config = await getSystemConfig();
+  return parseChatEngine(config.chat_engine);
+}
+
+function parseChatEngine(value: unknown): ChatEngine {
+  return value === 'v2' || value === 'v3' || value === 'v4' ? value : 'legacy';
 }
 
 /**

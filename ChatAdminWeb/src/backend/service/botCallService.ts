@@ -4,7 +4,7 @@
 // ถ้าทั้งคู่ import กันตรงๆ จะเกิด circular dependency → แยก callBot เป็น module ตรงกลาง
 import { serverConfig } from "../lib/config";
 import type { Platform } from "./systemConfigService";
-import { shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "./systemConfigService";
+import { getChatEngine, getBotProductLimit, type ChatEngine } from "./systemConfigService";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { botworkerRuntime } from "./botworkerRuntime";
 
@@ -13,6 +13,8 @@ export interface BotCallParams {
   message: string;
   shopId: string;
   shopName?: string;
+  itemId?: string;
+  orderSn?: string;
   // ⚡ Phase 1A multimodal — history อาจมี images + image_desc ของ turn ก่อนหน้า
   history: { role: "user" | "model"; text: string; images?: string[]; image_desc?: string }[];
   // ⚡ Phase 1A multimodal — URL รูปที่ลูกค้าส่งใน turn นี้
@@ -42,8 +44,8 @@ export interface BotCallResponse {
   // ⚡ Phase 1A multimodal — description ที่สกัดจากรูปใน turn นี้
   //    caller เก็บไว้ใน message doc เพื่อส่งกลับใน history ของ turn ถัดไป
   image_desc?: string;
-  // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2 / v3)
-  chat_engine?: "legacy" | "v2" | "v3" | "v4";
+  // ⚡ chat_engine — engine กลางที่ตอบ (legacy / v2 / v3 / v4)
+  chat_engine?: ChatEngine;
   handoff_required?: boolean;
   handoff_reason?: string;
   // ⚡ R5 — turn correlation id จาก Python (ตรง ai_usage.request_id) → shadow chain
@@ -171,8 +173,9 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
   const { state: ticketState, claimOutcome } =
     await resolveTicketState(params.conversationId, params.simulate, params.testSource);
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-  const useV2 = await shouldUseChatV2();
-  const useV3 = await shouldUseChatV3();
+  const chatEngine = await getChatEngine();
+  const useV2 = chatEngine === "v2";
+  const useV3 = chatEngine === "v3";
   // ⚡ Phase 8 — อ่าน llm_context_limit จาก SystemConfig (หน้า config ควบคุม)
   const { getSystemConfig } = await import("./systemConfigService");
   const sysConfig = await getSystemConfig();
@@ -202,39 +205,8 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       ])
     : params.signal;
   try {
-    const v4Shops = new Set((process.env.CHATBLACKSHARK_BOTWORKER_SHOP_IDS || "")
-      .split(",").map((value) => value.trim()).filter(Boolean));
-    if (isWorkerCall && params.messageId && params.conversationId && v4Shops.has(params.shopId)) {
-      const v4BaseUrl = process.env.CHATBLACKSHARK_ENGINE_URL?.replace(/\/$/, "");
-      const v4Token = process.env.CHATBLACKSHARK_ENGINE_TOKEN;
-      if (!v4BaseUrl || !v4Token) throw new Error("chatblackshark_engine_not_configured");
-      const resp = await fetch(`${v4BaseUrl}/api/engine/answer`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${v4Token}` },
-        body: JSON.stringify({ conversation_id: params.conversationId,
-          message_id: params.messageId, shop_id: params.shopId, platform: params.platform }),
-        ...(fetchSignal ? { signal: fetchSignal } : {}),
-      });
-      if (!resp.ok) throw new Error(`chatblackshark_engine_failed:${resp.status}`);
-      const data = await resp.json() as Record<string, unknown>;
-      if (data.conversation_id !== params.conversationId || data.message_id !== params.messageId) {
-        throw new Error("chatblackshark_engine_identity_mismatch");
-      }
-      const imageDesc = typeof data.image_desc === "string" ? data.image_desc : "";
-      if (imageDesc) {
-        const messages = await getCollection(COLLECTIONS.messages);
-        await messages.updateOne({ message_id: params.messageId, conversation_id: params.conversationId,
-          shop_id: params.shopId, platform: params.platform, image_desc: { $exists: false } },
-          { $set: { image_desc: imageDesc } });
-      }
-      return {
-        answer: typeof data.answer === "string" ? data.answer : "",
-        source: "chatblackshark", products: Array.isArray(data.products) ? data.products : [],
-        image_desc: imageDesc, chat_engine: "v4",
-        handoff_required: data.handoff_required === true,
-        handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
-        request_id: typeof data.request_id === "string" ? data.request_id : undefined,
-      };
+    if (chatEngine === "v4") {
+      return await callChatBlacksharkV4({ ...params, signal: fetchSignal });
     }
     const resp = await fetch(url, {
       method: "POST",
@@ -244,40 +216,26 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       },
       body: JSON.stringify({
         message: params.message,
-        // ⚠️ Python bot รับ field "shop" (ชื่อร้าน) ไม่ใช่ "shop_id" (ตัวเลข)
-        // ถ้าไม่มี shopName ใช้ shopId เป็น fallback (อาจไม่กรองร้านได้)
         shop: params.shopName || params.shopId,
         history: params.history,
-        // ⚡ ส่ง limit (frontend display) จาก config — ใช้ค่าเดียวกับ llm_context_limit
         limit: productLimit,
-        // ⚡ Phase 1A multimodal — ส่ง URL รูปให้ bot ใช้ Gemini vision อ่าน
-        ...(params.images && params.images.length > 0 ? { images: params.images } : {}),
-        // ⚡ Phase 2A — ส่ง ticket_state ให้บอทใช้ตัดสินใจ post-handoff
+        ...(params.images?.length ? { images: params.images } : {}),
         ...(ticketState ? { ticket_state: ticketState } : {}),
-        // ⚡ Phase 2B.6 — explicit admin claim outcome (episode-scoped;
-        //   occurred_at เป็น ISO บน wire, storage เก็บ Mongo Date)
-        ...(claimOutcome ? {
-          claim_outcome: {
-            episode_id: claimOutcome.episode_id,
-            outcome: claimOutcome.outcome,
-            actor_id: claimOutcome.actor_id,
-            occurred_at: claimOutcome.occurred_at instanceof Date
-              ? claimOutcome.occurred_at.toISOString()
-              : String(claimOutcome.occurred_at),
-          },
-        } : {}),
-        // ⚡ Phase 2A — ส่ง conversation_id + simulate ให้บอท (สำหรับ handoff API)
+        ...(claimOutcome ? { claim_outcome: {
+          episode_id: claimOutcome.episode_id,
+          outcome: claimOutcome.outcome,
+          actor_id: claimOutcome.actor_id,
+          occurred_at: claimOutcome.occurred_at instanceof Date
+            ? claimOutcome.occurred_at.toISOString()
+            : String(claimOutcome.occurred_at),
+        } } : {}),
         ...(params.conversationId ? { conversation_id: params.conversationId } : {}),
-        // ⚡ testSource → simulate_assignment=true เสมอ (กัน Python เขียน assign จริง) + test_source เพื่อ route เข้า test store
         ...(params.simulate || params.testSource ? { simulate_assignment: true } : {}),
         ...(params.testSource ? { test_source: params.testSource } : {}),
-        // ⚡ chat_engine — ส่ง use_v2/use_v3 ตามที่ config เลือก (v3 มี priority เหนือ v2)
-        ...(useV3 ? { use_v3: true } : {}),
-        ...(useV2 && !useV3 ? { use_v2: true } : {}),
-        // ⚡ Phase 8 — ส่ง llm_context_limit ให้บอท (จำนวนสินค้าใน LLM context)
+        use_v3: useV3,
+        use_v2: useV2,
         llm_context_limit: llmContextLimit,
       }),
-      // ⚡ bounded timeout / ownership abort — fetch ยอมรับ AbortSignal ตรงๆ
       ...(fetchSignal ? { signal: fetchSignal } : {}),
     });
     if (!resp.ok) throw new Error(`bot call failed: ${resp.status}`);
@@ -291,10 +249,72 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       cost: typeof data.cost === "number" ? data.cost : undefined,
       products: data.products,
       image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
-      chat_engine: useV3 ? "v3" : useV2 ? "v2" : "legacy",
+      chat_engine: chatEngine,
       request_id: typeof data.request_id === "string" ? data.request_id : undefined,
     };
   } finally {
     if (slotHeld) await releaseBotCallSlot();
   }
+}
+
+/** Route a call from any page through the globally selected ChatBlackshark engine. */
+export async function callChatBlacksharkV4(params: BotCallParams): Promise<BotCallResponse> {
+  const allowedShops = new Set((process.env.CHATBLACKSHARK_BOTWORKER_SHOP_IDS || "")
+    .split(",").map((value) => value.trim()).filter(Boolean));
+  if (!allowedShops.has(params.shopId)) throw new Error("chatblackshark_shop_not_enabled_for_v4");
+  const baseUrl = process.env.CHATBLACKSHARK_ENGINE_URL?.replace(/\/$/, "");
+  const token = process.env.CHATBLACKSHARK_ENGINE_TOKEN;
+  if (!baseUrl || !token) throw new Error("chatblackshark_engine_not_configured");
+
+  const useStoredConversation = !!params.conversationId && !!params.messageId &&
+    (!params.simulate || params.testSource === "botworker" || params.testSource === "test_assignment") &&
+    params.testSource !== "test_chat" && params.testSource !== "shadow";
+  const endpoint = useStoredConversation ? "/api/engine/answer" : "/api/engine/test-answer";
+  const explicitItemId = params.itemId || params.message.match(/\[สินค้า:\s*([^\]]+)\]/)?.[1]?.trim();
+  const payload = useStoredConversation
+    ? { conversation_id: params.conversationId, message_id: params.messageId,
+        shop_id: params.shopId, platform: params.platform }
+    : { question: params.message, history: params.history, shop_id: params.shopId,
+        shop_name: params.shopName,
+        platform: params.platform, images: params.images || [],
+        item_ids: explicitItemId ? [explicitItemId] : [], order_sn: params.orderSn };
+  const response = await fetch(`${baseUrl}${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    body: JSON.stringify(payload),
+    ...(params.signal ? { signal: params.signal } : {}),
+  });
+  if (!response.ok) throw new Error(`chatblackshark_engine_failed:${response.status}`);
+  const data = await response.json() as Record<string, unknown>;
+  if (useStoredConversation && (data.conversation_id !== params.conversationId || data.message_id !== params.messageId)) {
+    throw new Error("chatblackshark_engine_identity_mismatch");
+  }
+  const imageDesc = typeof data.image_desc === "string" ? data.image_desc :
+    typeof data.image_description === "string" ? data.image_description : "";
+  if (imageDesc && useStoredConversation && !params.simulate && params.messageId && params.conversationId) {
+    const messages = await getCollection(COLLECTIONS.messages);
+    await messages.updateOne({ message_id: params.messageId, conversation_id: params.conversationId,
+      shop_id: params.shopId, platform: params.platform, image_desc: { $exists: false } },
+      { $set: { image_desc: imageDesc } });
+  }
+  return {
+    answer: typeof data.answer === "string" ? data.answer : "",
+    source: "chatblackshark",
+    products: Array.isArray(data.products) ? data.products :
+      Array.isArray(data.product_cards) ? data.product_cards : [],
+    image_desc: imageDesc,
+    chat_engine: "v4",
+    handoff_required: data.handoff_required === true,
+    handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
+    request_id: typeof data.request_id === "string" ? data.request_id : undefined,
+  };
+}
+
+export async function resolveChatShopId(platform: Platform, shopName: string): Promise<string> {
+  const shops = await getCollection<{ shop_id: string; shopname: string; platform: Platform }>(COLLECTIONS.shops);
+  const key = shopName.trim();
+  const matches = await shops.find({ platform, $or: [{ shop_id: key }, { shopname: key }] },
+    { projection: { shop_id: 1 } }).limit(2).toArray();
+  if (matches.length !== 1 || !matches[0]?.shop_id) throw new Error("chat_engine_shop_scope_ambiguous");
+  return matches[0].shop_id;
 }

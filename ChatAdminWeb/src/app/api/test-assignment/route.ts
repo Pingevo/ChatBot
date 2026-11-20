@@ -32,7 +32,8 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
-import { getSystemConfig, setBotWorkerGlobalEnabled, shouldUseChatV2, shouldUseChatV3, getBotProductLimit } from "@/backend/service/systemConfigService";
+import { getSystemConfig, setBotWorkerGlobalEnabled, getChatEngine, getBotProductLimit } from "@/backend/service/systemConfigService";
+import { callChatBlacksharkV4 } from "@/backend/service/botCallService";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { handoffService } from "@/backend/service/handoffService";
 // ⚡ Phase 2J — test-assignment ใช้ test version (เก็บใน test_status_conversation ไม่ใช่ status_conversation จริง)
@@ -58,6 +59,8 @@ async function callBot(params: {
   itemId?: string;  // ⚡ item_id จากการ์ดสินค้าที่ลูกค้าแชร์
   orderSn?: string;  // ⚡ Phase 3C — order_sn จากการ์ดคำสั่งซื้อที่ลูกค้าแชร์
   images?: string[];  // ⚡ Phase 1A — URL รูป/วิดีโอที่ลูกค้าส่ง (ส่งให้ bot vision pass)
+  conversationId?: string;
+  messageId?: string;
 }): Promise<{
   answer: string;
   source?: string;
@@ -75,9 +78,17 @@ async function callBot(params: {
   handoff_reason?: string;
   image_desc?: string;  // ⚡ vision description ของรูป current turn (cache กัน re-read)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน
-  chat_engine?: "legacy" | "v2" | "v3";
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
 }> {
-  const { platform, message, history, shopId, shopName, itemId, orderSn, images } = params;
+  const { platform, message, history, shopId, shopName, itemId, orderSn, images, conversationId, messageId } = params;
+  const chatEngine = await getChatEngine();
+  if (chatEngine === "v4") {
+    const data = await callChatBlacksharkV4({ platform, message, history, shopId, shopName,
+      itemId, orderSn, images, conversationId, messageId,
+      simulate: true, testSource: "test_assignment" });
+    return { ...data, handoff_to_admin: data.handoff_required === true,
+      handoff_reason: data.handoff_reason };
+  }
   const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
   const url = `${upstream}/chat`;
   const headers: Record<string, string> = {
@@ -95,10 +106,10 @@ async function callBot(params: {
   if (images && images.length > 0) body.images = images;
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
   //    v3 มี priority เหนือ v2
-  const useV3 = await shouldUseChatV3();
-  const useV2 = !useV3 && await shouldUseChatV2();
-  if (useV3) body.use_v3 = true;
-  else if (useV2) body.use_v2 = true;
+  const useV3 = chatEngine === "v3";
+  const useV2 = chatEngine === "v2";
+  body.use_v3 = useV3;
+  body.use_v2 = useV2;
 
   // ⚡ 429 retry: รอ 60 วิ แล้วยิงใหม่ — สูงสุด 3 ครั้ง ถ้าเกินให้ throw
   const MAX_429_RETRIES = 3;
@@ -142,7 +153,7 @@ async function callBot(params: {
         handoff_reason: data.handoff_reason,
         image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
         // ⚡ chat_engine — บันทึก engine ที่ใช้
-        chat_engine: useV2 ? "v2" : "legacy",
+        chat_engine: chatEngine,
       };
     } catch (err) {
       // ถ้า error เป็น 429-related → retry
@@ -444,7 +455,7 @@ interface ReplayQa {
   bot_model?: string;
   bot_elapsed?: number;
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้ใช้ engine ไหน (legacy / v2 / v3)
-  chat_engine?: "legacy" | "v2" | "v3";
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
   // ⚡ bot products (item cards ที่บอทแนะนำ)
   bot_products?: { item_id: string; name: string; price?: number; image?: string; url?: string }[];
   // ⚡ pipeline info — intent/rag/llm2/search counts
@@ -872,6 +883,8 @@ export async function POST(req: NextRequest) {
             itemId: userItemId,
             orderSn: userOrderSn,  // ⚡ Phase 3C
             images: userImages.length > 0 ? userImages : undefined,  // ⚡ Phase 1A
+            conversationId: conversation_id,
+            messageId: msg.message_id,
           });
 
           if (!botResp.answer || botResp.answer.trim() === "") {

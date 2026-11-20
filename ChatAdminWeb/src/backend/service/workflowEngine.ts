@@ -145,6 +145,7 @@ export interface DeliveredMessage {
   image_url?: string; // ⚡ Zaapi send_message type=image — media passthrough ไป delivery pipeline
   products?: unknown[]; // ⚡ let_ai_respond → persist ลง shadow doc.bot_products (send_card identity verify)
   request_id?: string; // ⚡ R5 — let_ai_respond → shadow doc.request_id (turn correlation)
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
 }
 
 export type EngineResult = {
@@ -1761,7 +1762,8 @@ async function performAction(
       context.bot_handoff_required = botResp.handoff_required === true;
       context.bot_handoff_reason = botResp.handoff_reason;
       if (botResp.answer && !botResp.handoff_required) {
-        delivered.push({ text: botResp.answer, source: "workflow.let_ai_respond", node_id: node.node_id, products: botResp.products, request_id: botResp.request_id });
+        delivered.push({ text: botResp.answer, source: "workflow.let_ai_respond", node_id: node.node_id,
+          products: botResp.products, request_id: botResp.request_id, chat_engine: botResp.chat_engine });
       }
       return {};
     }
