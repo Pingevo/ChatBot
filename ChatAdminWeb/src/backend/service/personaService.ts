@@ -22,6 +22,11 @@ export interface ShopPersonaDoc extends Document {
   bot_name: string; // เช่น "พิม" / "น้ำหวาน" / "มะยม"
   enabled: boolean;
   notes?: string;
+  persona_text?: string;
+  friendliness?: number;
+  length?: "short" | "medium" | "long";
+  detail_level?: number;
+  voice?: "male" | "female";
   created_at: Date;
   updated_at: Date;
   updated_by?: string; // admin_id ที่แก้ล่าสุด

@@ -7,6 +7,7 @@ import type { Platform } from "./systemConfigService";
 import { getChatEngine, getBotProductLimit, type ChatEngine } from "./systemConfigService";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { botworkerRuntime } from "./botworkerRuntime";
+import { getPersona, type ShopPersonaDoc } from "./personaService";
 
 export interface BotCallParams {
   platform: Platform;
@@ -50,6 +51,97 @@ export interface BotCallResponse {
   handoff_reason?: string;
   // ⚡ R5 — turn correlation id จาก Python (ตรง ai_usage.request_id) → shadow chain
   request_id?: string;
+}
+
+interface EngineAccessToken {
+  value: string;
+  refreshAt: number;
+}
+
+const engineAccessTokens = new Map<string, EngineAccessToken>();
+const pendingEngineTokens = new Map<string, Promise<string>>();
+
+async function getEngineAccessToken(
+  baseUrl: string,
+  issuerSecret: string,
+  signal?: AbortSignal,
+  rejectedToken?: string,
+): Promise<string> {
+  const cacheKey = `${baseUrl}\n${issuerSecret}`;
+  const cached = engineAccessTokens.get(cacheKey);
+  if (rejectedToken && cached && cached.value !== rejectedToken) return cached.value;
+  if (!rejectedToken && cached && Date.now() < cached.refreshAt) return cached.value;
+
+  const pending = pendingEngineTokens.get(cacheKey);
+  if (pending) return pending;
+
+  const request = (async () => {
+    const response = await fetch(`${baseUrl}/api/engine/token`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${issuerSecret}` },
+      cache: "no-store",
+      ...(signal ? { signal } : {}),
+    });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => {});
+      throw new Error(`chatblackshark_token_request_failed:${response.status}`);
+    }
+    const body = await response.json() as { access_token?: unknown; expires_in?: unknown };
+    if (typeof body.access_token !== "string" || !body.access_token ||
+        typeof body.expires_in !== "number" || !Number.isFinite(body.expires_in) || body.expires_in <= 0) {
+      throw new Error("chatblackshark_token_response_invalid");
+    }
+    const refreshLeadSeconds = Math.min(60, Math.floor(body.expires_in / 3));
+    engineAccessTokens.set(cacheKey, {
+      value: body.access_token,
+      refreshAt: Date.now() + Math.max(1, body.expires_in - refreshLeadSeconds) * 1000,
+    });
+    return body.access_token;
+  })();
+  pendingEngineTokens.set(cacheKey, request);
+  try {
+    return await request;
+  } finally {
+    if (pendingEngineTokens.get(cacheKey) === request) pendingEngineTokens.delete(cacheKey);
+  }
+}
+
+function boundedPersonaNumber(value: unknown, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(100, Math.round(value)))
+    : fallback;
+}
+
+function toEnginePersona(persona: ShopPersonaDoc): Record<string, unknown> | undefined {
+  if (!persona.enabled || !persona.bot_name.trim()) return undefined;
+  const length = ["short", "medium", "long"].includes(persona.length || "")
+    ? persona.length
+    : "medium";
+  const voice = persona.voice === "female" ? "female" : "male";
+  return {
+    bot_name: persona.bot_name.trim().slice(0, 80),
+    persona_text: (persona.persona_text ?? persona.notes ?? "").trim().slice(0, 2000),
+    friendliness: boundedPersonaNumber(persona.friendliness, 50),
+    length,
+    detail_level: boundedPersonaNumber(persona.detail_level, 50),
+    voice,
+  };
+}
+
+async function loadEnginePersona(params: BotCallParams): Promise<Record<string, unknown> | undefined> {
+  if (!params.shopName?.trim()) return undefined;
+  try {
+    const persona = await getPersona(params.shopName.trim(), params.platform);
+    return persona ? toEnginePersona(persona) : undefined;
+  } catch (error) {
+    // Persona is presentation metadata; a Mongo persona read failure must not block a scoped answer.
+    console.warn("[chatblackshark-engine] persona_lookup_failed", {
+      platform: params.platform,
+      shop_id: params.shopId,
+      error: error instanceof Error ? error.name : "unknown",
+    });
+    return undefined;
+  }
 }
 
 /** ⚡ Phase 2B.6 — admin claim outcome ที่ transport ไป Python (production เท่านั้น) */
@@ -259,31 +351,40 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
 
 /** Route a call from any page through the globally selected ChatBlackshark engine. */
 export async function callChatBlacksharkV4(params: BotCallParams): Promise<BotCallResponse> {
-  const allowedShops = new Set((process.env.CHATBLACKSHARK_BOTWORKER_SHOP_IDS || "")
-    .split(",").map((value) => value.trim()).filter(Boolean));
-  if (!allowedShops.has(params.shopId)) throw new Error("chatblackshark_shop_not_enabled_for_v4");
+  if (!params.shopId?.trim()) throw new Error("chatblackshark_shop_required");
   const baseUrl = process.env.CHATBLACKSHARK_ENGINE_URL?.replace(/\/$/, "");
-  const token = process.env.CHATBLACKSHARK_ENGINE_TOKEN;
-  if (!baseUrl || !token) throw new Error("chatblackshark_engine_not_configured");
+  const issuerSecret = process.env.CHATBLACKSHARK_TOKEN_ISSUER_SECRET;
+  if (!baseUrl || !issuerSecret || issuerSecret.length < 32) {
+    throw new Error("chatblackshark_engine_not_configured");
+  }
 
   const useStoredConversation = !!params.conversationId && !!params.messageId &&
     (!params.simulate || params.testSource === "botworker" || params.testSource === "test_assignment") &&
     params.testSource !== "test_chat" && params.testSource !== "shadow";
   const endpoint = useStoredConversation ? "/api/engine/answer" : "/api/engine/test-answer";
   const explicitItemId = params.itemId || params.message.match(/\[สินค้า:\s*([^\]]+)\]/)?.[1]?.trim();
+  const persona = await loadEnginePersona(params);
   const payload = useStoredConversation
     ? { conversation_id: params.conversationId, message_id: params.messageId,
-        shop_id: params.shopId, platform: params.platform }
+        shop_id: params.shopId, platform: params.platform, ...(persona ? { persona } : {}) }
     : { question: params.message, history: params.history, shop_id: params.shopId,
         shop_name: params.shopName,
         platform: params.platform, images: params.images || [],
-        item_ids: explicitItemId ? [explicitItemId] : [], order_sn: params.orderSn };
-  const response = await fetch(`${baseUrl}${endpoint}`, {
+        item_ids: explicitItemId ? [explicitItemId] : [], order_sn: params.orderSn,
+        ...(persona ? { persona } : {}) };
+  const requestWithToken = async (token: string) => fetch(`${baseUrl}${endpoint}`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
     body: JSON.stringify(payload),
     ...(params.signal ? { signal: params.signal } : {}),
   });
+  let token = await getEngineAccessToken(baseUrl, issuerSecret, params.signal);
+  let response = await requestWithToken(token);
+  if (response.status === 401) {
+    await response.body?.cancel().catch(() => {});
+    token = await getEngineAccessToken(baseUrl, issuerSecret, params.signal, token);
+    response = await requestWithToken(token);
+  }
   if (!response.ok) throw new Error(`chatblackshark_engine_failed:${response.status}`);
   const data = await response.json() as Record<string, unknown>;
   if (useStoredConversation && (data.conversation_id !== params.conversationId || data.message_id !== params.messageId)) {
