@@ -53,6 +53,9 @@ export async function shouldUseChatV3() {
 export async function getBotProductLimit() {
   return 10;
 }
+export async function getChatEngine() {
+  return "legacy";
+}
 
 // ── authorize (route-level: requireAuth) ─────────────────────
 export async function requireAuth() {

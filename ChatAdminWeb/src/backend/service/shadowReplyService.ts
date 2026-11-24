@@ -8,7 +8,7 @@
 // Data flow:
 //   1. sellcenter เขียน inbound message (ลูกค้า) ลง `messages` collection
 //   2. sellcenter อาจเขียน Zaapi reply ลง `messages` ด้วย (role "bot"/"admin" source "zaapi" หรืออะไรก็ตาม)
-//   3. เราเรียก bot ของเราผ่าน /api/chatbot/[platform]/chat (proxy ไป Python service)
+//   3. caller ส่งคำถามผ่าน dispatchChatEngine ตาม engine ที่เลือก
 //   4. เก็บ bot reply ใน `shadow_replies` (ไม่ส่งจริง)
 //   5. UI แสดงเปรียบเทียบ: inbound | Zaapi reply | Bot shadow reply
 import { Document } from "mongodb";

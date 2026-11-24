@@ -29,6 +29,8 @@ export interface BotCallParams {
   //    → ticket_state อ่านจาก test_status_conversation(source)
   //    → Python _send_handoff ส่ง test_source กลับ → bot-handoff route เขียน test store
   testSource?: string;
+  includePersona?: boolean;
+  persistImageDescription?: boolean;
   // ⚡ bounded HTTP timeout — caller (botworker) ส่ง AbortSignal.timeout(botCallTimeoutMs)
   //    รวมกับ ownership-abort; timeout ต้อง < claim lease
   signal?: AbortSignal;
@@ -51,6 +53,144 @@ export interface BotCallResponse {
   handoff_reason?: string;
   // ⚡ R5 — turn correlation id จาก Python (ตรง ai_usage.request_id) → shadow chain
   request_id?: string;
+  answer_segments?: unknown;
+  intent?: unknown;
+  timing?: unknown;
+  retrieval_info?: unknown;
+  web_search_used?: boolean;
+  web_search_reason?: string;
+  web_search_model?: string;
+  steps?: unknown;
+  routing_decision?: unknown;
+  handoff_to_admin?: boolean;
+}
+
+export class ChatEngineDispatchError extends Error {
+  constructor(readonly status: number, readonly responseBody: unknown, message: string, readonly chat_engine?: ChatEngine) {
+    super(message);
+    this.name = "ChatEngineDispatchError";
+  }
+}
+
+export interface ChatEngineDispatchParams {
+  platform: Platform;
+  pythonPayload: Record<string, unknown>;
+  v4Params: BotCallParams;
+  engine?: ChatEngine;
+  signal?: AbortSignal;
+  pythonHeaders?: Record<string, string>;
+  timeoutMs?: number;
+  max429Retries?: number;
+  retryWaitMs?: number;
+  maxNon429Retries?: number;
+  non429RetryWaitMs?: number;
+  pythonUnsupportedMessage?: string;
+}
+
+export interface ChatEngineDispatchResult {
+  chat_engine: ChatEngine;
+  data: Record<string, any>;
+}
+
+/** Shared transport owner for Python chat engines and ChatBlackshark v4. */
+export async function dispatchChatEngine(params: ChatEngineDispatchParams): Promise<ChatEngineDispatchResult> {
+  const engine = params.engine || await getChatEngine();
+  if (engine === "v4") {
+    const v4Params = { ...params.v4Params, signal: params.signal || params.v4Params.signal };
+    try {
+      if (!v4Params.shopId?.trim() && v4Params.shopName?.trim()) {
+        v4Params.shopId = await resolveChatShopId(params.platform, v4Params.shopName);
+      }
+      if (!v4Params.shopId?.trim()) throw new Error("chat_engine_shop_required");
+      const data = await callChatBlacksharkV4(v4Params);
+      return { chat_engine: engine, data: data as Record<string, any> };
+    } catch (cause) {
+      throw new ChatEngineDispatchError(502, {}, cause instanceof Error ? cause.message : String(cause), engine);
+    }
+  }
+  if (params.pythonUnsupportedMessage) {
+    throw new ChatEngineDispatchError(501, {}, params.pythonUnsupportedMessage, engine);
+  }
+
+  const baseUrl = serverConfig.chatbotBaseUrls[params.platform] || serverConfig.chatbotBaseUrls.shopee;
+  const url = `${baseUrl.replace(/\/$/, "")}/chat`;
+  const retries = Math.max(0, params.max429Retries || 0);
+  const retryWaitMs = params.retryWaitMs ?? 60_000;
+  const non429Retries = Math.max(0, params.maxNon429Retries || 0);
+  const non429RetryWaitMs = params.non429RetryWaitMs ?? 2_000;
+  let rateLimitRetriesUsed = 0;
+  let non429RetriesUsed = 0;
+  for (let attempt = 0; attempt <= retries + non429Retries; attempt++) {
+    try {
+      const signal = params.timeoutMs
+        ? AbortSignal.any([...(params.signal ? [params.signal] : []), AbortSignal.timeout(params.timeoutMs)])
+        : params.signal;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-internal-secret": serverConfig.chatbotInternalSecret,
+          ...params.pythonHeaders,
+        },
+        body: JSON.stringify({
+          ...params.pythonPayload,
+          use_v2: engine === "v2",
+          use_v3: engine === "v3",
+        }),
+        ...(signal ? { signal } : {}),
+      });
+      if (response.status === 429) {
+        if (rateLimitRetriesUsed < retries) {
+          rateLimitRetriesUsed++;
+          await response.body?.cancel().catch(() => {});
+          await new Promise((resolve) => setTimeout(resolve, retryWaitMs));
+          continue;
+        }
+      }
+      const text = await response.text();
+      let data: Record<string, any> = {};
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) data = parsed;
+      } catch {
+        if (text) data = { detail: text };
+      }
+      if (!response.ok) {
+        if (response.status !== 429 && non429RetriesUsed < non429Retries) {
+          non429RetriesUsed++;
+          await new Promise((resolve) => setTimeout(resolve, non429RetryWaitMs));
+          continue;
+        }
+        const message = response.status === 429 && retries > 0
+          ? `bot 429 rate limit — ลอง ${retries} ครั้งแล้ว ยกเลิก`
+          : `bot call failed (${response.status}): ${text.slice(0, 200)}`;
+        throw new ChatEngineDispatchError(response.status, data, message, engine);
+      }
+      return { chat_engine: engine, data };
+    } catch (cause) {
+      if (cause instanceof ChatEngineDispatchError) {
+        if (cause.status === 429 && rateLimitRetriesUsed < retries) {
+          rateLimitRetriesUsed++;
+          await new Promise((resolve) => setTimeout(resolve, retryWaitMs));
+          continue;
+        }
+        throw cause;
+      }
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (message.includes("429") && rateLimitRetriesUsed < retries) {
+        rateLimitRetriesUsed++;
+        await new Promise((resolve) => setTimeout(resolve, retryWaitMs));
+        continue;
+      }
+      if (non429RetriesUsed < non429Retries) {
+        non429RetriesUsed++;
+        await new Promise((resolve) => setTimeout(resolve, non429RetryWaitMs));
+        continue;
+      }
+      throw new ChatEngineDispatchError(502, {}, message, engine);
+    }
+  }
+  throw new ChatEngineDispatchError(429, {}, `bot 429 rate limit — ลอง ${retries} ครั้งแล้ว ยกเลิก`, engine);
 }
 
 interface EngineAccessToken {
@@ -129,7 +269,7 @@ function toEnginePersona(persona: ShopPersonaDoc): Record<string, unknown> | und
 }
 
 async function loadEnginePersona(params: BotCallParams): Promise<Record<string, unknown> | undefined> {
-  if (!params.shopName?.trim()) return undefined;
+  if (params.includePersona === false || !params.shopName?.trim()) return undefined;
   try {
     const persona = await getPersona(params.shopName.trim(), params.platform);
     return persona ? toEnginePersona(persona) : undefined;
@@ -259,15 +399,11 @@ async function releaseBotCallSlot(): Promise<void> {
 }
 
 export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
-  const baseUrl = serverConfig.chatbotBaseUrls[params.platform] || serverConfig.chatbotBaseUrls.shopee;
-  const url = baseUrl.replace(/\/$/, "") + "/chat";
   // ⚡ Phase 2A — ดึง ticket_state + claim_outcome จาก DB (testSource → test store)
   const { state: ticketState, claimOutcome } =
     await resolveTicketState(params.conversationId, params.simulate, params.testSource);
   // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
   const chatEngine = await getChatEngine();
-  const useV2 = chatEngine === "v2";
-  const useV3 = chatEngine === "v3";
   // ⚡ Phase 8 — อ่าน llm_context_limit จาก SystemConfig (หน้า config ควบคุม)
   const { getSystemConfig } = await import("./systemConfigService");
   const sysConfig = await getSystemConfig();
@@ -297,16 +433,11 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       ])
     : params.signal;
   try {
-    if (chatEngine === "v4") {
-      return await callChatBlacksharkV4({ ...params, signal: fetchSignal });
-    }
-    const resp = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-internal-secret": serverConfig.chatbotInternalSecret,
-      },
-      body: JSON.stringify({
+    const { data } = await dispatchChatEngine({
+      platform: params.platform,
+      engine: chatEngine,
+      signal: fetchSignal,
+      pythonPayload: {
         message: params.message,
         shop: params.shopName || params.shopId,
         history: params.history,
@@ -324,14 +455,10 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
         ...(params.conversationId ? { conversation_id: params.conversationId } : {}),
         ...(params.simulate || params.testSource ? { simulate_assignment: true } : {}),
         ...(params.testSource ? { test_source: params.testSource } : {}),
-        use_v3: useV3,
-        use_v2: useV2,
         llm_context_limit: llmContextLimit,
-      }),
-      ...(fetchSignal ? { signal: fetchSignal } : {}),
+      },
+      v4Params: { ...params, signal: fetchSignal },
     });
-    if (!resp.ok) throw new Error(`bot call failed: ${resp.status}`);
-    const data = await resp.json();
     return {
       answer: data.answer || "",
       source: data.source,
@@ -343,6 +470,18 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
       chat_engine: chatEngine,
       request_id: typeof data.request_id === "string" ? data.request_id : undefined,
+      answer_segments: data.answer_segments,
+      intent: data.intent,
+      timing: data.timing,
+      retrieval_info: data.retrieval_info,
+      web_search_used: data.web_search_used === true,
+      web_search_reason: data.web_search_reason,
+      web_search_model: data.web_search_model,
+      steps: data.steps,
+      routing_decision: data.routing_decision,
+      handoff_to_admin: data.handoff_to_admin === true || data.handoff_required === true,
+      handoff_required: data.handoff_required === true,
+      handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
     };
   } finally {
     if (slotHeld) await releaseBotCallSlot();
@@ -392,7 +531,7 @@ export async function callChatBlacksharkV4(params: BotCallParams): Promise<BotCa
   }
   const imageDesc = typeof data.image_desc === "string" ? data.image_desc :
     typeof data.image_description === "string" ? data.image_description : "";
-  if (imageDesc && useStoredConversation && !params.simulate && params.messageId && params.conversationId) {
+  if (imageDesc && params.persistImageDescription !== false && useStoredConversation && !params.simulate && params.messageId && params.conversationId) {
     const messages = await getCollection(COLLECTIONS.messages);
     await messages.updateOne({ message_id: params.messageId, conversation_id: params.conversationId,
       shop_id: params.shopId, platform: params.platform, image_desc: { $exists: false } },
@@ -408,6 +547,16 @@ export async function callChatBlacksharkV4(params: BotCallParams): Promise<BotCa
     handoff_required: data.handoff_required === true,
     handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
     request_id: typeof data.request_id === "string" ? data.request_id : undefined,
+    intent: data.intent,
+    timing: data.timing,
+    retrieval_info: data.retrieval_info,
+    web_search_used: data.web_search_used === true,
+    web_search_reason: typeof data.web_search_reason === "string" ? data.web_search_reason : undefined,
+    web_search_model: typeof data.web_search_model === "string" ? data.web_search_model : undefined,
+    answer_segments: data.answer_segments,
+    steps: data.steps,
+    routing_decision: data.routing_decision,
+    handoff_to_admin: data.handoff_to_admin === true || data.handoff_required === true,
   };
 }
 

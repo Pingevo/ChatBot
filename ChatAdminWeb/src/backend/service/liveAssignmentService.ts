@@ -15,9 +15,8 @@ import { testStatusConversationService } from "./testStatusConversationService";
 import { handoffService } from "./handoffService";
 import { triggerService } from "./triggerService";
 import { logAdminEvent } from "./adminLogService";
-import { serverConfig } from "../lib/config";
-import { getChatEngine, getBotProductLimit } from "./systemConfigService";
-import { callChatBlacksharkV4 } from "./botCallService";
+import { getBotProductLimit } from "./systemConfigService";
+import { dispatchChatEngine } from "./botCallService";
 import { parseRawMessage, toProductCard } from "./messageMediaParser";
 import { productService } from "./productService";
 import { toBotText, toBotImages } from "./messageService";
@@ -131,20 +130,6 @@ async function callBot(params: {
   chat_engine?: "legacy" | "v2" | "v3" | "v4";
 }> {
   const { platform, message, history, shopId, shopName, itemId, orderSn, images, conversationId, messageId } = params;
-  const chatEngine = await getChatEngine();
-  if (chatEngine === "v4") {
-    const data = await callChatBlacksharkV4({ platform, message, history, shopId, shopName,
-      itemId, orderSn, images, conversationId, messageId,
-      simulate: true, testSource: "test_assignment" });
-    return { ...data, handoff_to_admin: data.handoff_required === true,
-      handoff_reason: data.handoff_reason };
-  }
-  const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
-  const url = `${upstream}/chat`;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-Internal-Secret": serverConfig.chatbotInternalSecret,
-  };
   const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
   if (shopName) body.shop = shopName;
   else if (shopId) body.shop = shopId;
@@ -153,49 +138,23 @@ async function callBot(params: {
   if (orderSn) body.order_sn = orderSn;
   // ⚡ Phase 1A — ส่ง URL รูป/วิดีโอให้ bot ใช้ Gemini vision อ่าน
   if (images && images.length > 0) body.images = images;
-  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-  //    v3 มี priority เหนือ v2
-  const useV3 = chatEngine === "v3";
-  const useV2 = chatEngine === "v2";
-  body.use_v3 = useV3;
-  body.use_v2 = useV2;
-
-  const MAX_429_RETRIES = 3;
-  const RATE_LIMIT_WAIT_MS = 60_000;
-  let lastErr: Error | null = null;
-  for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
-    try {
-      const resp = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(90_000),
-      });
-      if (resp.status === 429) {
-        if (attempt < MAX_429_RETRIES) {
-          await new Promise((r) => setTimeout(r, RATE_LIMIT_WAIT_MS));
-          continue;
-        }
-      }
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => "");
-        throw new Error(`bot ${resp.status}: ${txt.slice(0, 200)}`);
-      }
-      const data = await resp.json();
-      // ⚡ chat_engine — บันทึก engine ที่ใช้ (อ่านจาก config ตอนส่ง use_v2/use_v3)
-      data.chat_engine = useV3 ? "v3" : useV2 ? "v2" : "legacy";
-      return data;
-    } catch (err) {
-      lastErr = err instanceof Error ? err : new Error(String(err));
-      if (lastErr.message.includes("429") && attempt < MAX_429_RETRIES) continue;
-      if (attempt < MAX_429_RETRIES && !lastErr.message.includes("429")) {
-        // retry once on network error
-        await new Promise((r) => setTimeout(r, 2000));
-        continue;
-      }
-    }
-  }
-  throw lastErr || new Error("bot call failed");
+  const { chat_engine, data } = await dispatchChatEngine({
+    platform,
+    pythonPayload: body,
+    v4Params: { ...params, simulate: true, testSource: "test_assignment" },
+    timeoutMs: 90_000,
+    max429Retries: 3,
+    retryWaitMs: 60_000,
+    maxNon429Retries: 3,
+    non429RetryWaitMs: 2_000,
+  });
+  return {
+    ...data,
+    answer: typeof data.answer === "string" ? data.answer : "",
+    chat_engine,
+    handoff_to_admin: data.handoff_to_admin === true || data.handoff_required === true,
+    handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
+  };
 }
 
 // ─── Save / Get ───────────────────────────────────────────────────────────────

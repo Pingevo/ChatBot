@@ -16,6 +16,7 @@ const TARGETS = [
   "/node_modules/next/link.",
   "/lucide-react/",
   "/src/components/ui/PlatformIcon.",
+  "/src/components/ui/SelectField.",
   "/src/components/ui/Button.",
   "/src/components/ui/Loading.",
   "/src/components/ui/Badge.",

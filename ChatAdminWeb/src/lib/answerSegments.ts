@@ -5,7 +5,7 @@
  * และคืน field `answer_segments: list[str]` ด้วย
  *
  * ใช้กับ:
- *   - คำตอบจาก /api/chatbot/chat (TestChatClient)
+ *   - คำตอบจาก /api/test-chat/dispatch (TestChatClient)
  *   - คำตอบที่เก็บใน messages collection (TicketChatPanel, ShadowConversationPanel)
  *
  * ถ้าไม่มี ||| → คืน [text] (1 segment เดียวกับ text ตัวเดิม)

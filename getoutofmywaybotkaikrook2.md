@@ -14863,3 +14863,219 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ChatBlackshark PR #15 test-answer adapter และ PR #16 Zaapi data/import แยกงานและ merge แล้ว; backend tests ผ่าน 75 และ 76 ตาม branch; Vercel check ผ่านทั้งคู่
 - ChatBotProductMS ตรวจ `pytest docs/test/offline`: 2,426 passed, 17 skipped, 1 xfailed; TypeScript `tsc --noEmit --incremental false` และ `git diff --check` ผ่าน
 - ทดสอบแบบ offline/mock เท่านั้น; ไม่ยิง provider/customer, ไม่เขียน Mongo/Supabase และไม่ import Zaapi เข้า DB; ChatBotProductMS PR ยังรอ review/merge ณ เวลาบันทึก
+
+## กำลังจะทำ — ตรวจหน้าเว็บที่พึ่งพา bot port 8010 (2026-11-24)
+- ตรวจแบบ read-only ว่าหน้า/route ใดใน ChatAdminWeb เรียก Shopee bot ที่ port 8010 และเมื่อ bot unreachable แสดง error, fallback หรือยังทำงานต่อ
+- ไล่จาก URL/env/config และ API route ไปยังหน้า UI; ไม่ยิง customer/provider และไม่แก้โค้ดหรือ DB
+- บันทึกผลพร้อมไฟล์/ตำแหน่งอ้างอิงหลังตรวจ
+
+## ผ่านแล้ว — ตรวจหน้าเว็บที่พึ่งพา bot port 8010 (2026-11-24)
+- ตรวจ source ChatAdminWeb แบบ read-only; ค่า default ของ `CHATBOT_BASE_URL_SHOPEE` คือ `http://127.0.0.1:8010`; environment/deployment อาจ override ได้ และไม่ได้อ่าน `.env` หรือ probe service จริง
+- หน้าที่เรียก bot เพื่อทำงานหลัก: `/test-chat/shopee` (ส่งคำถามและจัดการ test sessions/logs), `/generations` (อ่าน/เริ่ม/จัดการ generation), `/replay-compare` (script `chatbot/frontendScript/replay_compare.py` POST ไป `127.0.0.1:8010/chat`), `/test-assignment` (replay Shopee), `/live-assignment` (replay/ประมวลผลข้อความใหม่), `/shadow-inbox` (Generate shadow replies); bot down ทำให้ action ตอบ error/สร้างผลลัพธ์สถานะ error ตามแต่ละ flow แต่หน้าและข้อมูลเก่าบางส่วนยังโหลดจาก Mongo/local files ได้
+- `/knowledge` ใช้ 8010 เฉพาะ file-backed Zaapi KB เช่น files/import/export/bind; corpus/docs/mapping บางส่วนอ่าน Mongo/local manifest โดยตรง จึงยังทำงานได้บางส่วน; `/zaapi-preview` ต้องใช้ bind endpoint จึงโหลด preview ไม่ได้; `/logs` กระทบเฉพาะ Zaapi import-log pane ส่วน admin logs ยังอ่านได้
+- `/config` ปุ่มทดสอบการเชื่อมต่อทำ GET `/health` ตาม Shopee Bot URL และแสดงแถวไม่ผ่าน; หน้าไม่ล้มทั้งหน้า แม้ route comment เก่าจะระบุว่าไม่ยิง bot
+- sidebar `GenPendingDot` บนทุกหน้า console poll generation endpoint ที่ 8010 แต่ swallow error เงียบ; worker/workflow AI processing ใช้ bot ผ่าน `callBot` และเมื่อใช้ engine legacy/v2/v3 อาจได้ `bot_failed`/workflow error โดยหน้า admin ยังเปิดได้
+- เมื่อ global engine เป็น v4 การสร้างคำตอบใน Test Chat, test/live assignment, shadow generation และ replay compare ใช้ ChatBlackshark API แทน 8010; แต่ session/admin/generation/Zaapi file endpoints และ health check บางรายการยังพึ่ง 8010
+- ตรวจด้วย static source trace/ค้น callsites เท่านั้น ไม่รัน test, ไม่ปิด/ยิง service, ไม่แตะ DB/provider/customer; historical waythrough semantic coverage ยัง partial
+
+## กำลังจะทำ — ตรวจ data flow ของ /shop และ /persona เทียบกับ bot 8010 (2026-11-24)
+- ทบทวนว่า frontend หน้า Shop และ Persona อ่าน/เขียนข้อมูลจาก route หรือ service ใด และมี dependency ที่จำเป็นต่อ chatbot port 8010 หรือเป็นการ coupling ที่ลดได้
+- ไล่ call chain ตั้งแต่ UI → Next.js API → backend service → FastAPI bot/MongoDB/ไฟล์ รวมถึงการเลือก engine และผลเมื่อ bot หยุด
+- audit แบบอ่านอย่างเดียว; หากพบแนวแก้ที่ต้องเปลี่ยน behavior จะรายงาน root cause, ผลกระทบ และแผนก่อน ไม่แก้โค้ดในรอบตรวจนี้
+
+## ผ่านแล้ว — ตรวจ data flow ของ /shops และ /persona เทียบกับ bot 8010 (2026-11-24)
+- ยืนยันว่า route หน้า `/shops` ใช้ GET `/api/shops` → `shopService.listShops/listShopsPaged` → `ADMIN_MONGO_COLLECTION_SHOPS`; `bot_worker` metadata อ่าน SystemConfig จาก Admin Mongo; drawer tabs เรียก Next API ของ workflows/triggers/persona/KB. หน้าและการแก้ metadata ไม่เรียก 8010
+- ยืนยันว่า `/persona` อ่าน/เขียนรายการ persona ผ่าน `/api/persona` และ collection `ADMIN_MONGO_COLLECTION_SHOP_PERSONAS`; แต่ create dropdown เรียก `/api/chatbot/shops` ซึ่ง generic proxy ส่ง GET `/shops` ไป Shopee URL (default 8010) แม้ engine เป็น v4 เพราะมี special-case เฉพาะ POST `/chat`
+- Python `/shops` เรียก `product_store.list_shops(db)` → `MONGO_COLLECTION` (default `ShpProducts`). ผลคือ `dbWallet` `distinct("shopname")`; เมื่อ bot down dropdown error, ถูกตั้งเป็นว่าง และปุ่มเพิ่ม persona ถูกปิด; list/edit/toggle/delete persona ที่มีอยู่ยังทำงานผ่าน Admin Mongo
+- Shop registry ใน Admin `shops` กับ catalog shopname ใน `dbWallet.ShpProducts` เป็นคนละ data contract. ไม่ควรสลับ source โดยไม่ตรวจ identity/casing; ChatAdmin มี `dbWalletClient` read-only และ `productService.listShopsByPlatform` ฝั่ง server อยู่แล้ว แต่ query shape ต่างจาก Python `distinct("shopname")`
+- Python legacy/v2/v3 อ่าน persona จาก Admin Mongo ตอนตอบ; v4 ฝั่ง ChatAdmin โหลด persona จาก Admin Mongo แล้วส่งใน payload ไป ChatBlackshark. 8010 ควรเป็น dependency ของ engine/endpoint ที่รันบน Python เท่านั้น ไม่ควรเป็น dependency โดยอ้อมของ shop-options UI
+- Root cause: `/persona` ผูกการอ่าน catalog metadata กับ generic chatbot HTTP proxy แทน data API ฝั่ง server. ทิศทางแก้ที่เสนอ: ให้ Next API/service อ่าน shop options จาก product DB แบบ read-only โดยคง source/semantics ให้ตรงกับ `distinct(shopname)` หรือยืนยัน canonical shop identity ก่อน; frontend ยังเรียก API เท่านั้น ไม่ต่อ Mongo เอง
+- ตรวจ static source เท่านั้น; ไม่ probe service, ไม่อ่าน `.env`, ไม่อ่าน/เขียน DB/provider/customer, ไม่แก้ code และไม่รัน tests. Historical waythrough semantic coverage ยังคง partial
+
+## กำลังจะทำ — inventory dependency ฝั่งหน้าเว็บต่อ bot port 8010 (2026-11-24)
+- สแกน source ฝั่ง ChatAdminWeb ทั้ง app/pages, components, hooks, client services และ API route ที่หน้าเว็บเรียก; รวมไฟล์ใหม่/modified ใน working tree โดยไม่อ่าน `.env`
+- ค้นทั้งการเรียก URL/port โดยตรง, generic `/api/chatbot` proxy, URL ที่ประกอบจาก config และ call chain ผ่าน backend service/engine
+- แยก dependency ที่ทำให้หน้า/action ใช้ไม่ได้เมื่อ Python bot หยุด ออกจาก fallback, error ที่ถูกกลืน และโค้ดที่เป็นแค่การตั้งค่า/health check; รายงานแบบ static audit ไม่แก้ code หรือยิง service
+
+## ผ่านแล้ว — inventory dependency ฝั่งหน้าเว็บต่อ bot port 8010 (2026-11-24)
+- สแกน ChatAdminWeb `src` ทั้ง 315 ไฟล์ source (รวม 114 API routes และ 42 pages) ด้วย URL/port/config/proxy/callsite search แล้วไล่ call chain ทุก direct `chatbotBaseUrls` consumer; working tree ไม่มี source file ใหม่/แก้ไข มีเฉพาะ log/ledger จากงาน audit
+- ทุก authenticated console page ผ่าน AppShell/Sidebar และ Sidebar mount `GenPendingDot`; poll `/chatbot/shopee/admin/generations` ทุก 30 วินาทีไป 8010 โดย swallow error — เป็น background request ทั่ว UI ไม่ทำให้หน้า fail
+- Generic `/api/chatbot/*` proxy ใช้ default Shopee 8010; ยกเว้นเฉพาะ POST `/chat` เมื่อ engine v4. Active UI callers: `/generations` ใช้ Python generations API เสมอ; `/test-chat/*` ใช้ Python sessions/messages/logs/close ตาม platform; unqualified `/chatbot/shops` ใช้ Shopee 8010 ใน TestChatClient, `/persona`, `/shop-settings`; unqualified `/chatbot/feedback` ใน TestChatClient ยิง Shopee 8010 แบบ best-effort; `lib/services.ts` ยังมี shopService.list wrapper แต่ไม่พบ caller
+- `/persona` และ `/shop-settings` อ่าน/เขียน records ผ่าน Admin Mongo ได้ แต่ dropdown ร้านจาก Python `/shops` → product DB `ShpProducts.distinct("shopname")`; bot down ทำให้ options ว่างและ create button ใช้ไม่ได้. `/shops` content เองอ่าน Admin Mongo ไม่ใช้ 8010 (ยังมี global badge poll)
+- Python endpoint โดยตรงที่ผูก Shopee URL: `/knowledge` Zaapi file list/toggle/import/export/rollback/bind, `/zaapi-preview` bind preview/save, `/logs` Zaapi import-log pane. Knowledge corpus/mapping, admin logs และข้อมูลเดิมบางส่วนมาจาก Admin DB/ไฟล์และยังทำงานได้
+- `/config` ปุ่มทดสอบ integration probe `/health` ของ configured bot URLs รวม Shopee (default 8010); เป็นการตรวจสุขภาพ ไม่ใช่การพึ่งพาตอนเปิดหน้า
+- งาน generate/replay ที่เรียก engine: Test Chat dispatch, Test Assignment, Live Assignment, Shadow Inbox, Replay Compare และ workflow AI/BotWorker ใช้ Shopee 8010 เมื่อ engine legacy/v2/v3; v4 ไป ChatBlackshark. อย่างไรก็ตาม Test Chat session storage ยังอยู่ Python proxyแม้ v4; Replay Compare script ตั้ง `BOT_URL` เป็น 8010 สำหรับ non-v4
+- Python `/shops`/persona/runtime และ Python static tester เป็น bot-specific. Shop metadata, persona, shop settings, product catalog read-only เป็น shared data concerns. Existing Admin DB services และ `dbWalletClient` อ่าน product DB ฝั่ง Next backend ได้แล้ว; shop identity ยังแยก transport `shop_id`, admin config key และ catalog `shopname`, จึงห้ามแทนกันแบบตรงๆ โดยไม่รักษา mapping
+- Architectural boundary ที่พบ: UI ควรเรียก shared authenticated Next API/domain service สำหรับ shop directory, catalog options, persona/settings; backend engine adapter ควรเป็นเจ้าของแค่ generation/answer call. ปัจจุบัน generic proxy ทำให้ shared shop options ขึ้นกับ 8010 และการเลือก engine ซ้ำอยู่ใน test-chat, test/live assignment, shadow routes, botCallService และ replay script
+- ตรวจ static source เท่านั้น; ไม่อ่าน `.env`, ไม่ยิง endpoint, ไม่แตะ DB/provider/customer และไม่รัน tests. ค่า runtime URL อาจถูก override; historical waythrough semantic coverage ยังคง partial
+
+## กำลังจะทำ — ออกแบบการใช้ v4 โดยปิด bot port 8010 (2026-11-24)
+- เป้าหมายตามผู้ใช้อนุมัติ: เมื่อเลือก v4 แล้วงาน shared/admin ที่รองรับ v4 ไม่ควรพึ่ง Python port 8010; behavior legacy/v2/v3 และข้อมูล session/ร้านต้องไม่เปลี่ยน
+- ตรวจ regression locks และ call/data contracts ของ shop options, Test Chat sessions/logs, engine routing, generations/Zaapi และ global generation badge ก่อนเลือกขอบเขต implementation
+- รอบนี้ทำ root-cause/design/plan เท่านั้นจนกว่า user จะ review spec และ implementation plan; ไม่แก้ code ก่อน approval gate ตาม brainstorming skill และ AGENTS.md ข้อ 9
+
+## ผ่านแล้ว/วิธีแก้/งานค้าง — v4 ทำงานโดยไม่พึ่ง bot port 8010 (2026-11-24)
+- Root cause ตาม marker บรรทัด 14911–14915: ข้อมูลรายชื่อร้านและ Test Chat sessions/logs ถูกอ่าน/เขียนผ่าน Python proxy; การเลือก engine ถูกทำซ้ำในหลาย route; Sidebar poll generation ทุกหน้า; Generations และ Zaapi file/import/bind เป็น Python-owned โดยไม่มี boundary ตาม engine
+- เพิ่ม authenticated Next.js `/api/catalog/shops` อ่านชื่อร้านแบบ read-only จาก dbWallet และ `/api/test-chat/*` เก็บ sessions/messages/status/action logs ใน Admin Mongo; Test Chat/Persona/Shop Settings ใช้ API กลาง
+- `dispatchChatEngine` เป็น transport owner เดียว: legacy/v2/v3 เรียก Python พร้อม flags ชัดเจน, v4 เรียก ChatBlackshark; `callBot` คงเป็น owner ระดับสูงของ Workflow/BotWorker; Test Chat, Test Assignment, Shadow Inbox, Live Assignment simulation และ compatibility `/api/chatbot/*/chat` ใช้ dispatcher พร้อมคง payload, admin headers, simulation/test source, retry/timeout และ response metadata ที่ caller ต้องใช้
+- Replay Compare API ส่ง Python child ผ่าน internal authenticated dispatcher bridge; v4 ไม่ fallback ไป Python ใน API-launched run; script standalone เดิมยังรองรับ CLI fallback
+- v4 ปิดการ forward สำหรับ Python-only Generations/Zaapi file operations และแสดง unavailable/disable action; generation sidebar ตรวจ engine ก่อน poll; Zaapi shared Admin Mongo data/mapping ยังใช้ได้; config health-check bot ยังคงเป็น diagnostic แบบกดเอง ไม่ใช่ dependency ตอนเปิดหน้า
+- Workflow trigger matching/orchestration ทำใน Next/Mongo; trigger ที่จบด้วย template/handoff ไม่เรียก Python; `let_ai_respond` และ BotWorker AI เรียก `callBot` → `dispatchChatEngine`, จึงใช้ 8010 เฉพาะ legacy/v2/v3
+- Verification ผ่าน: `npx tsc --noEmit`; catalog/session/engine-dispatch/v4-boundary/Zaapi UI/TestChat boundary; TestChat buffer 16/16; BotWorker idempotency 71/71; Shadow isolation 22/22; Workflow canonical 220/220, persistence 452/452, binding routes 47/47, foundation 163/163; ChatBlackshark v4; Python replay script syntax; `git diff --check`
+- Fetch-spy/mocked behavioral tests พิสูจน์ว่า v4 paths ที่ทดสอบไม่มี request ไป Python และ legacy routing/headers ยังถูกส่งผ่าน; ยังไม่ได้ปิด bot 8010 จริง, เชื่อม live Mongo หรือรัน end-to-end กับข้อมูล/provider จริง
+- งานค้าง/ขอบเขต: explicit Config > ทดสอบการเชื่อมต่อ ยัง probe `/health` ของ Python bot ตามหน้าที่ diagnostic; Generations/Zaapi file tools ต้องใช้ Python engine; การ acceptance ใน deployment จริงยังต้องทำแยกก่อน deploy. ไม่ commit/push/เปิด PR; changes คงอยู่ใน working tree
+
+## กำลังจะทำ — live smoke test v4 โดยไม่มี bot port 8010 (2026-11-24)
+- ผู้ใช้อนุญาตให้ทดสอบระบบที่รันจริง; ขอบเขต: local Admin UI, ตรวจ engine/port, shop options, Test Chat session/answer persistence, Generations และ Zaapi v4 boundary; ใช้คำถามสังเคราะห์เท่านั้น ไม่อ่าน secret files หรือใช้ customer message
+- บันทึก marker หลังเริ่ม preliminary read-only checks ไปแล้ว: ตรวจ listener และเปิด local UI ก่อน แล้วจึงกลับมาบันทึก ledger; การสร้าง Test Chat session/ส่งคำถามเกิดหลังผู้ใช้อนุญาต
+
+## ผ่านแล้ว/ผล live smoke test — v4 โดยไม่รัน bot port 8010 (2026-11-24)
+- Local Next Admin ที่ port 3000 ทำงาน; `GET /api/system/chat-engine` แสดง `chat_engine=v4`, `python_tools_available=false`; ตรวจ `lsof -iTCP:8010 -sTCP:LISTEN` แล้วไม่มี listener
+- Persona และ Shop Settings โหลดข้อมูล; dropdown ร้านแสดง catalog shops รวม BlackShark โดยไม่ต้องเปิด 8010
+- Test Chat เลือก BlackShark สร้าง session สังเคราะห์และได้คำตอบ “ได้รับคำถามเรียบร้อยแล้วครับ”; ส่งคำถาม probe เฉพาะและได้คำตอบตรง `V4_OK_8010_OFF`; ไม่พบ fallback ไป Python เพราะ 8010 ไม่มี listener
+- Reload Test Chat แล้ว session เดิมยังอยู่พร้อม 4 ข้อความ (คำถาม/คำตอบ 2 รอบ) ยืนยันทั้ง session/message persistence และ v4 answer path ผ่าน UI จริง
+- Generations แสดงว่า Python engine จำเป็นและปิดการเริ่ม build ใน v4; Knowledge > Zaapi KB แสดง Python-only file/import/export/bind notice และ shared panel ยังเปิดได้
+- ขอบเขต: เป็น live smoke บน local Admin UI ที่ต่อกับ Admin Mongo ตาม runtime config; ไม่อ่าน `.env` จึงยืนยันไม่ได้ว่า DB ปลายทางเป็น staging หรือ production. สร้าง session ทดสอบ 1 รายการชื่อขึ้นต้น “ทดสอบระบบครับ...” และยังไม่ได้ลบ; ไม่มี customer message ใช้
+- ยังไม่ได้ทดสอบ legacy/v2/v3 กับ Python จริง เพราะ 8010 ไม่ได้รัน; Workflow AI action/BotWorker live end-to-end ก็ยังไม่ถูกยิงใน smoke นี้ (มีเฉพาะ regression tests เดิม)
+
+## 2026-11-24 — Assignment, handoff, round-robin, buffer dependency audit
+
+กำลังจะทำ: read-only trace การจ่ายงาน, handoff/round-robin, message buffer/debounce และ workflow/BotWorker ตั้งแต่หน้าเว็บ/API ถึง shared backend และ Python bot เพื่อระบุว่าอะไรเรียก port 8010 ในแต่ละ engine; ไม่แก้โค้ด ไม่ยิง DB/provider และไม่ส่งข้อความจริง
+
+## ผ่านแล้ว — ตรวจเจ้าของงาน assignment/handoff/round-robin/buffer เทียบ bot 8010 (2026-11-24)
+- Static source trace ใน working tree ปัจจุบัน ครอบคลุม FastAPI routes และ test_chat_api router, Next API/services, UI consumers, BotWorker/Workflow และ Replay; ไม่แก้โค้ด ไม่ยิง DB/provider/HTTP และไม่ทดสอบ runtime
+- 8010 เป็น Python Shopee service: `/chat` ทำ answer/retrieval/intent และตัดสินผลรวมถึง handoff; ยังมี `/health`, `/shops`, `/categories`, `/brands`, `/feedback`, `/test-chat/sessions*`, `/test-chat/logs`, `/zaapi-kb/*`, `/admin/generations/*`
+- Handoff แบบที่ Python engine ตัดสินยังมี side-effect callback: `responses._send_handoff` POST ไป Next `/api/admin/conversations/bot-handoff`; แต่ owner ที่ commit state และเลือก admin/round-robin คือ Next `handoffService` + `assignmentService` บน Mongo. Trigger `handoff_admin`/workflow `assign_ticket` จ่ายงานที่ Next ได้โดยไม่เรียก Python
+- Round-robin เลือก pool/cursor จาก Mongo admins/team/config/cursor ใน Next; BotWorker message buffer/debounce เก็บ `buffer_messages` และ flush ใน TypeScript worker; Test Chat buffer/session APIs ปัจจุบันก็เป็น Next/Mongo. หลัง flush หรือ action `let_ai_respond` การสร้างคำตอบใช้ dispatcher: legacy/v2/v3 → Python URL (default Shopee 8010), v4 → ChatBlackshark
+- Current UI uses Next APIs for Test Chat sessions/dispatch, catalog shops and shared assignment/workflow; Python Test Chat session/log routesยังคงถูก mount และ generic `/api/chatbot/*` ยัง forward non-chat paths ไป Python เป็น compatibility route. Python generations/Zaapi file endpoints remain Python-owned and guarded unavailable for v4; Config integration button can probe bot `/health`; standalone replay script retains direct port-8010 fallback while API-launched replay uses dispatcher
+- Finding: 8010 ไม่ใช่ owner กลางของ assignment/round-robin/buffer/workflow orchestration; แต่ยังเป็น runtime dependency ของ legacy/v2/v3 answer และ AI-originated handoff, รวมถึง Python-only tools/compatibility callers. v4 + explicit workflow handoff/template/buffer/assignment shared paths ไม่ต้องใช้ 8010
+- ขอบเขต: เป็น source audit ของ working tree ที่มี uncommitted changes ไม่ใช่ deployed code; `.env` ไม่ได้อ่าน, deployment URL อาจ override default, ไม่มี live request/runtime verification; historical ledger coverage remains partial
+
+## 2026-11-24 — Follow-up: v4 handoff flag เทียบการ assign แอดมินจริง
+
+ตรวจเพิ่มตามคำถามผู้ใช้: ไล่ v4 response mapping และทุก caller ที่ consume handoff flag เพื่อแยกผลจำลองออกจากการเขียน ownership จริง; เป็น read-only ต่อเนื่องจาก A-359
+
+## ผ่านแล้ว — ข้อสรุป v4 handoff
+- `callChatBlacksharkV4` อ่าน `handoff_required`/`handoff_reason` จากคำตอบและคืน flag ให้ caller; ตัว dispatcher ไม่ POST `/api/admin/conversations/bot-handoff` เอง
+- caller ปัจจุบันที่เห็น: Test Assignment/Live Assignment เรียก `handoffToAdminTest`; BotWorker ส่ง `simulate:true,testSource=botworker` และ `pickAgent` เขียน test-status store; Shadow Inbox เก็บ flag; Test Chat คืน flag ให้ client. จึงไม่ใช่หลักฐานว่า v4 flag ได้ assign ticket production
+- production route `/api/admin/conversations/bot-handoff` มีอยู่และเรียก `handoffService.handoffToAdmin` ได้เมื่อถูกเรียกโดย internal-secret caller; ไม่พบ v4 adapter เรียก route/service production โดยตรง. Workflow `let_ai_respond` เก็บ flag ใน context/ไม่ส่งคำตอบ และต้องมี escalation/assignment path เพื่อให้เกิด ownership change
+- ข้อจำกัด: source audit เท่านั้น; ยังไม่มี live production v4 call/assignment proof. Route notification ภายนอกยังเป็น TODO (assignment/status persistence แยกจาก notification)
+
+## 2026-11-24 — Architecture follow-up: shared case intake and handoff policy
+
+กำลังจะทำ: read-only trace flow handoff/intake ของ Shopee Python legacy/v2/v3, shared workflow/assignment และ v4 adapter เพื่อแนะนำ owner กลางสำหรับถามข้อมูลก่อน assign โดยคง case/shop-specific behavior; ไม่แก้โค้ด ไม่ยิง DB/provider
+
+## ผ่านแล้ว — แนวทาง shared case-intake/handoff owner (2026-11-24)
+- Static trace: `handoffs.py:382-425` ส่งเคสใบกำกับภาษีให้แอดมินทันที; `ShopSettingsDoc` ปัจจุบันเก็บเฉพาะ `faq_liveagent_enabled`/`faq_liveagent_action` ไม่พบ config URL ใบกำกับภาษีต่อร้านใน owner นี้
+- `warranty_flow.py:1810-1928` ขอวันที่ซื้อ เลขคำสั่งซื้อ รูป/วิดีโอ แล้ว handoff ทันที; `warranty_flow.py:1412-1537` ประมวลข้อมูลเคลมเพิ่มเติมใน turn ต่อมาและเก็บ slot เช่น ชื่อ เบอร์ เลขคำสั่งซื้อ วันที่ซื้อ และหลักฐานรูป จึงไม่ใช่การรอข้อมูลครบก่อน assign ใน behavior ปัจจุบัน
+- `callChatBlacksharkV4` ส่งต่อ `handoff_required`/`handoff_reason`; shared handoff/assignment เป็นเจ้าของการ assign ส่วน Workflow มี wait/reply, condition และ `assign_ticket`; warranty lifecycle/state ยังอยู่ใน Python owner
+- Recommendation: ให้ shared case policy/state ใน Next backend เป็นเจ้าของ playbook ข้าม engine โดยอ่าน typed case signal + shop config + persisted case state แล้วเลือกถามต่อ/ส่ง self-service link/assign ผ่าน handoff service; ไม่สร้าง second general LLM bot และไม่คัดลอก policy แยกในแต่ละ engine. ใช้ Workflow เป็น orchestration foundation ได้ แต่ต้องมี typed case intake contract/state; ระยะแรก map behavior เดิมตรงตัวก่อน แล้วค่อยเปลี่ยน per-case behavior โดยอนุมัติแยก
+- ขอบเขต: read-only static source audit; ไม่แก้โค้ด ไม่รัน test/runtime ไม่อ่าน `.env` และไม่แตะ DB/provider; historical semantic coverage ยัง partial
+
+## 2026-11-24 — Follow-up: current v4 handoff consumers and customer reply
+
+กำลังจะทำ: ตรวจเฉพาะเส้นทางปัจจุบันที่รับ `handoff_required` จาก v4 แยก compatibility API, Workflow, BotWorker และ test/simulation เพื่อยืนยันว่าใครส่งข้อความและใคร assign จริง; static read-only ไม่แก้โค้ด ไม่ยิง DB/provider
+
+## ผ่านแล้ว — สถานะปัจจุบันของ v4 handoff consumer (2026-11-24)
+- `/api/chatbot/{platform}/chat` dispatch ไป engine และคืน `data` เป็น JSON; route นี้ไม่เรียก handoff service. v4 adapter คืน `answer`, `handoff_required`, `handoff_reason` จาก ChatBlackshark
+- Workflow `let_ai_respond` เก็บ answer/flag/reason ใน context แต่ใส่ answer ลง delivered เฉพาะเมื่อไม่มี handoff; ไม่พบ auto-assign จาก flag เอง. Workflow จะ assign จริงได้เมื่อ graph เดินถึง `assign_ticket` ซึ่งเรียก `handoffService.handoffToAdmin` ใน non-test run
+- BotWorker consumer ส่ง `simulate:true,testSource=botworker`; handoff เรียก `handoffToAdminTest`, สร้างผลไม่มี customer reply IDs และ log `delivered_to_platform:false`. Test Assignment/Shadow/Test Chat ก็คืนหรือเก็บ flag ในขอบเขต test/simulation
+- Production route `/api/admin/conversations/bot-handoff` มี real `handoffService.handoffToAdmin` branch แต่ไม่พบ v4 adapter/caller ปัจจุบันที่เรียก production route จาก handoff flag โดยตรง. Legacy Python เป็นผู้สร้าง warranty response แล้ว `_send_handoff` callback เข้า route นี้
+- ข้อสรุปปัจจุบัน: v4 `handoff_required + claim reason` ไม่ได้ทำให้มีข้อความเคลมกลางหรือ real admin assignment โดยอัตโนมัติ; compatibility chat route คืนคำตอบ v4 ให้ caller, Workflow suppresses answer, ส่วน BotWorker handoff path เป็น test store
+- ขอบเขต: static source trace ใน working tree; ไม่แก้ code ไม่ยิง HTTP/DB/provider ไม่รัน tests ไม่อ่าน `.env`; production configuration/runtime อาจต่าง และ semantic history coverage ยัง partial
+
+## 2026-11-24 — Follow-up: BotWorker sandbox assignment visibility
+
+กำลังจะทำ: ยืนยันว่า handoffToAdminTest เลือก/แสดง admin และ status ใน BotWorker sandbox อย่างไร, cursor ใช้ร่วมกับ production หรือไม่ และ `delivered_to_platform:false` หมายถึงอะไร; static read-only
+
+## ผ่านแล้ว — ความหมายของ BotWorker sandbox assignment (2026-11-24)
+- `handoffToAdminTest` เลือกแอดมินจาก existing assignment/config/round-robin แล้วเขียน `assigned_to`, status และ reason ลง `test_status_conversation`; ไม่เขียน `status_conversation` production และไม่สร้าง production admin audit
+- BotWorker inbox อ่าน test status แหล่ง `source="botworker"` และ map `assigned_to_name`; ถ้ามีคนรับจะเห็น status `open`, ถ้าไม่มีจะเห็น pending/handoff. จึงแสดงได้ว่า sandbox จำลองจ่ายงานให้ admin คนไหน/บทสนทนาไหน
+- Round-robin cursor เป็น source-scoped (`shop/platform/global:<source>`), จึงแยก BotWorker cursor จาก ticket cursor; ใช้ admin pool/config เดิมแต่ไม่ขยับ cursor ของ ticket production
+- `delivered_to_platform:false` กับ `reply_ids:[]` หมายถึงไม่มีข้อความตอบลูกค้าถูกส่งออกแพลตฟอร์ม; ไม่ได้แปลว่าไม่มี simulated admin assignment ใน BotWorker inbox
+- ขอบเขต: static code trace เท่านั้น ไม่เปิด UI/DB/runtime และไม่แก้โค้ด; ผล deployment อาจต่างจาก working tree
+
+## 2026-11-24 — Plan audit: Shopee live-send toggle for Tickets and BotWorker
+
+กำลังจะทำ: read-only audit ปุ่มส่ง/แก้แล้วส่ง/ไม่ส่งของ Tickets และ BotWorker, Shopee outbound transport, shadow reply status/config scope และเอกสารเดิม; เตรียมแผนก่อนแก้ตาม AGENTS.md; ไม่แก้ business code ไม่ยิง platform/DB
+
+## ผ่านแล้ว — ขอบเขต toggle ส่ง Shopee จริงเฉพาะ Tickets และ BotWorker (2026-11-24)
+- ยืนยัน scope จากผู้ใช้: config toggle ใช้คุม external delivery เฉพาะหน้า Tickets และ BotWorker; หน้าอื่นคง behavior เดิม. BotWorker draft/review/actions/shadow record คงเป็น flow หลัก; toggle ON แค่เปิดทางให้ action ส่งจริงได้
+- Source audit: Ticket `/api/admin/conversations/[id]/send` รับ text และบันทึก internal `messages` เท่านั้น; BotWorker `/review` ใช้ `sendMockPart` และ review state อยู่ใน `shadow_replies`. BotWorker sandbox `/send` เป็นอีก route และคงเดิม
+- `/config` แสดง `shopee_live_send_enabled` แบบ locked; API ปฏิเสธ field นี้และ `systemConfigService` derive จาก hardcoded safety. จึงต้องมี scoped config exception เฉพาะสอง send routes ไม่ปลดล็อก global field หรือเปลี่ยน routes อื่น
+- Current send contracts จำกัดกว่า scope ที่ขอ: Ticket composer/request เป็น text; BotWorker review supports text/product-card mock parts. Image/video/sticker outbound contract ยังไม่อยู่ใน review model/transport; official Open Platform docs returned 403 ระหว่าง audit จึงยังยืนยัน payload/upload/receipt ไม่ได้
+- สร้างแผน reviewable ที่ `docs/superpowers/plans/2026-11-24-shopee-ticket-botworker-live-send.md`; plan กำหนด OFF default, server gate เฉพาะ Tickets/BotWorker, preserve review states/shadow records, media contract discovery, tests ด้วย fake sender, และห้ามเปิด switch/ส่งจริง/commit/deploy โดยไม่มีการอนุมัติเพิ่ม
+- ขอบเขต: static source/doc audit เท่านั้น; ไม่แก้ production code ไม่อ่าน secrets ไม่ยิง Shopee/DB/provider และไม่รัน tests. ยังรอผู้ใช้ review/อนุมัติแผนก่อนแก้ code; historical ledger coverage partial
+
+## 2026-11-24 — Follow-up: chat composer live-send scope
+
+กำลังจะทำ: ปรับแผน live-send ให้รวม composer ด้านล่างทั้ง Tickets และ BotWorker รวม image/video/emoji/sticker inputs; คง scope เฉพาะสองหน้าและ review actions ของ BotWorker; ไม่แก้ production code
+
+## ผ่านแล้ว — สรุป scope ช่องพิมพ์ Tickets และ BotWorker (2026-11-24)
+- ปรับ `docs/superpowers/plans/2026-11-24-shopee-ticket-botworker-live-send.md` ให้ switch ที่ตั้งใน `/config` มีผลกับ 3 send entrypoints เท่านั้น: Ticket composer, BotWorker manual composer และ BotWorker review send/edit-and-send; reject ไม่ส่ง และหน้า/route อื่นคงเดิม
+- ระบุ OFF ให้ Ticket คง internal message, BotWorker manual composer คง sandbox record, และ BotWorker review คง mock/no-customer-delivery; ทั้งสามเส้นทางต้องไม่มี Shopee request. ON อนุญาตส่งจาก action ที่ผู้ใช้กดเท่านั้น; BotWorker draft ไม่ auto-send
+- เพิ่ม scope UI/message parts สำหรับข้อความ, emoji, image, video, sticker และชนิดอื่นที่ยืนยันจากสัญญา Shopee ได้; payload ที่ยังไม่รองรับต้องแจ้งเหตุผลและไม่ downgrade เงียบๆ; คง `shadow_replies` และสถานะตัดสินใจของ BotWorker
+- ขอบเขต: แก้เฉพาะเอกสารแผน ไม่มี production code/test/provider call; official Shopee docs ยังเปิดอ่านไม่ได้ (403) จึงต้องยืนยัน payload/upload/receipt และผู้ถือ credential ก่อนสร้าง sender. ยังรอผู้ใช้ทบทวน/อนุมัติแผนก่อน implementation; semantic history coverage partial
+
+## 2026-11-24 — BotWorker v4 no-response diagnosis
+
+กำลังจะทำ: ไล่จาก log ที่ผู้ใช้ส่ง `bot-worker.ts` หลัง enable edge → buffer/debounce → in-flight claim → v4 engine dispatch/response persistence เพื่อหา root cause ที่ข้อความไม่ตอบ; read-only source/runtime-log review, ไม่ส่ง Shopee จริง ไม่อ่าน `.env` ไม่แก้ production code
+
+## ผ่านแล้ว — BotWorker V4 กับ Next request log triage (2026-11-24)
+- Log worker ที่ให้มาพิสูจน์ว่า message ผ่าน scope และถูก buffer 7 วินาที; duplicate polls ไม่ reset debounce. `claim in-flight (self)` หมายถึง claim เดิมยัง active ใน process นี้ จึงยังไม่ใช่หลักฐานว่า V4 ล้มเหลวหรือว่าคำตอบสำเร็จ
+- Buffer timer flush success ไม่พิมพ์ผลลัพธ์ลง stdout; bot call errors ถูกบันทึกเป็น `bot_error` ใน `botworker_events`. ถ้าสำเร็จ reply จะถูกเก็บใน `shadow_replies` และ event `bot_reply` ด้วย `delivered_to_platform:false`; worker นี้ไม่ส่งข้อความจริงให้ลูกค้า
+- อ่าน Next log attachment 524 บรรทัด: BotWorker conversations/messages และ `/api/system/chat-engine` ตอบ 200; ไม่พบ POST/engine answer หรือ `bot_error`/`bot_reply`/`bot_handoff` event ใน server request log. CLI worker เรียก ChatBlackshark โดยตรง จึงไม่ปรากฏเป็น inbound Next request
+- 409 ซ้ำของ `/api/chatbot/shopee/admin/generations?status=pending` มาจาก guard `python_engine_required` เมื่อ `chat_engine=v4` ตาม compatibility proxy; เป็น Python-only generation endpoint ไม่ใช่ V4 answer error. Source `GenPendingDot` ปัจจุบันใช้ `/api/generations/pending` และตรวจ engine ก่อน จึงยังไม่ทราบว่า request URL เก่ามาจาก stale client/tab หรือ app instance อื่น
+- ถ้าไม่มี shadow reply ต้องใช้ BotWorker event/error หรือ claim status ของ conversation เดียวกันแยกสาเหตุ. ตัว adapter ต้องมี `CHATBLACKSHARK_ENGINE_URL` และ `CHATBLACKSHARK_TOKEN_ISSUER_SECRET` ใน environment ของ process worker; source maps missing config/auth/upstream/identity failures เป็น error เฉพาะ แต่ attachment ไม่มีผลลัพธ์เหล่านี้
+- ขอบเขต: read-only source/log triage; ไม่อ่าน `.env`, ไม่ query DB/provider, ไม่แก้โค้ดและไม่รัน tests. Root cause จริงของข้อความนี้ยังยืนยันไม่ได้เพราะ log ที่ให้ไม่มี conversation-correlated BotWorker event/worker output หลัง debounce; index error `customers_shp` เป็นอีกปัญหาและ worker catches แล้ว continue
+
+## 2026-11-24 — BotWorker V4 retry log correlation
+
+กำลังจะทำ: อ่าน log ปลายทาง Vercel/ChatBlackshark ที่ผู้ใช้แนบจากการลอง BotWorker V4 ซ้ำ เทียบ timestamp, endpoint, status, conversation/message identity กับ worker flow เพื่อหาว่า request ไปถึง engine หรือไม่และ fail จุดใด; read-only, ไม่อ่าน secrets/`.env`, ไม่ query DB/provider และไม่ส่งข้อความจริง
+
+## ผ่านแล้ว — BotWorker V4 กับ ChatBlackshark log (2026-11-24)
+- ChatBlackshark log แสดง `/api/engine/token` 200 เวลา 14:31:55 และ `/api/engine/answer` 403 เวลา 14:31:58. Worker enable edge ที่ผู้ใช้ให้คือ 07:31:29Z (14:31:29 ไทย); ลำดับเวลาและ endpoint สอดคล้องกับ BotWorker call มาก จึงชี้ว่า request ไปถึง v4 แล้วถูกปฏิเสธก่อนสร้างคำตอบ ไม่ใช่ 8010 หรือการ buffer เป็นสาเหตุของรอบนี้
+- Source worker ส่ง `simulate:true`, `testSource=botworker`, `conversationId` และ `messageId`; adapter เลือก `/api/engine/answer`. เมื่อ response ไม่ OK จะ throw `chatblackshark_engine_failed:403`; worker catch แล้วบันทึก `bot_error` โดยไม่สร้าง shadow reply. Endpoint log ไม่มี body/error code และไม่บันทึก conversation/message id จึงยังฟันธงไม่ได้ว่าเหตุ 403 เป็น shop authorization, record scope/identity หรือ rule ฝั่ง engine
+- Log เวลา 14:41:56 ที่ `/api/engine/test-answer` ได้ HTTP 200 หลัง 25.694 วินาที แต่แสดง Gemini key cycle exhausted ที่ stage=intent และ provider 429/503 หลายครั้ง; เป็นคนละ endpoint กับ BotWorker stored-conversation route จึงไม่ยืนยันว่า BotWorker ตอบได้
+- Next attachment แสดง UI polling messages ของ conversation `shp_98777118463033313` แต่ไม่เรียก `/events`; ต้องดู `GET /api/botworker/conversations/{conversationId}/events` เพื่อยืนยัน `bot_error.metadata.error` ของ conversation ที่ทดสอบก่อนแยกสาเหตุย่อยของ 403
+- ขอบเขต: source/log correlation แบบ read-only; ไม่อ่าน `.env`, ไม่ query DB/provider, ไม่แก้โค้ดและไม่รัน tests. สาเหตุภายในที่ทำให้ engine คืน 403 ยังไม่ทราบ เพราะ log ไม่มี response detail หรือ request identity. `customers_shp` duplicate-null index warning ยังคงเป็นคนละเรื่อง
+
+## 2026-11-24 — BotWorker V4 log follow-up
+
+กำลังจะทำ: เทียบ log ChatBlackshark และ Next ที่ผู้ใช้แนบล่าสุดกับ worker output รอบเดิม เพื่อบอกให้ชัดว่า V4 request ล่าสุดเข้า endpoint ใด, ได้สถานะอะไร, และระบบมีหลักฐานคำตอบ/ข้อผิดพลาดหรือไม่; read-only, ไม่อ่าน secrets/`.env`, ไม่ query DB/provider, ไม่แก้โค้ดและไม่รัน tests
+
+## ผ่านแล้ว — root cause ของ BotWorker V4 403 (2026-11-24)
+- Log ล่าสุดมี ChatBlackshark `/api/engine/answer` ตอบ 403 ใช้เวลา 2.393 วินาที หลัง token ของ server worker ได้ 200; ในช่วงเดียวกันมี test client request `/api/engine/test-answer` 200. Next attachment ยืนยัน Test Chat `POST /api/test-chat/dispatch` 200 ใน 27.2 วินาที และเห็น shop selector `shop_id=BlackShark`; ไม่พบ `/events` request ใน log จึงยังไม่มี BotWorker event ยืนยัน conversation แบบตรงตัว
+- อ่าน handler ChatBlackshark: token authorization ผิดจะเป็น 401; `/api/engine/answer` เรียก `_answer_legacy_message` ซึ่งเริ่มที่ `_shop_context`. 403 มีเงื่อนไขเดียวใน backend: `knowledge_for_shop(platform, shop_id)` ไม่ resolve scope และคืน detail `shop_not_configured_for_knowledge`; จึงปฏิเสธก่อนอ่าน inbound message หรือเรียกโมเดล
+- Scope ต้องตรง exact `(platform, shop_id)` และมี shop ที่ผูกไฟล์ KB ไม่กำกวมใน Supabase `platforms`/`shopnames`/`shop_files`. ดังนั้นสาเหตุคือ shop scope ที่ BotWorker ส่งไม่พร้อมใช้ใน ChatBlackshark v4 (ไม่มี mapping/ไฟล์ KB หรือรูปแบบ shop_id ไม่ตรง); ไม่ใช่ token, Gemini, debounce, duplicate-null index warning หรือ 8010. ยังไม่อ่าน payload/DB จึงไม่ยืนยันค่าจริงของ shop_id ที่ผิด
+- Test Chat `/test-answer` ส่ง question ตรงและใช้ shop ที่เลือกจาก UI จึงตอบ 200 ได้; ไม่พิสูจน์ว่า stored-conversation scope ของ BotWorker ถูกตั้งแล้ว. Worker call error จะถูกเก็บเป็น `bot_error` และไม่มี shadow reply
+- ขอบเขต: อ่าน source ใน ChatBotProductMS และ ChatBlackshark กับ log ที่ผู้ใช้แนบเท่านั้น; ไม่อ่าน `.env`, ไม่ query Mongo/Supabase/provider, ไม่แก้โค้ดหรือ config และไม่รัน tests. Code/config/database remediation ยังไม่ทำ
+
+## 2026-11-24 — BotWorker vs Test Chat V4 payload comparison
+
+กำลังจะทำ: trace data contract ตั้งแต่ BotWorker buffer และ Test Chat dispatch ผ่าน `callBot`/`callChatBlacksharkV4` ถึง ChatBlackshark request models, stored-message lookup และ shop-scope validation; read-only source inspection, no DB/provider/secrets access, no code/config changes or tests
+
+## ผ่านแล้ว — BotWorker กับ Test Chat ส่ง input เข้า V4 คนละ contract (2026-11-24)
+- BotWorker buffer รวมข้อความเป็น `combinedText`; `processClaimedMessage` สร้าง `botText` ผ่าน `toBotText` (ข้อความปกติคงเดิม, item/order card เป็น tag) แต่ callBot v4 เลือก stored-conversation route เพราะมี `conversationId`, `messageId`, `testSource=botworker`; JSON ที่ส่ง `/api/engine/answer` มีเพียง conversation/message/shop/platform/persona ไม่มี question/history/images
+- ChatBlackshark `/api/engine/answer` เรียก `_shop_context` ก่อน แล้วค่อยอ่าน inbound row จาก `messages_shp` ด้วย exact conversation/message/shop/platform และสร้าง question จาก event.text/raw_payload. 403 ที่เห็นจึงเกิดก่อนใช้ข้อความหรือเรียก LLM: scope ไม่มี mapping ที่ใช้ได้สำหรับ `(platform, shop_id)` ที่ BotWorker ส่ง
+- Test Chat เลือก `/api/engine/test-answer`; ส่ง `combinedText` เป็น `question`, history/images/shop_name และ dispatcher resolve shop_id ว่างจาก shop name ไปยัง `shops.shop_id` แบบ unique ก่อนส่ง. BotWorker กลับส่ง `msg.shop_id` (platform transport domain); code มี `config_shop_key` แยกต่างหาก. การส่ง shop id คนละ domain เป็นสาเหตุที่อธิบายได้ว่าทำไม test path ผ่านแต่ worker scope ไม่ตรง; exact runtime values/KB rows ยังไม่ได้ query
+- มีความต่าง batch เพิ่มเติม: `bufferService` join 2/3 messages แต่เลือก `firstMsg.message_id`; V4 stored path ทิ้ง combined text และระบุ ID เดียว ทำให้หลังแก้ scope แล้วคำตอบยังอ่านแค่ stored inbound row แรก ไม่ได้ตอบชุดข้อความตามที่ buffer รวมไว้
+- Attachment Next มี TestChat dispatch 200 และ engine log มี `/test-answer` 200; request IDs ไม่ได้ผูกข้าม service จึงใช้เป็นหลักฐานรูปแบบเส้นทาง ไม่ยืนยัน one-to-one request correlation. ขอบเขต read-only source/log ใน 2 repos; ไม่อ่าน `.env`, ไม่ query Mongo/Supabase/provider, ไม่แก้ code/config หรือรัน tests
+
+## 2026-11-24 — scoped Shopee live-send plan review
+
+กำลังจะทำ: ตรวจแผน 6 ข้อของผู้ใช้กับ design/implementation plan ปัจจุบันและ route/UI owners ทั้งสาม เพื่อระบุ source-of-truth, impact boundary, test coverage และ contract prerequisites ก่อน implementation; read-only, no `.env`, no DB/provider calls, no real sends, no code changes or tests
+
+## ผ่านแล้ว — audit แผน Scoped Shopee Live Send (2026-11-24)
+- Plan 6 ข้อของผู้ใช้กำหนด server gate 3 route: Tickets `/api/admin/conversations/[conversationId]/send`, BotWorker composer `/api/botworker/conversations/[conversationId]/send`, BotWorker review `/api/botworker/conversations/[conversationId]/review`. Config ปัจจุบันล็อก `shopee_live_send_enabled` ผ่าน SAFETY; ต้องเพิ่มค่า scoped ใหม่ default false และคง global lock
+- ปัจจุบัน Tickets เขียนข้อความภายใน, BotWorker composer เขียน `botworker_messages`, review route ใช้ `sendMockPart` และรักษา per-bubble state; ทั้งสาม route ยังเรียก `assertPlatformApiDisabled`. Composer ทั้งสองยังเป็น text-only. Existing plan at `docs/superpowers/plans/2026-11-24-shopee-ticket-botworker-live-send.md` ครอบคลุม 3 route, fake transport tests, OFF semantics และ isolation จาก routes อื่น
+- ค้น official Shopee Open Platform พบหน้า image upload และ video upload แต่เปิดเนื้อหา docs ไม่ได้ (HTTP 403); ไม่พบ contract ที่อ่านตรวจได้สำหรับส่ง customer chat, media upload/association, sticker, receipt, idempotency หรือ credential owner. ตามแผน Task 1 ต้องหยุดก่อนสร้าง sender จนกว่า official contract และ credential owner จะตรวจได้
+- Current checkout อยู่ branch `codex/audit-bot-8010-page-errors` และมี unrelated uncommitted v4/8010 changes; existing live-send plan ระบุให้ทำบน clean branch/worktree จาก main เพื่อไม่ปนงาน. No code/doc plan change, tests, DB/provider calls, secrets access or real sends; audit เป็น read-only ยกเว้น required append-only ledger log
+
+## 2026-11-24 — official Shopee Chat contract retrieval
+
+กำลังจะทำ: ตรวจซ้ำเฉพาะ official Shopee Open Platform search results เพื่อหาสัญญา Chat send/media ที่ใช้ยืนยัน implementation; ห้ามเดา payload, no `.env`, no DB/provider calls, no real sends
+
+## ผ่านแล้ว — official Shopee Chat contract retrieval (2026-11-24)
+- ค้น official domain รอบเพิ่มพบหน้าเอกสารทั่วไปและลิงก์เอกสารอัปโหลดวิดีโอ แต่ผลค้นหาไม่แสดง API method/payload ของการส่ง chat, media/sticker, receipt หรือ idempotency; การเปิด docs ถูกปฏิเสธ 403 ตาม audit ก่อนหน้า
+- ข้อสรุป A-370 ไม่เปลี่ยน: ต้องมีเอกสาร/SDK ที่อ่านได้และยืนยัน credential owner ก่อนผูก production sender; ไม่แก้ source/config, ไม่รัน tests, ไม่เรียก DB/provider และไม่ส่งลูกค้าจริง

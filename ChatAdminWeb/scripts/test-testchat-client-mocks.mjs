@@ -70,6 +70,7 @@ export const Clock = "ic:Clock";
 
 // ─── ui components (JSX type only) ──────────────────────────────────────
 export const PlatformIcon = "ui:PlatformIcon";
+export const SelectField = "ui:SelectField";
 export const Button = "ui:Button";
 export const Loading = "ui:Loading";
 export const Badge = "ui:Badge";

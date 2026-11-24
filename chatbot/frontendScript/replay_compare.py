@@ -42,6 +42,8 @@ PROD_MONGO_DB = os.environ.get('MONGO_DB', 'dbWallet')
 PROD_COLL = os.environ.get('MONGO_COLLECTION', 'ShpProducts')
 
 BOT_URL = 'http://127.0.0.1:8010/chat'
+REPLAY_ENGINE_URL = os.environ.get('CHATADMIN_REPLAY_ENGINE_URL', '').rstrip('/')
+REPLAY_ENGINE_SECRET = os.environ.get('CHATADMIN_REPLAY_ENGINE_SECRET', '')
 INTERNAL_SECRET = os.environ.get('CHATBOT_INTERNAL_SECRET', '')
 CHATBLACKSHARK_URL = os.environ.get('CHATBLACKSHARK_ENGINE_URL', '').rstrip('/')
 CHATBLACKSHARK_TOKEN = os.environ.get('CHATBLACKSHARK_ENGINE_TOKEN', '')
@@ -366,20 +368,34 @@ def call_bot(message: str, history: list, shop_name: str | None,
              use_v3: bool | None = None,
              use_v4: bool = False) -> dict:
     if use_v4:
-        if not CHATBLACKSHARK_URL or not CHATBLACKSHARK_TOKEN:
+        if not REPLAY_ENGINE_URL and (not CHATBLACKSHARK_URL or not CHATBLACKSHARK_TOKEN):
             return {'error': 'ChatBlackshark v4 is not configured', 'answer': '', 'chat_engine': 'v4'}
         if not shop_id or shop_id not in CHATBLACKSHARK_SHOPS:
             return {'error': 'shop is not enabled for ChatBlackshark v4', 'answer': '', 'chat_engine': 'v4'}
         if not conversation_id or not message_id or not platform:
             return {'error': 'v4 replay requires conversation_id, message_id and platform', 'answer': '', 'chat_engine': 'v4'}
         try:
-            resp = requests.post(
-                f'{CHATBLACKSHARK_URL}/api/engine/answer',
-                json={'conversation_id': conversation_id, 'message_id': message_id,
-                      'shop_id': shop_id, 'platform': platform},
-                headers={'Authorization': f'Bearer {CHATBLACKSHARK_TOKEN}', 'Content-Type': 'application/json'},
-                timeout=120,
-            )
+            if REPLAY_ENGINE_URL:
+                resp = requests.post(
+                    REPLAY_ENGINE_URL,
+                    json={
+                        'engine': 'v4', 'platform': platform, 'python_payload': {},
+                        'v4': {'message': message, 'history': history, 'shop_id': shop_id,
+                               'shop_name': shop_name, 'item_id': item_id, 'order_sn': order_sn,
+                               'images': images or [], 'conversation_id': conversation_id,
+                               'message_id': message_id},
+                    },
+                    headers={'X-ChatAdmin-Replay-Secret': REPLAY_ENGINE_SECRET, 'Content-Type': 'application/json'},
+                    timeout=120,
+                )
+            else:
+                resp = requests.post(
+                    f'{CHATBLACKSHARK_URL}/api/engine/answer',
+                    json={'conversation_id': conversation_id, 'message_id': message_id,
+                          'shop_id': shop_id, 'platform': platform},
+                    headers={'Authorization': f'Bearer {CHATBLACKSHARK_TOKEN}', 'Content-Type': 'application/json'},
+                    timeout=120,
+                )
             if not resp.ok:
                 return {'error': f'ChatBlackshark v4 http {resp.status_code}', 'answer': '', 'chat_engine': 'v4'}
             data = resp.json()
@@ -429,7 +445,16 @@ def call_bot(message: str, history: list, shop_name: str | None,
         pass
 
     try:
-        resp = requests.post(BOT_URL, json=body, headers=headers, timeout=120)
+        if REPLAY_ENGINE_URL:
+            engine = 'v3' if use_v3 else ('v2' if use_v2 else 'legacy')
+            resp = requests.post(
+                REPLAY_ENGINE_URL,
+                json={'engine': engine, 'platform': platform or 'shopee', 'python_payload': body, 'v4': {}},
+                headers={'X-ChatAdmin-Replay-Secret': REPLAY_ENGINE_SECRET, 'Content-Type': 'application/json'},
+                timeout=120,
+            )
+        else:
+            resp = requests.post(BOT_URL, json=body, headers=headers, timeout=120)
         # อ่าน log ส่วนที่เพิ่มขึ้นระหว่างเรียก
         bot_log = ''
         try:
@@ -1164,7 +1189,7 @@ def main():
             print(f'WARN: product DB not available — {e}')
             prod_db = None
 
-    print(f'Bot: {BOT_URL}')
+    print(f'Bot: {"shared ChatAdmin engine dispatcher" if REPLAY_ENGINE_URL else BOT_URL}')
     print(f'Admin DB: {ADMIN_MONGO_DB} / {MSG_COLL}')
 
     _use_v3 = True if args.v3 else (False if args.v2 or args.legacy else None)

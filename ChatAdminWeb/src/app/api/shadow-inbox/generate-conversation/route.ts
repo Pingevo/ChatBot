@@ -16,8 +16,8 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { readJson } from "@/backend/lib/http";
 import { shadowReplyService } from "@/backend/service/shadowReplyService";
-import { getChatEngine, getBotProductLimit } from "@/backend/service/systemConfigService";
-import { callChatBlacksharkV4 } from "@/backend/service/botCallService";
+import { getBotProductLimit, getChatEngine } from "@/backend/service/systemConfigService";
+import { dispatchChatEngine } from "@/backend/service/botCallService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { serverConfig } from "@/backend/lib/config";
 import type { Platform } from "@/backend/lib/safety";
@@ -29,8 +29,8 @@ export const maxDuration = 300; // 5 นาที
 export const dynamic = "force-dynamic";
 
 /**
- * เรียก bot ของเราผ่าน proxy (เหมือน test-chat)
- * ไม่ได้เรียก platform API — เรียก Python chatbot service ของเราเท่านั้น
+ * ส่งคำถามเข้า engine กลางตาม chat_engine และเก็บผลใน shadow_replies
+ * ไม่เรียก platform API และใช้ simulate mode เท่านั้น
  */
 async function callOurBot(params: {
   platform: Platform;
@@ -53,67 +53,26 @@ async function callOurBot(params: {
   handoff_to_admin?: boolean;
   handoff_reason?: string;
   routing_decision?: unknown;
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
 }> {
   const { platform, message, history, shopId, shopName, conversationId, messageId, images } = params;
-  const chatEngine = await getChatEngine();
-  if (chatEngine === "v4") {
-    const data = await callChatBlacksharkV4({ platform, message, history, shopId, shopName,
-      images, conversationId, messageId, simulate: true, testSource: "shadow" });
-    return { ...data, handoff_to_admin: data.handoff_required === true,
-      handoff_reason: data.handoff_reason };
-  }
-  const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
-  const url = `${upstream}/chat`;
-
-  // ⚡ BUG-G guard — fail fast สำหรับ platform ที่ไม่มี bot deploy (เหมือน route.ts)
-  if (platform !== "shopee") {
-    throw new Error(
-      `bot สำหรับ platform "${platform}" ยังไม่ได้ deploy (URL=${upstream}) — ` +
-      `shadow-inbox รองรับเฉพาะ shopee ในขณะนี้`
-    );
-  }
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-Internal-Secret": serverConfig.chatbotInternalSecret,
-  };
-
-  const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
-  if (shopName) body.shop = shopName;
-  else if (shopId) body.shop = shopId;
-  // ⚡ Shadow isolation — namespace conversation_id ด้วย "shadow:" เพื่อให้ bot
-  //   ใช้ timeline/anchor/claim state ได้เต็มรูปแบบ แต่เขียนลง doc แยกจากแชทจริง
-  if (conversationId) body.conversation_id = `shadow:${conversationId}`;
-  // ⚡ simulate_assignment → ถ้า replay trigger handoff จะเขียน test_status_conversation
-  //   ไม่แตะ conversations/status_conversation ของแชทจริง (bot ยังได้ชื่อ admin มาใส่คำตอบ)
-  body.simulate_assignment = true;
-  // ⚡ ส่ง current-turn images ให้ bot (ถ้ามี) — ใช้ Gemini vision อ่านรูป
-  if (images && images.length > 0) body.images = images;
-  // ⚡ chat_v3 — ส่ง use_v3 เพื่อบังคับใช้ chatbotv3 (มี priority เหนือ v2)
-  body.use_v3 = chatEngine === "v3";
-  body.use_v2 = chatEngine === "v2";
-
-  let resp: Response;
-  try {
-    resp = await fetch(url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-      // ⚡ timeout 90 วิต่อครั้ง — กันค้างถ้า LLM ช้า
-      signal: AbortSignal.timeout(90_000),
-    });
-  } catch (fetchErr) {
-    // ⚡ ถ้า fetch พัง (connection refused / timeout / DNS) → บอก platform + URL ให้ debug ได้
-    const reason = fetchErr instanceof Error ? fetchErr.message : String(fetchErr);
-    throw new Error(`bot call failed [${platform}] ${url}: ${reason} — ตรวจสอบว่า bot รันอยู่ที่ port นี้`);
-  }
-
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`bot call failed [${platform}] (${resp.status}): ${txt.slice(0, 200)}`);
-  }
-
-  const data = await resp.json();
+  const pythonPayload: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
+  if (shopName) pythonPayload.shop = shopName;
+  else if (shopId) pythonPayload.shop = shopId;
+  if (conversationId) pythonPayload.conversation_id = `shadow:${conversationId}`;
+  pythonPayload.simulate_assignment = true;
+  if (images?.length) pythonPayload.images = images;
+  const unsupported = platform === "shopee" ? undefined :
+    `bot สำหรับ platform "${platform}" ยังไม่ deploy (URL=${serverConfig.chatbotBaseUrls[platform]}) — shadow-inbox รองรับเฉพาะ shopee`;
+  const { chat_engine, data } = await dispatchChatEngine({
+    platform,
+    engine: await getChatEngine(),
+    pythonPayload,
+    pythonUnsupportedMessage: unsupported,
+    timeoutMs: 90_000,
+    v4Params: { platform, message, history, shopId, shopName, images, conversationId, messageId,
+      simulate: true, testSource: "shadow" },
+  });
   return {
     answer: data.answer || "(ไม่มีคำตอบ)",
     source: data.source,
@@ -123,9 +82,10 @@ async function callOurBot(params: {
     cost: typeof data.cost === "number" ? data.cost : undefined,
     products: data.products,
     image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
-    handoff_to_admin: data.handoff_to_admin === true, // ⚡ BUG-B — ส่งต่อให้ shadowReplyService เก็บ
+    handoff_to_admin: data.handoff_to_admin === true || data.handoff_required === true, // ⚡ BUG-B — ส่งต่อให้ shadowReplyService เก็บ
     handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
     routing_decision: data.routing_decision,
+    chat_engine,
   };
 }
 

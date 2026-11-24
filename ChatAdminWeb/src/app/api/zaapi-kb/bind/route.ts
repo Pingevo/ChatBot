@@ -6,6 +6,7 @@ import { NextRequest } from "next/server";
 import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { serverConfig } from "@/backend/lib/config";
+import { getChatEngine } from "@/backend/service/systemConfigService";
 
 async function upstream() {
   return serverConfig.chatbotBaseUrls.shopee.replace(/\/$/, "");
@@ -14,6 +15,7 @@ async function upstream() {
 export async function GET(req: NextRequest) {
   const r = await requirePageEdit(req, "kb");
   if (!r.ok) return r.response;
+  if (await getChatEngine() === "v4") return json({ detail: "python_engine_required" }, 409);
   const url = new URL(req.url);
   const file = url.searchParams.get("file") || "";
   if (!file) return json({ detail: "file required" }, 400);
@@ -28,6 +30,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const r = await requirePageEdit(req, "kb");
   if (!r.ok) return r.response;
+  if (await getChatEngine() === "v4") return json({ detail: "python_engine_required" }, 409);
   const url = new URL(req.url);
   const file = url.searchParams.get("file") || "";
   const body = await req.json().catch(() => null);

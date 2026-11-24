@@ -2,12 +2,14 @@
 //   passthrough → FastAPI /zaapi-kb/files (JSON เท่านั้น — ไม่มี binary)
 import { NextRequest } from "next/server";
 import { requireAuth, requirePageEdit } from "@/backend/middleware/authorize";
-import { json } from "@/backend/lib/http";
+import { json, error } from "@/backend/lib/http";
 import { serverConfig } from "@/backend/lib/config";
+import { getChatEngine } from "@/backend/service/systemConfigService";
 
 export async function GET(req: NextRequest) {
   const r = await requireAuth(req);
   if (!r.ok) return r.response;
+  if (await getChatEngine() === "v4") return error("python_engine_required", 409);
 
   const upstream = serverConfig.chatbotBaseUrls.shopee.replace(/\/$/, "");
   const res = await fetch(`${upstream}/zaapi-kb/files`, {
@@ -22,6 +24,7 @@ export async function GET(req: NextRequest) {
 export async function POST(req: NextRequest) {
   const r = await requirePageEdit(req, "kb");
   if (!r.ok) return r.response;
+  if (await getChatEngine() === "v4") return error("python_engine_required", 409);
   const url = new URL(req.url);
   const upstream = serverConfig.chatbotBaseUrls.shopee.replace(/\/$/, "");
   const res = await fetch(`${upstream}/zaapi-kb/files/toggle${url.search}`, {

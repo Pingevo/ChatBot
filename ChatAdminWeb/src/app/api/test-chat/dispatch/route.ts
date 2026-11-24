@@ -19,13 +19,11 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
-import { serverConfig } from "@/backend/lib/config";
 import {
-  getChatEngine,
   getBotProductLimit,
   type Platform,
 } from "@/backend/service/systemConfigService";
-import { callChatBlacksharkV4, resolveChatShopId } from "@/backend/service/botCallService";
+import { dispatchChatEngine, ChatEngineDispatchError } from "@/backend/service/botCallService";
 import { workflowEngine } from "@/backend/service/workflowEngine";
 import { handoffService } from "@/backend/service/handoffService";
 
@@ -92,59 +90,23 @@ export async function POST(req: NextRequest) {
   const origin = new URL(req.url).origin;
   const absImages = allImages.map((u) => (u.startsWith("http") ? u : `${origin}${u}`));
 
-  // ── bot leaf — Python /chat (payload เดียวกับ /api/chatbot/chat + flush เดิม) ──
+  // ── bot leaf — shared engine transport; caller payload stays unchanged ──
   const callTestBot = async (): Promise<{ ok: boolean; body: Record<string, unknown>; httpStatus?: number }> => {
-    const chatEngine = await getChatEngine();
-    if (chatEngine === "v4") {
-      try {
-        if (!shop) throw new Error("chat_engine_shop_required");
-        const shopId = await resolveChatShopId(platform, shop);
-        const data = await callChatBlacksharkV4({
-          platform, message: combinedText, shopId, shopName: shop, history,
-          images: absImages, simulate: true, testSource: "test_chat",
-        });
-        return { ok: true, body: {
-          answer: data.answer, products: data.products || [], source: data.source,
-          chat_engine: data.chat_engine, image_desc: data.image_desc,
-          handoff_to_admin: data.handoff_required === true,
-          handoff_reason: data.handoff_reason,
-        } };
-      } catch (err) {
-        return { ok: false, httpStatus: 502, body: { error: err instanceof Error ? err.message : "ChatBlackshark unavailable" } };
-      }
-    }
-    const baseUrl = serverConfig.chatbotBaseUrls[platform] || serverConfig.chatbotBaseUrls.shopee;
-    const url = baseUrl.replace(/\/$/, "") + "/chat";
     const payload: Record<string, unknown> = { message: combinedText, limit, history };
     if (shop) payload.shop = shop;
     payload.conversation_id = sessionId;
     payload.simulate_assignment = true;
     if (body.ticket_state) payload.ticket_state = body.ticket_state;
     if (absImages.length > 0) payload.images = absImages;
-    const useV3 = chatEngine === "v3";
-    const useV2 = chatEngine === "v2";
-    payload.use_v3 = useV3;
-    payload.use_v2 = useV2;
     try {
-      const resp = await fetch(url, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Internal-Secret": serverConfig.chatbotInternalSecret,
-          "X-Admin-Id": r.ctx.admin.admin_id,
-          "X-Admin-Name": encodeURIComponent(r.ctx.admin.name || ""),
+      const { chat_engine: chatEngine, data } = await dispatchChatEngine({
+        platform,
+        pythonPayload: payload,
+        v4Params: {
+          platform, message: combinedText, shopId: "", shopName: shop || undefined, history,
+          images: absImages, conversationId: sessionId, simulate: true, testSource: "test_chat",
         },
-        body: JSON.stringify(payload),
       });
-      if (!resp.ok) {
-        const errBody = await resp.json().catch(() => ({}));
-        return {
-          ok: false,
-          httpStatus: resp.status,
-          body: { error: errBody.detail || errBody.error || `bot returned ${resp.status}` },
-        };
-      }
-      const data = await resp.json();
       return {
         ok: true,
         body: {
@@ -170,7 +132,20 @@ export async function POST(req: NextRequest) {
           image_desc: data.image_desc,
         },
       };
-    } catch {
+    } catch (cause) {
+      if (cause instanceof ChatEngineDispatchError) {
+        const raw = cause.responseBody && typeof cause.responseBody === "object"
+          ? cause.responseBody as Record<string, unknown> : {};
+        return {
+          ok: false,
+          httpStatus: cause.status,
+          body: {
+            error: cause.chat_engine === "v4"
+              ? cause.message
+              : String(raw.detail || raw.error || (Object.keys(raw).length ? `bot returned ${cause.status}` : "chatbot service unreachable")),
+          },
+        };
+      }
       return { ok: false, httpStatus: 502, body: { error: "chatbot service unreachable" } };
     }
   };

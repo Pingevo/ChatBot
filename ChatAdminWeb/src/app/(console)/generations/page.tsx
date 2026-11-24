@@ -17,7 +17,7 @@ import { canEditPage } from "@/lib/roles";
 import { BuildProgressCat, getGenerationMascotState, PixelCat, type PixelCatOutfit } from "@/components/generations/BuildProgressCat";
 import { GenTracks } from "@/components/generations/GenTracks";
 
-const API = "/chatbot/shopee/admin/generations";
+const API = "/generations/list";
 const STEP_ORDER = [
   "export", "image_texts_sellable", "image_texts_nonsellable",
   "sellable_units", "unit_embeddings", "product_embeddings",
@@ -97,7 +97,7 @@ function StepBar({ info }: { info: StepInfo | undefined }) {
 function RunDetail({ gid }: { gid: string }) {
   const [d, setD] = useState<Detail | null>(null);
   useEffect(() => {
-    api().get<Detail>(`${API}/${encodeURIComponent(gid)}`)
+    api().get<Detail>(`/generations/${encodeURIComponent(gid)}`)
       .then((r) => setD(r.data)).catch(() => setD(null));
   }, [gid]);
   if (!d) return <div className="text-[11px] text-muted py-2">กำลังโหลดรายละเอียด…</div>;
@@ -258,11 +258,21 @@ export default function GenerationsPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [startMode, setStartMode] = useState<"daily" | "weekly">("daily");
   const [mascotOutfit, setMascotOutfit] = useState<PixelCatOutfit>("classic");
+  const [pythonUnavailable, setPythonUnavailable] = useState(false);
 
   const load = useCallback(async (quiet = false) => {
+    if (quiet && pythonUnavailable) return;
     if (!quiet) setLoading(true);
     try {
-      const r = await api().get<{ active: string; previous?: string; runs: Run[] }>(API);
+      const r = await api().get<{ active: string; previous?: string; runs: Run[]; unavailable?: boolean }>(API);
+      if (r.data.unavailable) {
+        setPythonUnavailable(true);
+        setActive("");
+        setPrevious("");
+        setRuns([]);
+        return;
+      }
+      setPythonUnavailable(false);
       setActive(r.data.active || "");
       setPrevious(r.data.previous || "");
       setRuns(r.data.runs || []);
@@ -271,7 +281,7 @@ export default function GenerationsPage() {
     } finally {
       setLoading(false);
     }
-  }, [catchError]);
+  }, [catchError, pythonUnavailable]);
 
   useEffect(() => {
     load();
@@ -303,6 +313,7 @@ export default function GenerationsPage() {
       : { action: "idle" as const, mood: "happy" as const };
 
   const onAction = async (action: string, gid: string) => {
+    if (pythonUnavailable) return;
     const meta: Record<string, { title: string; msg: string; okText: string; danger?: boolean }> = {
       publish: { title: "ยืนยัน Publish", okText: "Publish",
         msg: `สลับ pointer ไป ${gid} — บอทจะใช้ข้อมูลชุดใหม่ทันที (rollback ได้)` },
@@ -324,7 +335,7 @@ export default function GenerationsPage() {
     if (!ok) return;
     setBusy(true);
     try {
-      await api().post(`${API}/${action}?gid=${encodeURIComponent(gid)}`);
+      await api().post(`/generations/${action}?gid=${encodeURIComponent(gid)}`);
       toast.success(action === "publish" ? "Publish แล้ว — pointer สลับ" : "บันทึกแล้ว");
       await load();
     } catch (e) {
@@ -335,6 +346,7 @@ export default function GenerationsPage() {
   };
 
   const onStart = async () => {
+    if (pythonUnavailable) return;
     const ok = await confirm.ask({
       title: "ยืนยัน Build เลย",
       message: `สร้าง generation ใหม่และเริ่ม build ${startMode} ทันที — live bot ยังใช้ gen เดิมจนกว่าจะกด Accept`,
@@ -344,7 +356,7 @@ export default function GenerationsPage() {
     if (!ok) return;
     setBusy(true);
     try {
-      const r = await api().post<{ gid?: string }>(`${API}/start?mode=${startMode}`);
+      const r = await api().post<{ gid?: string }>(`/generations/start?mode=${startMode}`);
       toast.success(`เริ่ม build ${r.data.gid || ""} แล้ว`);
       await load();
     } catch (e) {
@@ -359,6 +371,11 @@ export default function GenerationsPage() {
       title="Generation Pipeline"
       subtitle={<> <span className="hidden md:inline">build → review → publish (pointer สลับเฉพาะตอน Accept)</span><span className="md:hidden">ติดตามชุดข้อมูลและสถานะ build</span></>}
     >
+      {pythonUnavailable && (
+        <div className="mb-4 rounded-xl border border-warning/30 bg-warning/10 p-4 text-sm text-warning">
+          Generation Pipeline ต้องใช้ Python engine (legacy/v2/v3) และ bot service; เลือก v4 แล้วเครื่องมือนี้จะหยุดเรียกข้อมูลจาก Python
+        </div>
+      )}
       <div className="generation-mobile-overview md:hidden">
         <section className="generation-current-panel">
           <div className="generation-current-copy">
@@ -413,7 +430,7 @@ export default function GenerationsPage() {
                   </button>
                 ))}
               </div>
-              <Button size="sm" disabled={busy} onClick={onStart}
+              <Button size="sm" disabled={busy || pythonUnavailable} onClick={onStart}
                       title="สร้าง generation ใหม่และเริ่ม build ทันที"
                       className="generation-start-button">
                 <Zap size={14} />
@@ -448,7 +465,7 @@ export default function GenerationsPage() {
                 <option value="daily">daily</option>
                 <option value="weekly">weekly</option>
               </SelectField>
-              <Button size="sm" disabled={busy} onClick={onStart}
+              <Button size="sm" disabled={busy || pythonUnavailable} onClick={onStart}
                       title="สร้าง generation ใหม่และเริ่ม build ทันที"
                       className="generation-start-button">
                 <Zap size={14} />
@@ -487,7 +504,7 @@ export default function GenerationsPage() {
             )}
             {runs.map((r) => (
               <RunCard key={r._id} run={r} active={active} previous={previous}
-                       editable={editable} busy={busy} onAction={onAction}
+                       editable={editable && !pythonUnavailable} busy={busy} onAction={onAction}
                        expanded={expanded === r._id}
                        onToggle={() => setExpanded(expanded === r._id ? null : r._id)} />
             ))}

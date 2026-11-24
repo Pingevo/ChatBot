@@ -144,5 +144,6 @@ export const getSystemConfig = async () => {
   lastGoodConfig = { ...state.config };
   return lastGoodConfig;
 };
+export const getChatEngine = async () => state.config.chat_engine || "legacy";
 export const systemConfigService = { getSystemConfig };
 export { shouldUseChatV2, shouldUseChatV3, getBotProductLimit };
