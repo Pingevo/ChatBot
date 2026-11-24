@@ -15,6 +15,7 @@ export const maxDuration = 300;
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
+import { serverConfig } from "@/backend/lib/config";
 import { getChatEngine } from "@/backend/service/systemConfigService";
 import { readFile, writeFile, readdir, stat } from "fs/promises";
 import { existsSync } from "fs";
@@ -128,6 +129,8 @@ async function runReplayScript(params: {
   useV3?: boolean;
   useLegacy?: boolean;
   useV4?: boolean;
+  engineCallUrl: string;
+  engineCallSecret: string;
 }): Promise<{ pid: number; logPath: string; savePath: string; alreadyRunning: boolean }> {
   const limit = params.limit ?? 50;
   const oldest = params.oldest ?? true;
@@ -185,7 +188,11 @@ async function runReplayScript(params: {
     cwd: REPO_ROOT,
     detached: true,
     stdio: "ignore",
-    env: { ...process.env },
+    env: {
+      ...process.env,
+      CHATADMIN_REPLAY_ENGINE_URL: params.engineCallUrl,
+      CHATADMIN_REPLAY_ENGINE_SECRET: params.engineCallSecret,
+    },
   });
   child.unref();
 
@@ -257,6 +264,8 @@ export async function POST(req: NextRequest) {
       useV3: chatEngine === "v3",
       useLegacy: chatEngine === "legacy",
       useV4: chatEngine === "v4",
+      engineCallUrl: new URL("/api/replay-compare/engine-call", req.url).toString(),
+      engineCallSecret: serverConfig.chatbotInternalSecret,
     });
     if (result.alreadyRunning) {
       return json({
@@ -280,6 +289,8 @@ export async function POST(req: NextRequest) {
       useV3: chatEngine === "v3",
       useLegacy: chatEngine === "legacy",
       useV4: chatEngine === "v4",
+      engineCallUrl: new URL("/api/replay-compare/engine-call", req.url).toString(),
+      engineCallSecret: serverConfig.chatbotInternalSecret,
     });
     if (result.alreadyRunning) {
       return json({

@@ -44,7 +44,7 @@ let dispatchResponder: Res = { status: 200, body: { status: "bot_answered", answ
     r = { status: 200, body: { ok: true } };
   } else if (u.endsWith("/api/test-chat/buffer-status")) {
     r = { status: 200, body: { enabled: false, window_ms: 100, max_messages: 5 } };
-  } else if (u.endsWith("/api/chatbot/shops")) {
+  } else if (u.endsWith("/api/catalog/shops")) {
     r = { status: 200, body: { shops: ["SuperITMall"] } };
   } else {
     r = { status: 200, body: {} };
@@ -182,6 +182,10 @@ check("persist[0] = user turn", per[0]?.body?.message?.role === "user"
   && per[0]?.body?.message?.text === "คำถามที่ล้มเหลว");
 check("persist[1] = model turn", per[1]?.body?.message?.role === "model"
   && per[1]?.body?.message?.text === "ตอบแล้ว");
+check("shop options and sessions use Next APIs; no observed call uses Python proxy",
+  fetchLog.some((c) => c.url.includes("/api/catalog/shops"))
+    && fetchLog.some((c) => c.url.includes("/api/test-chat/sessions"))
+    && fetchLog.every((c) => !c.url.includes("/api/chatbot")));
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);

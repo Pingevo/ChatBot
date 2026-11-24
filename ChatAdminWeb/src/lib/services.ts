@@ -269,9 +269,9 @@ export const statsService = {
     api().get<AdminActivityStats>("/stats/admin-activity", { params }).then((r) => r.data),
 };
 
-// ---- Shops (proxied to chatbot service) ----
+// ---- Catalog shop names (shared read-only product database) ----
 export const shopService = {
-  list: () => api().get<{ shops: string[] }>("/chatbot/shops").then((r) => r.data),
+  list: () => api().get<{ shops: string[] }>("/catalog/shops").then((r) => r.data),
 };
 
 // ---- Shop Personas (per-shop bot persona — admin ตั้งชื่อตัวแทนบอทของแต่ละร้าน) ----

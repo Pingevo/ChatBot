@@ -32,8 +32,8 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
-import { getSystemConfig, setBotWorkerGlobalEnabled, getChatEngine, getBotProductLimit } from "@/backend/service/systemConfigService";
-import { callChatBlacksharkV4 } from "@/backend/service/botCallService";
+import { getSystemConfig, setBotWorkerGlobalEnabled, getBotProductLimit } from "@/backend/service/systemConfigService";
+import { dispatchChatEngine } from "@/backend/service/botCallService";
 import { assignmentService } from "@/backend/service/assignmentService";
 import { handoffService } from "@/backend/service/handoffService";
 // ⚡ Phase 2J — test-assignment ใช้ test version (เก็บใน test_status_conversation ไม่ใช่ status_conversation จริง)
@@ -44,7 +44,6 @@ import type { TestAssignmentDoc } from "@/backend/service/testAssignmentService"
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { parseRawMessage, toProductCard } from "@/backend/service/messageMediaParser";
 import { productService } from "@/backend/service/productService";
-import { serverConfig } from "@/backend/lib/config";
 import type { Platform } from "@/backend/lib/safety";
 import { toBotText, toBotImages } from "@/backend/service/messageService";
 
@@ -81,91 +80,27 @@ async function callBot(params: {
   chat_engine?: "legacy" | "v2" | "v3" | "v4";
 }> {
   const { platform, message, history, shopId, shopName, itemId, orderSn, images, conversationId, messageId } = params;
-  const chatEngine = await getChatEngine();
-  if (chatEngine === "v4") {
-    const data = await callChatBlacksharkV4({ platform, message, history, shopId, shopName,
-      itemId, orderSn, images, conversationId, messageId,
-      simulate: true, testSource: "test_assignment" });
-    return { ...data, handoff_to_admin: data.handoff_required === true,
-      handoff_reason: data.handoff_reason };
-  }
-  const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
-  const url = `${upstream}/chat`;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-Internal-Secret": serverConfig.chatbotInternalSecret,
-  };
-  const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
-  if (shopName) body.shop = shopName;
-  else if (shopId) body.shop = shopId;
-  // ⚡ ส่ง item_id ถ้าลูกค้าแชร์การ์ดสินค้ามาในแชท
-  if (itemId) body.item_id = itemId;
-  // ⚡ Phase 3C — ส่ง order_sn ถ้าลูกค้าแชร์การ์ดคำสั่งซื้อมาในแชท
-  if (orderSn) body.order_sn = orderSn;
-  // ⚡ Phase 1A — ส่ง URL รูป/วิดีโอให้ bot ใช้ Gemini vision อ่าน
-  if (images && images.length > 0) body.images = images;
-  // ⚡ chat_engine — อ่านจาก SystemConfig (หน้า config ควบคุม)
-  //    v3 มี priority เหนือ v2
-  const useV3 = chatEngine === "v3";
-  const useV2 = chatEngine === "v2";
-  body.use_v3 = useV3;
-  body.use_v2 = useV2;
+  const pythonPayload: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
+  if (shopName) pythonPayload.shop = shopName;
+  else if (shopId) pythonPayload.shop = shopId;
+  if (itemId) pythonPayload.item_id = itemId;
+  if (orderSn) pythonPayload.order_sn = orderSn;
+  if (images?.length) pythonPayload.images = images;
 
-  // ⚡ 429 retry: รอ 60 วิ แล้วยิงใหม่ — สูงสุด 3 ครั้ง ถ้าเกินให้ throw
-  const MAX_429_RETRIES = 3;
-  const RATE_LIMIT_WAIT_MS = 60_000;
-  let lastErr: Error | null = null;
-  for (let attempt = 0; attempt <= MAX_429_RETRIES; attempt++) {
-    try {
-      const resp = await fetch(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(90_000),
-      });
-      if (resp.status === 429) {
-        if (attempt < MAX_429_RETRIES) {
-          // รอ 60 วิ แล้วยิงใหม่
-          await new Promise((r) => setTimeout(r, RATE_LIMIT_WAIT_MS));
-          continue;
-        }
-        throw new Error(`bot 429 rate limit — ลอง ${MAX_429_RETRIES} ครั้งแล้ว ยกเลิก`);
-      }
-      if (!resp.ok) {
-        const txt = await resp.text().catch(() => "");
-        throw new Error(`bot call failed (${resp.status}): ${txt.slice(0, 200)}`);
-      }
-      const data = await resp.json();
-      return {
-        answer: data.answer || "",
-        source: data.source,
-        model: data.model,
-        elapsed: typeof data.elapsed === "number" ? data.elapsed : undefined,
-        usage: data.usage,
-        cost: typeof data.cost === "number" ? data.cost : undefined,
-        products: data.products,
-        intent: data.intent,
-        retrieval_info: data.retrieval_info,
-        web_search_used: data.web_search_used === true,
-        web_search_reason: data.web_search_reason,
-        // ⚡ handoff fields
-        handoff_to_admin: data.handoff_to_admin === true,
-        handoff_reason: data.handoff_reason,
-        image_desc: typeof data.image_desc === "string" ? data.image_desc : undefined,
-        // ⚡ chat_engine — บันทึก engine ที่ใช้
-        chat_engine: chatEngine,
-      };
-    } catch (err) {
-      // ถ้า error เป็น 429-related → retry
-      if (err instanceof Error && err.message.includes("429") && attempt < MAX_429_RETRIES) {
-        await new Promise((r) => setTimeout(r, RATE_LIMIT_WAIT_MS));
-        continue;
-      }
-      lastErr = err instanceof Error ? err : new Error(String(err));
-      throw lastErr;
-    }
-  }
-  throw lastErr || new Error("bot call failed — unknown");
+  const { chat_engine, data } = await dispatchChatEngine({
+    platform,
+    pythonPayload,
+    v4Params: { ...params, simulate: true, testSource: "test_assignment" },
+    timeoutMs: 90_000,
+    max429Retries: 3,
+    retryWaitMs: 60_000,
+  });
+  return {
+    ...data,
+    answer: data.answer || "",
+    handoff_to_admin: data.handoff_to_admin === true || data.handoff_required === true,
+    chat_engine,
+  };
 }
 
 // ─── GET ──────────────────────────────────────────────────

@@ -167,6 +167,12 @@ export default function LogsPage() {
     if (!canViewLogs) return;
     setZaapiImportLogLoading(true);
     try {
+      const engine = await api().get<{ python_tools_available: boolean }>("/system/chat-engine");
+      if (engine.data.python_tools_available !== true) {
+        setZaapiImportLogs([]);
+        setZaapiImportLogError(false);
+        return;
+      }
       const r = await api().get<{ log: ZaapiImportLogRow[] }>("/zaapi-kb/import-log", { params: { limit: 100 } });
       setZaapiImportLogs(r.data.log || []);
       setZaapiImportLogError(false);

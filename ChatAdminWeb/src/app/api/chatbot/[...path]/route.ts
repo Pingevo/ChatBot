@@ -1,6 +1,5 @@
-// Proxy route handler — forwards /api/chatbot/<platform>/* to the Python chatbot service.
-// Adds the internal secret header so the chatbot accepts the request.
-// The chatbot is never exposed publicly; only Next.js can reach it.
+// Compatibility route for older /api/chatbot callers; chat requests use the selected engine.
+// Other proxied paths still forward to the configured private Python service.
 //
 // Routing: first path segment = platform → picks the right bot's base URL
 //   /api/chatbot/shopee/* → CHATBOT_BASE_URL_SHOPEE  (default 8010)
@@ -13,7 +12,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { serverConfig } from "@/backend/lib/config";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { getChatEngine } from "@/backend/service/systemConfigService";
-import { callChatBlacksharkV4, resolveChatShopId } from "@/backend/service/botCallService";
+import { ChatEngineDispatchError, dispatchChatEngine } from "@/backend/service/botCallService";
 
 type Platform = "shopee" | "lazada" | "tiktok";
 
@@ -40,6 +39,69 @@ async function proxy(req: NextRequest, segments: string[]) {
 
   const { upstream, remaining } = pickUpstream(segments);
   const path = remaining.join("/");
+  if ((path === "admin/generations" || path.startsWith("admin/generations/")) &&
+      await getChatEngine() === "v4") {
+    return NextResponse.json({ error: "python_engine_required" }, { status: 409 });
+  }
+  if (req.method === "POST" && path === "chat") {
+    let parsed: Record<string, any>;
+    try {
+      const value = await req.json();
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid_body");
+      parsed = value;
+    } catch {
+      return NextResponse.json({ error: "invalid_json_body" }, { status: 400 });
+    }
+    const requestedPlatform = (segments[0] || "").toLowerCase();
+    const platform: Platform = ["shopee", "lazada", "tiktok"].includes(requestedPlatform)
+      ? requestedPlatform as Platform : "shopee";
+    const shopName = typeof parsed.shop_name === "string" ? parsed.shop_name :
+      typeof parsed.shop === "string" ? parsed.shop : "";
+    const shopId = typeof parsed.shop_id === "string" ? parsed.shop_id : "";
+    try {
+      const { data } = await dispatchChatEngine({
+        platform,
+        pythonPayload: parsed,
+        pythonHeaders: {
+          "X-Admin-Id": authResult.ctx.admin.admin_id,
+          "X-Admin-Name": encodeURIComponent(authResult.ctx.admin.name || ""),
+        },
+        v4Params: {
+          platform,
+          shopId,
+          shopName,
+          message: typeof parsed.message === "string" ? parsed.message : "",
+          history: Array.isArray(parsed.history) ? parsed.history : [],
+          images: Array.isArray(parsed.images) ? parsed.images : [],
+          itemId: typeof parsed.item_id === "string" ? parsed.item_id : undefined,
+          orderSn: typeof parsed.order_sn === "string" ? parsed.order_sn : undefined,
+          conversationId: typeof parsed.conversation_id === "string" ? parsed.conversation_id : undefined,
+          messageId: typeof parsed.message_id === "string" ? parsed.message_id : undefined,
+          simulate: parsed.simulate_assignment === true,
+          testSource: parsed.simulate_assignment === true ? "test_chat" : undefined,
+        },
+      });
+      return NextResponse.json(data);
+    } catch (cause) {
+      if (cause instanceof ChatEngineDispatchError) {
+        if (cause.chat_engine === "v4") {
+          return NextResponse.json({
+            error: "chat_engine_unavailable",
+            message: cause.message,
+          }, { status: 502 });
+        }
+        if (cause.status !== 502 || Object.keys((cause.responseBody || {}) as object).length > 0) {
+          return NextResponse.json(cause.responseBody || {}, { status: cause.status });
+        }
+      }
+      const msg = cause instanceof Error ? cause.message : "chatbot unreachable";
+      console.error("[chatbot-proxy] upstream error:", msg, "upstream:", upstream);
+      return NextResponse.json(
+        { error: "chatbot_proxy_error", message: "chatbot service unreachable" },
+        { status: 502 }
+      );
+    }
+  }
   const url = `${upstream}/${path}${req.nextUrl.search}`;
 
   const method = req.method;
@@ -54,54 +116,7 @@ async function proxy(req: NextRequest, segments: string[]) {
   headers.set("X-Admin-Id", authResult.ctx.admin.admin_id);
   headers.set("X-Admin-Name", encodeURIComponent(authResult.ctx.admin.name || ""));
 
-  let body: BodyInit | undefined;
-  if (method !== "GET" && method !== "HEAD") {
-    const rawBody = await req.text();
-    // The global SystemConfig value overrides request-provided engine flags.
-    if (method === "POST" && path === "chat") {
-      let parsed: Record<string, any>;
-      try {
-        const value = JSON.parse(rawBody);
-        if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid_body");
-        parsed = value;
-      } catch {
-        return NextResponse.json({ error: "invalid_json_body" }, { status: 400 });
-      }
-      const chatEngine = await getChatEngine();
-      if (chatEngine === "v4") {
-        try {
-          const requestedPlatform = (segments[0] || "").toLowerCase();
-          const platform: Platform = ["shopee", "lazada", "tiktok"].includes(requestedPlatform)
-            ? requestedPlatform as Platform : "shopee";
-          const shopName = typeof parsed.shop_name === "string" ? parsed.shop_name :
-            typeof parsed.shop === "string" ? parsed.shop : "";
-          const shopId = typeof parsed.shop_id === "string" ? parsed.shop_id :
-            await resolveChatShopId(platform, shopName);
-          const result = await callChatBlacksharkV4({
-            platform, shopId, shopName,
-            message: typeof parsed.message === "string" ? parsed.message : "",
-            history: Array.isArray(parsed.history) ? parsed.history : [],
-            images: Array.isArray(parsed.images) ? parsed.images : [],
-            itemId: typeof parsed.item_id === "string" ? parsed.item_id : undefined,
-            orderSn: typeof parsed.order_sn === "string" ? parsed.order_sn : undefined,
-            conversationId: typeof parsed.conversation_id === "string" ? parsed.conversation_id : undefined,
-            messageId: typeof parsed.message_id === "string" ? parsed.message_id : undefined,
-            simulate: parsed.simulate_assignment === true,
-            testSource: parsed.simulate_assignment === true ? "test_chat" : undefined,
-          });
-          return NextResponse.json(result);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : "chat_engine_unavailable";
-          return NextResponse.json({ error: "chat_engine_unavailable", message }, { status: 502 });
-        }
-      }
-      parsed.use_v2 = chatEngine === "v2";
-      parsed.use_v3 = chatEngine === "v3";
-      body = JSON.stringify(parsed);
-    } else {
-      body = rawBody;
-    }
-  }
+  const body = method !== "GET" && method !== "HEAD" ? await req.text() : undefined;
 
   try {
     const upstreamResp = await fetch(url, {

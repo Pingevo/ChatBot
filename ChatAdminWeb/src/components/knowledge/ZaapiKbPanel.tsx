@@ -199,6 +199,7 @@ export function ZaapiKbPanel() {
 
   const [sources, setSources] = useState<ZaapiSource[]>([]);
   const [loading, setLoading] = useState(true);
+  const [pythonToolsAvailable, setPythonToolsAvailable] = useState<boolean | null>(null);
   const [search, setSearch] = useState("");
   const [platform, setPlatform] = useState("all");
   const [active, setActive] = useState("all");
@@ -249,19 +250,35 @@ export function ZaapiKbPanel() {
       .finally(() => setLoading(false));
   }, []);
   const loadFiles = useCallback(() => {
+    if (!pythonToolsAvailable) {
+      setFiles([]);
+      return;
+    }
     api()
       .get("/zaapi-kb/files")
       .then((r) => setFiles(r.data.files || []))
       .catch(() => setFiles([]));
+  }, [pythonToolsAvailable]);
+  const loadMapping = useCallback(() => {
     api()
       .get("/zaapi-kb/mapping")
       .then((r) => setKbShops(r.data.shops || []))
       .catch(() => setKbShops([]));
   }, []);
-  useEffect(() => { loadSources(); loadFiles(); }, [loadSources, loadFiles]);
+  useEffect(() => {
+    loadSources();
+    loadMapping();
+    api().get<{ python_tools_available: boolean }>("/system/chat-engine")
+      .then((r) => setPythonToolsAvailable(r.data.python_tools_available === true))
+      .catch(() => setPythonToolsAvailable(false));
+  }, [loadSources, loadMapping]);
+  useEffect(() => {
+    if (pythonToolsAvailable === true) loadFiles();
+    else if (pythonToolsAvailable === false) setFiles([]);
+  }, [loadFiles, pythonToolsAvailable]);
 
   async function doImport(op: "preview" | "apply") {
-    if (!imp) return;
+    if (!pythonToolsAvailable || !imp) return;
     setImporting(true);
     try {
       const fd = new FormData();
@@ -369,6 +386,7 @@ export function ZaapiKbPanel() {
 
   const [toggling, setToggling] = useState<string | null>(null);
   async function doToggleFile(f: ZaapiFile) {
+    if (!pythonToolsAvailable) return;
     const next = !!f.disabled;
     if (!(await confirm.ask({
       title: next ? `เปิดใช้ ${f.file}?` : `ปิดใช้ ${f.file}?`,
@@ -396,6 +414,7 @@ export function ZaapiKbPanel() {
   }
 
   async function doExport(f: ZaapiFile) {
+    if (!pythonToolsAvailable) return;
     try {
       const r = await api().get("/zaapi-kb/export", {
         params: { file: f.file }, responseType: "blob",
@@ -410,6 +429,7 @@ export function ZaapiKbPanel() {
   }
 
   async function doRollback(f: ZaapiFile) {
+    if (!pythonToolsAvailable) return;
     if (!(await confirm.ask({ title: `Rollback ${f.file} กลับ rev ${f.prev_rev ?? "?"}?`, variant: "danger" }))) return;
     try {
       const r = await api().post(`/zaapi-kb/import?op=rollback&file=${encodeURIComponent(f.file)}`);
@@ -426,6 +446,7 @@ export function ZaapiKbPanel() {
 
   // ── subject-binding editor (ใช้ stored source — ไม่ต้อง re-upload) ──
   async function openBind(f: ZaapiFile) {
+    if (!pythonToolsAvailable) return;
     if (bind?.file === f.file) { setBind(null); return; }
     setBind({ file: f.file, loading: true, saving: false, data: null, sel: {} });
     try {
@@ -454,7 +475,7 @@ export function ZaapiKbPanel() {
   }
 
   async function saveBind() {
-    if (!bind) return;
+    if (!pythonToolsAvailable || !bind) return;
     const sb: Record<string, BindRule> = {};
     const headers = (s: string, i: number) =>
       bind.data?.sheets[s]?.columns.find((c) => c.column_index === i)?.header || "";
@@ -635,6 +656,7 @@ export function ZaapiKbPanel() {
 
   // เปิด import modal — prefill scope จาก registry เดิมถ้าไฟล์ชื่อซ้ำ (re-import ไม่ต้องแมปใหม่)
   function openImport(f: File) {
+    if (!pythonToolsAvailable) return;
     const reg = files.find((x) => x.file === f.name);
     const scopes: ShopScope[] = (reg?.shop_scopes || []).map(
       ({ platform, shop_id, shopname }) => ({ platform, shop_id, shopname }));
@@ -892,28 +914,33 @@ export function ZaapiKbPanel() {
 
   const mobileAddActions = editable ? [
     { label: "เพิ่มเอกสาร", icon: <Plus size={17} />, onSelect: () => openCreate() },
-    { label: "Import ไฟล์", icon: <Upload size={17} />, onSelect: () => document.getElementById("zaapi-file-input")?.click() },
+    ...(pythonToolsAvailable ? [{ label: "Import ไฟล์", icon: <Upload size={17} />, onSelect: () => document.getElementById("zaapi-file-input")?.click() }] : []),
   ] : [];
 
-  if (loading) return <div className="flex justify-center py-12"><Loading size={24} /></div>;
+  if (loading || pythonToolsAvailable === null) return <div className="flex justify-center py-12"><Loading size={24} /></div>;
   if (sources.length === 0 && files.length === 0 && !imp)
     return (
       <div className="zaapi-kb-mobile-add-space space-y-3 pb-20 md:pb-0">
+        {pythonToolsAvailable === false && (
+          <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-text-muted">
+            รายการไฟล์, Import, Export, Rollback และการผูกรุ่นต้องใช้ Python engine; เลือก legacy/v2/v3 เพื่อใช้งานส่วนนี้
+          </div>
+        )}
         {editable && (
           <div className="flex justify-end gap-2">
               <Button size="sm" variant="outline" onClick={downloadSnapshot} disabled={snapshotting}>
               <Download size={14} /> {snapshotting ? "กำลังสำรอง..." : "Backup snapshot"}
             </Button>
-            <div className="hidden md:block">
+            {pythonToolsAvailable && <div className="hidden md:block">
               <Button size="sm" className="phone-mobile-add-hidden" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
                 <Upload size={14} /> Import ไฟล์
               </Button>
-            </div>
+            </div>}
             <input
               id="zaapi-file-input" type="file" accept=".xlsx,.txt" className="hidden"
               onChange={(e) => {
                 const f = e.target.files?.[0];
-                if (f) openImport(f);
+                if (f && pythonToolsAvailable) openImport(f);
                 e.target.value = "";
               }}
             />
@@ -928,6 +955,11 @@ export function ZaapiKbPanel() {
   return (
     <div className="zaapi-kb-mobile-add-space space-y-3 pb-20 md:pb-0">
       <MobileAddActions actions={mobileAddActions} />
+      {pythonToolsAvailable === false && (
+        <div className="rounded-lg border border-warning/40 bg-warning/10 px-3 py-2 text-xs text-text-muted">
+          รายการไฟล์, Import, Export, Rollback และการผูกรุ่นต้องใช้ Python engine; เลือก legacy/v2/v3 เพื่อใช้งานส่วนนี้
+        </div>
+      )}
       <div className="flex items-center gap-3 flex-wrap">
         <div className="relative flex-1 min-w-[200px] max-w-md">
           <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-text-subtle" />
@@ -963,7 +995,7 @@ export function ZaapiKbPanel() {
               <Download size={14} /> {snapshotting ? "กำลังสำรอง..." : "Backup snapshot"}
             </Button>
           )}
-          {editable && (
+          {editable && pythonToolsAvailable && (
             <Button size="sm" className="phone-mobile-add-hidden" onClick={() => document.getElementById("zaapi-file-input")?.click()}>
               <Upload size={14} /> Import ไฟล์
             </Button>
@@ -973,7 +1005,7 @@ export function ZaapiKbPanel() {
           id="zaapi-file-input" type="file" accept=".xlsx,.txt" className="hidden"
           onChange={(e) => {
             const f = e.target.files?.[0];
-            if (f) openImport(f);
+            if (f && pythonToolsAvailable) openImport(f);
             e.target.value = "";
           }}
         />
@@ -988,7 +1020,7 @@ export function ZaapiKbPanel() {
         <div className="border border-border rounded-xl divide-y divide-border bg-surface">
           <div className="px-4 py-2 text-[11px] font-medium text-text-subtle bg-surface-2 rounded-t-xl flex items-center justify-between gap-2">
             <span>ไฟล์นำเข้า ({files.length}) — ชื่อไฟล์เดิมแทนทั้งชุด · Export เป็น Excel{pageCount > 1 ? ` · หน้า ${page + 1}/${pageCount}` : ""}</span>
-            {editable && (
+            {editable && pythonToolsAvailable && (
               <button
                 onClick={async () => {
                   try {
@@ -1041,23 +1073,23 @@ export function ZaapiKbPanel() {
                   {f.accounts.length ? `${f.accounts.length} ร้าน` : "ทุกร้าน"}
                 </button>
                 {f.disabled && <Badge tone="warning">ปิดอยู่</Badge>}
-                {editable && (
+                {editable && pythonToolsAvailable && (
                   <span title={f.disabled ? "เปิดใช้ไฟล์นี้" : "ปิดใช้ไฟล์นี้"}>
                     <ToggleSwitch size="sm" enabled={!f.disabled}
                       disabled={toggling === f.file}
                       onChange={() => doToggleFile(f)} />
                   </span>
                 )}
-                <a
+                {pythonToolsAvailable && <a
                   href={`/zaapi-preview?file=${encodeURIComponent(f.file)}`}
                   className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center"
                   title="พรีวิว/แก้ไฟล์ต้นฉบับ" aria-label="Preview source">
                   <Eye size={13} className="text-text-muted" />
-                </a>
-                <button onClick={() => doExport(f)} className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center" title="Export xlsx" aria-label="Export">
+                </a>}
+                {pythonToolsAvailable && <button onClick={() => doExport(f)} className="w-7 h-7 rounded-md hover:bg-surface-2 flex items-center justify-center" title="Export xlsx" aria-label="Export">
                   <Download size={13} className="text-text-muted" />
-                </button>
-                {editable && f.prev_rev != null && (
+                </button>}
+                {editable && pythonToolsAvailable && f.prev_rev != null && (
                   <button onClick={() => doRollback(f)} className="w-7 h-7 rounded-md hover:bg-error-soft flex items-center justify-center" title={`Rollback → rev ${f.prev_rev}`} aria-label="Rollback">
                     <RotateCcw size={13} className="text-text-muted" />
                   </button>
@@ -1065,7 +1097,7 @@ export function ZaapiKbPanel() {
               </div>
               {openFile === f.file && (
                 <div className="border-t border-border bg-surface-2/50 px-4 py-3">
-                  {editable && (
+                  {editable && pythonToolsAvailable && (
                     <div className="mb-3 rounded-lg border border-border/60 bg-surface px-3 py-2">
                       <div className="flex items-center justify-between gap-2">
                         <div className="text-[11px] text-text-subtle">
@@ -1143,7 +1175,7 @@ export function ZaapiKbPanel() {
                                 <span className="text-[10px] text-text-subtle">
                                   rev {bind.data.active_rev} → บันทึก = rev ใหม่ (rollback ได้) · ว่างทั้งหมด = ล้าง binding
                                 </span>
-                                <Button size="sm" onClick={saveBind} disabled={bind.saving}>
+                                <Button size="sm" onClick={saveBind} disabled={bind.saving || !pythonToolsAvailable}>
                                   {bind.saving ? "กำลังบันทึก..." : "บันทึก binding"}
                                 </Button>
                               </div>

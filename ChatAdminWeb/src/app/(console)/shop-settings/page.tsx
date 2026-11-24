@@ -125,10 +125,10 @@ export default function ShopSettingsPage() {
     loadLogs();
   }, [load, loadLogs]);
 
-  // โหลดร้านทั้งหมดจาก chatbot /shops
+  // โหลด shopname จาก product catalog ผ่าน server API
   useEffect(() => {
     api()
-      .get<{ shops: string[] }>("/chatbot/shops")
+      .get<{ shops: string[] }>("/catalog/shops")
       .then((r) => {
         const shops: ShopOption[] = (r.data.shops || []).map((s) => ({
           shopname: s,

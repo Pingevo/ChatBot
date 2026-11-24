@@ -196,9 +196,17 @@ export async function listShopsByPlatform(platform: Platform): Promise<
   }));
 }
 
+/** รายชื่อ shopname ตาม catalog contract เดิมจาก Python GET /shops. */
+export async function listCatalogShopNames(platform: Platform = "shopee"): Promise<string[]> {
+  const coll = await getDbWalletCollection<ProductDoc>(COLLECTION_MAP[platform]);
+  const names = await coll.distinct("shopname");
+  return (names as string[]).sort();
+}
+
 export const productService = {
   listProducts,
   getProduct,
   getProductsByIds,
   listShopsByPlatform,
+  listCatalogShopNames,
 };

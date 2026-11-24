@@ -4,10 +4,12 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { serverConfig } from "@/backend/lib/config";
+import { getChatEngine } from "@/backend/service/systemConfigService";
 
 export async function GET(req: NextRequest) {
   const r = await requireAuth(req);
   if (!r.ok) return r.response;
+  if (await getChatEngine() === "v4") return json({ log: [], unavailable: true });
 
   const upstream = serverConfig.chatbotBaseUrls.shopee.replace(/\/$/, "");
   const qs = new URL(req.url).searchParams;

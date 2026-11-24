@@ -479,7 +479,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   async function loadSessions() {
     try {
       // ⚡ โหลดทุกร้านเสมอ — filter ทำใน frontend เพื่อให้เห็น history ทั้งหมด
-      const r = await fetch(`/api/chatbot/${platform}/test-chat/sessions?limit=200`);
+      const r = await fetch("/api/test-chat/sessions?limit=200");
       if (r.ok) {
         const d = await r.json();
         setSessions(d.sessions || []);
@@ -492,7 +492,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   async function createSession() {
     // ⚡ อนุญาตให้สร้าง session โดยไม่ต้องเลือกร้าน — เลือกทีหลังได้
     try {
-      const r = await fetch(`/api/chatbot/${platform}/test-chat/sessions`, {
+      const r = await fetch("/api/test-chat/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ shop: shop || "" }),
@@ -516,7 +516,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
 
   async function loadSession(id: string) {
     try {
-      const r = await fetch(`/api/chatbot/${platform}/test-chat/sessions/${id}`);
+      const r = await fetch(`/api/test-chat/sessions/${id}`);
       if (!r.ok) return;
       const d = await r.json();
       setCurrentSessionId(id);
@@ -627,7 +627,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   async function deleteSession(id: string) {
     if (!(await confirm.ask({ title: "ลบแชทนี้?", message: "ลบประวัติแชททดสอบถาวร", variant: "danger", confirmText: "ลบ" }))) return;
     try {
-      await fetch(`/api/chatbot/${platform}/test-chat/sessions/${id}`, { method: "DELETE" });
+      await fetch(`/api/test-chat/sessions/${id}`, { method: "DELETE" });
       if (currentSessionId === id) {
         setCurrentSessionId(null);
         setMessages([{ id: msgIdCounter++, role: "sys", html: `พิมพ์คำถามด้านล่างเพื่อทดสอบบอท${meta.label}` }]);
@@ -644,7 +644,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     try {
       // คำนวณ index ของ message ใหม่ใน array (ก่อน push)
       const msgIndex = messages.filter(m => m.role !== "sys").length;
-      await fetch(`/api/chatbot/${platform}/test-chat/sessions/${currentSessionId}/messages`, {
+      await fetch(`/api/test-chat/sessions/${currentSessionId}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -745,7 +745,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
     setLogsLoading(true);
     try {
       const scope = logsScope === "all" ? "all" : "";
-      const url = `/api/chatbot/${platform}/test-chat/logs?limit=200${scope ? `&admin_id=${scope}` : ""}`;
+      const url = `/api/test-chat/logs?limit=200${scope ? `&admin_id=${scope}` : ""}`;
       const r = await fetch(url);
       if (r.ok) {
         const d = await r.json();
@@ -793,7 +793,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   // ⚡ อัปเดต shop ของ session ใน DB (เมื่อผู้ใช้เปลี่ยนร้านในแชทที่มีอยู่)
   async function updateSessionShop(sessionId: string, newShop: string) {
     try {
-      await fetch(`/api/chatbot/${platform}/test-chat/sessions/${sessionId}`, {
+      await fetch(`/api/test-chat/sessions/${sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ shop: newShop }),
@@ -807,7 +807,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   // ⚡ อัปเดต title ของ session ใน DB (แก้ชื่อแชท)
   async function updateSessionTitle(sessionId: string, newTitle: string) {
     try {
-      await fetch(`/api/chatbot/${platform}/test-chat/sessions/${sessionId}`, {
+      await fetch(`/api/test-chat/sessions/${sessionId}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: newTitle }),
@@ -819,7 +819,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
   }
 
   useEffect(() => {
-    fetch("/api/chatbot/shops")
+    fetch("/api/catalog/shops")
       .then((r) => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((d) => setShops(d.shops || []))
       .catch(() => setShops([]));
@@ -849,7 +849,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
 
   function sendFeedback(answerText: string, rating: "up" | "down" | "clear") {
     try {
-      fetch("/api/chatbot/feedback", {
+      fetch("/api/test-chat/feedback", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ answer: answerText.slice(0, 500), rating }),
@@ -2119,7 +2119,7 @@ export function TestChatClient({ platform }: { platform: Platform }) {
                       // ⚡ Phase 2A — เรียก API ปิดแชท (state-driven) ไม่ใช่แค่ client toggle
                       if (currentSessionId) {
                         try {
-                          await fetch(`/api/chatbot/${platform}/test-chat/sessions/${currentSessionId}/close`, {
+                          await fetch(`/api/test-chat/sessions/${currentSessionId}/close`, {
                             method: "POST",
                           });
                         } catch (e) {

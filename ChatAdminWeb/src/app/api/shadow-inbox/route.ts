@@ -6,7 +6,7 @@
 //
 // ⛔ IRON RULE: ห้ามส่งข้อความจริงให้ลูกค้า
 // ⛔ ห้ามเรียก Shopee/TikTok/Lazada API
-// bot ถูกเรียกผ่าน /api/chatbot/[platform]/chat (proxy ไป Python service)
+// คำตอบผ่าน dispatchChatEngine ตาม chat_engine ที่ตั้งไว้; ผลลัพธ์เก็บใน shadow_replies
 // ผลลัพธ์เก็บใน `shadow_replies` collection เท่านั้น
 // ⚡ force-dynamic — กัน Next.js cache GET response (กันข้อมูลเก่าค้าง)
 export const dynamic = "force-dynamic";
@@ -17,7 +17,7 @@ import { shadowReplyService } from "@/backend/service/shadowReplyService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { serverConfig } from "@/backend/lib/config";
 import { getChatEngine, getBotProductLimit } from "@/backend/service/systemConfigService";
-import { callChatBlacksharkV4 } from "@/backend/service/botCallService";
+import { dispatchChatEngine } from "@/backend/service/botCallService";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import type { Platform } from "@/backend/lib/safety";
 
@@ -50,62 +50,21 @@ async function callOurBot(params: {
   chat_engine?: "legacy" | "v2" | "v3" | "v4";
 }> {
   const { platform, message, history, shopId, shopName, images, conversationId, messageId } = params;
-  const chatEngine = await getChatEngine();
-  if (chatEngine === "v4") {
-    const data = await callChatBlacksharkV4({ platform, message, history, shopId, shopName,
-      images, conversationId, messageId, simulate: true, testSource: "shadow" });
-    return { ...data, handoff_to_admin: data.handoff_required === true,
-      handoff_reason: data.handoff_reason };
-  }
-  // ใช้ platform-specific bot URL (shopee/tiktok/lazada แยกกัน)
-  const upstream = serverConfig.chatbotBaseUrls[platform].replace(/\/$/, "");
-  const url = `${upstream}/chat`;
-
-  // ⚡ BUG-G guard — fail fast สำหรับ platform ที่ไม่มี bot deploy
-  //   tiktok/lazada bot ยังเป็น placeholder (chatbot/tiktokchat/, chatbot/lazadachat/)
-  //   docker-compose ใช้ profiles จึงไม่ start ตาม default → fetch จะ timeout 50s
-  //   คืน error ที่อ่านรู้เรื่องแทน เพื่อกันเสียเวลา + สับสน
-  if (platform !== "shopee") {
-    throw new Error(
-      `bot สำหรับ platform "${platform}" ยังไม่ได้ deploy (URL=${upstream}) — ` +
-      `shadow-inbox รองรับเฉพาะ shopee ในขณะนี้`
-    );
-  }
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    "X-Internal-Secret": serverConfig.chatbotInternalSecret,
-  };
-
-  // ⚠️ Python bot รับ field "shop" (ชื่อร้าน) ไม่ใช่ "shop_id" (ตัวเลข)
-  // ถ้ามี shopName ใช้เป็นหลัก ถ้าไม่มี fallback เป็น shopId
-  const body: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
-  if (shopName) body.shop = shopName;
-  else if (shopId) body.shop = shopId;
-  // ⚡ A2 — ส่ง current-turn images ให้ bot (ถ้ามี)
-  if (images && images.length > 0) body.images = images;
-  // ⚡ Shadow isolation — namespace conversation_id ด้วย "shadow:" เพื่อให้ bot
-  //   ใช้ timeline/anchor/claim state ได้เต็มรูปแบบ แต่เขียนลง doc แยกจากแชทจริง
-  if (conversationId) body.conversation_id = `shadow:${conversationId}`;
-  // ⚡ simulate_assignment → ถ้า replay trigger handoff จะเขียน test_status_conversation
-  //   ไม่แตะ conversations/status_conversation ของแชทจริง (bot ยังได้ชื่อ admin มาใส่คำตอบ)
-  body.simulate_assignment = true;
-  // ⚡ chat_v3 — ส่ง use_v3 เพื่อบังคับใช้ chatbotv3 (มี priority เหนือ v2)
-  body.use_v3 = chatEngine === "v3";
-  body.use_v2 = chatEngine === "v2";
-
-  const resp = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(body),
+  const pythonPayload: Record<string, unknown> = { message, history, limit: await getBotProductLimit() };
+  if (shopName) pythonPayload.shop = shopName;
+  else if (shopId) pythonPayload.shop = shopId;
+  if (images?.length) pythonPayload.images = images;
+  if (conversationId) pythonPayload.conversation_id = `shadow:${conversationId}`;
+  pythonPayload.simulate_assignment = true;
+  const unsupported = platform === "shopee" ? undefined :
+    `bot สำหรับ platform "${platform}" ยังไม่ deploy (URL=${serverConfig.chatbotBaseUrls[platform]}) — shadow-inbox รองรับเฉพาะ shopee`;
+  const { chat_engine, data } = await dispatchChatEngine({
+    platform,
+    pythonPayload,
+    pythonUnsupportedMessage: unsupported,
+    v4Params: { platform, message, history, shopId, shopName, images, conversationId, messageId,
+      simulate: true, testSource: "shadow" },
   });
-
-  if (!resp.ok) {
-    const txt = await resp.text().catch(() => "");
-    throw new Error(`bot call failed (${resp.status}): ${txt.slice(0, 200)}`);
-  }
-
-  const data = await resp.json();
   return {
     answer: data.answer || "(ไม่มีคำตอบ)",
     source: data.source,
@@ -115,9 +74,10 @@ async function callOurBot(params: {
     cost: typeof data.cost === "number" ? data.cost : undefined,
     products: data.products,
     image_desc: data.image_desc, // ⚡ A2 — คืน image_desc ให้ caller cache
-    handoff_to_admin: data.handoff_to_admin === true, // ⚡ BUG-B — ส่งต่อให้ shadowReplyService เก็บ
+    handoff_to_admin: data.handoff_to_admin === true || data.handoff_required === true, // ⚡ BUG-B — ส่งต่อให้ shadowReplyService เก็บ
     handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
     routing_decision: data.routing_decision,
+    chat_engine,
   };
 }
 

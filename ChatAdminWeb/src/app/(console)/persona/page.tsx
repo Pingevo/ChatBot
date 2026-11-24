@@ -67,13 +67,10 @@ export default function PersonaPage() {
   const [showPlatformDd, setShowPlatformDd] = useState(false);
   const [saving, setSaving] = useState(false);
 
-  // โหลดร้านทั้งหมดจาก chatbot /shops (ใช้ shopname ที่ chatbot รู้จักจริง
-  // เพราะ chatbot รับ req.shop แล้วดึง persona ด้วย shopname นี้ — ต้องตรงกัน)
-  // chatbot /shops คืน { shops: ["shopname1", "shopname2", ...] } — string[] อย่างเดียว
-  // เรา assume platform = "shopee" เพราะ chatbot นี้เป็น shopee bot เท่านั้น
+  // โหลด shopname จาก product catalog ผ่าน server API
   useEffect(() => {
     api()
-      .get<{ shops: string[] }>("/chatbot/shops")
+      .get<{ shops: string[] }>("/catalog/shops")
       .then((r) => {
         const shops: ShopOption[] = (r.data.shops || []).map((s) => ({
           shopname: s,

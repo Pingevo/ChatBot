@@ -28,20 +28,31 @@ function PreviewInner() {
   const file = useSearchParams().get("file") || "";
   const [data, setData] = useState<Preview | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [pythonToolsAvailable, setPythonToolsAvailable] = useState(false);
   const [patches, setPatches] = useState<Patches>({});
   const [txtEdit, setTxtEdit] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
   const [colW, setColW] = useState<Record<string, number>>({});
   const dragRef = useRef<{ key: string; startX: number; startW: number } | null>(null);
 
-  const load = () => {
-    api().get("/zaapi-kb/bind", { params: { file, rows: 50 } })
-      .then((r) => { setData(r.data); setPatches({}); setTxtEdit({}); })
-      .catch((e) => setErr(e?.response?.data?.detail || "โหลดพรีวิวไฟล์ไม่สำเร็จ"));
-  };
   useEffect(() => {
     if (!file) { setErr("ไม่ได้ระบุไฟล์"); return; }
-    load();
+    let active = true;
+    api().get<{ python_tools_available: boolean }>("/system/chat-engine")
+      .then(async (r) => {
+        if (!active) return;
+        if (r.data.python_tools_available !== true) {
+          setErr("พรีวิวและแก้ไฟล์ต้นฉบับต้องใช้ Python engine; เลือก legacy/v2/v3 เพื่อใช้งานส่วนนี้");
+          return;
+        }
+        setPythonToolsAvailable(true);
+        const preview = await api().get("/zaapi-kb/bind", { params: { file, rows: 50 } });
+        if (active) { setData(preview.data); setPatches({}); setTxtEdit({}); }
+      })
+      .catch((e) => {
+        if (active) setErr(e?.response?.data?.detail || "โหลดพรีวิวไฟล์ไม่สำเร็จ");
+      });
+    return () => { active = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file]);
 
@@ -78,7 +89,7 @@ function PreviewInner() {
   const dirty = dirtyCells + dirtyTxt > 0;
 
   async function save() {
-    if (!data || !dirty) return;
+    if (!pythonToolsAvailable || !data || !dirty) return;
     setSaving(true);
     try {
       const body: Record<string, unknown> = dirtyCells
@@ -88,7 +99,8 @@ function PreviewInner() {
       if (r.data?.ok) {
         toast.success(`บันทึก → rev ${r.data.rev}` +
           (r.data.edited_cells ? ` · แก้ ${r.data.edited_cells} เซลล์` : ""));
-        load();
+        const preview = await api().get("/zaapi-kb/bind", { params: { file, rows: 50 } });
+        setData(preview.data); setPatches({}); setTxtEdit({});
       } else toast.error("บันทึกไม่สำเร็จ — " + (r.data?.reason || r.data?.detail || "error"));
     } catch (e: any) {
       toast.error("บันทึกไม่สำเร็จ — " + (e?.response?.data?.detail || "error"));
@@ -113,7 +125,7 @@ function PreviewInner() {
             ไฟล์ต้นฉบับ · rev {data.active_rev} · แก้ cell ได้โดยตรง — บันทึก = rev ใหม่ (rollback ได้) · แสดงสูงสุด 50 แถวแรกต่อชีต
           </div>
         </div>
-        <Button size="sm" onClick={save} disabled={!dirty || saving}>
+        <Button size="sm" onClick={save} disabled={!pythonToolsAvailable || !dirty || saving}>
           <Save size={13} /> {saving ? "กำลังบันทึก..." : `บันทึก${dirty ? ` (${dirtyCells + dirtyTxt})` : ""}`}
         </Button>
       </div>

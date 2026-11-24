@@ -9,8 +9,15 @@ export function GenPendingDot({ collapsed }: { collapsed?: boolean }) {
     let dead = false;
     const tick = async () => {
       try {
-        const r = await api().get<{ runs: { status: string }[] }>(
-          "/chatbot/shopee/admin/generations?status=pending");
+        const mode = await api().get<{ python_tools_available: boolean }>("/system/chat-engine");
+        if (dead) return;
+        if (!mode.data.python_tools_available) {
+          setPending(0);
+          return;
+        }
+        const r = await api().get<{ runs: { status: string }[]; unavailable?: boolean }>(
+          "/generations/pending?status=pending");
+        if (r.data.unavailable) { setPending(0); return; }
         if (!dead) setPending((r.data.runs || []).length);
       } catch { /* poll best-effort */ }
     };
