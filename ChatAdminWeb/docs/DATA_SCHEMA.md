@@ -10,6 +10,12 @@ sellcenter เขียนข้อมูลแชทจาก Shopee (และ
 - `conversations`
 - `messages`
 
+**Collections ภายในสำหรับ BotWorker review (ChatAdminWeb เป็นเจ้าของ; sellcenter ห้ามเขียน):**
+- `shadow_replies` — เก็บร่างจากบอท, original/edited/approved/rejected text, ผู้ตรวจ/เวลา/เหตุผล และผลการส่ง
+- `botworker_events` — operation และ audit timeline ของ action ผู้ตรวจ รวมถึง handoff ที่ทำใน BotWorker sandbox
+
+Shopee outbound จาก Tickets/BotWorker ถูกควบคุมด้วย `system_configs.main_config.shopee_console_send_enabled` ซึ่งค่าเริ่มต้นปิด; BotWorker review เมื่อปิด switch จะบันทึก `not_sent_switch_off` และไม่เรียก sender.
+
 **Collections ที่ห้ามแตะ** (เราเป็นเจ้าของ):
 - `admins`, `auth_tokens`, `sessions`
 - `admin_logs`, `system_configs`

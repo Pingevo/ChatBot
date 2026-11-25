@@ -50,7 +50,11 @@ export interface BotCallResponse {
   // ⚡ chat_engine — engine กลางที่ตอบ (legacy / v2 / v3 / v4)
   chat_engine?: ChatEngine;
   handoff_required?: boolean;
+  reason?: string;
   handoff_reason?: string;
+  handoff_explanation?: string;
+  conversation_id?: string;
+  message_id?: string;
   // ⚡ R5 — turn correlation id จาก Python (ตรง ai_usage.request_id) → shadow chain
   request_id?: string;
   answer_segments?: unknown;
@@ -481,7 +485,11 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       routing_decision: data.routing_decision,
       handoff_to_admin: data.handoff_to_admin === true || data.handoff_required === true,
       handoff_required: data.handoff_required === true,
+      reason: typeof data.reason === "string" ? data.reason : undefined,
       handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
+      handoff_explanation: typeof data.handoff_explanation === "string" ? data.handoff_explanation : undefined,
+      conversation_id: typeof data.conversation_id === "string" ? data.conversation_id : undefined,
+      message_id: typeof data.message_id === "string" ? data.message_id : undefined,
     };
   } finally {
     if (slotHeld) await releaseBotCallSlot();
@@ -545,7 +553,11 @@ export async function callChatBlacksharkV4(params: BotCallParams): Promise<BotCa
     image_desc: imageDesc,
     chat_engine: "v4",
     handoff_required: data.handoff_required === true,
+    reason: typeof data.reason === "string" ? data.reason : undefined,
     handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
+    handoff_explanation: typeof data.handoff_explanation === "string" ? data.handoff_explanation : undefined,
+    conversation_id: typeof data.conversation_id === "string" ? data.conversation_id : undefined,
+    message_id: typeof data.message_id === "string" ? data.message_id : undefined,
     request_id: typeof data.request_id === "string" ? data.request_id : undefined,
     intent: data.intent,
     timing: data.timing,

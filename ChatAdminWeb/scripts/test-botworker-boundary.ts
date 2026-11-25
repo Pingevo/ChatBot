@@ -27,6 +27,7 @@ type Rt = typeof import("../src/backend/service/botworkerRuntime");
 type MsgsRoute = typeof import("../src/app/api/botworker/conversations/[conversationId]/messages/route");
 type RepliesRoute = typeof import("../src/app/api/botworker/replies/route");
 type ConvsRoute = typeof import("../src/app/api/botworker/conversations/route");
+type CacheService = typeof import("../src/backend/service/botworkerConversationCache");
 type Poll = typeof import("../src/lib/usePolling");
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -37,6 +38,7 @@ let rt: Rt;
 let msgsRoute: MsgsRoute;
 let repliesRoute: RepliesRoute;
 let convsRoute: ConvsRoute;
+let cacheService: CacheService;
 let poll: Poll;
 
 // ── minimal hooks dispatcher — drive real usePolling outside a component ──
@@ -61,7 +63,7 @@ async function test(name: string, fn: () => Promise<void>) {
     console.log(`PASS ${name}`);
   } catch (e: any) {
     results.push({ name, ok: false, err: e?.message || String(e) });
-    console.log(`FAIL ${name}\n     ${e?.message || e}`);
+    console.log(`FAIL ${name}\n     ${e?.stack || e?.message || e}`);
   }
 }
 
@@ -230,6 +232,7 @@ async function main() {
   msgsRoute = await import("../src/app/api/botworker/conversations/[conversationId]/messages/route");
   repliesRoute = await import("../src/app/api/botworker/replies/route");
   convsRoute = await import("../src/app/api/botworker/conversations/route");
+  cacheService = await import("../src/backend/service/botworkerConversationCache");
   poll = await import("../src/lib/usePolling");
 
   // ⚡ install hooks dispatcher — usePolling รันจริง ผ่าน dispatcher ที่ test ควบคุม
@@ -550,7 +553,7 @@ async function main() {
         `cache miss at +3s poll — ${mocks.state.queryLog.length} queries: ${JSON.stringify(mocks.state.queryLog.map(q => q.coll + "." + q.op))}`);
     } finally {
       Date.now = realNow;
-      convsRoute.invalidateBotworkerCache();
+      cacheService.invalidateBotworkerCache();
     }
   });
 
@@ -566,7 +569,7 @@ async function main() {
       assert(mocks.state.queryLog.length === 0,
         `fresh data treated as stale — cache ts captured before queries finished (${mocks.state.queryLog.length} queries)`);
     } finally {
-      convsRoute.invalidateBotworkerCache();
+      cacheService.invalidateBotworkerCache();
       mocks.state.queryDelayMs = 0;
     }
   });
@@ -623,7 +626,7 @@ async function main() {
     seedConv(conv);
     seedUserMsg(conv, "m_u1", "hi");
     seedShadowReply(conv, { shadow_reply_id: "sr_p6", origin: "worker", mode: "standalone" });
-    convsRoute.invalidateBotworkerCache();
+    cacheService.invalidateBotworkerCache();
     mocks.state.queryLog.length = 0;
     await callConvsRoute();
     const inboxQueries = mocks.state.queryLog.length;

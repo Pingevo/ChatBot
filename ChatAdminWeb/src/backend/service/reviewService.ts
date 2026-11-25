@@ -10,12 +10,14 @@
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 import { insertDeterministicEvent } from "./botworkerEventService";
-import type { ShadowReplyDoc } from "./shadowReplyService";
+import type { ShadowReplyDoc, ShadowReviewBubbleDoc } from "./shadowReplyService";
+import { assignmentService } from "./assignmentService";
+import { handoffService } from "./handoffService";
 
 export const MAX_EDIT_LEN = 2000; // bounded input จนกว่า provider capability จะรู้จริง
 
 export type BubbleDecision = "pending" | "approved" | "edited_approved" | "rejected";
-export type DeliveryState = "not_requested" | "mock_sent" | "mock_failed" | "live_sending" | "live_sent" | "live_failed" | "live_unknown";
+export type DeliveryState = "not_requested" | "not_sent_switch_off" | "mock_sent" | "mock_failed" | "live_sending" | "live_sent" | "live_failed" | "live_unknown";
 
 export interface MockReceipt {
   provider: "mock";
@@ -42,15 +44,18 @@ export interface ReviewCard {
   delivery: BubbleDelivery;
 }
 
-export interface ReviewBubble {
+export interface ReviewBubble extends ShadowReviewBubbleDoc {
   bubble_id: string;
   ordinal: number;
   original_text: string;
   edited_text?: string;
   decision: BubbleDecision;
   decided_by?: string;
+  decided_by_name?: string;
   decided_at?: Date;
   approved_text?: string;
+  rejection_reason?: string;
+  edit_history?: { before_text: string; after_text: string; actor: string; actor_name: string; at: Date }[];
   delivery: BubbleDelivery;
   card?: ReviewCard;
   // Keep the approved text in approved_text; delivery status remains separate.
@@ -80,7 +85,7 @@ export interface ReviewOutcome {
 // ── helpers ────────────────────────────────────────────────
 
 function bubbleSettled(b: ReviewBubble): boolean {
-  return b.decision === "rejected" || b.delivery.state === "mock_sent" || b.delivery.state === "live_sent";
+  return b.decision === "rejected" || b.delivery.state === "mock_sent" || b.delivery.state === "live_sent" || b.delivery.state === "not_sent_switch_off";
 }
 
 /** earlier bubbles ทุกอันต้อง settled (rejected หรือ mock_sent) ก่อน bubble i ส่งได้ */
@@ -120,8 +125,9 @@ export async function applyReviewAction(opts: {
   cardItemId?: string;
   operationId: string;
   actor: string;              // admin_id จาก session
-  designatedAdminId: string;  // จาก system_config (server-derived)
-  designatedShopId: string;
+  actorName: string;
+  liveSendEnabled: boolean;
+  rejectionReason?: string;
   expectedUpdatedAt?: string; // optimistic version จาก client (ISO) — optional
   mockSender: (part: {
     eventId: string; replyId: string; bubbleId: string;
@@ -138,10 +144,6 @@ export async function applyReviewAction(opts: {
 }): Promise<ReviewOutcome> {
   const doc = await loadReply(opts.replyId, opts.conversationId);
   if (!doc) return { ok: false, code: "not_found", message: "reply not found" };
-  // shop/actor fence — persisted doc เท่านั้น
-  if (doc.shop_id !== opts.designatedShopId) return { ok: false, code: "forbidden", message: "shop outside pilot scope" };
-  // ⚡ "*" = pilot เปิดให้ทุกแอดมินรีวิว (shop ยัง fence เหมือนเดิม)
-  if (opts.designatedAdminId !== "*" && opts.actor !== opts.designatedAdminId) return { ok: false, code: "forbidden", message: "not the designated review admin" };
   const bubbles = doc.review_bubbles;
   if (!Array.isArray(bubbles) || bubbles.length === 0) {
     return { ok: false, code: "conflict", message: "draft has no review_bubbles (legacy or empty draft — not approvable)" };
@@ -163,13 +165,13 @@ export async function applyReviewAction(opts: {
   const opKey = reviewOpId(opts.operationId);
   const requestBinding = {
     actor: opts.actor,
-    shop_id: String(doc.shop_id),
     conversation_id: opts.conversationId,
     reply_id: opts.replyId,
     bubble_id: opts.bubbleId,
     action: opts.action,
     edited_text: opts.editedText ?? null,
     card_item_id: opts.cardItemId ?? null,
+    rejection_reason: opts.rejectionReason ?? null,
   };
   const opInsert = await insertDeterministicEvent({
     _id: opKey,
@@ -179,7 +181,7 @@ export async function applyReviewAction(opts: {
     actor: opts.actor,
     shop_id: doc.shop_id,
     platform: doc.platform,
-    metadata: { request: requestBinding, status: "in_progress" },
+    metadata: { request: requestBinding, actor_name: opts.actorName, status: "in_progress" },
     created_at: new Date(),
   });
   if (opInsert === "exists") {
@@ -196,12 +198,35 @@ export async function applyReviewAction(opts: {
 
   const coll = await getCollection<DocLike>(COLLECTIONS.shadowReplies);
   const now = new Date();
+  let auditDetails: Record<string, unknown> = {};
   const finish = async (outcome: ReviewOutcome): Promise<ReviewOutcome> => {
     // บันทึก outcome ลง op doc — CAS บน in_progress: finisher แรกชนะเท่านั้น
     // (same-opId concurrent execution → outcome ของผู้แพ้ห้ามทับของผู้ชนะ)
     await getCollection(COLLECTIONS.botworkerEvents).then((c) =>
-      c.updateOne({ _id: opKey, "metadata.status": "in_progress" } as never, { $set: { "metadata.outcome": outcome, "metadata.status": "done" } })
+      c.updateOne({ _id: opKey, "metadata.status": "in_progress" } as never, { $set: {
+        "metadata.outcome": outcome, "metadata.audit_details": auditDetails,
+        "metadata.actor_name": opts.actorName, "metadata.status": "done",
+      } })
     );
+    await insertDeterministicEvent({
+      _id: `reviewaction:${opts.operationId}`,
+      event_id: `reviewaction:${opts.operationId}`,
+      conversation_id: opts.conversationId,
+      type: "review_action",
+      actor: opts.actor,
+      shop_id: doc.shop_id,
+      platform: doc.platform,
+      metadata: {
+        actor_name: opts.actorName,
+        action: opts.action,
+        reply_id: opts.replyId,
+        bubble_id: opts.bubbleId,
+        request: requestBinding,
+        outcome: { ok: outcome.ok, code: outcome.code, delivery_state: outcome.bubble?.delivery.state },
+        ...auditDetails,
+      },
+      created_at: now,
+    });
     return outcome;
   };
 
@@ -217,9 +242,15 @@ export async function applyReviewAction(opts: {
     conversationId: string; shopId: string; platform: string;
     actor: string; inboundMessageId?: string;
   }): Promise<BubbleDelivery> => {
+    if (part.platform === "shopee" && !opts.liveSendEnabled) {
+      return { state: "not_sent_switch_off", request_id: part.eventId, error: "live_send_switch_off" };
+    }
     if (opts.liveSender) {
       try { return await opts.liveSender(part); }
       catch { return { state: "live_unknown", request_id: part.eventId, error: "delivery_unknown" }; }
+    }
+    if (part.platform === "shopee") {
+      return { state: "live_failed", request_id: part.eventId, error: "live_sender_unavailable" };
     }
     try {
       const receipt = await opts.mockSender(part);
@@ -236,18 +267,23 @@ export async function applyReviewAction(opts: {
   };
 
   const bubble = bubbles[i];
+  auditDetails = { original_text: bubble.original_text, previous_edited_text: bubble.edited_text };
   if (bubble.card?.delivery.state === "live_sending" || bubble.card?.delivery.state === "live_unknown") {
     return finish({ ok: false, code: "conflict", message: "card delivery is unconfirmed; verify the Shopee chat before changing this bubble" });
   }
 
   // ── reject ──
   if (opts.action === "reject") {
+    const rejectionReason = String(opts.rejectionReason ?? "").trim();
+    if (!rejectionReason) return finish({ ok: false, code: "invalid", message: "rejection_reason is required" });
+    if (rejectionReason.length > 1000) return finish({ ok: false, code: "invalid", message: "rejection_reason exceeds 1000 chars" });
     // ⚡ bubble ที่ส่ง card mock ไปแล้วห้าม reject — outbound event เกิดแล้ว ต้องคง record
     if (bubble.card && (["mock_sent", "live_sending", "live_sent", "live_unknown"] as DeliveryState[]).includes(bubble.card.delivery.state)) {
       return finish({ ok: false, code: "conflict", message: "card already sent — cannot reject bubble" });
     }
     const next = bubbles.slice();
-    next[i] = { ...bubble, decision: "rejected", decided_by: opts.actor, decided_at: now };
+    next[i] = { ...bubble, decision: "rejected", decided_by: opts.actor, decided_by_name: opts.actorName, decided_at: now, rejection_reason: rejectionReason };
+    auditDetails = { ...auditDetails, rejection_reason: rejectionReason, rejected_text: bubble.edited_text ?? bubble.original_text };
     const res = await coll.updateOne(baseFilter, { $set: { review_bubbles: next, updated_at: now } });
     if (res.matchedCount !== 1) return finish({ ok: false, code: "conflict", message: "bubble already decided or stale draft" });
     return finish({ ok: true, bubble: next[i], updated_at: now, reply_id: opts.replyId });
@@ -259,7 +295,8 @@ export async function applyReviewAction(opts: {
     if (!text) return finish({ ok: false, code: "invalid", message: "edited text is empty" });
     if (text.length > MAX_EDIT_LEN) return finish({ ok: false, code: "invalid", message: `edited text exceeds ${MAX_EDIT_LEN} chars` });
     const next = bubbles.slice();
-    next[i] = { ...bubble, edited_text: text };
+    next[i] = { ...bubble, edited_text: text, edit_history: [...(bubble.edit_history || []), { before_text: bubble.edited_text ?? bubble.original_text, after_text: text, actor: opts.actor, actor_name: opts.actorName, at: now }] };
+    auditDetails = { ...auditDetails, edited_text: text };
     const res = await coll.updateOne(baseFilter, { $set: { review_bubbles: next, updated_at: now } });
     if (res.matchedCount !== 1) return finish({ ok: false, code: "conflict", message: "bubble already decided or stale draft" });
     return finish({ ok: true, bubble: next[i], updated_at: now, reply_id: opts.replyId });
@@ -310,7 +347,7 @@ export async function applyReviewAction(opts: {
       updated_at: doc.updated_at,
       $or: [
         { [`review_bubbles.${i}.card`]: { $exists: false } },
-        { [`review_bubbles.${i}.card.item_id`]: itemId, [`review_bubbles.${i}.card.delivery.state`]: { $in: ["not_requested", "mock_failed", "live_failed"] } },
+        { [`review_bubbles.${i}.card.item_id`]: itemId, [`review_bubbles.${i}.card.delivery.state`]: { $in: ["not_requested", "not_sent_switch_off", "mock_failed", "live_failed"] } },
       ],
     };
     const intentState: DeliveryState = opts.liveSender && doc.platform === "shopee" ? "live_sending" : "not_requested";
@@ -367,6 +404,7 @@ export async function applyReviewAction(opts: {
       (bubble.decision === "approved" || bubble.decision === "edited_approved") &&
       bubble.delivery.state !== "mock_sent" && bubble.delivery.state !== "live_sent") {
     const persistedText = bubble.approved_text ?? bubble.edited_text ?? bubble.original_text;
+    auditDetails = { ...auditDetails, approved_text: persistedText, decision: bubble.decision };
     const eventId = mockSendEventId(opts.replyId, opts.bubbleId, "text");
     const delivery = await deliver({
       eventId, replyId: opts.replyId, bubbleId: opts.bubbleId,
@@ -378,7 +416,7 @@ export async function applyReviewAction(opts: {
     const next = bubbles.slice();
     next[i] = { ...bubble, delivery };
     const res = await coll.updateOne(
-      { _id: doc._id, [`review_bubbles.${i}.delivery.state`]: { $in: ["not_requested", "mock_failed", "live_failed"] }, [`review_bubbles.${i}.approved_text`]: persistedText, updated_at: doc.updated_at },
+      { _id: doc._id, [`review_bubbles.${i}.delivery.state`]: { $in: ["not_requested", "not_sent_switch_off", "mock_failed", "live_failed"] }, [`review_bubbles.${i}.approved_text`]: persistedText, updated_at: doc.updated_at },
       { $set: { review_bubbles: next, updated_at: new Date() } });
     if (res.matchedCount !== 1) return finish({ ok: false, code: "conflict", message: "stale draft during retry — verify state" });
     if (delivery.state === "mock_failed" || delivery.state === "live_failed" || delivery.state === "live_unknown") {
@@ -391,11 +429,14 @@ export async function applyReviewAction(opts: {
   //   ข้อความที่ log = approved_text ที่ persisted จริง (loser ออกก่อน mock)
   // CAS#1 — pending → decided + approved_text (delivery คง not_requested)
   const decidedBubbles = bubbles.slice();
+  auditDetails = { ...auditDetails, approved_text: approvedText, decision };
   decidedBubbles[i] = {
     ...bubble,
     ...(editedTextSet !== undefined ? { edited_text: editedTextSet } : {}),
+    ...(editedTextSet !== undefined ? { edit_history: [...(bubble.edit_history || []), { before_text: bubble.edited_text ?? bubble.original_text, after_text: editedTextSet, actor: opts.actor, actor_name: opts.actorName, at: now }] } : {}),
     decision,
     decided_by: opts.actor,
+    decided_by_name: opts.actorName,
     decided_at: now,
     approved_text: approvedText,
     delivery: bubble.delivery.state === "mock_failed" || bubble.delivery.state === "live_failed" ? { state: "not_requested" } : bubble.delivery,
@@ -426,4 +467,193 @@ export async function applyReviewAction(opts: {
     return finish({ ok: false, code: "conflict", message: delivery.state === "live_unknown" ? "Shopee delivery unconfirmed; verify before retry" : "message delivery failed", bubble: next[i] });
   }
   return finish({ ok: true, bubble: next[i], reply_id: opts.replyId });
+}
+
+export interface HandoffReviewOutcome {
+  ok: boolean;
+  code?: string;
+  message?: string;
+  handoff_review?: ShadowReplyDoc["handoff_review"];
+  candidates?: Awaited<ReturnType<typeof assignmentService.previewHandoffCandidates>>;
+  updated_at?: Date;
+}
+
+export async function getHandoffReviewPreview(opts: {
+  conversationId: string;
+  replyId: string;
+  expectedMessageId?: string;
+}): Promise<HandoffReviewOutcome> {
+  const doc = await loadReply(opts.replyId, opts.conversationId);
+  if (!doc) return { ok: false, code: "not_found", message: "handoff reply not found" };
+  if (doc.origin !== "worker" || !doc.bot_handoff_required || !doc.handoff_review) {
+    return { ok: false, code: "conflict", message: "reply has no reviewer handoff request" };
+  }
+  if ((doc.upstream_conversation_id && doc.upstream_conversation_id !== opts.conversationId) ||
+      (doc.upstream_message_id && !doc.inbound_message_ids?.includes(doc.upstream_message_id) && doc.upstream_message_id !== doc.inbound_message_id)) {
+    return { ok: false, code: "conflict", message: "upstream handoff identity does not match this conversation turn" };
+  }
+  if (opts.expectedMessageId && opts.expectedMessageId !== doc.inbound_message_id && opts.expectedMessageId !== doc.upstream_message_id) {
+    return { ok: false, code: "conflict", message: "handoff reply is not attached to the selected inbound message" };
+  }
+  const candidates = doc.handoff_review.status === "pending" || doc.handoff_review.status === "approving"
+    ? await assignmentService.previewHandoffCandidates({ shop_id: String(doc.shop_id), platform: doc.platform }, "botworker")
+    : [];
+  return {
+    ok: true,
+    handoff_review: doc.handoff_review,
+    candidates,
+    updated_at: doc.updated_at,
+  };
+}
+
+export async function applyHandoffReviewAction(opts: {
+  conversationId: string;
+  replyId: string;
+  action: "approve" | "reject";
+  selectedAdminId?: string;
+  rejectionReason?: string;
+  operationId: string;
+  actor: string;
+  actorName: string;
+  expectedUpdatedAt?: string;
+}): Promise<HandoffReviewOutcome> {
+  const doc = await loadReply(opts.replyId, opts.conversationId);
+  if (!doc) return { ok: false, code: "not_found", message: "handoff reply not found" };
+  if (doc.origin !== "worker" || !doc.bot_handoff_required || !doc.handoff_review) {
+    return { ok: false, code: "conflict", message: "reply has no reviewer handoff request" };
+  }
+  if ((doc.upstream_conversation_id && doc.upstream_conversation_id !== opts.conversationId) ||
+      (doc.upstream_message_id && !doc.inbound_message_ids?.includes(doc.upstream_message_id) && doc.upstream_message_id !== doc.inbound_message_id)) {
+    return { ok: false, code: "conflict", message: "upstream handoff identity does not match the stored inbound turn" };
+  }
+  const resumesSameAssignment = opts.action === "approve" && doc.handoff_review.status === "approving" &&
+    doc.handoff_review.assignment_operation_key === `${opts.replyId}:${opts.operationId}`;
+  if (opts.expectedUpdatedAt && !resumesSameAssignment) {
+    const expected = new Date(opts.expectedUpdatedAt).getTime();
+    if (!Number.isFinite(expected) || expected !== new Date(doc.updated_at).getTime()) {
+      return { ok: false, code: "conflict", message: "stale handoff review — refresh before retry" };
+    }
+  }
+  const reason = String(opts.rejectionReason ?? "").trim();
+  if (opts.action === "reject" && !reason) return { ok: false, code: "invalid", message: "rejection_reason is required" };
+  if (reason.length > 1000) return { ok: false, code: "invalid", message: "rejection_reason exceeds 1000 chars" };
+  if (opts.action === "approve" && !opts.selectedAdminId) return { ok: false, code: "invalid", message: "selected_admin_id is required" };
+
+  const opKey = `handoffreviewop:${opts.operationId}`;
+  const request = {
+    action: opts.action,
+    actor: opts.actor,
+    conversation_id: opts.conversationId,
+    reply_id: opts.replyId,
+    selected_admin_id: opts.selectedAdminId ?? null,
+    rejection_reason: opts.action === "reject" ? reason : null,
+  };
+  const insert = await insertDeterministicEvent({
+    _id: opKey, event_id: opKey, conversation_id: opts.conversationId, type: "review_op",
+    actor: opts.actor, shop_id: doc.shop_id, platform: doc.platform,
+    metadata: { request, actor_name: opts.actorName, status: "in_progress" }, created_at: new Date(),
+  });
+  if (insert === "exists") {
+    const previous = await getCollection<{ metadata?: { request?: typeof request; outcome?: HandoffReviewOutcome } }>(COLLECTIONS.botworkerEvents)
+      .then((coll) => coll.findOne({ _id: opKey } as never));
+    if (!previous?.metadata?.request || JSON.stringify(previous.metadata.request) !== JSON.stringify(request)) {
+      return { ok: false, code: "conflict", message: "operation_id reused with a different handoff decision" };
+    }
+    if (previous.metadata.outcome) return previous.metadata.outcome;
+  }
+
+  const coll = await getCollection<DocLike>(COLLECTIONS.shadowReplies);
+  const now = new Date();
+  const finish = async (outcome: HandoffReviewOutcome, audit: Record<string, unknown> = {}) => {
+    await getCollection(COLLECTIONS.botworkerEvents).then((events) => events.updateOne(
+      { _id: opKey, "metadata.status": "in_progress" } as never,
+      { $set: { "metadata.status": "done", "metadata.outcome": outcome,
+        "metadata.audit_details": audit, "metadata.actor_name": opts.actorName } }
+    ));
+    await insertDeterministicEvent({
+      _id: `reviewaction:${opts.operationId}`, event_id: `reviewaction:${opts.operationId}`,
+      conversation_id: opts.conversationId, type: "review_action", actor: opts.actor,
+      shop_id: doc.shop_id, platform: doc.platform,
+      metadata: { action: `handoff_${opts.action}`, actor_name: opts.actorName, reply_id: opts.replyId,
+        request, outcome: { ok: outcome.ok, code: outcome.code }, ...audit }, created_at: now,
+    });
+    return outcome;
+  };
+
+  if (opts.action === "reject") {
+    const nextReview = { ...doc.handoff_review, status: "rejected" as const, reviewed_by: opts.actor,
+      reviewed_by_name: opts.actorName, reviewed_at: now, rejection_reason: reason };
+    const res = await coll.updateOne({ _id: doc._id, updated_at: doc.updated_at, "handoff_review.status": "pending" },
+      { $set: { handoff_review: nextReview, updated_at: now } });
+    if (res.matchedCount !== 1) return finish({ ok: false, code: "conflict", message: "handoff already reviewed or stale" });
+    return finish({ ok: true, handoff_review: nextReview, updated_at: now }, { rejection_reason: reason,
+      answer: doc.bot_reply_text, handoff_reason: doc.bot_handoff_reason, handoff_explanation: doc.bot_handoff_explanation });
+  }
+
+  const candidates = await assignmentService.previewHandoffCandidates({ shop_id: String(doc.shop_id), platform: doc.platform }, "botworker");
+  const candidate = candidates.find((item) => item.admin_id === opts.selectedAdminId);
+  if (!candidate) {
+    if (doc.handoff_review.status === "approving" && resumesSameAssignment) {
+      await coll.updateOne({ _id: doc._id, "handoff_review.status": "approving",
+        "handoff_review.assignment_operation_id": opts.operationId },
+        { $set: { "handoff_review.status": "pending", "handoff_review.last_error": "selected admin is not currently online and eligible", updated_at: new Date() } });
+    }
+    return finish({ ok: false, code: "conflict", message: "selected admin is not currently online and eligible" }, { selected_admin_id: opts.selectedAdminId });
+  }
+
+  const existingReview = doc.handoff_review;
+  if (existingReview.status === "pending") {
+    const approving = { ...existingReview, status: "approving" as const, selected_admin_id: candidate.admin_id,
+      selected_admin_name: candidate.name, reviewed_by: opts.actor, reviewed_by_name: opts.actorName,
+      assignment_operation_id: opts.operationId, assignment_operation_key: `${opts.replyId}:${opts.operationId}` };
+    const claim = await coll.updateOne({ _id: doc._id, updated_at: doc.updated_at, "handoff_review.status": "pending" },
+      { $set: { handoff_review: approving, updated_at: now } });
+    if (claim.matchedCount !== 1) return finish({ ok: false, code: "conflict", message: "handoff already reviewed or stale" });
+  } else if (existingReview.status !== "approving" || existingReview.assignment_operation_key !== `${opts.replyId}:${opts.operationId}` || existingReview.selected_admin_id !== candidate.admin_id) {
+    return finish({ ok: false, code: "conflict", message: "another handoff decision is in progress or already completed" });
+  }
+
+  const operationKey = `botworker-handoff-review:${opts.replyId}:${opts.operationId}`;
+  const assignment = await handoffService.handoffToAdminTest({
+    conversationId: opts.conversationId, shopId: String(doc.shop_id), platform: doc.platform,
+    reason: doc.bot_handoff_reason || doc.bot_handoff_category || "bot_requested_handoff",
+    source: "botworker", assignedStatus: "open", selectedAdminId: candidate.admin_id, operationKey,
+  });
+  if (assignment.in_flight) return { ok: false, code: "conflict", message: "handoff assignment is in progress; retry with the same operation id" };
+  if (assignment.error || assignment.assignedTo !== candidate.admin_id) {
+    const fresh = await loadReply(opts.replyId, opts.conversationId);
+    if (fresh?.handoff_review?.status === "approving" && fresh.handoff_review.assignment_operation_key === `${opts.replyId}:${opts.operationId}`) {
+      await coll.updateOne({ _id: fresh._id, "handoff_review.status": "approving", "handoff_review.assignment_operation_key": `${opts.replyId}:${opts.operationId}` },
+        { $set: { "handoff_review.status": "pending", "handoff_review.last_error": assignment.assignmentReason, updated_at: new Date() } });
+    }
+    return finish({ ok: false, code: "conflict", message: "selected admin became unavailable; choose an online admin and retry" },
+      { selected_admin_id: candidate.admin_id, assignment_reason: assignment.assignmentReason });
+  }
+
+  const completed = { ...doc.handoff_review, status: "approved" as const, reviewed_by: opts.actor,
+    reviewed_by_name: opts.actorName, reviewed_at: new Date(), selected_admin_id: assignment.assignedTo,
+    selected_admin_name: assignment.assignedToName || candidate.name, assignment_reason: assignment.assignmentReason,
+    assignment_operation_key: operationKey };
+  const saved = await coll.updateOne({ _id: doc._id, "handoff_review.status": "approving",
+    "handoff_review.assignment_operation_key": `${opts.replyId}:${opts.operationId}` },
+    { $set: { handoff_review: completed, updated_at: new Date() } });
+  if (saved.matchedCount !== 1) {
+    const current = await loadReply(opts.replyId, opts.conversationId);
+    if (current?.handoff_review?.status !== "approved" || current.handoff_review.selected_admin_id !== assignment.assignedTo) {
+      return finish({ ok: false, code: "conflict", message: "assignment committed but review state needs reconciliation" }, { assigned_to: assignment.assignedTo });
+    }
+  }
+  await insertDeterministicEvent({
+    _id: `handoffreview:${opts.replyId}:${opts.operationId}`, event_id: `handoffreview:${opts.replyId}:${opts.operationId}`,
+    conversation_id: opts.conversationId, type: "handoff", actor: opts.actor, shop_id: doc.shop_id, platform: doc.platform,
+    metadata: { reply_id: opts.replyId, reason: doc.bot_handoff_reason, explanation: doc.bot_handoff_explanation,
+      assigned_to: assignment.assignedTo, assigned_to_name: assignment.assignedToName || candidate.name,
+      reviewer_id: opts.actor, reviewer_name: opts.actorName, assignment_reason: assignment.assignmentReason,
+      delivered_to_platform: false }, created_at: new Date(),
+  });
+  return finish({ ok: true, handoff_review: completed, updated_at: new Date() }, {
+    answer: doc.bot_reply_text, handoff_reason: doc.bot_handoff_reason,
+    handoff_explanation: doc.bot_handoff_explanation, selected_admin_id: assignment.assignedTo,
+    selected_admin_name: assignment.assignedToName || candidate.name,
+  });
 }

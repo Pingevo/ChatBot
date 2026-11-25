@@ -127,10 +127,11 @@ export function createFakeMongo(state = {}) {
     return v === cond;
   }
 
-  function matches(doc, filter) {
+  function matches(doc, filter, vars = {}) {
     for (const [k, cond] of Object.entries(filter)) {
-      if (k === "$and") { if (!cond.every((c) => matches(doc, c))) return false; continue; }
-      if (k === "$or") { if (!cond.some((c) => matches(doc, c))) return false; continue; }
+      if (k === "$and") { if (!cond.every((c) => matches(doc, c, vars))) return false; continue; }
+      if (k === "$or") { if (!cond.some((c) => matches(doc, c, vars))) return false; continue; }
+      if (k === "$expr") { if (!evalExpr(cond, doc, vars)) return false; continue; }
       if (!matchCond(val(doc, k), cond)) return false;
     }
     return true;
@@ -179,17 +180,34 @@ export function createFakeMongo(state = {}) {
   }
 
   // aggregation expression eval — scope: field refs + ops used by routes
-  function evalExpr(expr, doc) {
+  function evalExpr(expr, doc, vars = {}) {
+    if (typeof expr === "string" && expr.startsWith("$$")) return val(vars, expr.slice(2));
     if (typeof expr === "string" && expr.startsWith("$")) return val(doc, expr.slice(1));
     if (expr && typeof expr === "object" && !Array.isArray(expr)) {
       if (expr.$ifNull) {
-        for (const e of expr.$ifNull) { const v = evalExpr(e, doc); if (v != null) return v; }
+        for (const e of expr.$ifNull) { const v = evalExpr(e, doc, vars); if (v != null) return v; }
         return null;
       }
-      if (expr.$eq) { const [a, b] = expr.$eq.map((e) => evalExpr(e, doc)); return a === b; }
-      if (expr.$ne) { const [a, b] = expr.$ne.map((e) => evalExpr(e, doc)); return a !== b; }
-      if (expr.$in) { const [a, arr] = [evalExpr(expr.$in[0], doc), expr.$in[1]]; return Array.isArray(arr) && arr.includes(a); }
-      if (expr.$cond) { const [c, t, f] = expr.$cond; return evalExpr(c, doc) ? evalExpr(t, doc) : evalExpr(f, doc); }
+      if (expr.$dateToString) {
+        const date = evalExpr(expr.$dateToString.date, doc, vars);
+        if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+        const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+          timeZone: expr.$dateToString.timezone || "UTC", year: "numeric", month: "2-digit", day: "2-digit",
+        }).formatToParts(date).map((part) => [part.type, part.value]));
+        return String(expr.$dateToString.format || "%Y-%m-%d")
+          .replace("%Y", parts.year).replace("%m", parts.month).replace("%d", parts.day);
+      }
+      if (expr.$eq) { const [a, b] = expr.$eq.map((e) => evalExpr(e, doc, vars)); return a === b; }
+      if (expr.$ne) { const [a, b] = expr.$ne.map((e) => evalExpr(e, doc, vars)); return a !== b; }
+      if (expr.$gt) { const [a, b] = expr.$gt.map((e) => evalExpr(e, doc, vars)); return a > b; }
+      if (expr.$in) { const [a, arr] = [evalExpr(expr.$in[0], doc, vars), evalExpr(expr.$in[1], doc, vars)]; return Array.isArray(arr) && arr.includes(a); }
+      if (expr.$and) return expr.$and.every((e) => evalExpr(e, doc, vars));
+      if (expr.$max) return expr.$max.map((e) => evalExpr(e, doc, vars)).reduce((max, v) => max === undefined || v > max ? v : max, undefined);
+      if (expr.$arrayElemAt) {
+        const [array, index] = expr.$arrayElemAt.map((e) => evalExpr(e, doc, vars));
+        return Array.isArray(array) ? array[index] : undefined;
+      }
+      if (expr.$cond) { const [c, t, f] = expr.$cond; return evalExpr(c, doc, vars) ? evalExpr(t, doc, vars) : evalExpr(f, doc, vars); }
     }
     return expr;
   }
@@ -252,7 +270,14 @@ export function createFakeMongo(state = {}) {
     return docs.map((d) => {
       if (!include) { const c = structuredClone(d); for (const [k] of entries) unsetPath(c, k); return c; }
       const out = { _id: d._id };
-      for (const [k, v] of entries) if (v && val(d, k) !== undefined) setPath(out, k, val(d, k));
+      for (const [k, v] of entries) {
+        if (v === 0 || v === false) continue;
+        if (v === 1 || v === true) {
+          if (val(d, k) !== undefined) setPath(out, k, val(d, k));
+        } else {
+          setPath(out, k, evalExpr(v, d));
+        }
+      }
       return out;
     });
   }
@@ -409,13 +434,37 @@ export function createFakeMongo(state = {}) {
             else if (stage.$limit !== undefined) docs = docs.slice(0, stage.$limit);
             else if (stage.$skip !== undefined) docs = docs.slice(stage.$skip);
             else if (stage.$project) docs = applyProject(docs, stage.$project);
+            else if (stage.$set) docs = docs.map((d) => {
+              const copy = structuredClone(d);
+              for (const [key, expr] of Object.entries(stage.$set)) setPath(copy, key, evalExpr(expr, d));
+              return copy;
+            });
             else if (stage.$lookup) {
-              const { from, localField, foreignField, as } = stage.$lookup;
+              const { from, localField, foreignField, as, let: letSpec, pipeline: lookupPipeline } = stage.$lookup;
               const foreign = fakeColl(from);
-              docs = docs.map((d) => ({
-                ...d,
-                [as]: foreign.filter((f) => val(f, foreignField) === val(d, localField)),
-              }));
+              docs = docs.map((d) => {
+                let joined;
+                if (Array.isArray(lookupPipeline)) {
+                  const vars = Object.fromEntries(Object.entries(letSpec || {}).map(([key, expr]) => [key, evalExpr(expr, d)]));
+                  joined = foreign.slice();
+                  for (const inner of lookupPipeline) {
+                    if (inner.$match) joined = joined.filter((f) => matches(f, inner.$match, vars));
+                    else if (inner.$sort) joined = sortDocs(joined, inner.$sort);
+                    else if (inner.$limit !== undefined) joined = joined.slice(0, inner.$limit);
+                    else if (inner.$project) joined = applyProject(joined, inner.$project);
+                    else if (inner.$count) joined = [{ [inner.$count]: joined.length }];
+                    else if (inner.$set) joined = joined.map((f) => {
+                      const copy = structuredClone(f);
+                      for (const [key, expr] of Object.entries(inner.$set)) setPath(copy, key, evalExpr(expr, f, vars));
+                      return copy;
+                    });
+                    else throw new Error(`fake mongo: lookup pipeline stage unsupported (${Object.keys(inner)})`);
+                  }
+                } else {
+                  joined = foreign.filter((f) => val(f, foreignField) === val(d, localField));
+                }
+                return { ...d, [as]: joined };
+              });
             }
             else if (stage.$unwind) {
               const path = typeof stage.$unwind === "string" ? stage.$unwind : stage.$unwind.path;

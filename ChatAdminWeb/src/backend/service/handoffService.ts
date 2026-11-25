@@ -397,6 +397,7 @@ type HandoffTestResult = {
   assignmentReason: string;
   // ⚡ op ถูก owner อื่น execute อยู่ — retryable, ห้ามถือว่า assign สำเร็จ
   in_flight?: boolean;
+  error?: "ineligible_admin";
 };
 
 type HandoffOpDoc = Document & {
@@ -445,6 +446,7 @@ export async function handoffToAdminTest(opts: {
   source: TestSource;
   // ⚡ botworker — assign สำเร็จ = status "open" (แอดมินกำลังตอบ); default "handoff" คงพฤติกรรม test หน้าอื่น
   assignedStatus?: "handoff" | "open";
+  selectedAdminId?: string;
   // ⚡ botworker Part 1B — deterministic operation key: crash หลัง assign commit
   //   แต่ก่อน claim outcome → retry ด้วย key เดิมจะได้ result เดิม ไม่ assign ซ้ำ
   //   (idempotency อยู่ที่ handoff owner — dedupe doc ใน botworker_events)
@@ -544,6 +546,7 @@ async function doHandoffToAdminTest(opts: {
   reason?: string;
   source: TestSource;
   assignedStatus?: "handoff" | "open";
+  selectedAdminId?: string;
   operationKey?: string;
 }): Promise<HandoffTestResult> {
   const meta = await testStatusConversationService.getTestStatus(opts.conversationId, opts.source);
@@ -552,56 +555,67 @@ async function doHandoffToAdminTest(opts: {
   let reopened = false;
   let assignmentReason = "unknown";
 
+  if (opts.selectedAdminId && !(await assignmentService.isOnlineHandoffCandidate(
+    opts.selectedAdminId,
+    { shop_id: opts.shopId, platform: opts.platform },
+    opts.source
+  ))) {
+    return { assignedTo: null, assignedToName: null, reopened: false,
+      assignmentReason: "reviewer_selected_admin_not_online_or_eligible", error: "ineligible_admin" };
+  }
+
   if (wasClosed) {
     await testStatusConversationService.reopenTestConversation(opts.conversationId, opts.source);
     reopened = true;
   }
 
-  // Step 1: ถ้ามี assigned_to อยู่แล้ว → ใช้คนเดิม
-  let assignedTo = meta?.assigned_to || null;
-  if (assignedTo) {
-    assignmentReason = "existing_assignment: มี admin ดูแลอยู่แล้ว (test)";
-  }
+  let assignedTo: string | null = null;
+  if (opts.selectedAdminId) {
+    assignedTo = opts.selectedAdminId;
+    assignmentReason = "reviewer_selected_online_admin";
+  } else {
+    // Step 1: ถ้ามี assigned_to อยู่แล้ว → ใช้คนเดิม
+    assignedTo = meta?.assigned_to || null;
+    if (assignedTo) assignmentReason = "existing_assignment: มี admin ดูแลอยู่แล้ว (test)";
 
-  // Step 2: หา admin คนสุดท้ายที่เคยตอบ
-  if (!assignedTo) {
-    const lastReplyAdmin = await getLastReplyAdmin(opts.conversationId);
-    if (lastReplyAdmin) {
-      const adminColl = await getCollection<{
-        admin_id: string; active: boolean; role: string; is_accepting_chats?: boolean;
-      }>(COLLECTIONS.admins);
-      const admin = await adminColl.findOne({
-        admin_id: lastReplyAdmin,
-        active: { $ne: false },
-        is_accepting_chats: { $ne: false },
-      });
-      if (admin) {
-        assignedTo = lastReplyAdmin;
-        assignmentReason = "previous_reply_admin: ส่งคืน admin เดิมที่เคยตอบ (test)";
+    // Step 2: หา admin คนสุดท้ายที่เคยตอบ
+    if (!assignedTo) {
+      const lastReplyAdmin = await getLastReplyAdmin(opts.conversationId);
+      if (lastReplyAdmin) {
+        const adminColl = await getCollection<{
+          admin_id: string; active: boolean; role?: string; is_accepting_chats?: boolean;
+        }>(COLLECTIONS.admins);
+        const admin = await adminColl.findOne({
+          admin_id: lastReplyAdmin, active: { $ne: false }, role: "admin",
+          is_accepting_chats: { $ne: false },
+        });
+        if (admin) {
+          assignedTo = lastReplyAdmin;
+          assignmentReason = "previous_reply_admin: ส่งคืน admin เดิมที่เคยตอบ (test)";
+        }
       }
     }
-  }
 
-  // Step 3: round-robin (cursor ขยับจริง)
-  if (!assignedTo) {
-    const mode = await assignmentService.getActiveAssignmentConfig();
-    const { poolKey, orderedAgentIds } = await assignmentService.buildPool(
-      mode,
-      { shop_id: opts.shopId, platform: opts.platform },
-      opts.source
-    );
-    if (orderedAgentIds.length > 0) {
-      const sel = await assignmentService.reserveNextAgent(poolKey, orderedAgentIds);
-      if (sel.result === "reserved") {
-        assignedTo = sel.agentId;
-        assignmentReason = `round_robin: ไม่มี admin เดิม → จ่ายคิว (test:${opts.source})`;
-      } else if (sel.result === "contention") {
-        // claim พิสูจน์ไม่ได้ (retryable) — ห้าม persist pending_assignment โกหก
-        return {
-          assignedTo: null, assignedToName: null, reopened,
-          assignmentReason: `reservation_contention: cursor claim ไม่สำเร็จ (test:${opts.source})`,
-          in_flight: true,
-        };
+    // Step 3: round-robin (cursor ขยับจริง)
+    if (!assignedTo) {
+      const mode = await assignmentService.getActiveAssignmentConfig();
+      const { poolKey, orderedAgentIds } = await assignmentService.buildPool(
+        mode,
+        { shop_id: opts.shopId, platform: opts.platform },
+        opts.source
+      );
+      if (orderedAgentIds.length > 0) {
+        const sel = await assignmentService.reserveNextAgent(poolKey, orderedAgentIds);
+        if (sel.result === "reserved") {
+          assignedTo = sel.agentId;
+          assignmentReason = `round_robin: ไม่มี admin เดิม → จ่ายคิว (test:${opts.source})`;
+        } else if (sel.result === "contention") {
+          return {
+            assignedTo: null, assignedToName: null, reopened,
+            assignmentReason: `reservation_contention: cursor claim ไม่สำเร็จ (test:${opts.source})`,
+            in_flight: true,
+          };
+        }
       }
     }
   }

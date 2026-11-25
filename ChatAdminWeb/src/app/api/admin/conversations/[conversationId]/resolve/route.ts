@@ -8,7 +8,7 @@ import { invalidateConversationsCache } from "@/app/api/admin/conversations/rout
 // ⚡ G-fix — invalidate botworker cache ด้วย
 async function invalidateBotworkerCache() {
   try {
-    const mod = await import("@/app/api/botworker/conversations/route");
+    const mod = await import("@/backend/service/botworkerConversationCache");
     if (typeof (mod as unknown as { invalidateBotworkerCache?: () => void }).invalidateBotworkerCache === "function") {
       (mod as unknown as { invalidateBotworkerCache: () => void }).invalidateBotworkerCache();
     }

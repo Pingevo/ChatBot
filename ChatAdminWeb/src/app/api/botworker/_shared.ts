@@ -3,17 +3,13 @@
 //   (source="botworker") + botworker_messages + botworker_events เท่านั้น
 //   ห้ามเขียน status_conversation / conversations / messages_shp / admin_logs จริง
 import { testStatusConversationService, type TestStatusConversationDoc } from "@/backend/service/testStatusConversationService";
+import { invalidateBotworkerCache as invalidateCache } from "@/backend/service/botworkerConversationCache";
 
 export const BW_SOURCE = "botworker" as const;
 
-/** invalidate in-memory cache ของ GET /api/botworker/conversations (dynamic import กัน circular dep) */
+/** invalidate in-memory cache ของ GET /api/botworker/conversations */
 export async function invalidateBotworkerCache() {
-  try {
-    const mod = await import("@/app/api/botworker/conversations/route");
-    if (typeof (mod as unknown as { invalidateBotworkerCache?: () => void }).invalidateBotworkerCache === "function") {
-      (mod as unknown as { invalidateBotworkerCache: () => void }).invalidateBotworkerCache();
-    }
-  } catch { /* ignore */ }
+  invalidateCache();
 }
 
 /** ดึง test doc ของ conversation ใน botworker sandbox (อาจไม่มี → undefined) */

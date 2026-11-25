@@ -118,6 +118,10 @@ export async function requireAuth() {
   };
 }
 
+export async function requirePageAccess() {
+  return requireAuth();
+}
+
 // ── productService mock — spy นับ Product DB reads ───────────
 
 export const productService = {

@@ -5,17 +5,9 @@ import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { conversationService } from "@/backend/service/conversationService";
+import { invalidateBotworkerCache } from "@/backend/service/botworkerConversationCache";
 // ⚡ G-fix — invalidate conversation caches เมื่อ reopen
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
-async function invalidateBotworkerCache() {
-  try {
-    const mod = await import("@/app/api/botworker/conversations/route");
-    if (typeof (mod as unknown as { invalidateBotworkerCache?: () => void }).invalidateBotworkerCache === "function") {
-      (mod as unknown as { invalidateBotworkerCache: () => void }).invalidateBotworkerCache();
-    }
-  } catch { /* ignore */ }
-}
-
 export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ conversationId: string }> }
