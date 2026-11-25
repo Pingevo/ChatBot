@@ -24,9 +24,10 @@ export type ChatEngine = "legacy" | "v2" | "v3" | "v4";
 export interface SystemConfigDoc extends Document {
   config_key: string;
 
-  // === สวิตช์อันตราย — คืนค่าจาก SAFETY เสมอ (hard-coded false) ===
+  // === global platform switches stay locked; console Shopee send is a separate default-off control ===
   shopee_live_read_enabled: boolean;
   shopee_live_send_enabled: boolean;
+  shopee_console_send_enabled: boolean;
   shopee_live_mark_read_enabled: boolean;
   shopee_live_pin_enabled: boolean;
   shopee_poll_enabled: boolean;
@@ -128,6 +129,7 @@ const CACHE_TTL_MS = 5000;
 //   (warm: override บน cachedConfig / cold: override บน safety defaults —
 //   env/DB/stale ห้ามรั่วเป็น true กลาง outage)
 const FAIL_CLOSED_SWITCHES = {
+  shopee_console_send_enabled: false,
   bot_worker_enabled: false,
   // ⚡ Phase 2D — platform scope ต้อง fail-closed เหมือน global switch
   bot_worker_platforms: { shopee: false, tiktok: false, lazada: false },
@@ -143,6 +145,7 @@ const FAIL_CLOSED_SWITCHES = {
 // ค่า default สำหรับสวิตช์ปลอดภัย (อ่านจาก env ตอน boot)
 function getSafeDefaults(): Partial<SystemConfigDoc> {
   return {
+    shopee_console_send_enabled: false,
     mock_mode_enabled: process.env.MOCK_MODE_ENABLED === 'true',
     shadow_bot_enabled: process.env.SHADOW_BOT_ENABLED === 'true',
     polling_interval_ms: Number(process.env.POLLING_INTERVAL_MS || 1000),
@@ -183,6 +186,7 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     // Shopee — hard-coded false จาก SAFETY
     shopee_live_read_enabled: SAFETY.shopeeLiveRead,
     shopee_live_send_enabled: SAFETY.shopeeLiveSend,
+    shopee_console_send_enabled: dbConfig.shopee_console_send_enabled === true,
     shopee_live_mark_read_enabled: SAFETY.shopeeLiveMarkRead,
     shopee_live_pin_enabled: SAFETY.shopeeLivePin,
     shopee_poll_enabled: SAFETY.shopeePoll,
@@ -266,7 +270,7 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
 }
 
 /**
- * ดึง SystemConfig ปัจจุบัน — สวิตช์อันตรายเสมอเป็น false จาก SAFETY
+ * ดึง SystemConfig ปัจจุบัน — global platform switches มาจาก SAFETY; console send fails closed
  */
 export async function getSystemConfig(forceRefresh = false): Promise<SystemConfigDoc> {
   const now = Date.now();
@@ -286,6 +290,7 @@ export async function getSystemConfig(forceRefresh = false): Promise<SystemConfi
         // อันตราย — false เสมอ
         shopee_live_read_enabled: SAFETY.shopeeLiveRead,
         shopee_live_send_enabled: SAFETY.shopeeLiveSend,
+        shopee_console_send_enabled: false,
         shopee_live_mark_read_enabled: SAFETY.shopeeLiveMarkRead,
         shopee_live_pin_enabled: SAFETY.shopeeLivePin,
         shopee_poll_enabled: SAFETY.shopeePoll,
@@ -357,6 +362,7 @@ export async function updateSystemConfig(
 ): Promise<SystemConfigDoc> {
   // Whitelist — อนุญาตเฉพาะสวิตช์ปลอดภัย + bot URLs
   const allowedKeys: (keyof SystemConfigDoc)[] = [
+    'shopee_console_send_enabled',
     'mock_mode_enabled',
     'shadow_bot_enabled',
     'polling_interval_ms',

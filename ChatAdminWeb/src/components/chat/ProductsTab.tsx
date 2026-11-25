@@ -32,6 +32,7 @@ interface ProductRow {
 interface Props {
   conversation: Conversation;
   onSendProduct: (product: ProductRow) => void;
+  sendDisabled?: boolean;
 }
 
 // ดึง URL รูปจาก schema ต่างๆ ของ Shopee/TikTok/Lazada
@@ -80,7 +81,7 @@ function extractUrl(p: ProductRow): string | undefined {
   return undefined;
 }
 
-export function ProductsTab({ conversation, onSendProduct }: Props) {
+export function ProductsTab({ conversation, onSendProduct, sendDisabled = false }: Props) {
   const [products, setProducts] = useState<ProductRow[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -229,9 +230,11 @@ export function ProductsTab({ conversation, onSendProduct }: Props) {
                       </div>
                       {/* Send button */}
                       <button
+                        type="button"
+                        disabled={sendDisabled}
                         onClick={() => onSendProduct(p)}
-                        className="w-8 h-8 rounded-lg bg-brand/10 text-brand hover:bg-brand hover:text-white flex items-center justify-center transition-colors shrink-0"
-                        title="ส่งสินค้าเข้าแชท"
+                        className="w-8 h-8 rounded-lg bg-brand/10 text-brand hover:bg-brand hover:text-white flex items-center justify-center transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+                        title={sendDisabled ? "เปิดสวิตช์ส่งจริงเพื่อส่งการ์ด Shopee" : "ส่งการ์ดสินค้าเข้าแชท"}
                         aria-label="ส่งสินค้าเข้าแชท"
                       >
                         <Send size={14} />

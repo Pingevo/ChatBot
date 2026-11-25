@@ -377,6 +377,10 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `created_timestamp` | Date | |
 | `data_received_at` | Date? | |
 | `raw_payload` | object? | rich media (image, item card, order) |
+| `message_type` | string? | outbound/rich-media type when written by Next.js |
+| `media` | object? | image/video/sticker media URL metadata |
+| `delivery_status` | string? | `internal` / `sent` / `failed` / `unknown` for console sends |
+| `provider_message_id` | string? | Shopee-confirmed message id; absent if not confirmed |
 | `actor` | string? | |
 | `image_desc` | string? | ⚡ vision description cache |
 
@@ -384,7 +388,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
 | Read | messageService (listMessages, listMessagesPaginated, getHistoryForBot) | `/admin/conversations/[id]/messages`, `/botworker/conversations/[id]/messages` |
-| Write | messageService.addMessage | `/admin/conversations/[id]/send` (admin reply), data writer (user messages) |
+| Write | messageService.addMessage | `/admin/conversations/[id]/send` (Tickets live/internal reply), data writer (user messages) |
 | Update | updateOne image_desc | botWorkerService.storeBotReply (cache vision desc) |
 | Delete | ไม่มี (immutable log) | |
 
@@ -805,6 +809,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 |-------|------|---------|
 | `shopee_live_read` | boolean | ⚠️ อันตราย — hard-coded false |
 | `shopee_live_send` | boolean | ⚠️ อันตราย |
+| `shopee_console_send_enabled` | boolean | default false; separate switch for Shopee sends from Tickets/BotWorker only |
 | `shopee_live_mark_read` | boolean | ⚠️ อันตราย |
 | `shopee_live_pin` | boolean | ⚠️ อันตราย |
 | `shopee_poll` | boolean | ⚠️ อันตราย |
@@ -1340,6 +1345,29 @@ Zaapi Flow Builder import persistence — canonical drafts + immutable provenanc
 | `workflow_bindings` | unresolved binding records | `binding_id` (unique), `workflow_id`+`version_id`, `status` |
 
 **Access:** `ChatAdminWeb/src/backend/service/workflowImportService.ts` + workflow editor routes — declaration indexes ใน `ensureIndexes`; production index = operator gate
+
+---
+
+### 2.36 `shopee_outbound_operations` (direct Next.js collection)
+
+Idempotency ledger สำหรับข้อความ Shopee ที่ส่งจาก Tickets และ BotWorker เท่านั้น; ไม่อยู่ใน `COLLECTIONS` และไม่มี raw access token, service token หรือ partner key
+
+| Field | Type | หมายเหตุ |
+|-------|------|---------|
+| `_id` | string | SHA-256 ของ request id จาก UI; unique index ของ MongoDB |
+| `conversation_id` | string | conversation ที่ส่ง |
+| `shop_id` | string | ร้านจาก conversation ที่อ่านจาก server |
+| `payload_hash` | string | SHA-256 ของชนิด/เนื้อหา/ไฟล์ เพื่อปฏิเสธการใช้ request id ซ้ำกับ payload อื่น |
+| `message_type` | string | `text` / `image` / `video` / `sticker` / `item` |
+| `state` | string | `sending` / `sent` / `failed` / `unknown`; `sending`/`unknown` ห้ามส่งซ้ำอัตโนมัติ |
+| `result_code` | string? | รหัสผลลัพธ์แบบ sanitized |
+| `provider_message_id` | string? | มีเมื่อ Shopee ยืนยัน response |
+| `media_url` / `media_thumb_url` | string? | URL สื่อหลังส่งสำเร็จ เพื่อ replay ผลเดิมใน UI |
+| `created_at` / `updated_at` | Date | เวลาเริ่มและสถานะล่าสุด |
+
+**Access:** `shopeeOutboundService.sendShopeeMessage` เป็น owner เดียว; ถูกเรียกจาก Tickets send, BotWorker send และ BotWorker review routes เมื่อ `shopee_console_send_enabled=true` เท่านั้น; Tickets route ตรวจ `requirePageAccess("ticket")`, BotWorker composer/review ตรวจ `requirePageAccess("botworker")` ก่อนดำเนินการ และ review ยังคงตรวจแอดมิน/ร้านที่กำหนด
+
+**Credential handling:** Shopee requests ใช้ Node HTTPS โดยตรงเพื่อไม่ส่ง signed URL ที่มี token ผ่าน Next.js patched fetch/tracing; server ใช้ `SHOPEE_TOKEN_API_SERVICE_TOKEN` เรียก Sellcenter `/api/shopee/token` และ `SHOPEE_PARTNER_KEY` สำหรับ signature; `access_token` ใช้เฉพาะใน memory ต่อ request แล้วไม่เขียนลง DB, log, response หรือ browser
 
 ---
 

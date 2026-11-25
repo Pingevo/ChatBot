@@ -4,9 +4,8 @@
 //   - review_bubbles freeze ตอน draft insert (builder เดียว — ใช้ร่วม storeBotReply
 //     และ storeWorkflowDelivered); bot_reply_text ต้นฉบับไม่แตะ
 //   - decision: pending | approved | edited_approved | rejected
-//   - delivery: not_requested | mock_sent | mock_failed — receipt provider="mock",
-//     delivered=false เสมอ; ไม่มี sent_text ในทุกกรณี (field absent)
-//   - ordering: approve/send ได้เมื่อทุก bubble ก่อนหน้า rejected หรือ mock_sent
+//   - delivery: mock by default; scoped Shopee states are persisted for approved sends.
+//   - ordering: approve/send ได้เมื่อทุก bubble ก่อนหน้า rejected หรือส่งยืนยันแล้ว
 //   - legacy draft ไม่มี review_bubbles → แสดงได้ แต่ review ไม่ได้ (ห้ามแปลงย้อนหลัง)
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { splitAnswerSegments } from "@/lib/answerSegments";
@@ -16,7 +15,7 @@ import type { ShadowReplyDoc } from "./shadowReplyService";
 export const MAX_EDIT_LEN = 2000; // bounded input จนกว่า provider capability จะรู้จริง
 
 export type BubbleDecision = "pending" | "approved" | "edited_approved" | "rejected";
-export type DeliveryState = "not_requested" | "mock_sent" | "mock_failed";
+export type DeliveryState = "not_requested" | "mock_sent" | "mock_failed" | "live_sending" | "live_sent" | "live_failed" | "live_unknown";
 
 export interface MockReceipt {
   provider: "mock";
@@ -24,10 +23,17 @@ export interface MockReceipt {
   request_id: string;
 }
 
+export interface ShopeeReceipt {
+  provider: "shopee";
+  delivered: true;
+  request_id: string;
+  provider_message_id?: string;
+}
+
 export interface BubbleDelivery {
   state: DeliveryState;
   request_id?: string;
-  receipt?: MockReceipt;
+  receipt?: MockReceipt | ShopeeReceipt;
   error?: string;
 }
 
@@ -47,7 +53,7 @@ export interface ReviewBubble {
   approved_text?: string;
   delivery: BubbleDelivery;
   card?: ReviewCard;
-  // ⚠️ ห้ามเพิ่ม sent_text — reserved สำหรับ provider จริงใน phase ที่แยกอนุมัติ
+  // Keep the approved text in approved_text; delivery status remains separate.
 }
 
 export function buildReviewBubbles(replyId: string, answer: string): ReviewBubble[] {
@@ -74,7 +80,7 @@ export interface ReviewOutcome {
 // ── helpers ────────────────────────────────────────────────
 
 function bubbleSettled(b: ReviewBubble): boolean {
-  return b.decision === "rejected" || b.delivery.state === "mock_sent";
+  return b.decision === "rejected" || b.delivery.state === "mock_sent" || b.delivery.state === "live_sent";
 }
 
 /** earlier bubbles ทุกอันต้อง settled (rejected หรือ mock_sent) ก่อน bubble i ส่งได้ */
@@ -123,6 +129,12 @@ export async function applyReviewAction(opts: {
     conversationId: string; shopId: string; platform: string;
     actor: string; inboundMessageId?: string;
   }) => Promise<MockReceipt>;
+  liveSender?: (part: {
+    eventId: string; replyId: string; bubbleId: string;
+    part: "text" | "product_card"; text?: string; item_id?: string;
+    conversationId: string; shopId: string; platform: string;
+    actor: string; inboundMessageId?: string;
+  }) => Promise<BubbleDelivery>;
 }): Promise<ReviewOutcome> {
   const doc = await loadReply(opts.replyId, opts.conversationId);
   if (!doc) return { ok: false, code: "not_found", message: "reply not found" };
@@ -199,6 +211,24 @@ export async function applyReviewAction(opts: {
     return fresh?.review_bubbles?.[i];
   };
 
+  const deliver = async (part: {
+    eventId: string; replyId: string; bubbleId: string;
+    part: "text" | "product_card"; text?: string; item_id?: string;
+    conversationId: string; shopId: string; platform: string;
+    actor: string; inboundMessageId?: string;
+  }): Promise<BubbleDelivery> => {
+    if (opts.liveSender) {
+      try { return await opts.liveSender(part); }
+      catch { return { state: "live_unknown", request_id: part.eventId, error: "delivery_unknown" }; }
+    }
+    try {
+      const receipt = await opts.mockSender(part);
+      return { state: "mock_sent", request_id: part.eventId, receipt };
+    } catch {
+      return { state: "mock_failed", error: "mock_send_failed" };
+    }
+  };
+
   const baseFilter: Record<string, unknown> = {
     _id: doc._id,
     [`review_bubbles.${i}.decision`]: "pending",
@@ -206,12 +236,15 @@ export async function applyReviewAction(opts: {
   };
 
   const bubble = bubbles[i];
+  if (bubble.card?.delivery.state === "live_sending" || bubble.card?.delivery.state === "live_unknown") {
+    return finish({ ok: false, code: "conflict", message: "card delivery is unconfirmed; verify the Shopee chat before changing this bubble" });
+  }
 
   // ── reject ──
   if (opts.action === "reject") {
     // ⚡ bubble ที่ส่ง card mock ไปแล้วห้าม reject — outbound event เกิดแล้ว ต้องคง record
-    if (bubble.card?.delivery.state === "mock_sent") {
-      return finish({ ok: false, code: "conflict", message: "card already mock-sent — cannot reject bubble" });
+    if (bubble.card && (["mock_sent", "live_sending", "live_sent", "live_unknown"] as DeliveryState[]).includes(bubble.card.delivery.state)) {
+      return finish({ ok: false, code: "conflict", message: "card already sent — cannot reject bubble" });
     }
     const next = bubbles.slice();
     next[i] = { ...bubble, decision: "rejected", decided_by: opts.actor, decided_at: now };
@@ -245,8 +278,8 @@ export async function applyReviewAction(opts: {
     if (bubble.decision === "rejected") {
       return finish({ ok: false, code: "conflict", message: "rejected bubble cannot send card" });
     }
-    if (bubble.card?.delivery.state === "mock_sent") {
-      return finish({ ok: false, code: "conflict", message: "card already mock-sent" });
+    if (bubble.card && (["mock_sent", "live_sending", "live_sent", "live_unknown"] as DeliveryState[]).includes(bubble.card.delivery.state)) {
+      return finish({ ok: false, code: "conflict", message: "card already sent" });
     }
     // ⚡ verify item identity จาก bot_products record เดิมเท่านั้น — ห้ามเดาจากข้อความ/URL
     const products = Array.isArray(doc.bot_products) ? doc.bot_products : [];
@@ -277,40 +310,35 @@ export async function applyReviewAction(opts: {
       updated_at: doc.updated_at,
       $or: [
         { [`review_bubbles.${i}.card`]: { $exists: false } },
-        { [`review_bubbles.${i}.card.item_id`]: itemId, [`review_bubbles.${i}.card.delivery.state`]: { $in: ["not_requested", "mock_failed"] } },
+        { [`review_bubbles.${i}.card.item_id`]: itemId, [`review_bubbles.${i}.card.delivery.state`]: { $in: ["not_requested", "mock_failed", "live_failed"] } },
       ],
     };
+    const intentState: DeliveryState = opts.liveSender && doc.platform === "shopee" ? "live_sending" : "not_requested";
     const intentBubbles = bubbles.slice();
-    intentBubbles[i] = { ...bubble, card: { item_id: itemId, delivery: { state: "not_requested" } } };
+    intentBubbles[i] = { ...bubble, card: { item_id: itemId, delivery: { state: intentState } } };
     const intentRes = await coll.updateOne(cardFilter, { $set: { review_bubbles: intentBubbles, updated_at: now } });
     if (intentRes.matchedCount !== 1) {
       return finish({ ok: false, code: "conflict", message: "stale draft or conflicting card intent — rejected before any request" });
     }
     const eventId = mockSendEventId(opts.replyId, opts.bubbleId, "product_card");
-    let delivery: BubbleDelivery;
-    try {
-      const receipt = await opts.mockSender({
-        eventId, replyId: opts.replyId, bubbleId: opts.bubbleId,
-        part: "product_card", item_id: itemId,
-        conversationId: opts.conversationId, shopId: String(doc.shop_id),
-        platform: doc.platform, actor: opts.actor,
-        inboundMessageId: doc.inbound_message_id,
-      });
-      delivery = { state: "mock_sent", request_id: eventId, receipt };
-    } catch (e) {
-      delivery = { state: "mock_failed", error: String(e) };
-    }
+    const delivery = await deliver({
+      eventId, replyId: opts.replyId, bubbleId: opts.bubbleId,
+      part: "product_card", item_id: itemId,
+      conversationId: opts.conversationId, shopId: String(doc.shop_id),
+      platform: doc.platform, actor: opts.actor,
+      inboundMessageId: doc.inbound_message_id,
+    });
     const next = intentBubbles.slice();
     next[i] = { ...intentBubbles[i], card: { item_id: itemId, delivery } };
     const res = await coll.updateOne(
-      { _id: doc._id, [`review_bubbles.${i}.card.delivery.state`]: "not_requested", updated_at: now },
+      { _id: doc._id, [`review_bubbles.${i}.card.delivery.state`]: intentState, updated_at: now },
       { $set: { review_bubbles: next, updated_at: new Date() } });
     if (res.matchedCount !== 1) {
       // delivery CAS miss — mock request อาจมีอยู่แล้ว (deterministic id) → conflict honest
       return finish({ ok: false, code: "conflict", message: `card delivery CAS lost (delivery=${delivery.state}) — verify state before retry`, bubble: await persistedBubble() });
     }
-    if (delivery.state === "mock_failed") {
-      return finish({ ok: false, code: "conflict", message: `mock send failed: ${delivery.error}`, bubble: next[i] });
+    if (delivery.state === "mock_failed" || delivery.state === "live_failed" || delivery.state === "live_unknown") {
+      return finish({ ok: false, code: "conflict", message: delivery.state === "live_unknown" ? "Shopee delivery unconfirmed; verify before retry" : "message delivery failed", bubble: next[i] });
     }
     return finish({ ok: true, bubble: next[i], reply_id: opts.replyId });
   }
@@ -331,34 +359,31 @@ export async function applyReviewAction(opts: {
   const gate = sendGateError(bubbles, i);
   if (gate) return finish({ ok: false, code: "conflict", message: `out of order: ${gate}` });
 
-  // ⚡ retry/resume — bubble ตัดสินแล้ว แต่ delivery ยังไม่ mock_sent
-  //   (crash หลัง decision CAS หรือ mock_failed) → ยิง mock ด้วย persisted
-  //   approved_text เสมอ — ห้ามเดาจาก request ใหม่ ห้ามเปลี่ยน decision
+  // Retry/resume uses the persisted approved text; unknown live delivery is never retried.
+  if ((opts.action === "approve" || opts.action === "save_and_approve") && bubble.delivery.state === "live_unknown") {
+    return finish({ ok: false, code: "conflict", message: "Shopee delivery unconfirmed; verify the chat before retry", bubble });
+  }
   if ((opts.action === "approve" || opts.action === "save_and_approve") &&
       (bubble.decision === "approved" || bubble.decision === "edited_approved") &&
-      bubble.delivery.state !== "mock_sent") {
+      bubble.delivery.state !== "mock_sent" && bubble.delivery.state !== "live_sent") {
     const persistedText = bubble.approved_text ?? bubble.edited_text ?? bubble.original_text;
     const eventId = mockSendEventId(opts.replyId, opts.bubbleId, "text");
-    let delivery: BubbleDelivery;
-    try {
-      const receipt = await opts.mockSender({
-        eventId, replyId: opts.replyId, bubbleId: opts.bubbleId,
-        part: "text", text: persistedText,
-        conversationId: opts.conversationId, shopId: String(doc.shop_id),
-        platform: doc.platform, actor: opts.actor,
-        inboundMessageId: doc.inbound_message_id,
-      });
-      delivery = { state: "mock_sent", request_id: eventId, receipt };
-    } catch (e) {
-      delivery = { state: "mock_failed", error: String(e) };
-    }
+    const delivery = await deliver({
+      eventId, replyId: opts.replyId, bubbleId: opts.bubbleId,
+      part: "text", text: persistedText,
+      conversationId: opts.conversationId, shopId: String(doc.shop_id),
+      platform: doc.platform, actor: opts.actor,
+      inboundMessageId: doc.inbound_message_id,
+    });
     const next = bubbles.slice();
     next[i] = { ...bubble, delivery };
     const res = await coll.updateOne(
-      { _id: doc._id, [`review_bubbles.${i}.delivery.state`]: { $in: ["not_requested", "mock_failed"] }, [`review_bubbles.${i}.approved_text`]: persistedText, updated_at: doc.updated_at },
+      { _id: doc._id, [`review_bubbles.${i}.delivery.state`]: { $in: ["not_requested", "mock_failed", "live_failed"] }, [`review_bubbles.${i}.approved_text`]: persistedText, updated_at: doc.updated_at },
       { $set: { review_bubbles: next, updated_at: new Date() } });
     if (res.matchedCount !== 1) return finish({ ok: false, code: "conflict", message: "stale draft during retry — verify state" });
-    if (delivery.state === "mock_failed") return finish({ ok: false, code: "conflict", message: `mock send failed: ${delivery.error}`, bubble: next[i] });
+    if (delivery.state === "mock_failed" || delivery.state === "live_failed" || delivery.state === "live_unknown") {
+      return finish({ ok: false, code: "conflict", message: delivery.state === "live_unknown" ? "Shopee delivery unconfirmed; verify before retry" : "message delivery failed", bubble: next[i] });
+    }
     return finish({ ok: true, bubble: next[i], reply_id: opts.replyId });
   }
 
@@ -373,7 +398,7 @@ export async function applyReviewAction(opts: {
     decided_by: opts.actor,
     decided_at: now,
     approved_text: approvedText,
-    delivery: bubble.delivery.state === "mock_failed" ? { state: "not_requested" } : bubble.delivery,
+    delivery: bubble.delivery.state === "mock_failed" || bubble.delivery.state === "live_failed" ? { state: "not_requested" } : bubble.delivery,
   };
   const decideRes = await coll.updateOne(baseFilter, { $set: { review_bubbles: decidedBubbles, updated_at: now } });
   if (decideRes.matchedCount !== 1) {
@@ -381,19 +406,13 @@ export async function applyReviewAction(opts: {
   }
   // mock — ใช้ persisted approved_text ของผู้ชนะเท่านั้น
   const eventId = mockSendEventId(opts.replyId, opts.bubbleId, "text");
-  let delivery: BubbleDelivery;
-  try {
-    const receipt = await opts.mockSender({
-      eventId, replyId: opts.replyId, bubbleId: opts.bubbleId,
-      part: "text", text: approvedText,
-      conversationId: opts.conversationId, shopId: String(doc.shop_id),
-      platform: doc.platform, actor: opts.actor,
-      inboundMessageId: doc.inbound_message_id,
-    });
-    delivery = { state: "mock_sent", request_id: eventId, receipt };
-  } catch (e) {
-    delivery = { state: "mock_failed", error: String(e) };
-  }
+  const delivery = await deliver({
+    eventId, replyId: opts.replyId, bubbleId: opts.bubbleId,
+    part: "text", text: approvedText,
+    conversationId: opts.conversationId, shopId: String(doc.shop_id),
+    platform: doc.platform, actor: opts.actor,
+    inboundMessageId: doc.inbound_message_id,
+  });
   // CAS#2 — delivery not_requested → outcome (retry path ด้านบน recover ได้เสมอ)
   const next = decidedBubbles.slice();
   next[i] = { ...decidedBubbles[i], delivery };
@@ -403,8 +422,8 @@ export async function applyReviewAction(opts: {
   if (res.matchedCount !== 1) {
     return finish({ ok: false, code: "conflict", message: `delivery CAS lost after decision (delivery=${delivery.state}) — verify state before retry`, bubble: await persistedBubble() });
   }
-  if (delivery.state === "mock_failed") {
-    return finish({ ok: false, code: "conflict", message: `mock send failed: ${delivery.error}`, bubble: next[i] });
+  if (delivery.state === "mock_failed" || delivery.state === "live_failed" || delivery.state === "live_unknown") {
+    return finish({ ok: false, code: "conflict", message: delivery.state === "live_unknown" ? "Shopee delivery unconfirmed; verify before retry" : "message delivery failed", bubble: next[i] });
   }
   return finish({ ok: true, bubble: next[i], reply_id: opts.replyId });
 }

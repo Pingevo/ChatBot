@@ -12,6 +12,7 @@ import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { touchLastMessage } from "./conversationService";
 import { logAdminEvent } from "./adminLogService";
 import { parseRawMessage } from "./messageMediaParser";
+import type { MessageMedia, MessageType } from "@/lib/types";
 
 export type MessageRole = "user" | "bot" | "admin" | "system";
 export type MessageDirection = "in" | "out"; // in = ลูกค้า, out = ร้าน/bot
@@ -38,6 +39,10 @@ export interface MessageDoc extends Document {
   source?: string; // data_mirror | product_store | knowledge_base | general:* | admin | bot
   topic?: string;
   tokens?: { prompt: number; output: number; total: number };
+  message_type?: MessageType;
+  media?: MessageMedia;
+  delivery_status?: "internal" | "sent" | "failed" | "unknown";
+  provider_message_id?: string;
   reply_to_message_id?: string;   // Phase 7 — idempotency key สำหรับ bot reply
   created_timestamp: Date;        // เวลาจริงที่ข้อความถูกสร้าง (จาก platform หรือ admin)
   data_received_at?: Date;         // เวลาที่ data writer เขียน (debug)
@@ -150,11 +155,19 @@ export async function addMessage(opts: {
   replyToMessageId?: string;  // idempotency key สำหรับ bot reply
   actor?: string; // admin_id for admin replies, "bot" for bot replies
   imageDesc?: string; // ⚡ Phase 1A — description ที่สกัดจากรูปใน message นี้
+  documentId?: string;
+  messageId?: string;
+  messageType?: MessageType;
+  media?: MessageMedia;
+  rawPayload?: unknown;
+  deliveryStatus?: MessageDoc["delivery_status"];
+  providerMessageId?: string;
 }): Promise<MessageDoc> {
   const coll = await getCollection<MessageDoc>(COLLECTIONS.messages);
   const direction = opts.direction ?? (opts.role === "user" ? "in" : "out");
   const doc: MessageDoc = {
-    message_id: genMessageId(),
+    ...(opts.documentId ? { _id: opts.documentId } : {}),
+    message_id: opts.messageId || genMessageId(),
     conversation_id: opts.conversationId,
     shop_id: opts.shopId,
     platform: opts.platform || "shopee", // default shopee ถ้าไม่ระบุ (backward compat)
@@ -165,12 +178,29 @@ export async function addMessage(opts: {
     source: opts.source,
     topic: opts.topic,
     tokens: opts.tokens,
+    message_type: opts.messageType,
+    media: opts.media,
+    raw_payload: opts.rawPayload,
+    delivery_status: opts.deliveryStatus,
+    provider_message_id: opts.providerMessageId,
     reply_to_message_id: opts.replyToMessageId,
     created_timestamp: new Date(),
     actor: opts.actor,             // admin_id ที่ตอบ (สำหรับ admin messages)
     image_desc: opts.imageDesc,    // ⚡ Phase 1A — vision description cache
   };
-  await coll.insertOne(doc);
+  if (opts.documentId) {
+    const existing = await coll.findOne({ _id: opts.documentId });
+    if (existing) return existing;
+  }
+  try {
+    await coll.insertOne(doc);
+  } catch (e) {
+    if (opts.documentId && (e as { code?: number })?.code === 11000) {
+      const existing = await coll.findOne({ _id: opts.documentId });
+      if (existing) return existing;
+    }
+    throw e;
+  }
 
   // Update conversation preview — unread only bumps for customer-originated
   // messages (admin/bot replies are already "seen" by the console).

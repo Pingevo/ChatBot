@@ -8,19 +8,27 @@ import { ChatLogTab } from "@/components/chat/ChatLogTab";
 import { ProductsTab } from "@/components/chat/ProductsTab";
 import { CloseChatModal } from "@/components/chat/CloseChatModal";
 import { ModalLayer } from "@/components/ui/ModalLayer";
-import { chatService } from "@/lib/services";
+import { chatService, newChatRequestId } from "@/lib/services";
 import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
 import { useAuth } from "@/lib/authStore";
 import { useSharedConversations, invalidateSharedConversations } from "@/lib/useSharedConversations";
 import { useToastError } from "@/components/ui/Toast";
-import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory, AdminUser } from "@/lib/types";
+import type { Conversation, ChatMessage, ChatSendInput, CloseHistoryRecord, ProblemCategory, AdminUser } from "@/lib/types";
+import { useShopeeSendStatus } from "@/lib/useShopeeSendStatus";
 
 // Phase 7.4 — mock data ลบแล้ว โหลดจาก chatbot DB ผ่าน /api/admin/conversations
 // Phase 7.9 — รองรับ tab "แชทของฉัน" / "ทั้งหมด" / filter admin + popup เตือนตอบทับ
 
 type MobileView = "list" | "chat" | "info";
 type ChatFilter = "me" | "all" | string;
+
+function conflictPreview(payload: ChatSendInput): string {
+  if (payload.type === "text") return payload.text.slice(0, 60);
+  if (payload.type === "image" || payload.type === "video") return `${payload.type}: ${payload.file.name}`;
+  if (payload.type === "sticker") return `sticker ${payload.sticker_id}`;
+  return `item ${payload.item_id}`;
+}
 
 export default function TicketsPage() {
   const { user } = useAuth();
@@ -75,7 +83,9 @@ export default function TicketsPage() {
   const [acceptingChats, setAcceptingChats] = useState<boolean>(user?.is_accepting_chats ?? true);
   const [togglingAccept, setTogglingAccept] = useState(false);
   // Phase 7.9 — popup เตือนตอบทับ
-  const [conflictPopup, setConflictPopup] = useState<{ assignedTo: string; text: string } | null>(null);
+  const [conflictPopup, setConflictPopup] = useState<{ assignedTo: string; payload: ChatSendInput } | null>(null);
+  const productRequestIdsRef = useRef<Map<string, string>>(new Map());
+  const liveSendEnabled = useShopeeSendStatus();
 
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
 
@@ -176,12 +186,12 @@ export default function TicketsPage() {
 
   // Phase 7.9 — send พร้อมเช็ค conflict (assigned_to ไม่ใช่ตัวเอง)
   const sendInternal = useCallback(
-    async (text: string, force: boolean) => {
+    async (payload: ChatSendInput, force: boolean) => {
       if (!selectedId) return;
-      const res = await chatService.send(selectedId, text, force);
+      const res = await chatService.sendPart(selectedId, payload, force, liveSendEnabled);
       if (res.conflict) {
         // backend บอกว่า assigned ให้คนอื่น → เปิด popup
-        setConflictPopup({ assignedTo: res.assigned_to || "?", text });
+        setConflictPopup({ assignedTo: res.assigned_to || "?", payload });
         return false;
       }
       if (res.message) setMessages((prev) => [...prev, res.message]);
@@ -189,19 +199,26 @@ export default function TicketsPage() {
       invalidateSharedConversations();
       return true;
     },
-    [selectedId]
+    [selectedId, liveSendEnabled]
   );
 
   const handleSend = useCallback(
-    async (text: string) => {
+    async (payload: ChatSendInput) => {
       if (!selectedId) return;
       setSending(true);
       // ไม่ต้องสร้าง tempMsg — sendInternal จะเพิ่ม message จริงจาก API แล้ว
       // ถ้าสร้าง tempMsg ด้วยจะซ้อนกัน 2 อัน (temp + ของจริง) เพราะ id ต่างกัน merge ไม่ออก
       try {
-        await sendInternal(text, false);
-      } catch {
+        return await sendInternal(payload, false);
+      } catch (e) {
+        const body = (e as { response?: { data?: { conflict?: boolean; assigned_to?: string } } })?.response?.data;
+        if (body?.conflict) {
+          setConflictPopup({ assignedTo: body.assigned_to || "?", payload });
+          return false;
+        }
         // offline — ไม่มีอะไรต้องทำ (polling จะ sync ให้เมื่อ online)
+        catchError(e, "ส่งข้อความไม่สำเร็จ");
+        throw e;
       } finally {
         setSending(false);
       }
@@ -214,8 +231,7 @@ export default function TicketsPage() {
     if (!conflictPopup) return;
     setSending(true);
     try {
-      await sendInternal(conflictPopup.text, true);
-      setConflictPopup(null);
+      if (await sendInternal(conflictPopup.payload, true)) setConflictPopup(null);
     } catch {
       // ignore
     } finally {
@@ -229,8 +245,7 @@ export default function TicketsPage() {
     setSending(true);
     try {
       await chatService.assign(selectedId, me);
-      await sendInternal(conflictPopup.text, false);
-      setConflictPopup(null);
+      if (await sendInternal(conflictPopup.payload, false)) setConflictPopup(null);
       // ⚡ G-share — invalidate shared store
       invalidateSharedConversations();
     } catch {
@@ -396,11 +411,12 @@ export default function TicketsPage() {
       </div>
 
       {/* ── Panel กลาง: Ticket fields + Chat ── */}
-      <div className={`mobile-ticket-chat-panel ${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 h-full min-w-0 relative`}>
+      <div className={`mobile-ticket-chat-panel ${mobileView === "chat" ? "flex" : "hidden"} lg:flex flex-1 h-full min-w-0 relative scoped-mobile-chat-panel`}>
         <TicketChatPanel
           conversation={selected}
           messages={messages}
           onSend={handleSend}
+          liveSendEnabled={liveSendEnabled}
           onHandoff={handleHandoff}
           onResolve={handleResolve}
           onReopen={handleReopen}
@@ -484,10 +500,20 @@ export default function TicketsPage() {
                 {rightTab === "products" && (
                   <ProductsTab
                     conversation={selected}
+                    sendDisabled={selected.platform === "shopee" && !liveSendEnabled}
                     onSendProduct={(product) => {
                       // ดึงข้อมูลจาก schema ต่างๆ ของ Shopee/TikTok/Lazada
                       const itemId = String(product.itemid || product.item_id || product.id || "");
                       const name = String(product.name || product.item_name || product.title || product.product_name || "สินค้า");
+                      if (selected.platform === "shopee") {
+                        const key = `${selected.id}:${itemId}`;
+                        const requestId = productRequestIdsRef.current.get(key) || newChatRequestId();
+                        productRequestIdsRef.current.set(key, requestId);
+                        void handleSend({ type: "item", item_id: itemId, request_id: requestId }).then((sent) => {
+                          if (sent) productRequestIdsRef.current.delete(key);
+                        }).catch(() => {});
+                        return;
+                      }
                       const price = Number(product.price || product.new_check_price || product.gen_price || 0);
                       // image extraction (เหมือน ProductsTab.extractImage)
                       let image: string | undefined;
@@ -569,7 +595,7 @@ export default function TicketsPage() {
               <br />
               ถ้าส่งต่อไป ข้อความจะถูกบันทึก log ไว้เป็น &quot;forced override&quot;
               <br />
-              <span className="text-text-subtle">ข้อความที่จะส่ง: &quot;{conflictPopup.text.slice(0, 60)}{conflictPopup.text.length > 60 ? "..." : ""}&quot;</span>
+              <span className="text-text-subtle">รายการที่จะส่ง: &quot;{conflictPreview(conflictPopup.payload)}&quot;</span>
             </p>
             <div className="flex items-center gap-2 justify-end">
               <button

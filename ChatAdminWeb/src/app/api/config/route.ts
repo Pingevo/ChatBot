@@ -1,6 +1,6 @@
 // GET /api/config — ดึง SystemConfig ปัจจุบัน (สวิตช์อันตรายเสมอ false จาก SAFETY)
-// PUT /api/config — อัปเดตสวิตช์ปลอดภัย (mock_mode, shadow_bot, polling, bot URLs) เท่านั้น
-//   สวิตช์อันตราย (live_read/send/mark_read/pin/poll — ทุก platform) ไม่สามารถเปลี่ยนได้
+// PUT /api/config — อัปเดตค่าที่อนุญาต รวมถึงสวิตช์ส่ง Shopee เฉพาะ Tickets/BotWorker (default OFF)
+//   global platform API switches (live_read/send/mark_read/pin/poll — ทุก platform) ยังคงล็อก
 import { NextRequest } from "next/server";
 import { requirePageEdit } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
@@ -57,6 +57,10 @@ export async function PUT(req: NextRequest) {
 
   if ("chat_engine" in body && !["legacy", "v2", "v3", "v4"].includes(String(body.chat_engine))) {
     return error("chat_engine must be 'legacy', 'v2', 'v3', or 'v4'", 422);
+  }
+
+  if ("shopee_console_send_enabled" in body && typeof body.shopee_console_send_enabled !== "boolean") {
+    return error("shopee_console_send_enabled must be a boolean", 422);
   }
 
   // ป้องกัน: ถ้ามีคนส่งสวิตช์อันตรายมา ปฏิเสธทันที (ทุก platform)

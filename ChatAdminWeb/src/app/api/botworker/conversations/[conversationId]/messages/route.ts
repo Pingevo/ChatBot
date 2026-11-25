@@ -141,6 +141,11 @@ export async function GET(
     actor_name?: string;
     bubble_color?: string;
     text: string;
+    products?: ProductCard[];
+    message_type?: MessageType;
+    media?: MessageMedia;
+    delivery_status?: "internal" | "sent" | "failed" | "unknown";
+    provider_message_id?: string;
     created_at: Date;
   }>(COLLECTIONS.botworkerMessages);
   const bwFilter: Record<string, unknown> = { conversation_id: conversationId, role: "admin" };
@@ -362,6 +367,11 @@ export async function GET(
       admin_id: d.actor,
       admin_name: d.actor_name,
       bubble_color: d.bubble_color,
+      products: d.products,
+      message_type: d.message_type,
+      media: d.media,
+      delivery_status: d.delivery_status,
+      provider_message_id: d.provider_message_id,
     });
   }
 

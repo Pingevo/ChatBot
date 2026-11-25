@@ -5,8 +5,8 @@
 //   - ขวา: ข้อมูล + ประวัติแชท (เหมือน tickets)
 //
 // ความแตกต่างจาก /tickets:
-//   - ทุก action (รับเรื่อง/โยนงาน/ตอบ/ปิด/เปิด) เขียน test store เท่านั้น — ไม่แตะ ticket จริง
-//   - admin reply เก็บใน botworker_messages (ไม่ส่ง Shopee ไม่เขียน messages_shp)
+//   - รับเรื่อง/โยนงาน/ปิด/เปิด เขียน test store; reply เก็บ botworker_messages
+//   - ส่ง Shopee ได้เฉพาะเมื่อ switch เฉพาะ Tickets/BotWorker เปิด
 //   - แสดง 4 สี: user (เทา) + zaapi (เขียว) + admin (สี profile) + bot เรา (ฟ้า)
 //   - ข้อความ bot มาจาก shadow_replies (ไม่ใช่ messages_shp)
 import { SelectField } from "@/components/ui/SelectField";
@@ -26,12 +26,14 @@ import { MessageContent } from "@/components/chat/MessageContent";
 import { DateBanner, dayKey } from "@/components/shadow/DateBanner";
 import { splitAnswerSegments } from "@/lib/answerSegments";
 import { mergeBubbleResult } from "@/lib/reviewUi";
-import { chatService } from "@/lib/services";
+import { chatService, newChatRequestId, postOutboundChat } from "@/lib/services";
 import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
 import { useAuth } from "@/lib/authStore";
 import { adminBubbleColor, adminBubbleTextColor, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
-import type { Conversation, ChatMessage, CloseHistoryRecord, AdminUser, ProblemCategory } from "@/lib/types";
+import type { Conversation, ChatMessage, ChatSendInput, CloseHistoryRecord, AdminUser, ProblemCategory } from "@/lib/types";
+import { ShopeeChatComposer } from "@/components/chat/ShopeeChatComposer";
+import { useShopeeSendStatus } from "@/lib/useShopeeSendStatus";
 
 type MobileView = "list" | "chat" | "info";
 
@@ -45,7 +47,7 @@ interface ReviewBubble {
   decided_by?: string;
   decided_at?: string;
   approved_text?: string;
-  delivery: { state: "not_requested" | "mock_sent" | "mock_failed"; request_id?: string; receipt?: { provider: string; delivered: boolean }; error?: string };
+  delivery: { state: "not_requested" | "mock_sent" | "mock_failed" | "live_sending" | "live_sent" | "live_failed" | "live_unknown"; request_id?: string; receipt?: { provider: string; delivered: boolean; request_id?: string }; error?: string };
   card?: { item_id: string; delivery: { state: string; error?: string } };
 }
 
@@ -72,6 +74,8 @@ interface UnifiedMessage {
   // ⚡ rich media (parsed from raw_payload) — เหมือน /tickets
   message_type?: string;
   media?: { type: string; url?: string; thumb_url?: string; thumb_width?: number; thumb_height?: number; duration_seconds?: number };
+  delivery_status?: "internal" | "sent" | "failed" | "unknown";
+  provider_message_id?: string;
   order_sn?: string;
   notification_text?: string;
   table?: { headers: string[]; rows: string[][] };
@@ -81,6 +85,8 @@ interface UnifiedMessage {
 export default function BotWorkerPage() {
   const { user } = useAuth();
   const { catchError } = useToastError();
+  const liveSendEnabled = useShopeeSendStatus();
+  const productRequestIdsRef = useRef<Map<string, string>>(new Map());
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [totalCount, setTotalCount] = useState<number>(0);
   // ⚡ pagination — head (200 newest, poll 3s) + tail (load more on scroll)
@@ -261,6 +267,8 @@ export default function BotWorkerPage() {
     source: m.source,
     admin_id: m.admin_id,
     admin_name: m.admin_name,
+    delivery_status: m.delivery_status,
+    provider_message_id: m.provider_message_id,
     products: m.products,
     // ⚡ rich media fields
     message_type: m.message_type as ChatMessage["message_type"],
@@ -353,22 +361,24 @@ export default function BotWorkerPage() {
     }
   }, [selectedId]);
 
-  // ⚡ admin ตอบแชทใน sandbox — เขียน botworker_messages เท่านั้น ไม่ส่ง Shopee/messages_shp
-  const handleSend = useCallback(async (text: string) => {
-    if (!selectedId || !text.trim()) return;
+  // ⚡ admin reply — OFF: sandbox only; ON+Shopee: send through the provider and mirror botworker_messages
+  const handleSend = useCallback(async (payload: ChatSendInput) => {
+    if (!selectedId || (payload.type === "text" && !payload.text.trim())) return false;
     try {
-      const r = await api().post<{ message?: UnifiedMessage; conflict?: boolean; assigned_to?: string }>(
-        `/botworker/conversations/${selectedId}/send`,
-        { text: text.trim() }
-      );
-      if (r.data.message) {
-        setMessages((prev) => (prev.some((m) => m.id === r.data.message!.id) ? prev : [...prev, r.data.message!]));
+      const r = await postOutboundChat(`/botworker/conversations/${selectedId}/send`, payload, false, liveSendEnabled) as { message?: UnifiedMessage; conflict?: boolean; assigned_to?: string };
+      if (r.message) {
+        setMessages((prev) => (prev.some((m) => m.id === r.message!.id) ? prev : [...prev, r.message!]));
       }
+      return true;
     } catch (e) {
-      catchError(e, "ส่งข้อความไม่สำเร็จ");
-      throw e;
+      const body = (e as { response?: { data?: { conflict?: boolean; assigned_to?: string } } })?.response?.data;
+      const failure = body?.conflict
+        ? new Error(`แชทนี้มอบหมายให้ ${body.assigned_to || "แอดมินคนอื่น"} อยู่ — ยังไม่มีการส่งข้อความ`)
+        : e;
+      catchError(failure, "ส่งข้อความไม่สำเร็จ");
+      throw failure;
     }
-  }, [selectedId]);
+  }, [selectedId, liveSendEnabled]);
 
   // ⚡ review action — POST /review; server คืน bubble ใหม่ → patch message state
   // ⚡ op id reuse ต่อ (bubble,action,payload) — retry เจตนาเดิมได้ replay guarantee จาก server
@@ -384,7 +394,8 @@ export default function BotWorkerPage() {
     try {
       const r = await api().post<{ ok: boolean; message?: string; bubble?: ReviewBubble }>(
         `/botworker/conversations/${selectedId}/review`,
-        { reply_id: msgId, bubble_id: bubbleId, action, operation_id: opId, ...extra }
+        { reply_id: msgId, bubble_id: bubbleId, action, operation_id: opId, ...extra },
+        { headers: selected?.platform === "shopee" ? { "x-shopee-send-mode": liveSendEnabled ? "on" : "off" } : undefined }
       );
       const data = r.data as { ok?: boolean; message?: string; bubble?: ReviewBubble; detail?: string };
       if (!data.ok && !data.bubble) throw new Error(data.message || data.detail || "review action failed");
@@ -399,7 +410,7 @@ export default function BotWorkerPage() {
       opIdsRef.current.delete(opKey);
       throw e;
     }
-  }, [selectedId]);
+  }, [selectedId, selected?.platform, liveSendEnabled]);
 
   const handleToggleAccepting = useCallback(async () => {
     setTogglingAccept(true);
@@ -437,7 +448,7 @@ export default function BotWorkerPage() {
       </div>
 
       {/* ── Panel กลาง: BotWorkerChatPanel (3 สี ไม่มี composer) ── */}
-      <div className={`${mobileView === "chat" ? "flex" : "hidden"} 2xl:flex flex-1 h-full min-w-0 relative`}>
+      <div className={`${mobileView === "chat" ? "flex" : "hidden"} 2xl:flex flex-1 h-full min-w-0 relative scoped-mobile-chat-panel`}>
         <BotWorkerChatPanel
           conversation={selected}
           messages={messages}
@@ -447,6 +458,7 @@ export default function BotWorkerPage() {
           onReopen={handleReopen}
           onTransfer={handleTransfer}
           onSend={handleSend}
+          liveSendEnabled={liveSendEnabled}
           admins={admins}
           canReview={canReview}
           onReviewAction={handleReviewAction}
@@ -518,7 +530,18 @@ export default function BotWorkerPage() {
                 {rightTab === "products" && (
                   <ProductsTab
                     conversation={selected}
-                    onSendProduct={() => {}}
+                    sendDisabled={selected.platform === "shopee" && !liveSendEnabled}
+                    onSendProduct={(product) => {
+                      if (selected.platform !== "shopee") return;
+                      const itemId = String(product.itemid || product.item_id || product.id || "");
+                      if (!itemId) return;
+                      const key = `${selected.id}:${itemId}`;
+                      const requestId = productRequestIdsRef.current.get(key) || newChatRequestId();
+                      productRequestIdsRef.current.set(key, requestId);
+                      void handleSend({ type: "item", item_id: itemId, request_id: requestId }).then((sent) => {
+                        if (sent) productRequestIdsRef.current.delete(key);
+                      }).catch(() => {});
+                    }}
                   />
                 )}
               </div>
@@ -563,7 +586,8 @@ interface BotWorkerChatPanelProps {
   onResolve?: () => void;
   onReopen?: () => void;
   onTransfer?: (newAdminId: string) => void;
-  onSend?: (text: string) => Promise<void>;
+  onSend?: (payload: ChatSendInput) => Promise<unknown>;
+  liveSendEnabled: boolean;
   admins?: AdminUser[];
   canReview?: boolean;
   onReviewAction?: (msgId: string, bubbleId: string, action: string, extra?: Record<string, unknown>) => Promise<void>;
@@ -572,9 +596,8 @@ interface BotWorkerChatPanelProps {
   onInfo?: () => void;
 }
 
-function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, onSend, admins = [], canReview, onReviewAction, onBack, onInfo }: BotWorkerChatPanelProps) {
+function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, onSend, liveSendEnabled, admins = [], canReview, onReviewAction, onBack, onInfo }: BotWorkerChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   // ⚡ track ว่า user อยู่ใกล้ล่างไหม — ถ้าไม่ใช่ (กำลังเลื่อนขึ้นอ่าน) จะไม่ auto-scroll
   const wasNearBottomRef = useRef(true);
@@ -738,54 +761,37 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
             <div className="flex items-start gap-2 rounded-lg bg-success/5 border border-success/15 p-3 mt-4">
               <AlertCircle size={14} className="text-success-dark flex-shrink-0 mt-0.5" />
               <div className="text-[11px] text-text-muted leading-relaxed">
-                <span className="text-success-dark font-medium">ปลอดภัย:</span> คำตอบ bot (ฟ้า) เก็บใน shadow_replies
-                ไม่ส่งถึงลูกค้า ไม่ยิง Shopee API — zaapi (เขียว) คือข้อความจริงที่ sellcenter dump มา
+                <span className="text-success-dark font-medium">สถานะ:</span> คำตอบ bot (ฟ้า) ถูกเก็บใน shadow_replies ก่อนเสมอ
+                {liveSendEnabled && conversation?.platform === "shopee"
+                  ? " — การส่งถึงลูกค้าจะเกิดหลังแอดมินกดอนุมัติเท่านั้น"
+                  : " — ขณะนี้เก็บใน sandbox และไม่ส่งถึงลูกค้า"}
+                {" · zaapi (เขียว) คือข้อความจาก sellcenter"}
               </div>
             </div>
           </>
         )}
       </div>
 
-      {/* ── Composer — admin ตอบใน sandbox (เขียน botworker_messages, ไม่ส่ง Shopee) ── */}
+      {/* ── Composer — admin reply, sandbox unless the scoped Shopee switch is on ── */}
       {onSend && conversation.status !== "closed" && (
-        <form
-          onSubmit={async (e) => {
-            e.preventDefault();
-            if (!draft.trim() || sending) return;
-            setSending(true);
-            try {
-              await onSend(draft);
-              setDraft("");
-            } finally {
-              setSending(false);
-            }
-          }}
-          className="p-3 border-t border-border bg-surface shrink-0"
-        >
-          <div className="flex items-end gap-2">
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  e.currentTarget.form?.requestSubmit();
-                }
-              }}
-              placeholder="ตอบแชทใน sandbox... (Enter ส่ง · Shift+Enter ขึ้นบรรทัด) — ไม่ส่งถึงลูกค้าจริง"
-              rows={2}
-              className="flex-1 resize-none rounded-lg border border-border bg-surface-2 px-3 py-2 text-sm text-text placeholder:text-text-subtle focus:outline-none focus:ring-1 focus:ring-brand"
-            />
-            <Button type="submit" size="sm" disabled={!draft.trim() || sending} className="shrink-0">
-              {sending ? "กำลังส่ง..." : "ส่ง"}
-            </Button>
-          </div>
+        <div className="shrink-0">
+          <ShopeeChatComposer
+            key={conversation.id}
+            platform={conversation.platform}
+            liveSendEnabled={liveSendEnabled}
+            onSend={async (payload) => {
+              setSending(true);
+              try { await onSend(payload); } finally { setSending(false); }
+            }}
+            disabled={sending}
+            placeholder="ตอบแชทใน BotWorker..."
+          />
           {conversation.status === "bot" && (
-            <div className="text-[10px] text-text-subtle mt-1.5">
+            <div className="px-3 pb-2 text-[10px] text-text-subtle">
               การตอบจะ assign แชทนี้ให้คุณใน sandbox — บอทจะหยุดตอบจนกว่าจะปิด/เปิดแชทใหม่
             </div>
           )}
-        </form>
+        </div>
       )}
     </div>
   );
@@ -858,6 +864,8 @@ function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewA
     admin_id: m.admin_id,
     admin_name: m.admin_name,
     products: m.products,
+    delivery_status: m.delivery_status,
+    provider_message_id: m.provider_message_id,
     // ⚡ ส่ง rich media fields ไป MessageContent ให้แสดงรูป/สติกเกอร์/การ์ดสินค้าได้
     message_type: m.message_type as ChatMessage["message_type"],
     media: m.media as ChatMessage["media"],
@@ -904,6 +912,10 @@ function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewA
           )}
           {isBot && msg.bot_source && <span className="opacity-60">· {msg.bot_source}</span>}
           {isZaapi && <span className="opacity-60">· sellcenter</span>}
+          {msg.delivery_status === "sent" && <span className="text-green-700">· Shopee ส่งแล้ว</span>}
+          {msg.delivery_status === "internal" && <span>· บันทึก sandbox</span>}
+          {msg.delivery_status === "unknown" && <span className="text-warning">· ผลส่งไม่ชัดเจน</span>}
+          {msg.delivery_status === "failed" && <span className="text-vibrant-coral">· ส่งไม่สำเร็จ</span>}
         </div>
       </div>
       {!isUser && (
@@ -1005,11 +1017,11 @@ function BotWorkerTransferDropdown({
   );
 }
 
-// ─── ReviewBubbleList — per-bubble review controls (mock send) ───
+// ─── ReviewBubbleList — per-bubble human send controls ───
 // ⚡ pending: อนุมัติส่ง / แก้ไข / ไม่อนุมัติส่ง (+ card attach)
 //    editing: บันทึก / บันทึกและส่ง / ยกเลิก (inline ใน bubble นั้น)
-//    decided: read-only — แสดง original/saved edit/decision/actor/mock outcome
-//    mock_sent ต้อง label "จำลองส่งเท่านั้น — ลูกค้ายังไม่ได้รับ" เสมอ
+//    decided: read-only — แสดง original/saved edit/decision/actor/delivery outcome
+//    live_sent แปลว่า Shopee ยืนยันการส่งแล้ว
 function ReviewBubbleList({
   msg, canReview, onAction, toChatMsg, bubbleClass,
 }: {
@@ -1025,7 +1037,7 @@ function ReviewBubbleList({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<{ bubbleId: string; message: string } | null>(null);
 
-  const settled = (b: ReviewBubble) => b.decision === "rejected" || b.delivery.state === "mock_sent";
+  const settled = (b: ReviewBubble) => b.decision === "rejected" || b.delivery.state === "mock_sent" || b.delivery.state === "live_sent";
   const gateOk = (i: number) => bubbles.slice(0, i).every(settled);
 
   async function act(bubbleId: string, action: string, extra?: Record<string, unknown>): Promise<boolean> {
@@ -1086,9 +1098,18 @@ function ReviewBubbleList({
               {b.delivery.state === "mock_failed" && (
                 <span className="ml-1 rounded bg-red-500/30 px-1.5 py-0.5">จำลองส่งล้มเหลว</span>
               )}
+              {b.delivery.state === "live_sent" && (
+                <span className="ml-1 rounded bg-green-500/30 px-1.5 py-0.5 font-medium">Shopee ยืนยันส่งถึงลูกค้าแล้ว</span>
+              )}
+              {b.delivery.state === "live_failed" && (
+                <span className="ml-1 rounded bg-red-500/30 px-1.5 py-0.5">Shopee ปฏิเสธการส่ง</span>
+              )}
+              {b.delivery.state === "live_unknown" && (
+                <span className="ml-1 rounded bg-yellow-500/30 px-1.5 py-0.5">ผลส่งยังไม่ชัดเจน — ตรวจสอบแชทก่อนทำซ้ำ</span>
+              )}
               {b.card && (
                 <span className="ml-1 rounded bg-white/15 px-1.5 py-0.5">
-                  card:{b.card.item_id} {b.card.delivery.state === "mock_sent" ? "(จำลอง)" : "(ล้มเหลว)"}
+                  card:{b.card.item_id} {b.card.delivery.state === "mock_sent" ? "(จำลอง)" : b.card.delivery.state === "live_sent" ? "(ส่งแล้ว)" : b.card.delivery.state === "live_unknown" ? "(ผลไม่ชัดเจน)" : b.card.delivery.state === "live_sending" ? "(กำลังส่ง)" : "(ล้มเหลว)"}
                 </span>
               )}
             </div>
