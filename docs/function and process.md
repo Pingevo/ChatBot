@@ -1223,7 +1223,7 @@ reopenConversation({conversationId, reopenedBy, reopenReason, assignedTo, target
 
 **ไฟล์:** `ChatAdminWeb/src/backend/service/shadowReplyService.ts`
 
-- เก็บคำตอบบอทที่ **ไม่ส่งจริง** ใน `shadow_replies` collection
+- เก็บร่างคำตอบบอทใน `shadow_replies` ก่อนเสมอ; BotWorker review จะเก็บข้อความต้นฉบับ/ข้อความแก้/ผลอนุมัติหรือปฏิเสธแยกกัน
 - เปรียบเทียบกับ Zaapi reply (ดึงจาก messages ที่ source != admin)
 - Fields: `bot_reply_text`, `zaapi_reply_text`, `rating`, `star_rating`, `comment`, `cost`, `tokens`, `image_desc`
 - origin: `worker` (auto pipeline), `workflow` (workflow engine), `manual` (generate มือ)
@@ -1245,6 +1245,16 @@ reopenConversation({conversationId, reopenedBy, reopenReason, assignedTo, target
 - replay แชทจริง → ส่งทุก message ให้บอท → เก็บผลใน `test_assignment`
 - เปรียบเทียบ bot vs Zaapi
 - rate per-message + per-conversation
+
+### 15.5 BotWorker review, handoff และ analysis
+
+- แอดมินทุกคนที่มีสิทธิ์เข้าหน้า BotWorker สามารถตรวจคำตอบและ handoff ของทุก shop ที่ BotWorker รับตาม config; API ตรวจสิทธิ์หน้า ไม่จำกัดผู้ตรวจไว้ที่ admin ID เดียว
+- คำตอบถูกแยกเป็น `review_bubbles` และเก็บข้อความบอทต้นฉบับไว้เสมอ; การแก้ไขเพิ่ม edit history พร้อมผู้แก้และเวลา; การปฏิเสธต้องมีเหตุผล
+- ทุก action ผูกกับผู้ตรวจและ operation id ใน `botworker_events`; ข้อมูลต้นฉบับ/แก้/อนุมัติ/ปฏิเสธอยู่ใน `shadow_replies` สำหรับตรวจย้อนหลัง
+- Shopee review ส่งได้หลังผู้ตรวจอนุมัติและ switch `shopee_console_send_enabled` เปิด; ถ้าปิดจะบันทึก `not_sent_switch_off` และไม่เรียก live หรือ mock sender
+- เมื่อ engine ส่ง `handoff_required`, BotWorker บันทึก flag, reason code, explanation, answer และ upstream turn IDs; ยังไม่ assign งานอัตโนมัติ
+- ผู้ตรวจเห็น reason/explanation และรายชื่อผู้รับที่ออนไลน์ใน assignment pool ของแชท เลือกผู้รับเองหรือใช้ตัวเลือกที่แนะนำ แล้วอนุมัติ/ปฏิเสธพร้อมเหตุผล; การอนุมัติจ่ายงานลง `test_status_conversation` ของ BotWorker เท่านั้น
+- `/botworker/review-analysis` เปิดให้แอดมินที่มีสิทธิ์เข้าหน้า BotWorker อ่านช่วงวันเดียวหรือหลายวัน, จัดกราฟรายวัน/เดือน/ปี และแสดง Q&A, สถานะ, edit/rejection reason, ผู้ตรวจ, ผู้รับงาน และ timeline
 
 ---
 

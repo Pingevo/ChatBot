@@ -58,7 +58,7 @@ const WORKER_SOURCE = "botworker" as const;
 // ─── Types ────────────────────────────────────────────────
 
 export type ChatProcessingStatus =
-  | "processing" | "trigger_matched" | "bot_answered" | "handed_off"
+  | "processing" | "trigger_matched" | "bot_answered" | "handed_off" | "handoff_review_pending"
   | "bot_failed" | "no_action" | "workflow_actioned" | "workflow_resumed";
 
 export interface ChatProcessingDoc extends Document {
@@ -92,7 +92,7 @@ export interface ChatProcessingDoc extends Document {
 
 const CLAIM_TERMINAL_STATUSES = new Set<ChatProcessingStatus>([
   "trigger_matched", "bot_answered", "handed_off", "bot_failed",
-  "no_action", "workflow_actioned", "workflow_resumed",
+  "handoff_review_pending", "no_action", "workflow_actioned", "workflow_resumed",
 ]);
 
 // ─── ClaimContext — poll → buffer row → batch processor ────
@@ -458,24 +458,42 @@ function genShadowReplyId(): string {
   return "sr_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
+type WorkerBotResponse = {
+  answer: string;
+  source?: string;
+  model?: string;
+  elapsed?: number;
+  usage?: { prompt: number; output: number; total: number };
+  cost?: number;
+  products?: unknown[];
+  image_desc?: string;
+  chat_engine?: "legacy" | "v2" | "v3" | "v4";
+  request_id?: string;
+  handoff_required?: boolean;
+  handoff_to_admin?: boolean;
+  reason?: string;
+  handoff_reason?: string;
+  handoff_explanation?: string;
+  conversation_id?: string;
+  message_id?: string;
+};
+
+function assertBotResponseIdentity(response: WorkerBotResponse, expected: { conversationId: string; messageId: string }): void {
+  if (response.conversation_id && response.conversation_id !== expected.conversationId) {
+    throw new Error("bot_response_conversation_identity_mismatch");
+  }
+  if (response.message_id && response.message_id !== expected.messageId) {
+    throw new Error("bot_response_message_identity_mismatch");
+  }
+}
+
 async function storeBotReply(opts: {
   messageId: string;
   messageText: string;
   conversationId: string;
   shopId: string;
   platform: Platform;
-  botResp: {
-    answer: string;
-    source?: string;
-    model?: string;
-    elapsed?: number;
-    usage?: { prompt: number; output: number; total: number };
-    cost?: number;
-    products?: unknown[];
-    image_desc?: string;
-    chat_engine?: "legacy" | "v2" | "v3" | "v4";
-    request_id?: string;
-  };
+  botResp: WorkerBotResponse;
   triggerId?: string;
   // ⚡ deterministic reply identity — E11000 = persist ไปแล้ว (recovery reuse)
   replyId?: string;
@@ -513,6 +531,20 @@ async function storeBotReply(opts: {
     batch_id: opts.batchId,
     inbound_text: opts.messageText,
     bot_reply_text: opts.botResp.answer,
+    ...(opts.botResp.handoff_required ? {
+      bot_handoff_required: true,
+      bot_handoff_to_admin: true,
+      bot_handoff_category: opts.botResp.reason || opts.botResp.handoff_reason,
+      bot_handoff_reason: opts.botResp.handoff_reason || opts.botResp.reason,
+      bot_handoff_explanation: opts.botResp.handoff_explanation,
+      upstream_conversation_id: opts.botResp.conversation_id,
+      upstream_message_id: opts.botResp.message_id,
+      handoff_review: {
+        status: "pending" as const,
+        reason: opts.botResp.handoff_reason || opts.botResp.reason,
+        explanation: opts.botResp.handoff_explanation,
+      },
+    } : {}),
     bot_source: opts.botResp.source,
     bot_model: opts.botResp.model,
     bot_elapsed_ms: opts.botResp.elapsed != null ? Math.round(opts.botResp.elapsed * 1000) : undefined,  // bot คืนเป็นวินาที → ms
@@ -552,6 +584,44 @@ async function storeBotReply(opts: {
   }
 
   return shadowReplyId;
+}
+
+async function storePendingHandoffReply(opts: {
+  messageId: string;
+  messageText: string;
+  conversationId: string;
+  shopId: string;
+  platform: Platform;
+  botResp: WorkerBotResponse;
+  triggerId?: string;
+  replyId: string;
+  batchId: string;
+  inboundMessageIds: string[];
+}): Promise<string> {
+  assertBotResponseIdentity(opts.botResp, { conversationId: opts.conversationId, messageId: opts.messageId });
+  const botResp = {
+    ...opts.botResp,
+    conversation_id: opts.botResp.conversation_id || opts.conversationId,
+    message_id: opts.botResp.message_id || opts.messageId,
+  };
+  const replyId = await storeBotReply({ ...opts, botResp });
+  const metadata = {
+    shadow_reply_id: replyId,
+    handoff_required: true,
+    reason: opts.botResp.reason,
+    handoff_reason: opts.botResp.handoff_reason || opts.botResp.reason,
+    handoff_explanation: opts.botResp.handoff_explanation,
+    answer: opts.botResp.answer,
+    upstream_conversation_id: botResp.conversation_id,
+    upstream_message_id: botResp.message_id,
+    status: "awaiting_reviewer",
+    delivered_to_platform: false,
+  };
+  await logBotworkerEvent({ type: "bot_reply", actor: "bot-worker", conversation_id: opts.conversationId,
+    shop_id: opts.shopId, platform: opts.platform, metadata: { ...metadata, handoff_required: true } });
+  await logBotworkerEvent({ type: "bot_handoff", actor: "bot-worker", conversation_id: opts.conversationId,
+    shop_id: opts.shopId, platform: opts.platform, metadata });
+  return replyId;
 }
 
 // ─── Store workflow delivered messages in shadow_replies ──
@@ -1039,20 +1109,19 @@ async function processClaimedMessage(msg: {
         });
         // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
         if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
+        assertBotResponseIdentity(botResp, { conversationId: msg.conversation_id, messageId: msg.message_id });
         if (botResp.handoff_required) {
-          const reason = botResp.handoff_reason || "engine requested handoff";
-          const { agentId, mode, inFlight } = await pickAgent(
-            configShopKey, msg.platform, msg.conversation_id, reason,
-            opIdFor(ctx.claim_id, "handoff")
-          );
-          if (inFlight) return { status: "in_flight", detail: `handoff op in-flight for ${msg.conversation_id}` };
-          await logBotworkerEvent({ type: "bot_handoff", actor: "bot-worker",
-            conversation_id: msg.conversation_id, shop_id: msg.shop_id, platform: msg.platform,
-            metadata: { trigger_id: trigger.trigger_id, reason, assigned_to: agentId, delivered_to_platform: false } });
-          return { status: "handed_off", detail: `trigger→engine handoff→${agentId || "no agent"}`,
-            outcome: { type: "handed_off", reply_ids: [],
-              side_effects: [{ type: "handoff", ref: agentId, at: new Date() }],
-              extra: { trigger_id: trigger.trigger_id, assigned_to: agentId || undefined, assignment_mode: mode } } };
+          const shadowReplyId = await storePendingHandoffReply({
+            messageId: msg.message_id, messageText: botText, conversationId: msg.conversation_id,
+            shopId: msg.shop_id, platform: msg.platform, botResp, triggerId: trigger.trigger_id,
+            replyId: replyIdFor(ctx.batch_id), batchId: ctx.batch_id, inboundMessageIds: ctx.message_ids,
+          });
+          return {
+            status: "handoff_review_pending",
+            detail: `trigger→engine handoff awaiting reviewer→${shadowReplyId}`,
+            outcome: { type: "handoff_review_pending", reply_ids: [shadowReplyId],
+              extra: { trigger_id: trigger.trigger_id, trigger_action: "bot_answer", shadow_reply_id: shadowReplyId } },
+          };
         }
         const shadowReplyId = await storeBotReply({
           messageId: msg.message_id,
@@ -1113,8 +1182,23 @@ async function processClaimedMessage(msg: {
         });
         // heartbeat lost กลางคัน → stale owner — ห้าม persist/finalize
         if (ctx.lost) return { status: "lost_ownership", detail: "claim lost mid-bot-call" };
+        assertBotResponseIdentity(botResp, { conversationId: msg.conversation_id, messageId: msg.message_id });
 
-        if (botResp.handoff_required || !botResp.answer || botResp.answer.trim() === "") {
+        if (botResp.handoff_required) {
+          const shadowReplyId = await storePendingHandoffReply({
+            messageId: msg.message_id, messageText: botText, conversationId: msg.conversation_id,
+            shopId: msg.shop_id, platform: msg.platform, botResp,
+            replyId: replyIdFor(ctx.batch_id), batchId: ctx.batch_id, inboundMessageIds: ctx.message_ids,
+          });
+          return {
+            status: "handoff_review_pending",
+            detail: `no trigger→engine handoff awaiting reviewer→${shadowReplyId}`,
+            outcome: { type: "handoff_review_pending", reply_ids: [shadowReplyId],
+              extra: { shadow_reply_id: shadowReplyId } },
+          };
+        }
+
+        if (!botResp.answer || botResp.answer.trim() === "") {
           // บอทตอบไม่ได้ → ส่งต่อแอดมิน
           const reason = botResp.handoff_reason || "bot empty answer";
           const { agentId, mode, inFlight } = await pickAgent(

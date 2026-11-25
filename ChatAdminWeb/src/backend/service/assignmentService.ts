@@ -164,6 +164,53 @@ export async function reserveNextAgent(
   return { result: "contention" }; // claim พิสูจน์ไม่ได้ — retryable ไม่ใช่ "ไม่มี admin"
 }
 
+export interface HandoffCandidate {
+  admin_id: string;
+  name: string;
+  pool_key: string;
+  suggested: boolean;
+}
+
+/** Preview the existing assignment pool without reserving or advancing its round-robin cursor. */
+export async function previewHandoffCandidates(
+  shop: { shop_id: string; platform: string },
+  source = "botworker"
+): Promise<HandoffCandidate[]> {
+  const mode = await getActiveAssignmentConfig();
+  const { poolKey, orderedAgentIds } = await buildPool(mode, shop, source);
+  if (!orderedAgentIds.length) return [];
+  const adminColl = await getCollection<{
+    admin_id: string; name?: string; username?: string; active?: boolean; role?: string;
+    is_accepting_chats?: boolean; is_active_agent?: boolean;
+  }>(COLLECTIONS.admins);
+  const agents = await adminColl.find({
+    admin_id: { $in: orderedAgentIds }, active: { $ne: false }, role: "admin",
+    is_accepting_chats: { $ne: false }, is_active_agent: { $ne: false },
+  }).toArray();
+  const byId = new Map(agents.map((agent) => [agent.admin_id, agent]));
+  const onlineIds = orderedAgentIds.filter((id) => byId.has(id));
+  if (!onlineIds.length) return [];
+  const cursor = await getCollection<AssignmentCursorDoc>(COLLECTIONS.assignmentCursors)
+    .then((coll) => coll.findOne({ pool_key: poolKey }));
+  const lastIndex = cursor?.last_assigned_admin_id ? onlineIds.indexOf(String(cursor.last_assigned_admin_id)) : -1;
+  const suggestedId = onlineIds[(lastIndex + 1 + onlineIds.length) % onlineIds.length];
+  return onlineIds.map((id) => {
+    const agent = byId.get(id)!;
+    return { admin_id: id, name: agent.name || agent.username || id, pool_key: poolKey, suggested: id === suggestedId };
+  });
+}
+
+/** Revalidate reviewer-selected assignee against the live online pool at commit time. */
+export async function isOnlineHandoffCandidate(
+  adminId: string,
+  shop: { shop_id: string; platform: string },
+  source = "botworker"
+): Promise<boolean> {
+  if (!adminId) return false;
+  const candidates = await previewHandoffCandidates(shop, source);
+  return candidates.some((candidate) => candidate.admin_id === adminId);
+}
+
 // ดึง config ปัจจุบัน — สร้าง default ถ้ายังไม่มี
 export async function getActiveAssignmentConfig(): Promise<AssignmentMode> {
   const coll = await getCollection<AssignmentConfigDoc>(COLLECTIONS.assignmentConfigs);
@@ -317,4 +364,6 @@ export const assignmentService = {
   removeAgentFromPlatform,
   buildPool,
   reserveNextAgent,
+  previewHandoffCandidates,
+  isOnlineHandoffCandidate,
 };

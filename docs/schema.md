@@ -537,6 +537,13 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `bot_routing_decision` | object? | |
 | `bot_handoff_to_admin` | boolean? | |
 | `bot_handoff_reason` | string? | |
+| `bot_handoff_required` | boolean? | engine handoff flag; reviewer must decide before sandbox assignment |
+| `bot_handoff_category` | string? | normalized reason code when supplied by engine |
+| `bot_handoff_explanation` | string? | explanation shown to an admin with BotWorker page access |
+| `upstream_conversation_id` / `upstream_message_id` | string? | engine turn identity; mismatch with worker input fails closed |
+| `inbound_message_ids` | string[]? | inbound messages grouped into this worker turn |
+| `review_bubbles` | object[]? | frozen answer parts; retains original/edited/approved text, reviewer identity/time, rejection reason, edit history, and delivery status |
+| `handoff_review` | object? | pending/approving/approved/rejected; reviewer, selected sandbox assignee, reason, operation key, and errors |
 | `bot_image_desc` | string? | |
 | `generation_batch_id` | string? | ⚡ Phase 3B-6 — id กลุ่มรอบ generate (unique ต่อรอบ กดซ้ำแชทเดิมแยกกัน) |
 | `created_at` | Date | |
@@ -547,12 +554,12 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 |---------|-------|--------|
 | Read | shadowReplyService.list, get, stats | `/shadow-inbox`, `/shadow-inbox/conversations`, `/botworker/replies`, `/replay-compare` |
 | Write | generateShadowReply, generateConversationShadowReplies, storeBotReply (bot worker) | `/shadow-inbox` POST, bot worker, test-assignment |
-| Update | rateShadowReply, restoreShadowReply | `/shadow-inbox/[id]` PATCH |
+| Update | rateShadowReply, restoreShadowReply, reviewService.applyReviewAction, reviewService.applyHandoffReviewAction | `/shadow-inbox/[id]` PATCH, `/botworker/conversations/[id]/review`, `/botworker/conversations/[id]/handoff-review` |
 | Delete (soft) | deleteShadowReply, clearAllShadowReplies | `/shadow-inbox/[id]` DELETE, `/shadow-inbox?clear_all=1` |
 
 **หน้าที่เข้าถึง:** `/shadow-inbox`, `/botworker`, `/replay-compare`
 
-**หมายเหตุ:** เป็น collection หลักที่เก็บคำตอบบอท — ไม่ส่งจริงให้ลูกค้า
+**หมายเหตุ:** BotWorker เก็บร่างและผลตรวจใน collection นี้ก่อนเสมอ; Shopee ส่งได้เฉพาะการอนุมัติจากผู้ตรวจ เมื่อ `shopee_console_send_enabled=true`; เมื่อ switch ปิดไม่เรียก sender และบันทึก `not_sent_switch_off`. Handoff approval เปลี่ยนเฉพาะ BotWorker sandbox assignment.
 
 ---
 
@@ -1281,7 +1288,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 
 ### 2.33 `botworker_events`
 
-**Schema:** event doc ใน `botworkerEventService.ts` + `HandoffOpDoc` ใน `handoffService.ts` (op docs ใช้ deterministic `_id` = operation key)
+**Schema:** event doc ใน `botworkerEventService.ts` + operation docs ใน `reviewService.ts`/`handoffService.ts` (ใช้ deterministic `_id` เพื่อ dedupe/recovery)
 
 **Fields (handoff op doc):**
 | Field | Type | หมายเหตุ |
@@ -1294,6 +1301,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `result` | object? | committed `HandoffTestResult` — crash retry คืนผลนี้ |
 | `created_at` | Date | |
 | `updated_at` | Date? | |
+
+**Review events:** `review_op` stores the requested action, reviewer identity, request binding and final outcome; `review_action` stores the action details and answer/rejection text. Bubble decisions and edit history remain in `shadow_replies.review_bubbles`; handoff decisions remain in `shadow_replies.handoff_review`.
 
 **หมายเหตุ:** collection เดียวกันใช้เก็บ event log ของ botworker (`logBotworkerEvent`) และ op idempotency docs — op fields ทั้งหมด optional บน collection เดิม, ไม่มี migration, ไม่มี index ใหม่, event docs เดิมอ่านได้เหมือนเดิม
 
@@ -1368,7 +1377,7 @@ Idempotency ledger สำหรับข้อความ Shopee ที่ส�
 | `media_url` / `media_thumb_url` | string? | URL สื่อหลังส่งสำเร็จ เพื่อ replay ผลเดิมใน UI |
 | `created_at` / `updated_at` | Date | เวลาเริ่มและสถานะล่าสุด |
 
-**Access:** `shopeeOutboundService.sendShopeeMessage` เป็น owner เดียว; ถูกเรียกจาก Tickets send, BotWorker send และ BotWorker review routes เมื่อ `shopee_console_send_enabled=true` เท่านั้น; Tickets route ตรวจ `requirePageAccess("ticket")`, BotWorker composer/review ตรวจ `requirePageAccess("botworker")` ก่อนดำเนินการ และ review ยังคงตรวจแอดมิน/ร้านที่กำหนด
+**Access:** `shopeeOutboundService.sendShopeeMessage` เป็น owner เดียว; ถูกเรียกจาก Tickets send, BotWorker send และ BotWorker review routes เมื่อ `shopee_console_send_enabled=true` เท่านั้น; Tickets route ตรวจ `requirePageAccess("ticket")`, BotWorker composer/review/analysis ตรวจ `requirePageAccess("botworker")` ก่อนดำเนินการ แอดมินทุกคนที่มีสิทธิ์หน้านี้ตรวจได้ทุก shop ที่ BotWorker รับตาม config; actor จริงถูกบันทึกทุก action. Handoff candidate ยังตรวจ pool/ความพร้อมของแอดมินตาม assignment owner ของบทสนทนา
 
 **Credential handling:** Shopee requests ใช้ Node HTTPS โดยตรงเพื่อไม่ส่ง signed URL ที่มี token ผ่าน Next.js patched fetch/tracing; server ใช้ `SHOPEE_TOKEN_API_SERVICE_TOKEN` เรียก Sellcenter `/api/shopee/token` และ `SHOPEE_PARTNER_KEY` สำหรับ signature; `access_token` ใช้เฉพาะใน memory ต่อ request แล้วไม่เขียนลง DB, log, response หรือ browser
 

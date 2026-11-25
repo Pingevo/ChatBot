@@ -34,6 +34,3 @@ export async function GET(req: NextRequest) {
   });
   return res;
 }
-
-// export ให้ callback ใช้
-export { SSO_BASE_URL, AUTO_PROVISION_DOMAIN };

@@ -10,15 +10,9 @@ import { testStatusConversationService } from "@/backend/service/testStatusConve
 import { statusConversationService } from "@/backend/service/statusConversationService";
 import { safeRegexSearch } from "@/backend/lib/regexEscape";
 import { parseInboxFilters, unansweredStages, messageStatusMatch } from "@/backend/lib/inboxFilters";
+import { getBotworkerConversationCache, setBotworkerConversationCache } from "@/backend/service/botworkerConversationCache";
 import type { Conversation } from "@/lib/types";
 import type { ConversationDoc } from "@/backend/service/conversationService";
-
-let bwCache: { key: string; data: Conversation[]; totalCount: number; hasMore: boolean; cursor: string | null; ts: number } | null = null;
-const BW_CACHE_TTL = 5000;
-
-export function invalidateBotworkerCache() {
-  bwCache = null;
-}
 
 export async function GET(req: NextRequest) {
   const auth = await requirePageAccess(req, "botworker");
@@ -48,8 +42,9 @@ export async function GET(req: NextRequest) {
   const channels = auth.ctx.admin.role === "superadmin" || auth.ctx.admin.role === "dev" || !auth.ctx.admin.channels_access?.length
     ? null : auth.ctx.admin.channels_access;
   const cacheKey = JSON.stringify([me, channels, assignedTo, platform, shopId, search, rawFilters, rawPinIds, limit, cursorParam]);
-  if (bwCache && bwCache.key === cacheKey && Date.now() - bwCache.ts < BW_CACHE_TTL) {
-    return json({ rows: bwCache.data, total_count: bwCache.totalCount, has_more: bwCache.hasMore, cursor: bwCache.cursor });
+  const cached = getBotworkerConversationCache(cacheKey);
+  if (cached) {
+    return json({ rows: cached.data, total_count: cached.totalCount, has_more: cached.hasMore, cursor: cached.cursor });
   }
 
   const terms: Record<string, unknown>[] = [];
@@ -174,6 +169,6 @@ export async function GET(req: NextRequest) {
       ? `n|${encodeURIComponent(last.to_name || "")}|${last.conversation_id}`
       : `${last.last_message_timestamp.toISOString()}|${last.conversation_id}`
     : null;
-  if (!cursorParam) bwCache = { key: cacheKey, data: rows, totalCount, hasMore, cursor: nextCursor, ts: Date.now() };
+  if (!cursorParam) setBotworkerConversationCache({ key: cacheKey, data: rows, totalCount, hasMore, cursor: nextCursor, ts: Date.now() });
   return json({ rows, total_count: totalCount, has_more: hasMore, cursor: nextCursor });
 }

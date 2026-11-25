@@ -19,7 +19,8 @@ export type BotworkerEventType =
   | "backlog_assign"  // distributor จ่ายงานค้าง (per-ticket)
   | "backlog_commit"  // distributor commit batch (aggregate — ไม่ผูก conversation เดียว)
   | "mock_send"       // mock Shopee send request/receipt (per review bubble — delivered=false เสมอ)
-  | "review_op";      // review action operation record (dedupe ด้วย deterministic _id)
+  | "review_op"      // review action operation record (dedupe ด้วย deterministic _id)
+  | "review_action"; // immutable reviewer action/audit event
 
 export interface BotworkerEventDoc {
   event_id: string;

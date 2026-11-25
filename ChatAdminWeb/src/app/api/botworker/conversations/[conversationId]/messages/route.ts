@@ -10,7 +10,7 @@
 // ⚡ force-dynamic — กัน Next.js cache
 export const dynamic = "force-dynamic";
 import { NextRequest } from "next/server";
-import { requireAuth } from "@/backend/middleware/authorize";
+import { requirePageAccess } from "@/backend/middleware/authorize";
 import { json } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { conversationService } from "@/backend/service/conversationService";
@@ -27,6 +27,8 @@ const BW_MSG_SOURCE = COLLECTIONS.botworkerMessages; // "botworker_messages" (pa
 
 interface UnifiedMessage {
   id: string;
+  conversation_id?: string;
+  inbound_message_id?: string;
   role: "user" | "zaapi" | "bot" | "admin";
   text: string;
   timestamp: string;
@@ -45,6 +47,11 @@ interface UnifiedMessage {
   bubble_color?: string;  // ⚡ สี bubble ของแอดมินใน sandbox (botworker_messages)
   bot_products?: unknown[];   // ⚡ review — product entries ที่ bot แนะนำ (card attach)
   review_bubbles?: unknown[]; // ⚡ review — frozen per-bubble state (absent = legacy draft)
+  bot_handoff_required?: boolean;
+  bot_handoff_reason?: string;
+  bot_handoff_category?: string;
+  bot_handoff_explanation?: string;
+  handoff_review?: unknown;
   // ⚡ rich media (parsed from raw_payload) — เหมือน /admin/conversations/:id/messages
   message_type?: MessageType;
   media?: MessageMedia;
@@ -61,7 +68,7 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ conversationId: string }> }
 ) {
-  const r = await requireAuth(req);
+  const r = await requirePageAccess(req, "botworker");
   if (!r.ok) return r.response;
 
   const { conversationId } = await params;
@@ -107,6 +114,7 @@ export async function GET(
     conversation_id: string;
     platform: Platform;
     bot_reply_text: string;
+    inbound_message_id?: string;
     bot_source?: string;
     bot_model?: string;
     bot_elapsed_ms?: number;
@@ -115,6 +123,11 @@ export async function GET(
     origin?: string;
     bot_products?: unknown[];
     review_bubbles?: unknown[];
+    bot_handoff_required?: boolean;
+    bot_handoff_reason?: string;
+    bot_handoff_category?: string;
+    bot_handoff_explanation?: string;
+    handoff_review?: unknown;
     created_at: Date;
     deleted_at?: Date;
   }>(COLLECTIONS.shadowReplies);
@@ -343,6 +356,8 @@ export async function GET(
   for (const d of srDocs) {
     unified.push({
       id: d.shadow_reply_id,
+      conversation_id: d.conversation_id,
+      inbound_message_id: d.inbound_message_id,
       role: "bot",
       text: d.bot_reply_text,
       timestamp: d.created_at.toISOString(),
@@ -355,6 +370,11 @@ export async function GET(
       origin: d.origin,
       bot_products: d.bot_products,
       review_bubbles: d.review_bubbles,
+      bot_handoff_required: d.bot_handoff_required,
+      bot_handoff_reason: d.bot_handoff_reason,
+      bot_handoff_category: d.bot_handoff_category,
+      bot_handoff_explanation: d.bot_handoff_explanation,
+      handoff_review: d.handoff_review,
     });
   }
 
@@ -380,16 +400,5 @@ export async function GET(
   // 7. เรียงเก่า → ใหม่
   unified.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
-  // ⚡ review permission — designated admin + shop เท่านั้น (server-derived)
-  const me = r.ctx.admin.admin_id;
-  let canReview = false;
-  try {
-    const { getSystemConfig } = await import("@/backend/service/systemConfigService");
-    const config = await getSystemConfig();
-    canReview = !!config.bot_review_admin_id && !!config.bot_review_shop_id
-      && (me === config.bot_review_admin_id || config.bot_review_admin_id === "*")
-      && String(conv?.shop_id) === String(config.bot_review_shop_id);
-  } catch { /* config read fail → review off */ }
-
-  return json({ messages: unified, total: unified.length, can_review: canReview });
+  return json({ messages: unified, total: unified.length, can_review: true });
 }

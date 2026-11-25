@@ -18,9 +18,12 @@ type Mocks = typeof import("./test-botworker-review-mocks.mjs");
 type Svc = typeof import("../src/backend/service/botWorkerService");
 type Rt = typeof import("../src/backend/service/botworkerRuntime");
 type ReviewRoute = typeof import("../src/app/api/botworker/conversations/[conversationId]/review/route");
+type HandoffRoute = typeof import("../src/app/api/botworker/conversations/[conversationId]/handoff-review/route");
 type MsgsRoute = typeof import("../src/app/api/botworker/conversations/[conversationId]/messages/route");
+type AnalyticsService = typeof import("../src/backend/service/botworkerReviewAnalyticsService");
+type AnalyticsRoute = typeof import("../src/app/api/botworker/review-analysis/route");
 
-let mocks: Mocks, svc: Svc, rt: Rt, reviewRoute: ReviewRoute, msgsRoute: MsgsRoute;
+let mocks: Mocks, svc: Svc, rt: Rt, reviewRoute: ReviewRoute, handoffRoute: HandoffRoute, msgsRoute: MsgsRoute, analyticsService: AnalyticsService, analyticsRoute: AnalyticsRoute;
 
 const results: { name: string; ok: boolean; err?: string }[] = [];
 function assert(cond: boolean, msg: string) { if (!cond) throw new Error(msg); }
@@ -32,26 +35,34 @@ async function test(name: string, fn: () => Promise<void>) {
 }
 
 // ── seeds ──
-function seedConv(conversationId = "conv_1", shopId = "shop_1") {
+const MOCK_PLATFORM = "tiktok" as const;
+
+function seedConv(conversationId = "conv_1", shopId = "shop_1", platform: "shopee" | "tiktok" | "lazada" = MOCK_PLATFORM) {
   mocks.fakeColl("conversations").push({
-    conversation_id: conversationId, shop_id: shopId, platform: "shopee",
+    conversation_id: conversationId, shop_id: shopId, platform,
     customer_id: "cust_1", shop_name: "TestShop", status: "bot",
     last_message_timestamp: new Date(), created_at: new Date(), updated_at: new Date(),
   });
 }
-function seedUserMsg(conversationId: string, messageId: string, text = "hello") {
+function seedUserMsg(conversationId: string, messageId: string, text = "hello", shopId = "shop_1", platform: "shopee" | "tiktok" | "lazada" = MOCK_PLATFORM) {
   mocks.fakeColl("messages").push({
-    message_id: messageId, conversation_id: conversationId, shop_id: "shop_1",
-    platform: "shopee", role: "user", direction: "in", text,
+    message_id: messageId, conversation_id: conversationId, shop_id: shopId,
+    platform, role: "user", direction: "in", text,
     created_timestamp: new Date(1_000_000),
   });
 }
-function seedClaim(messageId: string, conversationId: string, ctx: any) {
+function seedClaim(messageId: string, conversationId: string, ctx: any, shopId = "shop_1", platform: "shopee" | "tiktok" | "lazada" = MOCK_PLATFORM) {
   mocks.fakeColl("chat_processing").push({
     _id: `botworker:claim:${messageId}`, message_id: messageId,
-    conversation_id: conversationId, shop_id: "shop_1", platform: "shopee",
+    conversation_id: conversationId, shop_id: shopId, platform,
     status: "processing", owner_id: ctx.owner_id, fencing_token: ctx.fencing_token,
     lease_expires_at: new Date(Date.now() + 120000), attempt: 1, created_at: new Date(),
+  });
+}
+function seedAdmin(adminId: string, name: string, overrides: Record<string, unknown> = {}) {
+  mocks.fakeColl("admins").push({
+    admin_id: adminId, name, username: adminId, role: "admin", active: true,
+    is_accepting_chats: true, is_active_agent: true, created_at: new Date(), ...overrides,
   });
 }
 function makeCtx(messageIds: string[]) {
@@ -66,17 +77,26 @@ function makeCtx(messageIds: string[]) {
 }
 
 /** run real pipeline: inbound → processMessage → shadow_replies doc */
-async function runBotTurn(conversationId = "conv_1", messageId = "m_1", answer?: string) {
+async function runBotTurn(
+  conversationId = "conv_1",
+  messageId = "m_1",
+  answer?: string,
+  options: { shopId?: string; platform?: "shopee" | "tiktok" | "lazada"; expectReply?: boolean } = {},
+) {
+  const shopId = options.shopId || "shop_1";
+  const platform = options.platform || MOCK_PLATFORM;
   if (answer !== undefined) mocks.state.callBotAnswer = answer;
-  seedConv(conversationId); seedUserMsg(conversationId, messageId);
-  const ctx = makeCtx([messageId]); seedClaim(messageId, conversationId, ctx);
+  seedConv(conversationId, shopId, platform);
+  seedUserMsg(conversationId, messageId, "hello", shopId, platform);
+  const ctx = makeCtx([messageId]); seedClaim(messageId, conversationId, ctx, shopId, platform);
   const r = await svc.processMessage({
-    message_id: messageId, conversation_id: conversationId, shop_id: "shop_1",
-    platform: "shopee", text: "hello", claimContext: ctx,
-    shop_ctx: { config_shop_key: "shop_1", shopname: "TestShop" },
+    message_id: messageId, conversation_id: conversationId, shop_id: shopId,
+    platform, text: "hello", claimContext: ctx,
+    shop_ctx: { config_shop_key: shopId, shopname: "TestShop" },
   });
+  (mocks.state as any).lastProcessResult = r;
   const docs = mocks.fakeColl("shadow_replies");
-  assert(docs.length === 1, `expected 1 shadow reply, got ${docs.length} (status=${r.status} ${r.detail})`);
+  if (options.expectReply !== false) assert(docs.length === 1, `expected 1 shadow reply, got ${docs.length} (status=${r.status} ${r.detail})`);
   return docs[0] as any;
 }
 
@@ -85,10 +105,12 @@ async function callReview(conversationId: string, body: Record<string, unknown>)
   const op = `op_${++opSeq}`;
   const req = {
     url: `http://localhost/api/botworker/conversations/${conversationId}/review`,
+    headers: { get: (name: string) => name.toLowerCase() === "x-shopee-send-mode" ? (mocks.state.shopeeSendEnabled ? "on" : "off") : null },
     json: async () => body,
     text: async () => JSON.stringify(body),
   } as any;
   const res = await reviewRoute.POST(req, { params: Promise.resolve({ conversationId }) } as any);
+  if (!res) throw new Error("review route returned no response");
   return { status: res.status, body: await res.json() };
 }
 async function review(conversationId: string, replyId: string, bubbleId: string, action: string, extra: Record<string, unknown> = {}, opId?: string) {
@@ -100,6 +122,21 @@ async function review(conversationId: string, replyId: string, bubbleId: string,
 async function getReplyDoc() {
   return (await mocks.getCollection("shadow_replies").then((c) => c.find({}).toArray()))[0] as any;
 }
+async function callHandoffReview(conversationId: string, replyId: string, body?: Record<string, unknown>, messageId?: string) {
+  const messageQuery = messageId ? `&message_id=${encodeURIComponent(messageId)}` : "";
+  const req = {
+    url: `http://localhost/api/botworker/conversations/${conversationId}/handoff-review?reply_id=${encodeURIComponent(replyId)}${messageQuery}`,
+    headers: { get: () => null },
+    json: async () => body || {},
+    text: async () => JSON.stringify(body || {}),
+  } as any;
+  const params = { params: Promise.resolve({ conversationId }) } as any;
+  const res = body
+    ? await handoffRoute.POST(req, params)
+    : await handoffRoute.GET(req, params);
+  if (!res) throw new Error("handoff review route returned no response");
+  return { status: res.status, body: await res.json() };
+}
 const mockEvents = () =>
   mocks.fakeColl("botworker_events").filter((e: any) => e.type === "mock_send");
 
@@ -108,7 +145,10 @@ async function main() {
   svc = await import("../src/backend/service/botWorkerService");
   rt = await import("../src/backend/service/botworkerRuntime");
   reviewRoute = await import("../src/app/api/botworker/conversations/[conversationId]/review/route");
+  handoffRoute = await import("../src/app/api/botworker/conversations/[conversationId]/handoff-review/route");
   msgsRoute = await import("../src/app/api/botworker/conversations/[conversationId]/messages/route");
+  analyticsService = await import("../src/backend/service/botworkerReviewAnalyticsService");
+  analyticsRoute = await import("../src/app/api/botworker/review-analysis/route");
 
   // ═══ A — freeze at insert ═══
   await test("A1 A|||B|||C → 3 review_bubbles ใน Mongo + 0 mock request", async () => {
@@ -122,15 +162,49 @@ async function main() {
     assert(mockEvents().length === 0, "mock request before approval");
   });
 
-  await test("A2 messages route คืน review_bubbles + can_review (designated admin+shop)", async () => {
+  await test("A2 messages route ให้แอดมินที่เข้าถึง BotWorker ตรวจได้แม้ไม่มี fixed reviewer", async () => {
     await runBotTurn();
+    delete (mocks.state.config as any).bot_review_admin_id;
+    mocks.state.authAdminId = "other_admin";
     const req = { url: "http://localhost/api/botworker/conversations/conv_1/messages" } as any;
     const res = await msgsRoute.GET(req, { params: Promise.resolve({ conversationId: "conv_1" }) } as any);
     const body = await res.json();
     assert(body.can_review === true, `can_review=${body.can_review}`);
     const bot = body.messages.find((m: any) => m.role === "bot");
     assert(Array.isArray(bot?.review_bubbles) && bot.review_bubbles.length === 3, "review_bubbles missing in API");
+    assert(bot.inbound_message_id === "m_1", "inbound turn identity missing from bot reply API");
     assert(mockEvents().length === 0, "mock request appeared");
+  });
+
+  await test("A3 page-authorized admin can inspect review drafts across BotWorker shops", async () => {
+    const doc = await runBotTurn("conv_shop_2", "m_shop_2", undefined, { shopId: "shop_2" });
+    const req = { url: "http://localhost/api/botworker/conversations/conv_shop_2/messages" } as any;
+    const res = await msgsRoute.GET(req, { params: Promise.resolve({ conversationId: "conv_shop_2" }) } as any);
+    const body = await res.json();
+    assert(body.can_review === true, "reviewer was incorrectly fenced to one pilot shop");
+    const bot = body.messages.find((m: any) => m.role === "bot");
+    assert(Array.isArray(bot?.review_bubbles) && bot.review_bubbles.length === 3, "cross-shop review draft was hidden");
+    assert(doc.shop_id === "shop_2", "fixture did not use second shop");
+  });
+
+  await test("A4 page access denied blocks review, handoff preview, messages and analysis", async () => {
+    const doc = await runBotTurn();
+    mocks.state.pageAccessAllowed = false;
+    const messages = await msgsRoute.GET({ url: "http://localhost/api/botworker/conversations/conv_1/messages" } as any,
+      { params: Promise.resolve({ conversationId: "conv_1" }) } as any);
+    const reviewed = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "blocked" });
+    const handoff = await callHandoffReview("conv_1", doc.shadow_reply_id);
+    const analysis = await analyticsRoute.GET({ url: "http://localhost/api/botworker/review-analysis" } as any);
+    assert([messages.status, reviewed.status, handoff.status, analysis.status].every((status) => status === 403),
+      `page access bypass: ${[messages.status, reviewed.status, handoff.status, analysis.status].join()}`);
+    assert(mockEvents().length === 0, "denied page access sent a message");
+  });
+
+  await test("A5 analysis is available to another page-authorized admin without fixed reviewer", async () => {
+    delete (mocks.state.config as any).bot_review_admin_id;
+    mocks.state.authAdminId = "other_admin";
+    const res = await analyticsRoute.GET({ url: "http://localhost/api/botworker/review-analysis?from=2026-11-25&to=2026-11-25" } as any);
+    assert(res.status === 200, `analysis -> ${res.status}`);
   });
 
   // ═══ B — approve unchanged + ordering ═══
@@ -158,7 +232,7 @@ async function main() {
 
   await test("B3 reject A → approve B ผ่าน (reject settle gate)", async () => {
     const doc = await runBotTurn();
-    const rr = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject");
+    const rr = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject", { rejection_reason: "ส่งต่อเคสให้ตรวจ" });
     assert(rr.status === 200, `reject ${rr.status}`);
     const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[1].bubble_id, "approve");
     assert(r.status === 200, `approve ${r.status} ${JSON.stringify(r.body)}`);
@@ -206,10 +280,197 @@ async function main() {
     assert(mockEvents().length === 0, "mock on invalid save");
   });
 
+  await test("E0 reject without a reason → 422 and no state change", async () => {
+    const doc = await runBotTurn();
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject");
+    assert(r.status === 422, "expected 422, got " + r.status);
+    const b = (await getReplyDoc()).review_bubbles[0];
+    assert(b.decision === "pending", "missing reason changed the decision");
+    assert(mockEvents().length === 0 && mocks.state.fakeShopeeCalls.length === 0, "missing reason caused delivery");
+  });
+
+  await test("E2 reject keeps reason, reviewer identity, and edit history in the audit trail", async () => {
+    const doc = await runBotTurn();
+    const bubbleId = doc.review_bubbles[0].bubble_id;
+    const edited = await review("conv_1", doc.shadow_reply_id, bubbleId, "save", { edited_text: "Edited answer" });
+    assert(edited.status === 200, "save edit -> " + edited.status);
+    const rejected = await review("conv_1", doc.shadow_reply_id, bubbleId, "reject", { rejection_reason: "ข้อมูลสินค้าไม่ตรง" });
+    assert(rejected.status === 200, "reject -> " + rejected.status + " " + JSON.stringify(rejected.body));
+    const b = (await getReplyDoc()).review_bubbles[0];
+    assert(b.original_text === "A" && b.edited_text === "Edited answer", "original or edited text was lost");
+    assert(b.rejection_reason === "ข้อมูลสินค้าไม่ตรง", "rejection reason was not persisted");
+    assert(b.decided_by === "t_admin" && b.decided_by_name === "Test Reviewer", "reviewer identity snapshot missing");
+    assert(Array.isArray(b.edit_history) && b.edit_history.length === 1, "edit history missing");
+    assert(b.edit_history[0].before_text === "A" && b.edit_history[0].after_text === "Edited answer", "edit delta wrong");
+    const audit = mocks.fakeColl("botworker_events").filter((e: any) => e.type === "review_action");
+    assert(audit.length === 2, "expected edit and reject audit events, got " + audit.length);
+    assert(audit.some((e: any) => e.metadata.rejection_reason === "ข้อมูลสินค้าไม่ตรง"), "rejection reason missing from event");
+    assert(audit.every((e: any) => e.actor === "t_admin" && e.metadata.actor_name === "Test Reviewer"), "action actor missing from event");
+  });
+
+  await test("Handoff flag persists separate reason/explanation/answer and waits for review", async () => {
+    mocks.state.callBotExtra = {
+      handoff_required: true,
+      reason: "legal_or_platform_dispute",
+      handoff_reason: "legal_or_platform_dispute",
+      handoff_explanation: "ต้องให้เจ้าหน้าที่ตรวจข้อพิพาท",
+      conversation_id: "conv_handoff",
+      message_id: "m_handoff",
+    };
+    const doc = await runBotTurn("conv_handoff", "m_handoff", "ขออภัย จะให้เจ้าหน้าที่ตรวจสอบ", { platform: "shopee" });
+    assert(doc.bot_reply_text === "ขออภัย จะให้เจ้าหน้าที่ตรวจสอบ", "customer-facing answer was not preserved separately");
+    assert(doc.bot_handoff_required === true && doc.bot_handoff_reason === "legal_or_platform_dispute", "handoff flag/reason missing");
+    assert(doc.bot_handoff_explanation === "ต้องให้เจ้าหน้าที่ตรวจข้อพิพาท", "review explanation missing");
+    assert(doc.upstream_conversation_id === "conv_handoff" && doc.upstream_message_id === "m_handoff", "upstream IDs missing");
+    assert(doc.handoff_review.status === "pending", "handoff did not wait for reviewer");
+    assert((mocks.state.lastProcessResult as any)?.status === "handoff_review_pending", "worker did not report pending review");
+    assert(mocks.fakeColl("test_status_conversation").every((row: any) => !row.assigned_to), "bot auto-assigned before reviewer approval");
+  });
+
+  await test("Conflicting upstream turn IDs fail closed without a shadow draft", async () => {
+    mocks.state.callBotExtra = { handoff_required: true, handoff_reason: "clarification_unresolved",
+      handoff_explanation: "ต้องตรวจเพิ่ม", conversation_id: "other_conv", message_id: "other_msg" };
+    await runBotTurn("conv_mismatch", "m_mismatch", "answer", { platform: "shopee", expectReply: false });
+    assert(mocks.fakeColl("shadow_replies").length === 0, "identity mismatch stored a draft on the wrong turn");
+    assert((mocks.state.lastProcessResult as any)?.status === "bot_failed", "identity mismatch was not marked failed");
+  });
+
+  await test("Handoff preview rejects a reply paired with a different inbound message", async () => {
+    mocks.state.callBotExtra = { handoff_required: true, handoff_reason: "clarification_unresolved",
+      handoff_explanation: "ต้องตรวจเพิ่ม", conversation_id: "conv_handoff_pair", message_id: "m_handoff_pair" };
+    const doc = await runBotTurn("conv_handoff_pair", "m_handoff_pair", "ต้องให้เจ้าหน้าที่ตรวจ", { platform: "shopee" });
+    const response = await callHandoffReview("conv_handoff_pair", doc.shadow_reply_id, undefined, "m_other");
+    assert(response.status === 409, `wrong inbound message preview -> ${response.status}`);
+  });
+
+  await test("Reviewer previews eligible admins then approves the selected handoff in sandbox", async () => {
+    delete (mocks.state.config as any).bot_review_admin_id;
+    mocks.state.authAdminId = "other_admin";
+    mocks.state.callBotExtra = { handoff_required: true, reason: "insufficient_shop_evidence",
+      handoff_reason: "insufficient_shop_evidence", handoff_explanation: "หลักฐานร้านไม่พอ",
+      conversation_id: "conv_handoff_approve", message_id: "m_handoff_approve" };
+    seedAdmin("adm_online_1", "Online Admin 1");
+    seedAdmin("adm_offline", "Offline Admin", { is_active_agent: false });
+    const doc = await runBotTurn("conv_handoff_approve", "m_handoff_approve", "ร่างตอบลูกค้า", { platform: "shopee" });
+    const preview = await callHandoffReview("conv_handoff_approve", doc.shadow_reply_id);
+    assert(preview.status === 200, `preview -> ${preview.status} ${JSON.stringify(preview.body)}`);
+    assert(preview.body.candidates.some((candidate: any) => candidate.admin_id === "adm_online_1"), "online admin missing from candidates");
+    assert(!preview.body.candidates.some((candidate: any) => candidate.admin_id === "adm_offline"), "offline admin was selectable");
+    const approved = await callHandoffReview("conv_handoff_approve", doc.shadow_reply_id, {
+      reply_id: doc.shadow_reply_id, action: "approve", selected_admin_id: "adm_online_1",
+      operation_id: "handoff_approve_1", updated_at: preview.body.updated_at,
+    });
+    assert(approved.status === 200, `approve -> ${approved.status} ${JSON.stringify(approved.body)}`);
+    assert(approved.body.handoff_review.status === "approved" && approved.body.handoff_review.selected_admin_id === "adm_online_1", "approved assignment not recorded");
+    assert(approved.body.handoff_review.reviewed_by === "other_admin", "actual reviewer identity not recorded");
+    assert(mocks.fakeColl("test_status_conversation").some((row: any) => row.conversation_id === "conv_handoff_approve" && row.assigned_to === "adm_online_1"), "selected sandbox assignment missing");
+    assert(mocks.fakeColl("messages").filter((m: any) => m.direction === "out").length === 0, "handoff review wrote a customer message");
+  });
+
+  await test("Reviewer reload resumes an approving handoff with the persisted operation id", async () => {
+    mocks.state.callBotExtra = { handoff_required: true, handoff_reason: "clarification_unresolved",
+      handoff_explanation: "ต้องตรวจเพิ่ม", conversation_id: "conv_handoff_resume", message_id: "m_handoff_resume" };
+    seedAdmin("adm_resume", "Resume Admin");
+    const doc = await runBotTurn("conv_handoff_resume", "m_handoff_resume", "ร่างตอบลูกค้า", { platform: "shopee" });
+    const operationId = "handoff_resume_after_reload";
+    const stored = mocks.fakeColl("shadow_replies").find((row: any) => row.shadow_reply_id === doc.shadow_reply_id) as any;
+    stored.handoff_review = { ...stored.handoff_review, status: "approving", selected_admin_id: "adm_resume",
+      selected_admin_name: "Resume Admin", assignment_operation_id: operationId,
+      assignment_operation_key: `${doc.shadow_reply_id}:${operationId}` };
+    stored.updated_at = new Date();
+
+    const preview = await callHandoffReview("conv_handoff_resume", doc.shadow_reply_id);
+    assert(preview.status === 200 && preview.body.handoff_review.status === "approving", "reload did not restore approving state");
+    assert(preview.body.handoff_review.assignment_operation_id === operationId, "persisted operation id missing from preview");
+    assert(preview.body.candidates.some((candidate: any) => candidate.admin_id === "adm_resume"), "selected online admin missing from resume options");
+    const resumed = await callHandoffReview("conv_handoff_resume", doc.shadow_reply_id, {
+      reply_id: doc.shadow_reply_id, action: "approve", selected_admin_id: "adm_resume",
+      operation_id: operationId, updated_at: preview.body.updated_at,
+    });
+    assert(resumed.status === 200 && resumed.body.handoff_review.status === "approved", `resume -> ${resumed.status} ${JSON.stringify(resumed.body)}`);
+    assert(mocks.fakeColl("test_status_conversation").filter((row: any) => row.conversation_id === "conv_handoff_resume" && row.assigned_to === "adm_resume").length === 1,
+      "resume did not create exactly one sandbox assignment");
+    assert(mocks.fakeColl("messages").filter((m: any) => m.direction === "out").length === 0, "resume sent a customer message");
+  });
+
+  await test("Rejecting a bot handoff requires reason and records reviewer without assignment", async () => {
+    mocks.state.callBotExtra = { handoff_required: true, handoff_reason: "clarification_unresolved",
+      handoff_explanation: "ยังยืนยันข้อมูลไม่ได้", conversation_id: "conv_handoff_reject", message_id: "m_handoff_reject" };
+    seedAdmin("adm_online_1", "Online Admin 1");
+    const doc = await runBotTurn("conv_handoff_reject", "m_handoff_reject", "ร่างคำตอบ", { platform: "shopee" });
+    const missing = await callHandoffReview("conv_handoff_reject", doc.shadow_reply_id, {
+      reply_id: doc.shadow_reply_id, action: "reject", operation_id: "handoff_reject_missing",
+    });
+    assert(missing.status === 422, `missing rejection reason -> ${missing.status}`);
+    const rejected = await callHandoffReview("conv_handoff_reject", doc.shadow_reply_id, {
+      reply_id: doc.shadow_reply_id, action: "reject", rejection_reason: "ยังไม่ครบข้อมูล",
+      operation_id: "handoff_reject_1",
+    });
+    assert(rejected.status === 200, `reject -> ${rejected.status} ${JSON.stringify(rejected.body)}`);
+    assert(rejected.body.handoff_review.status === "rejected" && rejected.body.handoff_review.rejection_reason === "ยังไม่ครบข้อมูล", "handoff rejection not persisted");
+    assert(rejected.body.handoff_review.reviewed_by_name === "Test Reviewer", "reviewer name missing");
+    assert(mocks.fakeColl("test_status_conversation").every((row: any) => row.conversation_id !== "conv_handoff_reject" || !row.assigned_to), "rejected handoff assigned an admin");
+  });
+
+  await test("Analysis includes workflow replies and all linked actions after the selected creation date", async () => {
+    const created = new Date("2026-11-24T09:00:00+07:00");
+    const reviewed = new Date("2026-11-25T10:00:00+07:00");
+    mocks.fakeColl("shadow_replies").push(
+      { _id: "analytics_worker", shadow_reply_id: "sr_analytics_worker", conversation_id: "conv_analytics_worker",
+        shop_id: "shop_1", platform: "shopee", origin: "worker", created_at: created, updated_at: created,
+        inbound_text: "ถามสินค้า", bot_reply_text: "ร่างตอบ", bot_handoff_required: true,
+        bot_handoff_reason: "clarification_unresolved", bot_handoff_explanation: "ต้องตรวจ",
+        handoff_review: { status: "pending" }, review_bubbles: [{ bubble_id: "b1", ordinal: 0, original_text: "เดิม",
+          edited_text: "แก้", approved_text: "แก้", decision: "edited_approved", decided_by: "t_admin",
+          decided_by_name: "Test Reviewer", edit_history: [{ before_text: "เดิม", after_text: "แก้", actor: "t_admin", actor_name: "Test Reviewer", at: reviewed }],
+          delivery: { state: "not_sent_switch_off" } }] },
+      { _id: "analytics_workflow", shadow_reply_id: "sr_analytics_workflow", conversation_id: "conv_analytics_workflow",
+        shop_id: "shop_2", platform: "shopee", origin: "workflow", created_at: created, updated_at: created,
+        inbound_text: "ถามจาก flow", bot_reply_text: "ตอบจาก flow", review_bubbles: [], }
+    );
+    mocks.fakeColl("botworker_events").push(
+      { _id: "reviewop:analytics_op", event_id: "reviewop:analytics_op", conversation_id: "conv_analytics_worker",
+        type: "review_op", actor: "t_admin", metadata: { request: { reply_id: "sr_analytics_worker", action: "save_and_approve" },
+          actor_name: "Test Reviewer", status: "done" }, created_at: reviewed },
+      { _id: "reviewaction:analytics_op", event_id: "reviewaction:analytics_op", conversation_id: "conv_analytics_worker",
+        type: "review_action", actor: "t_admin", metadata: { reply_id: "sr_analytics_worker", action: "save_and_approve",
+          actor_name: "Test Reviewer", edited_text: "แก้" }, created_at: reviewed }
+    );
+    const result = await analyticsService.getBotworkerReviewAnalysis({ from: "2026-11-24", to: "2026-11-24", group: "day" });
+    assert(result.total === 2, `worker/workflow total=${result.total}`);
+    assert(result.series[0].drafts === 2 && result.series[0].handoff_requested === 1, "daily series omitted replies or handoff flag");
+    const item = result.items.find((row) => row.reply_id === "sr_analytics_worker");
+    if (!item) throw new Error("analysis item missing");
+    assert(item.timeline.length === 1 && item.timeline[0].type === "review_action", "linked event timeline missing or duplicated");
+    assert(item.timeline[0].actor_name === "Test Reviewer", "reviewer identity missing in timeline");
+    assert(item.review_bubbles[0].edit_history?.[0].after_text === "แก้", "edit history missing from analysis item");
+  });
+
+  await test("E3 Shopee approval while live-send switch is OFF is recorded without calling any sender", async () => {
+    mocks.state.shopeeSendEnabled = false;
+    const doc = await runBotTurn("conv_off", "m_off", "Safe draft", { platform: "shopee" });
+    const r = await review("conv_off", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "approve");
+    assert(r.status === 200, "approval while OFF -> " + r.status);
+    assert(r.body.bubble.decision === "approved", "review decision not recorded");
+    assert(r.body.bubble.delivery.state === "not_sent_switch_off", "delivery=" + r.body.bubble.delivery.state);
+    assert(mocks.state.fakeShopeeCalls.length === 0, "fake Shopee sender was called while OFF");
+    assert(mocks.state.mockCalls.length === 0, "mock sender was called while OFF");
+  });
+
+  await test("E4 explicit Shopee approval while switch is ON uses only fake sender", async () => {
+    mocks.state.shopeeSendEnabled = true;
+    const doc = await runBotTurn("conv_fake_on", "m_fake_on", "Safe draft", { platform: "shopee" });
+    const r = await review("conv_fake_on", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "approve");
+    assert(r.status === 200, "fake approval -> " + r.status);
+    assert(r.body.bubble.delivery.state === "live_sent", "fake delivery outcome missing");
+    assert(mocks.state.fakeShopeeCalls.length === 1, "explicit ON action did not call fake sender once");
+    assert((mocks.state.fakeShopeeCalls as unknown as any[])[0].conversationId === "conv_fake_on", "fake sender received wrong conversation");
+  });
+
   // ═══ E/F — reject + dedupe + authz ═══
   await test("E1 reject → 0 mock + no approved_text/sent_text", async () => {
     const doc = await runBotTurn();
-    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject");
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject", { rejection_reason: "ไม่ผ่านการตรวจ" });
     assert(r.status === 200, `status=${r.status}`);
     const b = (await getReplyDoc()).review_bubbles[0];
     assert(b.decision === "rejected" && b.decided_by === "t_admin" && b.decided_at, "reject fields wrong");
@@ -234,16 +495,15 @@ async function main() {
     assert(mockEvents().length === 1, "second mock request created");
   });
 
-  await test("F3 wrong admin → 403; wrong shop → 403", async () => {
+  await test("F3 another BotWorker admin may review; decision records that admin", async () => {
     const doc = await runBotTurn();
-    mocks.state.authAdminId = "evil_admin";
-    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "approve");
-    assert(r.status === 403, `expected 403 got ${r.status}`);
-    mocks.state.authAdminId = "t_admin";
+    mocks.state.authAdminId = "other_admin";
     mocks.state.config.bot_review_shop_id = "other_shop";
-    const r2 = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "approve");
-    assert(r2.status === 403, `expected 403 got ${r2.status}`);
-    assert(mockEvents().length === 0, "unauthorized created mock");
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "review remains cross-shop" });
+    assert(r.status === 200, `page-authorized admin must review, got ${r.status}`);
+    const updated = await getReplyDoc();
+    assert(updated.review_bubbles[0].edit_history?.[0]?.actor === "other_admin", "actual reviewer identity missing from edit history");
+    assert(mockEvents().length === 0, "save must not create delivery event");
   });
 
   await test("F4 legacy draft (ไม่มี review_bubbles) → แสดงได้ แต่ approve → 409", async () => {
@@ -258,11 +518,12 @@ async function main() {
     assert(mockEvents().length === 0, "legacy draft mock-sent");
   });
 
-  await test("F5 config ไม่ตั้ง designated → 403", async () => {
+  await test("F5 config ไม่ตั้ง fixed reviewer → page-authorized admin still reviews", async () => {
     const doc = await runBotTurn();
     delete (mocks.state.config as any).bot_review_admin_id;
-    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "approve");
-    assert(r.status === 403, `expected 403 got ${r.status}`);
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "reviewed" });
+    assert(r.status === 200, `expected 200 got ${r.status}`);
+    assert(mockEvents().length === 0, "saving an edit must not send");
   });
 
   // ═══ G — mock failure ═══
@@ -332,12 +593,12 @@ async function main() {
   await test("I2 workflow delivered reply (storeWorkflowDelivered จริง) มี review_bubbles + review ได้", async () => {
     // workflow trigger("wfkw") → let_ai_respond → settleWorkflowResult → storeWorkflowDelivered
     const conv = "conv_wf";
-    seedConv(conv); seedUserMsg(conv, "m_wf", "wfkw hi");
+    seedConv(conv, "shop_1", MOCK_PLATFORM); seedUserMsg(conv, "m_wf", "wfkw hi", "shop_1", MOCK_PLATFORM);
     mocks.state.config.workflow_enabled = true;
     mocks.state.callBotAnswer = "W1|||W2";
     mocks.fakeColl("workflows").push({
       workflow_id: "wf_t", name: "wf_t", enabled: true, status: "published", is_deleted: false,
-      shop_ids: ["shop_1"], platforms: ["shopee"], trigger_frequency: "every_time",
+      shop_ids: ["shop_1"], platforms: [MOCK_PLATFORM], trigger_frequency: "every_time",
       false_branch_policy: "exit_to_bot",
       nodes: [
         { node_id: "n1", type: "trigger", subtype: "message_content", config: { keywords: ["wfkw"] }, position: { x: 0, y: 0 } },
@@ -349,7 +610,7 @@ async function main() {
     const ctx = makeCtx(["m_wf"]); seedClaim("m_wf", conv, ctx);
     const r = await svc.processMessage({
       message_id: "m_wf", conversation_id: conv, shop_id: "shop_1",
-      platform: "shopee", text: "wfkw hi", claimContext: ctx,
+      platform: MOCK_PLATFORM, text: "wfkw hi", claimContext: ctx,
       shop_ctx: { config_shop_key: "shop_1", shopname: "TestShop" },
     });
     const wfDocs = mocks.fakeColl("shadow_replies").filter((d: any) => d.origin === "workflow");
@@ -390,7 +651,7 @@ async function main() {
     const r1 = await review("conv_1", doc.shadow_reply_id, b0, "save", { edited_text: "v1" }, op);
     assert(r1.status === 200, `first ${r1.status}`);
     // op id เดิม + action ต่าง
-    const r2 = await review("conv_1", doc.shadow_reply_id, b0, "reject", {}, op);
+    const r2 = await review("conv_1", doc.shadow_reply_id, b0, "reject", { rejection_reason: "different action" }, op);
     assert(r2.status === 409, `different action → ${r2.status}`);
     // op id เดิม + payload ต่าง
     const r3 = await review("conv_1", doc.shadow_reply_id, b0, "save", { edited_text: "v2" }, op);
@@ -489,9 +750,9 @@ async function main() {
       shop_id: "shop_1", platform: "shopee",
       metadata: {
         request: {
-          actor: "t_admin", shop_id: "shop_1", conversation_id: "conv_1",
+          actor: "t_admin", conversation_id: "conv_1",
           reply_id: rid, bubble_id: b0, action: "save_and_approve",
-          edited_text: "PERSISTED s&a edit", card_item_id: null,
+          edited_text: "PERSISTED s&a edit", card_item_id: null, rejection_reason: null,
         },
         status: "in_progress",
       },
@@ -524,7 +785,7 @@ async function main() {
     mocks.state.callBotProducts = [{ item_id: "it1", shop_id: "shop_1" }];
     const doc = await runBotTurn();
     const rid = doc.shadow_reply_id; const b0 = doc.review_bubbles[0].bubble_id;
-    const rr = await review("conv_1", rid, b0, "reject");
+    const rr = await review("conv_1", rid, b0, "reject", { rejection_reason: "ต้องตรวจใหม่" });
     assert(rr.status === 200, `reject ${rr.status}`);
     const r = await review("conv_1", rid, b0, "send_card", { card_item_id: "it1" });
     assert(r.status === 409, `send_card on rejected → ${r.status}`);
@@ -575,7 +836,7 @@ async function main() {
     const rid = doc.shadow_reply_id; const b0 = doc.review_bubbles[0].bubble_id;
     const rc = await review("conv_1", rid, b0, "send_card", { card_item_id: "it1" });
     assert(rc.status === 200, `card ${rc.status}`);
-    const rr = await review("conv_1", rid, b0, "reject");
+    const rr = await review("conv_1", rid, b0, "reject", { rejection_reason: "ไม่อนุมัติ" });
     assert(rr.status === 409, `reject after card → ${rr.status}`);
     const d = await getReplyDoc();
     assert(d.review_bubbles[0].decision === "pending", "reject overwrote card-sent bubble");

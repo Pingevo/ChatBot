@@ -236,7 +236,7 @@ export function ChatList({
   // ดึงรายชื่อร้านทั้งหมดจาก conversations (กรองตาม platform ที่เลือก)
   const availableShops = useMemo(() => {
     const source = onListFiltersChange ? directoryShops : conversations.map((c) => ({
-      id: c.shop_id, name: c.shop_name, platform: c.platform,
+      id: c.shop_id, name: c.shop_name?.trim() || c.shop_id, platform: c.platform,
     }));
     const groups = new Map<string, { name: string; platform: Platform; keys: string[] }>();
     for (const shop of source) {
@@ -710,7 +710,7 @@ export function ChatList({
                       </span>
                     )}
                   </div>
-                  <div className="mobile-chat-shop text-[11px] text-text-muted truncate">{c.shop_name}</div>
+                  <div className="mobile-chat-shop text-[11px] text-text-muted truncate">{c.shop_name?.trim() || c.shop_id}</div>
                   <div className="mobile-chat-preview text-xs text-text-muted truncate mt-0.5">{c.last_message}</div>
                   <div className="flex items-center gap-1.5 mt-1">
                     <Badge tone={statusTone[c.status] || "neutral"}>{statusLabel[c.status] || c.status}</Badge>

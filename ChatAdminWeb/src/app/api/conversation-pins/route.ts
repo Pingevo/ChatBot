@@ -4,7 +4,7 @@ import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { statusConversationService } from "@/backend/service/statusConversationService";
 import { json, error, readJson } from "@/backend/lib/http";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
-import { invalidateBotworkerCache } from "@/app/api/botworker/conversations/route";
+import { invalidateBotworkerCache } from "@/backend/service/botworkerConversationCache";
 
 export const dynamic = "force-dynamic";
 

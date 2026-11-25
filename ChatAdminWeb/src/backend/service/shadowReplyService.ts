@@ -18,6 +18,22 @@ import { getConversation } from "./conversationService";
 import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
 import { logAdminEvent } from "./adminLogService";
 
+export interface ShadowReviewBubbleDoc {
+  bubble_id: string;
+  ordinal: number;
+  original_text: string;
+  edited_text?: string;
+  decision: "pending" | "approved" | "edited_approved" | "rejected";
+  decided_by?: string;
+  decided_by_name?: string;
+  decided_at?: Date;
+  approved_text?: string;
+  rejection_reason?: string;
+  edit_history?: { before_text: string; after_text: string; actor: string; actor_name: string; at: Date }[];
+  delivery: { state: string; request_id?: string; error?: string };
+  card?: { item_id: string; delivery: { state: string; request_id?: string; error?: string } };
+}
+
 export interface ShadowReplyDoc extends Document {
   shadow_reply_id: string;
   conversation_id: string;
@@ -34,6 +50,7 @@ export interface ShadowReplyDoc extends Document {
   bot_cost_usd?: number;          // ต้นทุนประมาณ (USD) — จาก bot
   bot_cost_thb?: number;          // ต้นทุนประมาณ (THB) — คำนวณจาก USD × 36
   bot_products?: unknown[];
+  review_bubbles?: ShadowReviewBubbleDoc[];
   // comparison — เทียบกับ Zaapi/sellcenter reply (ถ้ามี)
   zaapi_reply_text?: string;       // คำตอมของ Zaapi/sellcenter (ถ้ามีใน messages)
   zaapi_reply_message_id?: string;
@@ -71,6 +88,26 @@ export interface ShadowReplyDoc extends Document {
   };
   bot_handoff_to_admin?: boolean;
   bot_handoff_reason?: string;
+  bot_handoff_required?: boolean;
+  bot_handoff_explanation?: string;
+  bot_handoff_category?: string;
+  upstream_conversation_id?: string;
+  upstream_message_id?: string;
+  handoff_review?: {
+    status: "pending" | "approving" | "approved" | "rejected";
+    reason?: string;
+    explanation?: string;
+    reviewed_by?: string;
+    reviewed_by_name?: string;
+    reviewed_at?: Date;
+    rejection_reason?: string;
+    selected_admin_id?: string;
+    selected_admin_name?: string;
+    assignment_operation_id?: string;
+    assignment_reason?: string;
+    assignment_operation_key?: string;
+    last_error?: string;
+  };
   bot_image_desc?: string;           // ⚡ A2 — vision description ของรูป current turn (cache กัน re-read)
   // ⚡ chat_engine — บันทึกว่าคำตอบนี้มาจาก engine ไหน (legacy / v2 / v3)
   //    ใช้ตอนเปรียบเทียบ — แยกคำตอบ legacy vs v2 vs v3 ใน shadow inbox

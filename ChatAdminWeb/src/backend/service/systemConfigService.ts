@@ -55,11 +55,6 @@ export interface SystemConfigDoc extends Document {
   //   → resolver fail-closed (worker เงียบ)
   bot_worker_enabled_at?: Date | null;
 
-  // === Human review pilot (mock send) — designated admin + shop ===
-  // ไม่ตั้ง = review disabled (route 403); server-derived เท่านั้น
-  bot_review_admin_id?: string;
-  bot_review_shop_id?: string;
-
   // === Bot Message Buffering (Debounce) — admin-configurable ===
   bot_buffer_enabled: boolean;       // เปิด/ปิด message buffering
   bot_buffer_window_ms: number;      // รอ X ms หลัง message สุดท้ายก่อนประมวลผล
@@ -214,10 +209,6 @@ function mergeWithSafety(dbConfig: Partial<SystemConfigDoc>): SystemConfigDoc {
     //   null/missing = fail-closed ใน resolver)
     bot_worker_platform_enabled_at: dbConfig.bot_worker_platform_enabled_at,
     bot_worker_enabled_at: dbConfig.bot_worker_enabled_at,
-    // ⚡ review pilot — passthrough; missing = review off (route 403)
-    bot_review_admin_id: dbConfig.bot_review_admin_id,
-    bot_review_shop_id: dbConfig.bot_review_shop_id,
-
     // Buffer — จาก DB หรือ env
     bot_buffer_enabled: dbConfig.bot_buffer_enabled ?? safeDefaults.bot_buffer_enabled ?? false,
     bot_buffer_window_ms: dbConfig.bot_buffer_window_ms ?? safeDefaults.bot_buffer_window_ms ?? 6000,
@@ -393,9 +384,6 @@ export async function updateSystemConfig(
     'web_search_enabled',
     // ⚡ Workstream E — pool source switches (kb_source ไม่อยู่ตรงนี้ — flip ผ่าน setKbSource CAS เท่านั้น)
     'pool_sources',
-    // ⚡ review pilot scope — designated admin + pilot shop (single shop id)
-    'bot_review_admin_id',
-    'bot_review_shop_id',
   ];
 
   const sanitized: Record<string, unknown> = { updated_by: updatedBy, updated_at: new Date() };

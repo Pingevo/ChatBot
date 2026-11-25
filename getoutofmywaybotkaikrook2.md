@@ -15148,3 +15148,58 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Updated relevant schemas and API metadata. Current branch: codex/shopee-ticket-botworker-live-send. User authorized committing the current branch changes.
 - Verification: source-only TypeScript diagnostics 0; `git diff --check` passed. `npm run` exposes no lint script. `npm run build` and `npm run build -- --webpack` both stop at `.next/trace*` with EPERM before compilation. No automated tests, UI runtime checks, database writes, provider calls, or customer sends were performed.
 - Runtime behavior, full build, visual pin/filter behavior, and provider-send paths remain unverified; commit records source state only.
+
+
+## 2026-11-25 — BotWorker review, handoff approval and analysis — pre-work
+- User approved implementation of the agreed review flow and requested a two-part analysis view with day/month/year filters, single or multiple selected days, visual metrics, and per-conversation Q&A/status history.
+- Source baseline from the prior audit: BotWorker drafts are stored in shadow_replies; review actions partially use botworker_events; handoff currently assigns automatically through the BotWorker sandbox assignment owner; there is no analysis view. Review/send UI and persistence do not yet meet the requested audit contract.
+- Plan: write a reviewable specification for preserving original and edited/rejected text, one designated reviewer, explicit delivery outcomes, approval-gated handoff with round-robin preview, append-only action history, and the two-part analysis page. Keep existing owners and sandbox/live boundaries; no new autonomous sender.
+- Scope boundary: do not change code, schemas, runtime config or DB; do not run tests/build/lint; do not call provider, upload media, or send any customer message. This step creates the spec only; implementation waits for user review of the written spec and plan.
+
+
+## 2026-11-25 — BotWorker review, handoff approval and analysis — closeout
+- Prepared and read back the reviewable spec at docs/superpowers/specs/2026-11-25-botworker-review-handoff-analysis.md. It covers preserving bot originals and edit/reject text, one reviewer, append-only actions, send outcomes, approval-gated handoff preview/assignment, and a two-part Analytics view with Bangkok day/month/year filters and multi-day selection.
+- Spec acceptance criteria distinguish approval from confirmed delivery, prohibit automatic sends when the switch changes, require rejection reasons, preserve reviewer/assignee/responder identities separately, and fail closed if the handoff candidate changes.
+- Verification was limited to spec read-back/required-section checks and integrity checks. No code/schema/runtime changes, tests/build/lint, database/provider calls, or customer sends were performed.
+- Implementation plan and code have not started; awaiting user review of the written spec. Branch remains codex/shopee-ticket-botworker-live-send; semantic history coverage remains partial.
+
+
+## 2026-11-25 — BotWorker review, handoff analysis and edit UI — pre-work
+- User approved the review/handoff/analysis plan and added two requirements: the reviewer may choose any currently online eligible admin before approving handoff; edit mode must expand into a proportionate, readable editor rather than the compressed textarea shown in the screenshot.
+- Source findings to revalidate: BotWorker stores drafts in shadow_replies, review actions partially use botworker_events, and the worker currently performs BotWorker sandbox handoff automatically. The review API/UI and analysis page do not yet cover the requested complete audit flow.
+- Plan: inspect the existing online/presence source and assignment owner; change the existing BotWorker handoff path so it waits for reviewer decision; preserve original/edit/reject text and actor history; add server-filtered analysis data and the two-part view; resize the existing review editor using current design tokens/components.
+- Safety: keep live-send OFF; no real customer sends, provider/media calls, or credential inspection. Any delivery test must use a fake sender. Begin with behavior tests before production edits.
+
+## 2026-11-25 — BotWorker review, handoff analysis and edit UI — implementation plan
+กำลังจะทำ: บน branch codex/shopee-ticket-botworker-live-send จะ implement review audit และ reject reason, ย้าย bot handoff ให้รอผู้ตรวจและให้เลือกแอดมินออนไลน์ก่อน commit, เพิ่ม server-filtered analysis และปรับ edit UI. เริ่มจากเพิ่ม behavioral assertions ใน fake-Mongo harness ให้ fail ก่อนแก้ source. ใช้ shadow_replies/botworker_events และ assignment/handoff owner เดิม; keep live-send OFF; no provider calls, credentials, media upload, or real customer sends.
+
+## 2026-11-25 — BotWorker upstream handoff fields — implementation addition
+- User clarified the upstream handoff response contract: handoff_required is the decision flag; reason/handoff_reason carry the category code; handoff_explanation is reviewer-facing context; answer is a separate customer-facing draft; conversation_id/message_id identify the source turn.
+- Preserve exact fields and supported reason codes legal_or_platform_dispute, clarification_unresolved, and insufficient_shop_evidence without inferring reason from the answer. Use the worker input IDs as correlation authority and fail closed if supplied upstream IDs disagree.
+- Added these cases to the approved spec and implementation plan. Keep default live-send OFF; no provider requests, media uploads, or customer sends.
+
+## 2026-11-25 — BotWorker review, handoff and analysis — implementation verification closeout
+- Implemented per-answer review audit in `shadow_replies` with original, edited, approved and rejected text, edit history, reviewer identity/time, required rejection reasons, and append-only `review_op`/`review_action` events. The designated reviewer can inspect every BotWorker-enabled shop.
+- Handoff flags preserve the engine reason/explanation/answer/source IDs and wait for reviewer approval. The reviewer previews eligible online admins, selects the recipient, and commits the handoff through the existing BotWorker sandbox assignment owner. Persisted operation IDs allow resuming an approval after reload; no customer message is sent by handoff.
+- Added the BotWorker analysis view with date filters and metrics plus per-conversation answer, review, handoff, and action history. The Shopee send switch remains default-off; with it off, review records `not_sent_switch_off` and calls no sender.
+- Fake-only verification: BotWorker review/handoff/analysis 47/47; BotWorker conversation boundary 25/25; `npx tsc --noEmit --incremental false` passed; `git diff --check` passed. Tests use fake Mongo and fake senders only. No customer messages, provider calls, media uploads, credentials, or database writes were used.
+- Build remains unverified: Turbopack build was blocked by the sandbox port/operation restriction; webpack build stops on Node MongoDB driver native-module imports. `npm run` has no lint script. No commit was made; current changes remain on `codex/shopee-ticket-botworker-live-send` pending review/commit approval. Semantic history coverage remains partial.
+
+## 2026-11-25 — Shadow Inbox ChatList missing shop_name runtime fix
+- User supplied stack at ChatList availableShops `.trim()`; root cause: mirrored conversation `shop_name` can be undefined while `ChatList` assumes a string. Shadow Inbox uses conversation-derived shop options, unlike Tickets/BotWorker directory mode.
+- Plan/audit: `docs/plans/active/2026-11-25-chat-list-missing-shop-name.md`; patch the shared ChatList conversation display mapping and row label with `shop_id` fallback. No changes to query/filter keys, API, or customer send.
+- Real ChatList server-render test RED reproduced exact TypeError at line 244; GREEN showed missing-name row as shop ID and retained known-name display. `tsc --noEmit --incremental false` and `git diff --check` exit 0.
+- No live browser or Mongo/provider/customer request. Working tree remains uncommitted with other BotWorker review work; this task log was appended after the fix rather than before editing. Semantic coverage partial.
+
+## 2026-11-25 — กำลังจะทำ: BotWorker review ใช้ page access แทน fixed reviewer
+- ผู้ใช้ยืนยันว่าทุกแอดมินที่เข้าถึงหน้า BotWorker ต้องตรวจคำตอบและ handoff ได้ ไม่กำหนดผู้ตรวจตายตัว; ภาพแสดง `รอตรวจ` แต่ไม่มีปุ่มเพราะ `can_review=false` จาก `bot_review_admin_id` gate
+- Audit พบ fixed-admin gate ใน messages, review POST, handoff-review GET/POST, analysis GET และ reviewService; `/config` ไม่มี UI กำหนด reviewer จึงทำให้ปุ่มหายได้
+- แผน `docs/plans/active/2026-11-25-botworker-review-page-access.md`: ใช้ `requirePageAccess("botworker")` เป็นขอบเขต, เก็บ actor จริงใน audit, คง CAS/idempotency, switch ส่งจริงและเงื่อนไขเลือกผู้รับ; test fake only, ไม่ส่งลูกค้าจริง
+- baseline frozen SHA และ active 1..15192 SHA ตรง ledger; tail ก่อนเริ่มว่าง; semantic coverage partial
+
+## 2026-11-25 — ผ่านแล้ว: BotWorker review สำหรับทุกแอดมินที่มีสิทธิ์หน้า
+- Root cause: `can_review` และ review/handoff/analysis routes ผูกกับ `bot_review_admin_id`/`bot_review_shop_id`; แอดมินอื่นเห็นร่างแต่ปุ่มไม่แสดงหรือ action ถูกปฏิเสธ
+- แก้ให้ messages, review, handoff-review และ analysis ตรวจ `requirePageAccess("botworker")` เท่านั้น; reviewService ไม่ตรวจ fixed reviewer; actor ของผู้กดจริงยังถูกบันทึกใน shadow_replies และ botworker_events; CAS/idempotency, rejection reason, handoff recipient eligibility และสวิตช์ส่งจริงคงเดิม
+- ลบ pilot config fields ที่ไม่ใช้จาก systemConfigService; ปรับ UI copy, spec, plan, SRS, schema และ function/process ให้ตรงสิทธิ์ใหม่
+- Fake-Mongo/fake-sender behavioral suite 49/49 และ BotWorker boundary suite 25/25 ผ่าน; `tsc --noEmit --incremental false` และ `git diff --check` ผ่าน; ไม่เรียก Shopee/ไม่ส่งลูกค้าจริง/ไม่อ่าน secret; ไม่มี commit เพราะ working tree มีงานอื่นค้างอยู่
+- Correction mechanism net change: helper +0, guard +0, regex +0, keyword table +0, decision owner +0; ตัด fixed-reviewer/config gates และใช้ page permission owner เดิม; semantic coverage ของประวัติยัง partial

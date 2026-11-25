@@ -6,7 +6,6 @@ export const dynamic = "force-dynamic";
 import { NextRequest } from "next/server";
 import { requirePageAccess } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
-import { getSystemConfig } from "@/backend/service/systemConfigService";
 import { applyReviewAction, type ReviewAction } from "@/backend/service/reviewService";
 import { sendMockPart } from "@/backend/service/mockSendService";
 import { conversationService } from "@/backend/service/conversationService";
@@ -28,7 +27,7 @@ export async function POST(
   const body = await readJson<{
     reply_id?: string; bubble_id?: string; action?: string;
     edited_text?: string; card_item_id?: string;
-    operation_id?: string; updated_at?: string;
+    operation_id?: string; updated_at?: string; rejection_reason?: string;
   }>(req);
   if (!body?.reply_id || !body.bubble_id || !body.action || !body.operation_id) {
     return error("reply_id, bubble_id, action, operation_id required", 422);
@@ -37,11 +36,8 @@ export async function POST(
     return error(`action must be one of ${ACTIONS.join("/")}`, 422);
   }
 
-  const config = await getSystemConfig();
-  const designatedAdminId = config.bot_review_admin_id;
-  const designatedShopId = config.bot_review_shop_id;
-  if (!designatedAdminId || !designatedShopId) {
-    return error("human review pilot not configured", 403);
+  if (body.action === "reject" && !body.rejection_reason?.trim()) {
+    return error("rejection_reason required when rejecting", 422);
   }
 
   const liveSendEnabled = await isShopeeConsoleSendEnabled();
@@ -94,8 +90,9 @@ export async function POST(
     cardItemId: body.card_item_id,
     operationId: body.operation_id,
     actor: r.ctx.admin.admin_id,
-    designatedAdminId,
-    designatedShopId,
+    actorName: r.ctx.admin.name || r.ctx.admin.username || r.ctx.admin.admin_id,
+    liveSendEnabled,
+    rejectionReason: body.rejection_reason,
     expectedUpdatedAt: body.updated_at,
     mockSender: sendMockPart,
     liveSender,

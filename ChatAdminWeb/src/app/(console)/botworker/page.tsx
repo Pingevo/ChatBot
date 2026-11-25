@@ -35,6 +35,7 @@ import { adminBubbleColor, adminBubbleTextColor, ZAAPI_COLOR, BOT_COLOR } from "
 import type { Conversation, ChatMessage, ChatSendInput, CloseHistoryRecord, AdminUser, ProblemCategory } from "@/lib/types";
 import { ShopeeChatComposer } from "@/components/chat/ShopeeChatComposer";
 import { useShopeeSendStatus } from "@/lib/useShopeeSendStatus";
+import { BotworkerReviewAnalysis } from "@/components/botworker/BotworkerReviewAnalysis";
 
 type MobileView = "list" | "chat" | "info";
 
@@ -46,15 +47,34 @@ interface ReviewBubble {
   edited_text?: string;
   decision: "pending" | "approved" | "edited_approved" | "rejected";
   decided_by?: string;
+  decided_by_name?: string;
   decided_at?: string;
   approved_text?: string;
-  delivery: { state: "not_requested" | "mock_sent" | "mock_failed" | "live_sending" | "live_sent" | "live_failed" | "live_unknown"; request_id?: string; receipt?: { provider: string; delivered: boolean; request_id?: string }; error?: string };
+  rejection_reason?: string;
+  edit_history?: { before_text: string; after_text: string; actor: string; actor_name: string; at: string }[];
+  delivery: { state: "not_requested" | "not_sent_switch_off" | "mock_sent" | "mock_failed" | "live_sending" | "live_sent" | "live_failed" | "live_unknown"; request_id?: string; receipt?: { provider: string; delivered: boolean; request_id?: string }; error?: string };
   card?: { item_id: string; delivery: { state: string; error?: string } };
+}
+
+interface HandoffReviewState {
+  status: "pending" | "approving" | "approved" | "rejected";
+  reason?: string;
+  explanation?: string;
+  reviewed_by_name?: string;
+  reviewed_at?: string;
+  rejection_reason?: string;
+  selected_admin_id?: string;
+  selected_admin_name?: string;
+  assignment_reason?: string;
+  assignment_operation_id?: string;
+  last_error?: string;
 }
 
 // ⚡ Phase 2T — unified message ที่ merge จาก messages_shp + shadow_replies
 interface UnifiedMessage {
   id: string;
+  conversation_id?: string;
+  inbound_message_id?: string;
   role: "user" | "zaapi" | "bot" | "admin";
   text: string;
   timestamp: string;
@@ -72,6 +92,11 @@ interface UnifiedMessage {
   bubble_color?: string; // ⚡ สี bubble ที่ admin เลือก (จาก botworker_messages)
   bot_products?: { item_id?: string; itemid?: string; name?: string; price?: number; image?: string; shop?: string; shop_id?: string; shopid?: string }[]; // ⚡ review — card attach
   review_bubbles?: ReviewBubble[]; // ⚡ review — frozen per-bubble state (absent = legacy draft)
+  bot_handoff_required?: boolean;
+  bot_handoff_reason?: string;
+  bot_handoff_category?: string;
+  bot_handoff_explanation?: string;
+  handoff_review?: HandoffReviewState;
   // ⚡ rich media (parsed from raw_payload) — เหมือน /tickets
   message_type?: string;
   media?: { type: string; url?: string; thumb_url?: string; thumb_width?: number; thumb_height?: number; duration_seconds?: number };
@@ -102,8 +127,9 @@ export default function BotWorkerPage() {
   });
   const listFiltersParam = JSON.stringify(listFilters);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [sectionView, setSectionView] = useState<"inbox" | "analysis">("inbox");
   const [messages, setMessages] = useState<UnifiedMessage[]>([]);
-  const [canReview, setCanReview] = useState(false); // ⚡ designated review admin+shop (server-derived)
+  const [canReview, setCanReview] = useState(false); // ⚡ BotWorker page access (server-derived)
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [loadingConversations, setLoadingConversations] = useState(false);
   const [mobileView, setMobileView] = useState<MobileView>("list");
@@ -460,7 +486,14 @@ export default function BotWorkerPage() {
   }, [acceptingChats]);
 
   return (
-    <div className="relative h-full min-w-0 flex overflow-hidden">
+    <div className="flex h-full min-w-0 flex-col overflow-hidden">
+      <div role="tablist" aria-label="ส่วน BotWorker" className="flex h-11 shrink-0 items-center gap-1 border-b border-border bg-surface px-3">
+        <button role="tab" aria-selected={sectionView === "inbox"} onClick={() => setSectionView("inbox")}
+          className={`h-9 rounded-lg px-4 text-sm font-medium ${sectionView === "inbox" ? "bg-brand text-white" : "text-text-muted hover:bg-surface-2 hover:text-text"}`}>Inbox</button>
+        <button role="tab" aria-selected={sectionView === "analysis"} onClick={() => setSectionView("analysis")}
+          className={`h-9 rounded-lg px-4 text-sm font-medium ${sectionView === "analysis" ? "bg-brand text-white" : "text-text-muted hover:bg-surface-2 hover:text-text"}`}>วิเคราะห์ผล</button>
+      </div>
+      {sectionView === "analysis" ? <BotworkerReviewAnalysis /> : <div className="relative flex min-h-0 flex-1 overflow-hidden">
       {/* ── Panel ซ้าย: ChatList (เหมือน tickets) ── */}
       <div className={`${mobileView === "list" ? "flex" : "hidden"} 2xl:flex h-full min-w-0 flex-col w-full 2xl:w-80 shrink-0 border-r border-border`}>
         <ChatList
@@ -498,6 +531,7 @@ export default function BotWorkerPage() {
           onTransfer={handleTransfer}
           onSend={handleSend}
           liveSendEnabled={liveSendEnabled}
+          platform={selected?.platform}
           admins={admins}
           canReview={canReview}
           onReviewAction={handleReviewAction}
@@ -610,6 +644,7 @@ export default function BotWorkerPage() {
           loading={closing}
         />
       )}
+      </div>}
     </div>
   );
 }
@@ -627,6 +662,7 @@ interface BotWorkerChatPanelProps {
   onTransfer?: (newAdminId: string) => void;
   onSend?: (payload: ChatSendInput) => Promise<unknown>;
   liveSendEnabled: boolean;
+  platform?: string;
   admins?: AdminUser[];
   canReview?: boolean;
   onReviewAction?: (msgId: string, bubbleId: string, action: string, extra?: Record<string, unknown>) => Promise<void>;
@@ -635,7 +671,7 @@ interface BotWorkerChatPanelProps {
   onInfo?: () => void;
 }
 
-function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, onSend, liveSendEnabled, admins = [], canReview, onReviewAction, onBack, onInfo }: BotWorkerChatPanelProps) {
+function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, onSend, liveSendEnabled, platform, admins = [], canReview, onReviewAction, onBack, onInfo }: BotWorkerChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [sending, setSending] = useState(false);
   // ⚡ track ว่า user อยู่ใกล้ล่างไหม — ถ้าไม่ใช่ (กำลังเลื่อนขึ้นอ่าน) จะไม่ auto-scroll
@@ -791,7 +827,7 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
               return (
                 <React.Fragment key={msg.id}>
                   {showDate && <DateBanner timestamp={msg.timestamp} onlyToday />}
-                  <UnifiedBubble msg={msg} customerName={conversation?.customer_name} customerAvatar={conversation?.customer_avatar} canReview={canReview} onReviewAction={onReviewAction} />
+                  <UnifiedBubble msg={msg} customerName={conversation?.customer_name} customerAvatar={conversation?.customer_avatar} canReview={canReview} onReviewAction={onReviewAction} liveSendEnabled={liveSendEnabled} platform={platform} />
                 </React.Fragment>
               );
             })}
@@ -840,7 +876,7 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
 
 import { User, Zap, Bot as BotIcon } from "lucide-react";
 
-function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewAction }: { msg: UnifiedMessage; customerName?: string; customerAvatar?: string; canReview?: boolean; onReviewAction?: (msgId: string, bubbleId: string, action: string, extra?: Record<string, unknown>) => Promise<void> }) {
+function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewAction, liveSendEnabled, platform }: { msg: UnifiedMessage; customerName?: string; customerAvatar?: string; canReview?: boolean; onReviewAction?: (msgId: string, bubbleId: string, action: string, extra?: Record<string, unknown>) => Promise<void>; liveSendEnabled: boolean; platform?: string }) {
   const isUser = msg.role === "user";
   const isZaapi = msg.role === "zaapi";
   const isBot = msg.role === "bot";
@@ -917,7 +953,7 @@ function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewA
   return (
     <div className={`flex gap-2.5 ${isUser ? "justify-start" : "justify-end"} animate-fade-in`}>
       {isUser && <Avatar name={customerName || "User"} src={customerAvatar} size={32} className="mt-1 shrink-0" />}
-      <div className={`max-w-[70%] ${isUser ? "" : "flex flex-col items-end gap-1"}`}>
+      <div className={`${isUser ? "max-w-[70%]" : isBot && (msg.review_bubbles || msg.bot_handoff_required) ? "w-full max-w-[min(84vw,58rem)]" : "max-w-[70%]"} ${isUser ? "" : "flex flex-col items-end gap-1"}`}>
         {/* Label */}
         {(isZaapi || isBot || isAdmin) && (
           <div className="text-[10px] text-text-muted mb-0.5 pr-1 flex items-center gap-1">
@@ -929,7 +965,7 @@ function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewA
         )}
         {isBot && Array.isArray(msg.review_bubbles) ? (
           // ⚡ review mode — 1 persisted bubble = 1 UI bubble + controls ตาม decision
-          <ReviewBubbleList msg={msg} canReview={!!canReview} onAction={onReviewAction} toChatMsg={toChatMsg} bubbleClass={bubbleClass} />
+          <ReviewBubbleList msg={msg} canReview={!!canReview} onAction={onReviewAction} toChatMsg={toChatMsg} bubbleClass={bubbleClass} liveSendEnabled={liveSendEnabled && platform === "shopee"} />
         ) : (
           segmentMsgs.map((segMsg, i) => (
             <div key={i} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleClass} ${isAdmin ? "admin-bubble-contrast" : ""}`} style={isZaapi ? { backgroundColor: ZAAPI_COLOR } : isBot ? { backgroundColor: BOT_COLOR } : isAdmin ? { backgroundColor: adminColor, color: adminBubbleTextColor(adminColor) } : undefined}>
@@ -937,6 +973,7 @@ function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewA
             </div>
           ))
         )}
+        {isBot && msg.bot_handoff_required && <HandoffReviewPanel msg={msg} canReview={!!canReview} />}
         {/* Timestamp + metadata */}
         <div className="flex items-center gap-1.5 mt-1 text-[10px] text-text-subtle">
           {isBot && <BotIcon size={10} />}
@@ -961,6 +998,127 @@ function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewA
           {isZaapi ? <Zap size={16} className="text-white" /> : isAdmin ? <Headset size={16} className="text-white" /> : <BotIcon size={16} className="text-white" />}
         </div>
       )}
+    </div>
+  );
+}
+
+function HandoffReviewPanel({ msg, canReview }: { msg: UnifiedMessage; canReview: boolean }) {
+  const [review, setReview] = useState<HandoffReviewState>(msg.handoff_review || { status: "pending" });
+  const [candidates, setCandidates] = useState<{ admin_id: string; name: string; suggested: boolean }[]>([]);
+  const [selectedAdminId, setSelectedAdminId] = useState("");
+  const [rejecting, setRejecting] = useState(false);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const operationIdsRef = useRef<Map<string, string>>(new Map());
+
+  useEffect(() => {
+    if (msg.handoff_review) setReview(msg.handoff_review);
+  }, [msg.handoff_review?.status, msg.handoff_review?.selected_admin_id, msg.handoff_review?.assignment_operation_id, msg.handoff_review?.rejection_reason]);
+
+  useEffect(() => {
+    let current = true;
+    if (!canReview || (review.status !== "pending" && review.status !== "approving")) return;
+    api().get<{ handoff_review?: HandoffReviewState; candidates: { admin_id: string; name: string; suggested: boolean }[] }>(
+      `/botworker/conversations/${msg.conversation_id || ""}/handoff-review`, { params: { reply_id: msg.id, message_id: msg.inbound_message_id } }
+    ).then((r) => {
+      if (!current) return;
+      const currentReview = r.data.handoff_review || review;
+      setReview(currentReview);
+      const rows = r.data.candidates || [];
+      setCandidates(rows);
+      setSelectedAdminId(currentReview.status === "approving" && currentReview.selected_admin_id
+        ? currentReview.selected_admin_id
+        : rows.find((candidate) => candidate.suggested)?.admin_id || rows[0]?.admin_id || "");
+    }).catch((e) => { if (current) setMessage(e instanceof Error ? e.message : "โหลดรายชื่อผู้รับไม่สำเร็จ"); });
+    return () => { current = false; };
+  }, [canReview, review.status, msg.conversation_id, msg.id, msg.inbound_message_id]);
+
+  async function decide(action: "approve" | "reject") {
+    if (action === "approve" && !selectedAdminId) return;
+    if (action === "reject" && !reason.trim()) { setMessage("กรุณาระบุเหตุผลที่ไม่อนุมัติ handoff"); return; }
+    setBusy(true); setMessage("");
+    const opKey = `${action}:${selectedAdminId}:${reason.trim()}`;
+    let operationId = operationIdsRef.current.get(opKey);
+    if (!operationId && action === "approve" && review.status === "approving" &&
+        review.selected_admin_id === selectedAdminId && review.assignment_operation_id) {
+      operationId = review.assignment_operation_id;
+      operationIdsRef.current.set(opKey, operationId);
+    }
+    if (!operationId) {
+      operationId = newChatRequestId();
+      operationIdsRef.current.set(opKey, operationId);
+    }
+    try {
+      const response = await api().post<{ ok: boolean; message?: string; handoff_review?: HandoffReviewState }>(
+        `/botworker/conversations/${msg.conversation_id || ""}/handoff-review`, {
+          reply_id: msg.id,
+          action,
+          ...(action === "approve" ? { selected_admin_id: selectedAdminId } : { rejection_reason: reason }),
+          operation_id: operationId,
+        }
+      );
+      if (!response.data.ok || !response.data.handoff_review) throw new Error(response.data.message || "บันทึกผล handoff ไม่สำเร็จ");
+      setReview(response.data.handoff_review);
+      operationIdsRef.current.delete(opKey);
+      setRejecting(false);
+    } catch (e) {
+      setMessage(e instanceof Error ? e.message : "บันทึกผล handoff ไม่สำเร็จ");
+      if (action === "approve") {
+        try {
+          const refreshed = await api().get<{ handoff_review?: HandoffReviewState; candidates: { admin_id: string; name: string; suggested: boolean }[] }>(
+            `/botworker/conversations/${msg.conversation_id || ""}/handoff-review`, { params: { reply_id: msg.id, message_id: msg.inbound_message_id } }
+          );
+          const currentReview = refreshed.data.handoff_review;
+          if (currentReview) setReview(currentReview);
+          const rows = refreshed.data.candidates || [];
+          setCandidates(rows);
+          setSelectedAdminId(currentReview?.status === "approving" && currentReview.selected_admin_id
+            ? currentReview.selected_admin_id
+            : rows.find((candidate) => candidate.suggested)?.admin_id || rows[0]?.admin_id || "");
+        } catch { /* keep the last visible review state when refresh is unavailable */ }
+      }
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="w-full rounded-xl border border-amber-300/30 bg-[#152a42] p-3 text-white shadow-sm">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex items-center gap-2"><span className="rounded-full bg-amber-300/15 px-2 py-1 text-[10px] font-semibold text-amber-100">HANDOFF FLAG</span><span className="text-xs font-semibold">{review.status === "pending" ? "รอผู้ตรวจตัดสินใจ" : review.status === "approving" ? "กำลังบันทึกการจ่ายงาน" : review.status === "approved" ? "อนุมัติ handoff แล้ว" : "ไม่อนุมัติ handoff"}</span></div>
+        <span className="text-[10px] text-white/60">ยังไม่ส่งข้อความหาลูกค้า · handoff อยู่ใน BotWorker sandbox</span>
+      </div>
+      <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <div className="rounded-lg bg-white/5 p-2.5"><div className="text-[10px] text-white/60">รหัสเหตุผลจาก engine</div><div className="mt-1 break-words text-xs font-medium">{msg.bot_handoff_reason || msg.bot_handoff_category || "ไม่ระบุ"}</div></div>
+        <div className="rounded-lg bg-white/5 p-2.5"><div className="text-[10px] text-white/60">คำอธิบายสำหรับผู้ตรวจ</div><div className="mt-1 whitespace-pre-wrap break-words text-xs">{msg.bot_handoff_explanation || "ไม่มีคำอธิบายจาก engine"}</div></div>
+      </div>
+      {(review.status === "pending" || review.status === "approving") && canReview && (
+        <div className="mt-3 space-y-2">
+          <label className="block text-[10px] text-white/70">เลือกผู้รับที่ออนไลน์ใน pool ปัจจุบัน</label>
+          <select value={selectedAdminId} onChange={(e) => setSelectedAdminId(e.target.value)} disabled={busy || review.status === "approving" || candidates.length === 0}
+            className="h-10 w-full rounded-lg border border-white/15 bg-[#203954] px-3 text-sm text-white disabled:opacity-50">
+            {candidates.length === 0 && <option value="">ไม่มีแอดมินออนไลน์ที่รับงานนี้ได้</option>}
+            {review.status === "approving" && review.selected_admin_id && !candidates.some((candidate) => candidate.admin_id === review.selected_admin_id) &&
+              <option value={review.selected_admin_id}>{review.selected_admin_name || review.selected_admin_id} · ตรวจสอบรายการเดิม</option>}
+            {candidates.map((candidate) => <option key={candidate.admin_id} value={candidate.admin_id}>
+              {candidate.name}{candidate.suggested ? " · แนะนำตามคิว" : ""}
+            </option>)}
+          </select>
+          {review.status === "approving" && <p className="text-[10px] text-amber-100/80">กำลังกู้ผลการอนุมัติเดิม · กดต่อเพื่อให้ระบบตรวจและบันทึกการจ่ายงานซ้ำอย่างปลอดภัย{review.last_error ? ` · ${review.last_error}` : ""}</p>}
+          {rejecting && <textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} rows={3}
+            placeholder="ระบุเหตุผลที่ไม่อนุมัติ handoff" className="min-h-20 w-full resize-y rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/45 focus:border-amber-200 focus:outline-none" />}
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => void decide("approve")} disabled={busy || !selectedAdminId} className="min-h-10 rounded-lg bg-emerald-500/80 px-3 py-2 text-xs font-semibold hover:bg-emerald-500 disabled:opacity-40">{busy ? "กำลังบันทึก…" : review.status === "approving" ? "ดำเนินการ handoff เดิมต่อ" : "อนุมัติ handoff ให้ผู้รับที่เลือก"}</button>
+            {review.status === "pending" && (!rejecting ? <button onClick={() => setRejecting(true)} disabled={busy} className="min-h-10 rounded-lg bg-rose-500/25 px-3 py-2 text-xs font-semibold text-rose-100 hover:bg-rose-500/40 disabled:opacity-40">ไม่อนุมัติ handoff</button> : <>
+              <button onClick={() => void decide("reject")} disabled={busy || !reason.trim()} className="min-h-10 rounded-lg bg-rose-500/70 px-3 py-2 text-xs font-semibold hover:bg-rose-500 disabled:opacity-40">บันทึกการไม่อนุมัติ</button>
+              <button onClick={() => { setRejecting(false); setReason(""); }} disabled={busy} className="min-h-10 rounded-lg bg-white/10 px-3 py-2 text-xs hover:bg-white/15">ยกเลิก</button>
+            </>)}
+          </div>
+        </div>
+      )}
+      {review.status === "pending" && !canReview && <div className="mt-3 text-xs text-white/60">รอแอดมินตรวจ</div>}
+      {review.status === "approved" && <div className="mt-3 rounded-lg bg-emerald-500/10 p-2.5 text-xs">ผู้ตรวจ {review.reviewed_by_name || "ไม่ระบุ"} · ผู้รับงาน {review.selected_admin_name || review.selected_admin_id || "ไม่ระบุ"} · {review.reviewed_at ? new Date(review.reviewed_at).toLocaleString("th-TH") : ""}</div>}
+      {review.status === "rejected" && <div className="mt-3 rounded-lg bg-rose-500/10 p-2.5 text-xs">ผู้ตรวจ {review.reviewed_by_name || "ไม่ระบุ"} · เหตุผล: {review.rejection_reason || "ไม่ระบุ"}</div>}
+      {message && <div role="alert" className="mt-2 text-xs text-rose-200">{message}</div>}
     </div>
   );
 }
@@ -1061,21 +1219,24 @@ function BotWorkerTransferDropdown({
 //    decided: read-only — แสดง original/saved edit/decision/actor/delivery outcome
 //    live_sent แปลว่า Shopee ยืนยันการส่งแล้ว
 function ReviewBubbleList({
-  msg, canReview, onAction, toChatMsg, bubbleClass,
+  msg, canReview, onAction, toChatMsg, bubbleClass, liveSendEnabled,
 }: {
   msg: UnifiedMessage;
   canReview: boolean;
   onAction?: (msgId: string, bubbleId: string, action: string, extra?: Record<string, unknown>) => Promise<void>;
   toChatMsg: (m: UnifiedMessage) => ChatMessage;
   bubbleClass: string;
+  liveSendEnabled: boolean;
 }) {
   const bubbles = msg.review_bubbles || [];
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<{ bubbleId: string; message: string } | null>(null);
+  const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [rejectReason, setRejectReason] = useState("");
 
-  const settled = (b: ReviewBubble) => b.decision === "rejected" || b.delivery.state === "mock_sent" || b.delivery.state === "live_sent";
+  const settled = (b: ReviewBubble) => b.decision === "rejected" || b.delivery.state === "mock_sent" || b.delivery.state === "live_sent" || b.delivery.state === "not_sent_switch_off";
   const gateOk = (i: number) => bubbles.slice(0, i).every(settled);
 
   async function act(bubbleId: string, action: string, extra?: Record<string, unknown>): Promise<boolean> {
@@ -1100,7 +1261,7 @@ function ReviewBubbleList({
         const sendable = canReview && !decided && gateOk(i);
         const editing = editingId === b.bubble_id;
         return (
-          <div key={b.bubble_id} className={`rounded-2xl px-3.5 py-2 text-sm ${bubbleClass}`} style={{ backgroundColor: BOT_COLOR }}>
+          <div key={b.bubble_id} className={`w-full min-w-0 rounded-2xl px-4 py-3 text-sm ${bubbleClass}`} style={{ backgroundColor: BOT_COLOR }}>
             {/* original vs saved edit */}
             {b.edited_text && b.edited_text !== b.original_text && (
               <div className="text-[10px] opacity-70 border-b border-white/20 pb-1 mb-1">
@@ -1111,8 +1272,8 @@ function ReviewBubbleList({
               <textarea
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                rows={3}
-                className="w-full resize-none rounded-md border border-white/30 bg-white/10 px-2 py-1 text-sm text-white placeholder:text-white/50 focus:outline-none"
+                rows={6}
+                className="min-h-36 w-full resize-y rounded-lg border border-white/30 bg-white/10 px-3 py-2 text-sm leading-6 text-white placeholder:text-white/50 focus:border-white/60 focus:outline-none"
               />
             ) : (
               <MessageContent msg={toChatMsg({ ...msg, text: b.edited_text ?? b.original_text })} variant="out" />
@@ -1126,7 +1287,8 @@ function ReviewBubbleList({
                 {b.decision === "edited_approved" && "อนุมัติ (แก้ไขแล้ว)"}
                 {b.decision === "rejected" && "ไม่อนุมัติ"}
               </span>
-              {b.decided_by && <span>· {b.decided_by}</span>}
+              {b.decided_by_name && <span>· ผู้ตรวจ {b.decided_by_name}</span>}
+              {!b.decided_by_name && b.decided_by && <span>· ผู้ตรวจ {b.decided_by}</span>}
               {b.decided_at && <span>· {new Date(b.decided_at).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}</span>}
               {b.delivery.state === "mock_sent" && (
                 <span className="ml-1 rounded bg-white/15 px-1.5 py-0.5 font-medium text-yellow-200">
@@ -1135,6 +1297,9 @@ function ReviewBubbleList({
               )}
               {b.delivery.state === "mock_failed" && (
                 <span className="ml-1 rounded bg-red-500/30 px-1.5 py-0.5">จำลองส่งล้มเหลว</span>
+              )}
+              {b.delivery.state === "not_sent_switch_off" && (
+                <span className="ml-1 rounded bg-amber-400/20 px-1.5 py-0.5 font-medium text-amber-100">อนุมัติแล้ว แต่ switch ปิด — ไม่ได้เรียก sender และยังไม่ส่งถึงลูกค้า</span>
               )}
               {b.delivery.state === "live_sent" && (
                 <span className="ml-1 rounded bg-green-500/30 px-1.5 py-0.5 font-medium">Shopee ยืนยันส่งถึงลูกค้าแล้ว</span>
@@ -1153,14 +1318,14 @@ function ReviewBubbleList({
             </div>
 
             {/* controls */}
-            {canReview && !decided && !editing && (
-              <div className="flex items-center gap-1.5 mt-2">
+            {canReview && !decided && !editing && rejectingId !== b.bubble_id && (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <button
                   disabled={!sendable || busy}
                   onClick={() => act(b.bubble_id, "approve")}
                   className="rounded-md bg-white/20 hover:bg-white/30 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
                   title={!gateOk(i) ? "ต้องตัดสินบับเบิ้ลก่อนหน้าก่อน" : ""}
-                >อนุมัติส่ง</button>
+                >{liveSendEnabled ? "อนุมัติและส่งจริง" : "อนุมัติ (switch ปิด ไม่ส่งจริง)"}</button>
                 <button
                   disabled={busy}
                   onClick={() => { setEditingId(b.bubble_id); setDraft(b.edited_text ?? b.original_text); }}
@@ -1168,7 +1333,7 @@ function ReviewBubbleList({
                 >แก้ไข</button>
                 <button
                   disabled={busy}
-                  onClick={() => act(b.bubble_id, "reject")}
+                  onClick={() => { setRejectingId(b.bubble_id); setRejectReason(""); }}
                   className="rounded-md bg-red-500/40 hover:bg-red-500/60 disabled:opacity-40 px-2 py-1 text-[11px]"
                 >ไม่อนุมัติส่ง</button>
                 {b.delivery.state === "mock_failed" && (
@@ -1195,8 +1360,19 @@ function ReviewBubbleList({
                 )}
               </div>
             )}
+            {canReview && !decided && rejectingId === b.bubble_id && (
+              <div className="mt-3 space-y-2 rounded-lg border border-white/15 bg-black/10 p-3">
+                <label className="block text-[11px] font-medium text-white/80">เหตุผลที่ไม่อนุมัติ</label>
+                <textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} maxLength={1000} rows={3}
+                  className="min-h-20 w-full resize-y rounded-lg border border-white/25 bg-white/10 px-3 py-2 text-sm text-white placeholder:text-white/45 focus:outline-none" placeholder="ระบุเหตุผลเพื่อเก็บใน shadow_replies และ audit log" />
+                <div className="flex flex-wrap gap-2">
+                  <button disabled={busy || !rejectReason.trim()} onClick={async () => { if (await act(b.bubble_id, "reject", { rejection_reason: rejectReason })) { setRejectingId(null); setRejectReason(""); } }} className="min-h-9 rounded-md bg-red-500/60 px-3 py-1.5 text-xs font-medium disabled:opacity-40">บันทึกการไม่อนุมัติ</button>
+                  <button disabled={busy} onClick={() => { setRejectingId(null); setRejectReason(""); }} className="min-h-9 rounded-md bg-white/15 px-3 py-1.5 text-xs">ยกเลิก</button>
+                </div>
+              </div>
+            )}
             {canReview && editing && (
-              <div className="flex items-center gap-1.5 mt-2">
+              <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-white/15 pt-3">
                 <button
                   disabled={busy || !draft.trim()}
                   onClick={async () => { if (await act(b.bubble_id, "save", { edited_text: draft })) setEditingId(null); }}
@@ -1207,7 +1383,7 @@ function ReviewBubbleList({
                   onClick={async () => { if (await act(b.bubble_id, "save_and_approve", { edited_text: draft })) setEditingId(null); }}
                   className="rounded-md bg-green-500/40 hover:bg-green-500/60 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
                   title={!gateOk(i) ? "ต้องตัดสินบับเบิ้ลก่อนหน้าก่อน" : ""}
-                >บันทึกและส่ง</button>
+                >{liveSendEnabled ? "บันทึกและส่งจริง" : "บันทึกและอนุมัติ (switch ปิด ไม่ส่งจริง)"}</button>
                 <button
                   disabled={busy}
                   onClick={() => { setEditingId(null); setDraft(b.edited_text ?? b.original_text); }}
@@ -1216,14 +1392,14 @@ function ReviewBubbleList({
               </div>
             )}
             {/* decided + mock_failed → ปุ่มลองส่งใหม่ (อยู่นอก pending block — bubble ตัดสินแล้ว) */}
-            {canReview && decided && b.delivery.state === "mock_failed" && (
+            {canReview && decided && (b.delivery.state === "mock_failed" || (b.delivery.state === "not_sent_switch_off" && liveSendEnabled)) && (
               <div className="flex items-center gap-1.5 mt-2">
                 <button
                   disabled={!gateOk(i) || busy}
                   onClick={() => act(b.bubble_id, "approve")}
                   className="rounded-md bg-yellow-500/40 hover:bg-yellow-500/60 disabled:opacity-40 px-2 py-1 text-[11px]"
                   title={!gateOk(i) ? "ต้องตัดสินบับเบิ้ลก่อนหน้าก่อน" : ""}
-                >ลองส่งใหม่</button>
+                >{b.delivery.state === "not_sent_switch_off" ? "ส่งจริงตามการอนุมัติเดิม" : "ลองส่งใหม่"}</button>
               </div>
             )}
             {err && err.bubbleId === b.bubble_id && <div className="text-[10px] text-red-200 mt-1">{err.message}</div>}

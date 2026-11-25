@@ -4,21 +4,13 @@ import { requirePageAccess } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
 import { messageService } from "@/backend/service/messageService";
 import { conversationService } from "@/backend/service/conversationService";
+import { invalidateBotworkerCache } from "@/backend/service/botworkerConversationCache";
 import { statusConversationService } from "@/backend/service/statusConversationService";
 import { logAdminEvent } from "@/backend/service/adminLogService";
 import { auth } from "@/backend/service/authService";
 import { invalidateConversationsCache } from "@/app/api/admin/conversations/route";
 import { sendShopeeMessage, isShopeeConsoleSendEnabled, outboundMessageId, readShopeeOutboundInput } from "@/backend/service/shopeeOutboundService";
 import type { ChatMessage, MessageMedia, MessageType } from "@/lib/types";
-
-async function invalidateBotworkerCache() {
-  try {
-    const mod = await import("@/app/api/botworker/conversations/route");
-    if (typeof (mod as unknown as { invalidateBotworkerCache?: () => void }).invalidateBotworkerCache === "function") {
-      (mod as unknown as { invalidateBotworkerCache: () => void }).invalidateBotworkerCache();
-    }
-  } catch { /* ignore */ }
-}
 
 const INPUT_ERRORS = new Set(["invalid_body", "unsupported_message_type"]);
 

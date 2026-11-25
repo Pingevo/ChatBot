@@ -9,6 +9,7 @@ const TARGETS = [
   "/src/backend/middleware/authorize.",
   "/src/backend/service/productService.",
   "/src/backend/service/mockSendService.", // mock transport seam — failure injection
+  "/src/backend/service/shopeeOutboundService.", // fake-only live-send seam; never reaches Shopee
 ];
 
 export async function resolve(specifier, context, nextResolve) {

@@ -15,12 +15,18 @@ export const state = {
   callBotParams: [],
   callBotAnswer: "A|||B|||C",       // answer ที่ callBot mock คืน
   callBotProducts: /** @type {any[]|undefined} */ (undefined), // botResp.products
+  callBotExtra: {},
+  lastProcessResult: null,
   authAdminId: "t_admin",         // actor ที่ requireAuth คืน (เปลี่ยนต่อเทสได้)
+  authAdminName: "Test Reviewer",
+  pageAccessAllowed: true,
+  shopeeSendEnabled: false,
+  fakeShopeeCalls: [],
   mockFail: false,                // mockSendService throw → mock_failed path
   mockCalls: [],                  // args ของ sendMockPart จริง (request log ของ seam)
   config: {
     bot_worker_enabled: true,
-    bot_worker_platforms: { shopee: true, tiktok: false, lazada: false },
+    bot_worker_platforms: { shopee: true, tiktok: true, lazada: false },
     bot_concurrency_limit: 50,
     workflow_enabled: false,
     bot_buffer_enabled: false,
@@ -28,8 +34,8 @@ export const state = {
     bot_buffer_max_messages: 10,
     workflow_run_timeout_ms: 1800000,
     assignment_prefer_previous_admin: false,
-    bot_review_admin_id: "t_admin",   // designated admin (pilot)
-    bot_review_shop_id: "shop_1",     // designated shop (pilot)
+    bot_review_admin_id: "t_admin",   // legacy config must not restrict review
+    bot_review_shop_id: "shop_1",     // legacy config must not restrict shops
   },
   uniqueKeys: {
     messages: ["message_id"],
@@ -51,7 +57,13 @@ export function resetState() {
   state.callBotParams.length = 0;
   state.callBotAnswer = "A|||B|||C";
   state.callBotProducts = undefined;
+  state.callBotExtra = {};
+  state.lastProcessResult = null;
   state.authAdminId = "t_admin";
+  state.authAdminName = "Test Reviewer";
+  state.pageAccessAllowed = true;
+  state.shopeeSendEnabled = false;
+  state.fakeShopeeCalls.length = 0;
   state.mockFail = false;
   state.mockCalls.length = 0;
   Object.assign(state.config, JSON.parse(JSON.stringify(DEFAULT_CONFIG)));
@@ -67,7 +79,7 @@ export async function ensureIndexes() {}
 const baseCallBot = makeCallBotMock(state);
 export async function callBot(params) {
   const resp = await baseCallBot(params);
-  return { ...resp, answer: state.callBotAnswer, products: state.callBotProducts };
+  return { ...resp, answer: state.callBotAnswer, products: state.callBotProducts, ...state.callBotExtra };
 }
 
 // ── systemConfigService mock ──
@@ -80,10 +92,15 @@ export async function requireAuth() {
   return {
     ok: true,
     ctx: {
-      admin: { admin_id: state.authAdminId, role: "admin", active: true },
+      admin: { admin_id: state.authAdminId, name: state.authAdminName, role: "admin", active: true },
       safeAdmin: { admin_id: state.authAdminId, role: "admin" },
     },
   };
+}
+
+export async function requirePageAccess() {
+  if (!state.pageAccessAllowed) return { ok: false, response: new Response(JSON.stringify({ detail: "forbidden" }), { status: 403 }) };
+  return requireAuth();
 }
 
 // ── productService mock ──
@@ -117,4 +134,17 @@ export async function sendMockPart(part) {
     if (e.code !== 11000) throw e;
   }
   return { provider: "mock", delivered: false, request_id: part.eventId };
+}
+
+// ── Shopee outbound fake — safe test-only seam; no credentials or network ──
+export const isShopeeConsoleSendEnabled = async () => state.shopeeSendEnabled;
+export const outboundMessageId = (requestId) => "fake_" + requestId;
+export async function sendShopeeMessage(request) {
+  state.fakeShopeeCalls.push(request);
+  return {
+    state: "sent",
+    type: request.input?.type || "text",
+    text: request.input?.text || "",
+    providerMessageId: "fake-provider-" + state.fakeShopeeCalls.length,
+  };
 }
