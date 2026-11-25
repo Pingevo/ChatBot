@@ -5598,3 +5598,11 @@ html[data-chat-text-size="larger"] .chat-message-copy { font-size: 1.125rem; }
     animation: none !important;
   }
 }
+
+/* Keep tablet chat composers above the floating navigation dock. */
+@media (pointer: coarse) and (min-width: 768px) and (max-width: 1279.98px),
+       (min-width: 768px) and (max-width: 1023.98px) {
+  .scoped-mobile-chat-panel { padding-bottom: calc(5.25rem + env(safe-area-inset-bottom, 0px)); }
+}
+
+.tablet-console-frame[data-mobile-keyboard-open="true"] .scoped-mobile-chat-panel { padding-bottom: 0; }

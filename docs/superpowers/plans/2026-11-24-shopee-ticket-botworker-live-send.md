@@ -14,14 +14,16 @@
 
 - The new switch defaults OFF and is checked on the server for every live send attempt.
 - Only `/api/admin/conversations/[conversationId]/send`, `/api/botworker/conversations/[conversationId]/send`, and `/api/botworker/conversations/[conversationId]/review` may use this switch.
+- Enforce the existing page permission matrix at all three send-capable routes: `ticket` for Tickets and `botworker` for BotWorker composer/review. A page URL or client header is not an authorization proof; users with page access can still call their permitted route directly.
 - Configure the switch in the existing `/config` page, but limit its effect to send actions initiated from Tickets and BotWorker. `/shadow-inbox`, Test Chat, Replay, Workflow/other send routes, TikTok, and Lazada keep their current behavior and do not consult it.
-- When OFF, Tickets keeps its existing internal-only message record, BotWorker's manual composer keeps its sandbox-only behavior, and BotWorker review keeps its existing mock/no-customer-delivery behavior. All three paths make zero Shopee requests.
+- When OFF, Tickets keeps its existing internal-only message record, BotWorker's manual composer keeps its sandbox-only behavior, and BotWorker review keeps its existing mock/no-customer-delivery behavior. All three paths make zero Shopee requests. Media pickers may open and preview local files or public sticker images while OFF, but their Send action is blocked in the composer and the server routes still reject live delivery.
 - When ON, a send action initiated from either page may send supported content to the Shopee customer. BotWorker AI drafts still require the existing explicit admin action; the switch never auto-sends a draft. Reject never sends.
 - BotWorker stores the draft in `shadow_replies` before review; only the existing admin send/edit-and-send actions may invoke live delivery; reject never sends.
 - Preserve `review_bubbles` decision, order, authorization, and idempotency contracts; keep original bot text immutable and record the final provider-confirmed text and receipt separately.
 - Tests use a fake transport and must make zero requests to Shopee. Do not enable the switch, send a canary message, or deploy as part of implementation.
 - Do not read `.env` or `มาแล้วจ้า.md`; obtain credentials only through an existing approved server-side credential owner.
 - Keep the existing globally locked `shopee_live_send_enabled` field unavailable to other routes; the scoped control is a separate, audited setting.
+- Sticker UI reads the documented public live-TH manifest and pack JSON through a read-only authenticated catalog route; admin selects the thumbnail, and only a separate Send click submits its validated package/sticker IDs. The catalog route does not call Shopee sellerchat OpenAPI or access tokens.
 - Implement in a clean worktree/branch from `main`; the current checkout has unrelated uncommitted v4/8010 changes.
 - Implement text, image, video, sticker, product card, and any additional send type only when the official Shopee contract verifies its payload, upload prerequisites, recipient identity, and receipt behavior. Unsupported types fail closed with a visible reason; never silently downgrade them to text.
 
@@ -123,3 +125,11 @@
 ## Approval Boundary
 
 The repository's current Iron Rule says platform live sending stays hard-disabled and the global send field cannot be changed through the UI. This request requires a deliberate, narrow exception for the three named server routes, limited to the Tickets and BotWorker pages. Approval of this plan authorizes implementing that scoped capability with the new switch default OFF; it does not authorize turning it ON, sending a real message, using unverified media payloads, deploying, or changing other pages.
+
+## User contract addendum — 2026-11-24
+
+- Obtain the shop access token server-to-server from Sellcenter `GET /api/shopee/token`; use the conversation's `shop_id`. The token exists only for the current request in server memory. Never cache, persist, log, return, or display it.
+- Authenticate to Sellcenter with a server-only service token. Sign Shopee requests with the server-only partner key already configured for the runtime. Never expose either credential in browser code, API responses, logs, DB records, or error strings.
+- Outbound messages use `POST /api/v2/sellerchat/send_message`. Image/video use the documented upload endpoints first; video delivery uses the user-confirmed video URL. No call is made during this implementation.
+- The user explicitly forbids all tests, builds, lint, smoke checks, and real Shopee sends. Do not add or run test scripts; leave the new switch OFF. Implementation status must be reported as untested for the user's own verification.
+- Required operational setup is external to code: Sellcenter service token with `shopee:token:read` and caller IP allowlist, plus Shopee's source IP allowlist.

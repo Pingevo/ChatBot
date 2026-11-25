@@ -18,7 +18,7 @@ import { toast, useToastError } from "@/components/ui/Toast";
 import { api } from "@/lib/apiClient";
 import { useAuth } from "@/lib/authStore";
 import { usePolling } from "@/lib/usePolling";
-import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory, AdminUser, Platform } from "@/lib/types";
+import type { Conversation, ChatMessage, ChatSendInput, CloseHistoryRecord, ProblemCategory, AdminUser, Platform } from "@/lib/types";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -363,11 +363,12 @@ export default function LiveAssignmentPage() {
   );
 
   const handleSend = useCallback(
-    async (text: string) => {
+    async (payload: ChatSendInput) => {
       if (!selectedId) return;
+      if (payload.type !== "text") { toast.error("หน้านี้รองรับเฉพาะข้อความ"); return; }
       setSending(true);
       try {
-        await sendInternal(text, false);
+        await sendInternal(payload.text, false);
         toast.success("ส่งคำตอบแล้ว");
       } catch {
         // ignore
@@ -721,6 +722,7 @@ export default function LiveAssignmentPage() {
             conversation={selected}
             messages={messages}
             onSend={handleSend}
+            liveSendEnabled={false}
             onHandoff={handleHandoff}
             onResolve={handleResolve}
             onReopen={handleReopen}

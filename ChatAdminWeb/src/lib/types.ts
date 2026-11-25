@@ -90,6 +90,8 @@ export interface ChatMessage {
   // Rich media — ดึงจาก raw_payload.data.content
   message_type?: MessageType;
   media?: MessageMedia;
+  delivery_status?: "internal" | "sent" | "failed" | "unknown";
+  provider_message_id?: string;
   order_sn?: string;          // สำหรับ message_type=order
   notification_text?: string; // สำหรับ message_type=notification
   table?: MessageTable;       // สำหรับ structured content (variation_card)
@@ -98,6 +100,12 @@ export interface ChatMessage {
   // Derived — ไม่ได้มาจาก sellcenter โดยตรง
   replied?: boolean;          // user message: มี admin/bot ตอบแล้วไหม (derive จาก timestamp)
 }
+
+export type ChatSendInput =
+  | { type: "text"; text: string; request_id: string }
+  | { type: "image" | "video"; file: File; request_id: string }
+  | { type: "sticker"; sticker_id: string; sticker_package_id: string; request_id: string }
+  | { type: "item"; item_id: string; request_id: string; text?: string };
 
 export interface ProductCard {
   item_id: string;
@@ -122,6 +130,8 @@ export interface Conversation {
   last_message: string;
   last_timestamp: string; // ISO
   unread: number;
+  pin_global?: boolean;
+  pin_personal?: boolean;
   assigned_to?: string; // admin id
   assigned_to_name?: string; // admin display name (lookup)
   replay_verdict?: string; // live-assignment replay result — display only, not current state

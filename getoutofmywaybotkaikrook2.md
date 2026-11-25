@@ -15079,3 +15079,72 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 ## ผ่านแล้ว — official Shopee Chat contract retrieval (2026-11-24)
 - ค้น official domain รอบเพิ่มพบหน้าเอกสารทั่วไปและลิงก์เอกสารอัปโหลดวิดีโอ แต่ผลค้นหาไม่แสดง API method/payload ของการส่ง chat, media/sticker, receipt หรือ idempotency; การเปิด docs ถูกปฏิเสธ 403 ตาม audit ก่อนหน้า
 - ข้อสรุป A-370 ไม่เปลี่ยน: ต้องมีเอกสาร/SDK ที่อ่านได้และยืนยัน credential owner ก่อนผูก production sender; ไม่แก้ source/config, ไม่รัน tests, ไม่เรียก DB/provider และไม่ส่งลูกค้าจริง
+
+## 2026-11-24 — Shopee Tickets/BotWorker send — pre-work
+- Branch `codex/shopee-ticket-botworker-live-send` is checked out in `/Users/itdev4/Documents/GitHub/ChatBotProductMS` at merged-main `9ae8419`; checkout is clean. The Codex worktree is detached at the same commit.
+- Root cause from route audit: Tickets writes internal messages only; BotWorker composer writes sandbox messages only; BotWorker review injects the mock sender. There is no shared live sender or scoped switch.
+- Planned correction: add a separate default-OFF setting enforced only by Tickets send, BotWorker composer send, and BotWorker review send/edit-and-send. Keep drafts first, rejection non-sending, and all other routes unchanged.
+- Credential contract: use documented Sellcenter `GET /api/shopee/token` server-to-server; access token is request-scoped memory only, never cached, persisted, logged, returned, or displayed. Derive shop/recipient identity from the server conversation record. No token endpoint or Shopee API request has been called.
+- Media contract: use documented image/video upload prerequisites and `send_message`; video content uses the user-confirmed video URL. Sticker/item-card payloads use documented typed content. Do not silently downgrade unsupported content.
+- User explicitly forbids tests and real sends; leave switch OFF, perform no test/build/lint/smoke, and report implementation as unverified until the user tests it.
+- Audit limitation: waythrough ledger coverage remains partial; prior active baseline is verified at 15081 lines. No new historical ranges were read in this round.
+
+## 2026-11-25 — Shopee scoped live send — static correction, unverified
+- Continued on local branch `codex/shopee-ticket-botworker-live-send` in the original checkout; switch remains default OFF and was not enabled. No commit, PR, test/build/lint/smoke, token request, upload, or customer send was performed.
+- Static review found the wrong normalized sticker/item field names in Tickets history, optional mode headers, a BotWorker card reject/send race, Next patched-fetch exposure of token-bearing URLs, and ambiguous provider success handling.
+- Corrected field names; required matching switch-mode header for Shopee send actions; persisted `live_sending` before card dispatch and blocked concurrent bubble changes; moved signed Shopee requests to Node HTTPS; required HTTP success and provider message ID; kept uncertain results non-retryable; bounded video status polling.
+- Mechanism delta for this correction: helpers +2 (`_requestShopee`, `_multipartFile`), guards strengthened for send mode/provider confirmation/card in-flight; regex and keyword tables +0; decision owners +0. The shared outbound owner and existing review owner remain responsible for behavior.
+- Evidence is source inspection only. User forbids all automated tests and real calls, so TypeScript/runtime behavior, Shopee response format, Vercel duration, and end-to-end delivery remain unverified; user-run testing is pending. Historical ledger semantic coverage remains partial.
+
+## 2026-11-25 — Restrict scoped Shopee send routes — pre-work
+- Root cause: the three send-capable API routes use `requireAuth`, so a logged-in user without access to Tickets/BotWorker can invoke them directly when the switch is ON. UI placement and mode header do not authorize a page.
+- Plan: enforce existing page-access matrix in Tickets send (`ticket`), BotWorker composer send (`botworker`), and BotWorker review (`botworker`), retaining designated review-admin/shop checks and default BotWorker read-role behavior. No new sender or page routes.
+- User approved correction. Switch stays OFF; no tests/build/lint/provider calls/customer sends under the standing user instruction.
+- Static correction: all three send-capable routes now use the existing page-access matrix (`ticket` or `botworker`) before request processing. Review retains the designated admin/shop fence; BotWorker read-role access is intentionally preserved to avoid changing its prior composer behavior.
+- Scope limit: browser page origin is not an authorization primitive. Users authorized for one of these pages can call that page's API directly; other pages have no new sender callsite. This is page-permission enforcement, not a cryptographic proof of which UI initiated the request.
+- No tests/build/lint/real API calls/customer sends were run per user instruction. No commit or PR. Runtime and permission-matrix behavior remain unverified until user-run checks; default switch remains OFF and was not toggled.
+
+## 2026-11-25 — Visual Shopee sticker picker — pre-work
+- Root cause: the shared composer exposes manual package/sticker ID fields; the user requested image selection. A sticker ID is transport metadata, not a usable admin control.
+- Plan: read the documented public live-TH sticker manifest and pack JSON through one read-only server endpoint; show pack tabs and sticker thumbnails in the existing shared composer; submit the selected pid/sid to the existing scoped sender. Preserve switch OFF and fail clearly if catalog data cannot be read. No customer send or token calls.
+- Contract limit: the supplied pack-JSON example is an image without machine-readable schema. Parse only validated sid/ext entries and never invent IDs. No tests/build/lint/provider/CDN calls during development per user instruction.
+- Implementation: added a read-only authenticated catalog route for the documented public live-TH manifest and per-pack JSON; the shared Tickets/BotWorker composer now shows pack tabs and actual sticker thumbnails, requires an image selection, and sends only after the separate Send click. Removed manual ID fields. No new customer-send path was added.
+- Catalog parsing accepts only validated pid/sid/ext entries; if Shopee changes the undocumented pack JSON shape, the picker shows a clear empty/error state and cannot submit an invented sticker ID. The switch must be ON to open the picker; OFF remains default.
+- Mechanism delta for this correction: helpers +2 in the catalog route (`_catalogJson`, `_packs`, `_stickers` = 3) plus 2 UI loaders (`openStickerPicker`, `chooseStickerPack`); guards +validated pack/ID/extension/region, regex +2 for ID and extension validation, keyword tables +0, decision owners +0. No token or signed Shopee URL is used by the catalog route.
+- No tests/build/lint, CDN/catalog calls, token calls, uploads, or real customer sends were performed per user instruction. Actual catalog schema/CORS, rendering, and provider delivery remain unverified for user-run testing. No commit or PR.
+
+## 2026-11-25 — Mobile/tablet chat composer overlap and media affordance — pre-work
+- Screenshot shows Tickets composer behind the fixed tablet dock at 789px; CSS reserves dock padding in `main`, but the chat panel uses full-height nested flex and still reaches the viewport bottom. Shared composer buttons are disabled by `canSendMedia` whenever the send switch is OFF.
+- Plan: reserve dock space inside the two chat panels at phone/tablet breakpoints; let admins choose/preview media while OFF, but block submit before any send call and state clearly that sending requires the switch ON. Keep all three server routes fail-closed. No provider/customer calls or automated tests per user instruction.
+- Static correction: added phone/tablet dock clearance to the Tickets and BotWorker chat panels, with keyboard-open override. Shared composer now allows selecting image/video/sticker while the live switch is OFF, shows local image/video preview, keeps media Send disabled, and blocks off-mode media submit before any route call.
+- Mechanism delta: helper functions +0, safety guard +1 in composer submit, regex/keyword tables +0, decision owners +0. Server send gates and default-OFF config unchanged.
+- Evidence is source inspection plus the user's annotated 789px screenshot; no browser/test/build/lint/provider/CDN/customer-send operation was run per standing user instruction. Visual runtime confirmation remains for the user. No commit or PR.
+
+## 2026-11-25 — Restore phone chat layout — pre-work
+- User requests phone layout return to prior behavior. Scope: remove only the newly added phone-width chat-panel dock padding; retain tablet-width dock clearance and scoped send safety. No tests or provider calls.
+- Removed the new `max-width: 767.98px` scoped chat-panel padding; phone layout returns to its prior spacing. Tablet dock clearance at 768–1279px remains. No sender logic or switch state changed.
+- Source inspection only; no browser/test/build/lint/provider/customer operation per user instruction. No commit or PR.
+
+## 2026-11-25 — Inbox pagination, server filters, recipient counts and pins — pre-work
+- User approved continuing on codex/shopee-ticket-botworker-live-send and instructed committing the prior Shopee send checkpoint first; commit eddb10e was made without tests or provider calls as previously required.
+- Root causes from source: BotWorker head poll clears tail every 3 seconds; ChatList applies shop/platform/status/message/sort to only loaded rows; available shop choices derive from loaded rows; recipient selection reaches API but combined client filters and badge counts do not represent the full query. Tickets and BotWorker use different status metadata owners.
+- Plan: keep pagination state across head polls, move complete filters and ordering before DB limit, derive per-recipient and pending handoff counts from correct status owner, add private/global pin UI and durable metadata independent of imported conversation dump. Preserve page permissions and no Shopee sends. Prior user prohibition on tests/provider calls remains in effect.
+- Historical ledger coverage is partial. Frozen and active prefix integrity matched before this task; source range through 15126 was indexed previously.
+
+
+## 2026-11-25 — Shop dropdown still displays transport IDs — pre-work
+- Root cause: `/api/conversation-shop-options` queries `shops.shop_id` with conversation IDs as strings and groups only one `$max shop_name`. This misses legacy `shops.shop_id=shopname` fallback rows (documented in earlier inventory) and mixed numeric/string IDs; many conversation rows also lack `shop_name`, so no alias can be recovered from the current projection.
+- Plan: gather all nonempty conversation `shop_name` candidates per `(platform, normalized transport shop_id)`; load registered shops for only the platforms in scope; resolve by normalized exact ID first, then `(platform, shopname)` alias, then a non-ID conversation name. Keep the returned transport shop ID for filtering; do not display raw IDs when no name can be resolved.
+- Impact: shop option API and dropdown labels only. No writes to MongoDB, provider/token/CDN requests, customer sends, or automated tests. Historical ledger coverage remains partial.
+
+- Follow-up finding from read-only local GETs: `/api/conversation-shop-options?scope=tickets` now returns registered/conversation names for mapped pairs, but three Shopee pairs still resolve only to the generic label `ไม่ทราบชื่อร้าน`: 258491064, 530326507, 80878682. Targeted historical census at lines 5769–5780 records these exact pairs as having no shop name and no product rows; no authoritative local name mapping exists to display for them. `/api/shops?platform=shopee` also has no matching directory rows. No customer data, provider APIs, or writes were accessed.
+
+- Public-name lookup for user candidates: Shopee Thailand profile `https://shopee.co.th/shop/530326507` resolves to `binnifaofficialstore`, confirming BinnifaOfficialStore for 530326507. Profiles for 258491064 and 80878682 display Shopee's removed/suspended message; direct profile lookup cannot confirm LuckyHomeMart or SuperAudio. Local `shops` has LuckyHomeMart and BinnifaOfficialStore only as name-fallback IDs; no pair mapping for these orphan conversation IDs. No mapping was written.
+
+- User decision: do not add any shop-name mappings for 258491064, 530326507, or 80878682; keep these three unresolved. No DB update or hard-coded alias was added.
+
+## 2026-11-25 — Inbox full-query filters, pins, recipient counts and shop names — closeout
+- Implemented database-side filter/sort/pagination for Tickets and BotWorker; BotWorker head refresh now retains loaded tail rows. Added private/global conversation pins, server-side recipient counts, and shop options resolved through normalized shop IDs/name aliases. Existing unknown shop IDs 258491064, 530326507, and 80878682 remain without mappings per user decision.
+- Updated relevant schemas and API metadata. Current branch: codex/shopee-ticket-botworker-live-send. User authorized committing the current branch changes.
+- Verification: source-only TypeScript diagnostics 0; `git diff --check` passed. `npm run` exposes no lint script. `npm run build` and `npm run build -- --webpack` both stop at `.next/trace*` with EPERM before compilation. No automated tests, UI runtime checks, database writes, provider calls, or customer sends were performed.
+- Runtime behavior, full build, visual pin/filter behavior, and provider-send paths remain unverified; commit records source state only.

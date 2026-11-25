@@ -107,6 +107,7 @@ async function fetchHead(
         timeout: 15000,
       }
     );
+    if (store.filterKey !== filterKey) return;
     const rows = Array.isArray(r.data) ? r.data : (r.data.rows || []);
     const totalCount = Array.isArray(r.data) ? rows.length : (r.data.total_count ?? 0);
     const hasMore = Array.isArray(r.data) ? false : (r.data.has_more ?? false);
@@ -120,15 +121,21 @@ async function fetchHead(
     });
     // ⚡ merge head — ถ้ามี tail อยู่ ให้เอา head ใหม่ แล้วตัด tail ที่ซ้ำกับ head ออก
     const headIds = new Set(deduped.map((c) => c.id));
-    const newTail = store.tail.filter((c) => !headIds.has(c.id));
+    const candidates = store.tail.length ? [...store.head, ...store.tail] : [];
+    const tailIds = new Set<string>();
+    const newTail = candidates.filter((c) => {
+      if (headIds.has(c.id) || tailIds.has(c.id)) return false;
+      tailIds.add(c.id);
+      return true;
+    });
     setStore({
       head: deduped,
       tail: newTail,
       totalCount,
-      hasMore,
-      cursor,
+      hasMore: newTail.length ? store.hasMore : hasMore,
+      cursor: newTail.length ? store.cursor : cursor,
       loading: false,
-      loadingMore: false,
+      loadingMore: store.loadingMore,
       error: null,
       lastFetch: Date.now(),
       filterKey,
@@ -160,6 +167,7 @@ async function fetchTail(
         timeout: 15000,
       }
     );
+    if (store.filterKey !== filterKey) return;
     const rows = Array.isArray(r.data) ? r.data : (r.data.rows || []);
     const hasMore = Array.isArray(r.data) ? false : (r.data.has_more ?? false);
     const cursor = Array.isArray(r.data) ? null : (r.data.cursor ?? null);
@@ -189,6 +197,7 @@ export interface ConversationFilter {
   status?: string;
   shop?: string;
   q?: string;
+  filters?: string;
   pageSize?: number; // ⚡ จำนวนต่อ page (default 50)
   // ⚡ backward compat — หน้าเก่าส่ง limit มา แต่ตอนนี้ใช้ pageSize แทน
   limit?: number;
@@ -201,6 +210,7 @@ function buildFilterKey(filter: ConversationFilter): string {
     filter.status || "",
     filter.shop || "",
     filter.q || "",
+    filter.filters || "",
     String(filter.pageSize || filter.limit || 200),
   ].join("|");
 }
@@ -212,6 +222,7 @@ function buildFilterParams(filter: ConversationFilter): Record<string, string> {
   if (filter.status) params.status = filter.status;
   if (filter.shop) params.shop = filter.shop;
   if (filter.q) params.q = filter.q;
+  if (filter.filters) params.filters = filter.filters;
   return params;
 }
 

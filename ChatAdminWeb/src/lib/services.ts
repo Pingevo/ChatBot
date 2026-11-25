@@ -6,6 +6,7 @@ import { api } from "./apiClient";
 import type {
   Conversation,
   ChatMessage,
+  ChatSendInput,
   Ticket,
   KnowledgeEntry,
   TriggerRule,
@@ -13,6 +14,36 @@ import type {
   Platform,
   CloseHistoryRecord,
 } from "./types";
+
+export interface ChatSendResponse {
+  ok: boolean;
+  message?: ChatMessage;
+  assigned_to?: string | null;
+  conflict?: boolean;
+  delivery_status?: "internal" | "sent" | "failed" | "unknown";
+  message_text?: string;
+}
+
+export function newChatRequestId(): string {
+  return typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().replaceAll("-", "")
+    : `ui_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function postOutboundChat(path: string, payload: ChatSendInput, force = false, expectedLiveSendEnabled?: boolean) {
+  if ("file" in payload) {
+    const form = new FormData();
+    form.set("request_id", payload.request_id);
+    form.set("type", payload.type);
+    form.set("file", payload.file, payload.file.name);
+    if (force) form.set("force", "true");
+    const headers: Record<string, string> = { "Content-Type": "multipart/form-data" };
+    if (expectedLiveSendEnabled !== undefined) headers["x-shopee-send-mode"] = expectedLiveSendEnabled ? "on" : "off";
+    return api().post<ChatSendResponse>(path, form, { headers, timeout: 120_000 }).then((r) => r.data);
+  }
+  const headers = expectedLiveSendEnabled === undefined ? {} : { "x-shopee-send-mode": expectedLiveSendEnabled ? "on" : "off" };
+  return api().post<ChatSendResponse>(path, { ...payload, force }, { headers }).then((r) => r.data);
+}
 
 // ---- Auth (re-export from authService.ts) ----
 export { authService } from "./authService";
@@ -46,6 +77,8 @@ export const chatService = {
       `/admin/conversations/${id}/send`,
       { text, force }
     ).then((r) => r.data),
+  sendPart: (id: string, payload: ChatSendInput, force?: boolean, expectedLiveSendEnabled?: boolean) =>
+    postOutboundChat(`/admin/conversations/${id}/send`, payload, force, expectedLiveSendEnabled),
   assign: (id: string, adminId: string) =>
     api().post(`/admin/conversations/${id}/assign`, { admin_id: adminId }).then((r) => r.data),
   resolve: (id: string) =>

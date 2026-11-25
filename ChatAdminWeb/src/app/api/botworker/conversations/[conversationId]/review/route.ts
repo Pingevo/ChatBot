@@ -1,14 +1,16 @@
-// POST /api/botworker/conversations/:id/review — per-bubble human review (mock send)
+// POST /api/botworker/conversations/:id/review — per-bubble human review
 // body: { reply_id, bubble_id, action, edited_text?, card_item_id?, operation_id, updated_at? }
 //   action: save | approve | save_and_approve | reject | send_card
-// ⛔ mock only — ไม่ยิง Shopee, ไม่เขียน messages_shp; identity ทั้งหมด server-derived
+// Live Shopee delivery is available only through the scoped config switch; identity is server-derived.
 export const dynamic = "force-dynamic";
 import { NextRequest } from "next/server";
-import { requireAuth } from "@/backend/middleware/authorize";
+import { requirePageAccess } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { getSystemConfig } from "@/backend/service/systemConfigService";
 import { applyReviewAction, type ReviewAction } from "@/backend/service/reviewService";
 import { sendMockPart } from "@/backend/service/mockSendService";
+import { conversationService } from "@/backend/service/conversationService";
+import { isShopeeConsoleSendEnabled, outboundMessageId, sendShopeeMessage } from "@/backend/service/shopeeOutboundService";
 
 const ACTIONS: ReviewAction[] = ["save", "approve", "save_and_approve", "reject", "send_card"];
 const CODE_STATUS: Record<string, number> = {
@@ -19,7 +21,7 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ conversationId: string }> }
 ) {
-  const r = await requireAuth(req);
+  const r = await requirePageAccess(req, "botworker");
   if (!r.ok) return r.response;
 
   const { conversationId } = await params;
@@ -42,6 +44,47 @@ export async function POST(
     return error("human review pilot not configured", 403);
   }
 
+  const liveSendEnabled = await isShopeeConsoleSendEnabled();
+  const expectedMode = req.headers.get("x-shopee-send-mode");
+  const actionCanSend = body.action === "approve" || body.action === "save_and_approve" || body.action === "send_card";
+  if (actionCanSend) {
+    const conversation = await conversationService.getConversation(conversationId);
+    if (conversation?.platform === "shopee" && expectedMode !== (liveSendEnabled ? "on" : "off")) {
+      return error("สถานะสวิตช์ส่งจริงเปลี่ยนแล้ว กรุณารีเฟรชหน้าก่อนอนุมัติ", 409);
+    }
+  }
+  const liveSender = liveSendEnabled ? async (part: {
+    eventId: string; replyId: string; bubbleId: string;
+    part: "text" | "product_card"; text?: string; item_id?: string;
+    conversationId: string; shopId: string; platform: string;
+    actor: string; inboundMessageId?: string;
+  }) => {
+    if (part.platform !== "shopee") {
+      const receipt = await sendMockPart(part);
+      return { state: "mock_sent" as const, request_id: part.eventId, receipt };
+    }
+    const input = part.part === "product_card"
+      ? { type: "item" as const, itemId: part.item_id }
+      : { type: "text" as const, text: part.text };
+    try {
+      const result = await sendShopeeMessage({ conversationId: part.conversationId, requestId: outboundMessageId(part.eventId), input });
+      if (result.state === "sent") {
+        return {
+          state: "live_sent" as const,
+          request_id: part.eventId,
+          receipt: { provider: "shopee" as const, delivered: true as const, request_id: part.eventId, provider_message_id: result.providerMessageId },
+        };
+      }
+      return {
+        state: result.state === "unknown" ? "live_unknown" as const : "live_failed" as const,
+        request_id: part.eventId,
+        error: result.state === "unknown" ? "delivery_unknown" : result.code,
+      };
+    } catch {
+      return { state: "live_unknown" as const, request_id: part.eventId, error: "delivery_unknown" };
+    }
+  } : undefined;
+
   const outcome = await applyReviewAction({
     conversationId,
     replyId: body.reply_id,
@@ -55,6 +98,7 @@ export async function POST(
     designatedShopId,
     expectedUpdatedAt: body.updated_at,
     mockSender: sendMockPart,
+    liveSender,
   });
 
   if (!outcome.ok) {

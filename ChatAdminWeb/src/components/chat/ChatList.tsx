@@ -5,15 +5,26 @@ import { useState, useMemo, useEffect, useRef, useCallback } from "react";
 import { Avatar } from "@/components/ui/Avatar";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
-import { Search, ChevronDown, Check, X, ArrowDownUp, MessageSquare, Trash2, RotateCcw } from "lucide-react";
+import { Search, ChevronDown, Check, X, ArrowDownUp, MessageSquare, Trash2, RotateCcw, Pin } from "lucide-react";
 import type { Conversation, Platform, AdminUser } from "@/lib/types";
 import { formatDateLabel } from "@/components/shadow/DateBanner";
 import { AnnotationDot, type Annotation } from "@/components/ui/AnnotationDot";
 import { ModalLayer } from "@/components/ui/ModalLayer";
 import { useFocusTrap } from "@/lib/useKeyboardShortcuts";
 import { PageIdentityMark } from "@/components/ui/PageIdentityMark";
+import { api } from "@/lib/apiClient";
+
+export interface InboxListFilters {
+  platforms: Platform[];
+  shops: string[];
+  chatStatus: "all" | "bot" | "handoff" | "closed";
+  msgStatus: "all" | "unread" | "read" | "unreplied";
+  sort: "recent" | "oldest" | "name";
+}
 
 interface Props {
+  onListFiltersChange?: (filters: InboxListFilters) => void;
+  onPinChanged?: () => void | Promise<void>;
   conversations: Conversation[];
   selectedId: string | null;
   onSelect: (id: string) => void;
@@ -26,6 +37,8 @@ interface Props {
   togglingAccept?: boolean;
   // ⚡ total count จริงจาก DB (ไม่จำกัดด้วย limit) — ถ้าไม่ส่ง จะใช้ filtered.length
   totalCount?: number;
+  assignmentCountScope?: "tickets" | "botworker";
+  currentAdminId?: string;
   // ⚡ server-side search — เมื่อส่ง callback นี้ จะใช้ server search แทน client filter
   //   ทำให้เจอแชทที่อยู่นอก 2000 ล่าสุด (เช่น ลูกค้าคนเดียวทักหลายร้าน)
   onSearchChange?: (search: string) => void;
@@ -65,7 +78,7 @@ const msgStatusOptions: { value: MsgStatusFilter; label: string }[] = [
   { value: "unreplied", label: "ยังไม่ตอบ" },
 ];
 
-type SortOption = "recent" | "oldest" | "unread" | "name";
+type SortOption = "recent" | "oldest" | "name";
 
 const sortOptions: { value: SortOption; label: string }[] = [
   { value: "recent", label: "ใหม่ล่าสุด" },
@@ -126,6 +139,10 @@ export function ChatList({
   onToggleAccepting,
   togglingAccept = false,
   totalCount,
+  assignmentCountScope,
+  currentAdminId,
+  onListFiltersChange,
+  onPinChanged,
   onSearchChange,
   loading = false,
   annotationsMap,
@@ -138,6 +155,26 @@ export function ChatList({
   loadingMore = false,
 }: Props) {
   const [search, setSearch] = useState("");
+  const [assignmentCounts, setAssignmentCounts] = useState<{
+    total: number; pending: number; by_admin: Record<string, number>;
+  } | null>(null);
+  useEffect(() => {
+    if (!assignmentCountScope) return;
+    let active = true;
+    const refresh = async () => {
+      try {
+        const r = await api().get<{ total: number; pending: number; by_admin: Record<string, number> }>(
+          "/conversation-assignment-counts", { params: { scope: assignmentCountScope } }
+        );
+        if (active) setAssignmentCounts(r.data);
+      } catch {
+        if (active) setAssignmentCounts(null);
+      }
+    };
+    void refresh();
+    const timer = setInterval(refresh, 15000);
+    return () => { active = false; clearInterval(timer); };
+  }, [assignmentCountScope]);
   // ⚡ server-side search debounce — ถ้ามี onSearchChange จะส่งไป API แทน client filter
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const handleSearchChange = useCallback((value: string) => {
@@ -161,22 +198,64 @@ export function ChatList({
   const [showChatStatusDropdown, setShowChatStatusDropdown] = useState(false);
   const [showMsgStatusDropdown, setShowMsgStatusDropdown] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
+  const [pinTarget, setPinTarget] = useState<Conversation | null>(null);
+  const [pinBusy, setPinBusy] = useState(false);
+  const [pinError, setPinError] = useState("");
+  const updatePin = async (visibility: "private" | "everyone", pinned: boolean) => {
+    if (!pinTarget || !assignmentCountScope || pinBusy) return;
+    setPinBusy(true);
+    setPinError("");
+    try {
+      await api().patch("/conversation-pins", {
+        scope: assignmentCountScope, conversation_id: pinTarget.id, visibility, pinned,
+      });
+      await onPinChanged?.();
+      setPinTarget(null);
+    } catch {
+      setPinError("บันทึกหมุดไม่สำเร็จ กรุณาลองอีกครั้ง");
+    } finally {
+      setPinBusy(false);
+    }
+  };
+  const [directoryShops, setDirectoryShops] = useState<{ id: string; name: string; platform: Platform }[]>([]);
+  useEffect(() => {
+    if (!onListFiltersChange) return;
+    let active = true;
+    api().get<{ rows: { shop_id: string; shopname: string; platform: Platform }[] }>("/conversation-shop-options", { params: { scope: assignmentCountScope } })
+      .then((r) => {
+        if (active) setDirectoryShops((r.data.rows || []).map((shop) => ({
+          id: shop.shop_id, name: shop.shopname, platform: shop.platform,
+        })));
+      }).catch(() => { if (active) setDirectoryShops([]); });
+    return () => { active = false; };
+  }, [onListFiltersChange, assignmentCountScope]);
+  useEffect(() => {
+    onListFiltersChange?.({ platforms: [...platforms].sort(), shops: [...shops].sort(), chatStatus, msgStatus, sort });
+  }, [platforms, shops, chatStatus, msgStatus, sort, onListFiltersChange]);
 
   // ดึงรายชื่อร้านทั้งหมดจาก conversations (กรองตาม platform ที่เลือก)
   const availableShops = useMemo(() => {
-    const shopMap = new Map<string, { id: string; name: string; platform: Platform }>();
-    conversations.forEach((c) => {
-      if (platforms.size === 0 || platforms.has(c.platform)) {
-        const key = `${c.shop_id}|${c.platform}`;
-        if (!shopMap.has(key)) {
-          shopMap.set(key, { id: c.shop_id, name: c.shop_name, platform: c.platform });
-        }
+    const source = onListFiltersChange ? directoryShops : conversations.map((c) => ({
+      id: c.shop_id, name: c.shop_name, platform: c.platform,
+    }));
+    const groups = new Map<string, { name: string; platform: Platform; keys: string[] }>();
+    for (const shop of source) {
+      if (platforms.size && !platforms.has(shop.platform)) continue;
+      const groupKey = `${shop.platform}|${shop.name.trim().toLocaleLowerCase("th")}`;
+      const key = `${shop.id}|${shop.platform}`;
+      const group = groups.get(groupKey);
+      if (group) {
+        if (!group.keys.includes(key)) group.keys.push(key);
+      } else {
+        groups.set(groupKey, { name: shop.name, platform: shop.platform, keys: [key] });
       }
-    });
-    return Array.from(shopMap.values());
-  }, [conversations, platforms]);
+    }
+    return [...groups.values()].sort((a, b) => a.name.localeCompare(b.name, "th"));
+  }, [conversations, platforms, directoryShops, onListFiltersChange]);
+  const selectedShopOptions = availableShops.filter((shop) => shop.keys.every((key) => shops.has(key)));
 
   const filtered = useMemo(() => {
+    if (onListFiltersChange) return conversations;
     let result = conversations;
 
     // Platform filter (multi-select)
@@ -230,15 +309,12 @@ export function ChatList({
       case "oldest":
         sorted.sort((a, b) => new Date(a.last_timestamp).getTime() - new Date(b.last_timestamp).getTime());
         break;
-      case "unread":
-        sorted.sort((a, b) => b.unread - a.unread);
-        break;
       case "name":
         sorted.sort((a, b) => a.customer_name.localeCompare(b.customer_name, "th"));
         break;
     }
     return sorted;
-  }, [conversations, platforms, chatStatus, msgStatus, shops, search, sort]);
+  }, [conversations, platforms, chatStatus, msgStatus, shops, search, sort, onListFiltersChange]);
 
   // ⚡ Incremental rendering — โหลดทีละ 50 รายการ เพื่อลดการหน่วง
   //    เมื่อ filter/sort เปลี่ยน รีเซ็ตเป็น 50 รายการแรก
@@ -251,7 +327,7 @@ export function ChatList({
   const listRef = useRef<HTMLDivElement>(null);
   // track filter/sort signature — ถ้าเปลี่ยน → reset renderCount
   // ถ้าแค่ conversations เปลี่ยน (poll) → ไม่ reset (กัน scroll กระโดด)
-  const filterSignature = `${platforms.size}|${chatStatus}|${msgStatus}|${shops.size}|${search}|${sort}`;
+  const filterSignature = `${[...platforms].sort().join(",")}|${chatStatus}|${msgStatus}|${[...shops].sort().join(",")}|${search}|${sort}|${chatFilter}`;
   const prevFilterSigRef = useRef(filterSignature);
   useEffect(() => {
     if (prevFilterSigRef.current !== filterSignature) {
@@ -300,11 +376,14 @@ export function ChatList({
     });
   }
 
-  function toggleShop(key: string) {
+  function toggleShop(keys: string[]) {
     setShops((prev) => {
       const next = new Set(prev);
-      if (next.has(key)) next.delete(key);
-      else next.add(key);
+      const selected = keys.every((key) => next.has(key));
+      for (const key of keys) {
+        if (selected) next.delete(key);
+        else next.add(key);
+      }
       return next;
     });
   }
@@ -318,7 +397,7 @@ export function ChatList({
     if (onSearchChange) onSearchChange("");
   }
 
-  const activeFilterCount = platforms.size + (chatStatus !== "all" ? 1 : 0) + (msgStatus !== "all" ? 1 : 0) + shops.size;
+  const activeFilterCount = platforms.size + (chatStatus !== "all" ? 1 : 0) + (msgStatus !== "all" ? 1 : 0) + selectedShopOptions.length;
 
   return (
     <div className="mobile-chat-list w-full bg-surface flex flex-col h-full">
@@ -397,20 +476,21 @@ export function ChatList({
               >
                 <span className="text-text-subtle shrink-0">ผู้รับ:</span>
                 <span className="font-medium truncate" style={{ minWidth: "40px", maxWidth: "70px" }}>
-                  {chatFilter === "me" ? "ฉัน" : chatFilter === "all" ? "ทั้งหมด" : (admins.find((a) => a.admin_id === chatFilter)?.name || admins.find((a) => a.admin_id === chatFilter)?.username || chatFilter)}
+                  {chatFilter === "me" ? "ฉัน" : chatFilter === "all" ? "ทั้งหมด" : chatFilter === "pending_handoff" ? "รอจ่ายงาน" : (admins.find((a) => a.admin_id === chatFilter)?.name || admins.find((a) => a.admin_id === chatFilter)?.username || chatFilter)}
                 </span>
                 <ChevronDown size={10} className="text-text-muted shrink-0" />
               </button>
               {showAdminDropdown && (
                 <FilterMenu label="ผู้รับแชท" onClose={() => setShowAdminDropdown(false)}>
-                    <button onClick={() => { onChatFilterChange("me"); setShowAdminDropdown(false); }} className={`w-full text-left px-2.5 py-1.5 text-[11px] hover:bg-surface-2 ${chatFilter === "me" ? "text-brand font-medium" : "text-text"}`}>ฉัน</button>
-                    <button onClick={() => { onChatFilterChange("all"); setShowAdminDropdown(false); }} className={`w-full text-left px-2.5 py-1.5 text-[11px] hover:bg-surface-2 ${chatFilter === "all" ? "text-brand font-medium" : "text-text"}`}>ทั้งหมด</button>
+                    <button onClick={() => { onChatFilterChange("me"); setShowAdminDropdown(false); }} className={`w-full flex justify-between gap-2 text-left px-2.5 py-1.5 text-[11px] hover:bg-surface-2 ${chatFilter === "me" ? "text-brand font-medium" : "text-text"}`}><span>ฉัน</span><span>{currentAdminId ? assignmentCounts?.by_admin[currentAdminId] ?? 0 : "–"}</span></button>
+                    <button onClick={() => { onChatFilterChange("all"); setShowAdminDropdown(false); }} className={`w-full flex justify-between gap-2 text-left px-2.5 py-1.5 text-[11px] hover:bg-surface-2 ${chatFilter === "all" ? "text-brand font-medium" : "text-text"}`}><span>ทั้งหมด</span><span>{assignmentCounts?.total ?? "–"}</span></button>
+                    {assignmentCountScope && <button onClick={() => { onChatFilterChange("pending_handoff"); setShowAdminDropdown(false); }} className={`w-full flex justify-between gap-2 text-left px-2.5 py-1.5 text-[11px] hover:bg-surface-2 ${chatFilter === "pending_handoff" ? "text-brand font-medium" : "text-text"}`}><span>รอจ่ายงาน</span><span>{assignmentCounts?.pending ?? "–"}</span></button>}
                     {admins.length > 0 && (
                       <>
                         <div className="border-t border-border my-1" />
                         {admins.map((a) => (
-                          <button key={a.admin_id} onClick={() => { onChatFilterChange(a.admin_id); setShowAdminDropdown(false); }} className={`w-full text-left px-2.5 py-1.5 text-[11px] hover:bg-surface-2 ${chatFilter === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
-                            {a.name || a.username}
+                          <button key={a.admin_id} onClick={() => { onChatFilterChange(a.admin_id); setShowAdminDropdown(false); }} className={`w-full flex justify-between gap-2 text-left px-2.5 py-1.5 text-[11px] hover:bg-surface-2 ${chatFilter === a.admin_id ? "text-brand font-medium" : "text-text"}`}>
+                            <span>{a.name || a.username}</span><span>{assignmentCounts?.by_admin[a.admin_id] ?? 0}</span>
                           </button>
                         ))}
                       </>
@@ -487,8 +567,8 @@ export function ChatList({
           {/* Shop multi-select */}
           <Dropdown
             label="ร้าน"
-            displayLabel={shops.size === 0 ? "ทั้งหมด" : shops.size === 1 ? Array.from(shops)[0].split("|")[0] : `${shops.size} ร้าน`}
-            selectedCount={shops.size}
+            displayLabel={selectedShopOptions.length === 0 ? "ทั้งหมด" : selectedShopOptions.length === 1 ? selectedShopOptions[0].name : `${selectedShopOptions.length} ร้าน`}
+            selectedCount={selectedShopOptions.length}
             minLabelWidth={48}
             open={showShopDropdown}
             onToggle={() => { setShowShopDropdown(!showShopDropdown); setShowAdminDropdown(false); setShowPlatformDropdown(false); setShowSortDropdown(false); setShowChatStatusDropdown(false); setShowMsgStatusDropdown(false); }}
@@ -497,12 +577,12 @@ export function ChatList({
           >
             <div className="max-h-48 overflow-y-auto">
               {availableShops.map((s) => {
-                const key = `${s.id}|${s.platform}`;
+                const key = `${s.platform}|${s.name}`;
                 return (
                   <DropdownCheckItem
                     key={key}
-                    checked={shops.has(key)}
-                    onClick={() => toggleShop(key)}
+                    checked={s.keys.every((shopKey) => shops.has(shopKey))}
+                    onClick={() => toggleShop(s.keys)}
                   >
                     <PlatformIcon platform={s.platform} size={12} />
                     <span className="truncate">{s.name}</span>
@@ -576,6 +656,16 @@ export function ChatList({
                   <div className="flex items-center gap-1.5">
                     <span className="mobile-chat-customer-name text-sm font-medium text-text truncate flex-1 min-w-0">{c.customer_name}</span>
                     <span className="text-[10px] text-text-subtle shrink-0">{timeLabel(c.last_timestamp)}</span>
+                    {onPinChanged && (
+                      <button
+                        type="button"
+                        onClick={(e) => { e.stopPropagation(); setPinTarget(c); setPinError(""); }}
+                        onKeyDown={(e) => e.stopPropagation()}
+                        className={`inline-flex shrink-0 p-1 rounded hover:bg-surface-2 ${c.pin_personal || c.pin_global ? "text-brand" : "text-text-subtle"}`}
+                        aria-label={`ตั้งค่าปักหมุด ${c.customer_name}`}
+                        title={c.pin_personal ? "ปักหมุดเฉพาะฉัน" : c.pin_global ? "ปักหมุดทุกคน" : "ปักหมุดแชท"}
+                      ><Pin size={13} fill={c.pin_personal || c.pin_global ? "currentColor" : "none"} /></button>
+                    )}
                     {annotationsMap && onAnnotationsChange && (
                       <AnnotationDot
                         scope={annotationsScope}
@@ -624,6 +714,8 @@ export function ChatList({
                   <div className="mobile-chat-preview text-xs text-text-muted truncate mt-0.5">{c.last_message}</div>
                   <div className="flex items-center gap-1.5 mt-1">
                     <Badge tone={statusTone[c.status] || "neutral"}>{statusLabel[c.status] || c.status}</Badge>
+                    {c.pin_personal && <span className="text-[10px] text-brand">หมุดของฉัน</span>}
+                    {c.pin_global && <span className="text-[10px] text-brand">หมุดทุกคน</span>}
                     {c.replay_verdict && (
                       <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-2 text-text-muted truncate">
                         replay: {c.replay_verdict}
@@ -660,6 +752,24 @@ export function ChatList({
           </>
         )}
       </div>
+      {pinTarget && (
+        <ModalLayer className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4" onClick={() => { if (!pinBusy) setPinTarget(null); }}>
+          <div role="dialog" aria-modal="true" aria-label="ตั้งค่าปักหมุดแชท" className="w-full max-w-sm rounded-xl bg-surface p-4 shadow-xl" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <h3 className="font-semibold text-text">ปักหมุดแชท</h3>
+              <button type="button" onClick={() => setPinTarget(null)} disabled={pinBusy} aria-label="ปิด" className="text-text-muted"><X size={18} /></button>
+            </div>
+            <p className="text-sm text-text-muted mb-3 truncate">{pinTarget.customer_name} · {pinTarget.shop_name}</p>
+            <button type="button" disabled={pinBusy} onClick={() => void updatePin("private", !pinTarget.pin_personal)} className="w-full flex justify-between rounded-lg border border-border px-3 py-2 mb-2 text-sm text-left hover:bg-surface-2">
+              <span>เห็นเฉพาะฉัน</span><span>{pinTarget.pin_personal ? "ปลดหมุด" : "ปักหมุด"}</span>
+            </button>
+            <button type="button" disabled={pinBusy} onClick={() => void updatePin("everyone", !pinTarget.pin_global)} className="w-full flex justify-between rounded-lg border border-border px-3 py-2 text-sm text-left hover:bg-surface-2">
+              <span>เห็นทุกคน</span><span>{pinTarget.pin_global ? "ปลดหมุด" : "ปักหมุด"}</span>
+            </button>
+            {pinError && <p role="alert" className="mt-3 text-xs text-error">{pinError}</p>}
+          </div>
+        </ModalLayer>
+      )}
     </div>
   );
 }

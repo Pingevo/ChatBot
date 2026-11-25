@@ -24,6 +24,7 @@ interface SystemConfig {
   // Shopee — ล็อค false ถาวร
   shopee_live_read_enabled: boolean;
   shopee_live_send_enabled: boolean;
+  shopee_console_send_enabled: boolean;
   shopee_live_mark_read_enabled: boolean;
   shopee_live_pin_enabled: boolean;
   shopee_poll_enabled: boolean;
@@ -189,6 +190,7 @@ export default function ConfigPage() {
   async function handleSafeToggle(key: keyof SystemConfig, value: boolean) {
     if (!config) return;
     const labelMap: Record<string, string> = {
+      shopee_console_send_enabled: "ส่งจริงจาก Tickets / BotWorker",
       mock_mode_enabled: "Mock Mode",
       shadow_bot_enabled: "Shadow Bot",
       bot_worker_enabled: "Bot Worker (Auto)",
@@ -197,7 +199,9 @@ export default function ConfigPage() {
     const label = labelMap[key as string] || key;
     const ok = await confirm.ask({
       title: `${value ? "เปิด" : "ปิด"} ${label}?`,
-      message: `ยืนยันการเปลี่ยนแปลงค่า "${label}" เป็น ${value ? "เปิด" : "ปิด"}`,
+      message: key === "shopee_console_send_enabled" && value
+        ? "เมื่อเปิดแล้ว ปุ่มส่งใน Tickets และ BotWorker จะส่งข้อความถึงลูกค้าจริงผ่าน Shopee เท่านั้น ตรวจสอบแชทและร้านก่อนเปิด"
+        : `ยืนยันการเปลี่ยนแปลงค่า "${label}" เป็น ${value ? "เปิด" : "ปิด"}`,
       confirmText: "บันทึก",
     });
     if (!ok) return;
@@ -726,6 +730,30 @@ export default function ConfigPage() {
                     </div>
                   </div>
                 ))}
+              </div>
+            </Card>
+
+            {/* Scoped Shopee send — does not unlock the global platform switch. */}
+            <Card className="p-4 break-inside-avoid mb-4 border-warning/30">
+              <div className="flex items-center gap-2 mb-3">
+                <ShieldAlert size={14} className="text-warning" />
+                <h2 className="text-sm font-semibold text-text">ส่งจริงจาก Tickets / BotWorker</h2>
+                <Badge tone={config?.shopee_console_send_enabled ? "coral" : "neutral"} className="ml-auto">
+                  {config?.shopee_console_send_enabled ? "ส่งถึงลูกค้าจริง" : "ปิดอยู่"}
+                </Badge>
+              </div>
+              <div className="flex items-center justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-sm font-medium text-text">อนุญาตการส่งข้อความ Shopee</div>
+                  <div className="text-xs text-text-muted mt-1">
+                    ปิด: เก็บในระบบภายใน · เปิด: เฉพาะ Tickets และ BotWorker ส่งถึงลูกค้าจริง
+                  </div>
+                </div>
+                <ToggleSwitch
+                  enabled={config?.shopee_console_send_enabled === true}
+                  onChange={() => editable && handleSafeToggle("shopee_console_send_enabled", config?.shopee_console_send_enabled !== true)}
+                  disabled={saving || !editable}
+                />
               </div>
             </Card>
 

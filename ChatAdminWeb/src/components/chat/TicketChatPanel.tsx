@@ -1,9 +1,8 @@
 // TicketChatPanel — middle column: ticket metadata bar + chat history + composer (Zaapi-style)
 // This replaces the old ChatWindow for the /tickets route, combining ticket fields and chat.
 "use client";
-import { useState, useRef, useEffect, FormEvent } from "react";
+import { useState, useRef, useEffect } from "react";
 import {
-  Send,
   Bot,
   Headset,
   AlertCircle,
@@ -24,7 +23,8 @@ import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { quickReplyService, type QuickReplyRow } from "@/lib/services";
-import type { Conversation, ChatMessage, Topic } from "@/lib/types";
+import type { Conversation, ChatMessage, ChatSendInput, Topic } from "@/lib/types";
+import { ShopeeChatComposer } from "./ShopeeChatComposer";
 import { MessageContent } from "./MessageContent";
 import { DateSeparatedList } from "./DateSeparator";
 import { adminBubbleColor, adminBubbleStyle, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
@@ -224,6 +224,10 @@ function MessageBubble({ msg, customerName, customerAvatar }: { msg: ChatMessage
           {isZaapi && <Zap size={10} />}
           <span>{new Date(msg.timestamp).toLocaleTimeString("th-TH", { hour: "2-digit", minute: "2-digit" })}</span>
           {msg.source && <span className="opacity-60">· {msg.source}</span>}
+          {msg.delivery_status === "sent" && <span className="text-green-700">· Shopee ส่งแล้ว</span>}
+          {msg.delivery_status === "internal" && <span>· บันทึกภายใน</span>}
+          {msg.delivery_status === "unknown" && <span className="text-warning">· ผลส่งไม่ชัดเจน</span>}
+          {msg.delivery_status === "failed" && <span className="text-vibrant-coral">· ส่งไม่สำเร็จ</span>}
         </div>
       </div>
       {!isUser && !isSystem && (
@@ -334,7 +338,8 @@ function TransferDropdown({
 interface Props {
   conversation: Conversation | null;
   messages: ChatMessage[];
-  onSend: (text: string) => void;
+  onSend: (payload: ChatSendInput) => Promise<unknown> | void;
+  liveSendEnabled: boolean;
   onHandoff: () => void;
   onResolve: () => void;
   onReopen?: () => void;
@@ -352,6 +357,7 @@ export function TicketChatPanel({
   conversation,
   messages,
   onSend,
+  liveSendEnabled,
   onHandoff,
   onResolve,
   onReopen,
@@ -363,10 +369,8 @@ export function TicketChatPanel({
   onBack,
   onInfo,
 }: Props) {
-  const [text, setText] = useState("");
   const [quickReplies, setQuickReplies] = useState<QuickReplyRow[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
   // track ว่า user อยู่ใกล้ล่างไหม — ถ้าไม่ใช่ (กำลังเลื่อนขึ้นอ่าน) จะไม่ auto-scroll
   const wasNearBottomRef = useRef(true);
   // track conversation id เพื่อบังคับ scroll ลงล่างเมื่อเปลี่ยน conversation
@@ -435,22 +439,6 @@ export function TicketChatPanel({
       .then(setQuickReplies)
       .catch(() => setQuickReplies([]));
   }, [conversation?.platform, conversation?.shop_id]);
-
-  // ⚡ Phase 2E — กด quick reply แล้วส่งเลย (ไม่ต้องมาแอดใน textarea ก่อน)
-  function handleQuickReply(qr: QuickReplyRow) {
-    if (sending) return;
-    onSend(qr.body);
-    setText("");
-  }
-
-  function handleSubmit(e: FormEvent) {
-    e.preventDefault();
-    if (!text.trim() || sending) return;
-    onSend(text.trim());
-    setText("");
-    // ⚡ reset textarea height หลังส่ง
-    if (textareaRef.current) textareaRef.current.style.height = "auto";
-  }
 
   if (!conversation) {
     return (
@@ -575,55 +563,22 @@ export function TicketChatPanel({
       </div>
 
       {/* ── Composer ── */}
-      <form onSubmit={handleSubmit} className="mobile-chat-composer p-3 border-t border-border bg-surface shrink-0">
-        {/* ⚡ Quick replies — floating chips above text box (ไม่ใช่ dropdown ใหญ่) */}
-        {quickReplies.length > 0 && (
-          <div className="flex flex-wrap gap-1.5 mb-2 max-h-20 overflow-y-auto">
-            {quickReplies.map((qr) => (
-              <button
-                key={qr.quick_reply_id}
-                type="button"
-                onClick={() => handleQuickReply(qr)}
-                title={qr.body}
-                className="px-2.5 py-1 rounded-full border border-brand/30 bg-brand/5 text-xs text-brand hover:bg-brand/10 hover:border-brand/50 transition-colors whitespace-nowrap max-w-[160px] truncate"
-              >
-                {qr.title}
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="flex items-end gap-2">
-          <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={(e) => {
-              setText(e.target.value);
-              // ⚡ auto-expand — ขยายตามจำนวนบรรทัด (ไม่ scroll) สูงสุด 128px
-              const ta = e.target;
-              ta.style.height = "auto";
-              ta.style.height = `${Math.min(ta.scrollHeight, 128)}px`;
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSubmit(e as unknown as FormEvent);
-              }
-            }}
-            placeholder="พิมพ์ข้อความตอบลูกค้า..."
-            rows={1}
-            className="flex-1 resize-none min-h-[44px] max-h-[128px] rounded-xl border border-border bg-surface-2 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand overflow-hidden"
-          />
-          <Button type="submit" size="icon" aria-label="ส่งข้อความ" disabled={!text.trim() || sending}>
-            <Send size={16} />
-          </Button>
-        </div>
+      <div className="mobile-chat-composer">
+        <ShopeeChatComposer
+          key={conversation.id}
+          platform={conversation.platform}
+          liveSendEnabled={liveSendEnabled}
+          onSend={onSend}
+          quickReplies={quickReplies}
+          disabled={sending}
+        />
         {conversation.status === "handoff" && (
           <div className="mt-2 flex items-center gap-1.5 text-xs text-vibrant-coral">
             <AlertCircle size={12} />
             แชทนี้อยู่ในมือแอดมิน — บอทจะไม่ตอบอัตโนมัติ
           </div>
         )}
-      </form>
+      </div>
     </div>
   );
 }

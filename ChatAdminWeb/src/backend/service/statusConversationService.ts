@@ -35,6 +35,7 @@ export interface StatusConversationDoc {
   assignment_reason?: string | null;
   // other admin-owned fields
   pinned?: boolean;
+  pinned_by_admin_ids?: string[];
   topic?: string;
   item_ids?: string[];
   // ⚡ inbound lifecycle — message_id ของ inbound event ที่ชนะ CAS
@@ -78,6 +79,25 @@ export async function getMetaMap(conversationIds: string[]): Promise<Map<string,
   const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
   const docs = await coll.find({ conversation_id: { $in: conversationIds } }).toArray();
   return new Map(docs.map((d) => [d.conversation_id, d]));
+}
+
+/** ปักหมุดแชทส่วนตัวหรือทุกคนใน admin-owned status โดยไม่แก้ imported conversation */
+export async function setConversationPin(
+  conversationId: string,
+  adminId: string,
+  visibility: "private" | "everyone",
+  pinned: boolean,
+): Promise<void> {
+  const coll = await getCollection<StatusConversationDoc>(COLLECTIONS.statusConversation);
+  const filter = { conversation_id: conversationId };
+  const updated_at = new Date();
+  if (visibility === "everyone") {
+    await coll.updateOne(filter, { $set: { pinned, updated_at } }, { upsert: true });
+  } else if (pinned) {
+    await coll.updateOne(filter, { $addToSet: { pinned_by_admin_ids: adminId }, $set: { updated_at } }, { upsert: true });
+  } else {
+    await coll.updateOne(filter, { $pull: { pinned_by_admin_ids: adminId }, $set: { updated_at } });
+  }
 }
 
 /** upsert meta — ใช้สำหรับเขียน field ของเรา */
@@ -621,6 +641,7 @@ export async function applyClaimOutcome(
 }
 
 export const statusConversationService = {
+  setConversationPin,
   getMeta,
   getMetaMap,
   updateStatus,

@@ -15,6 +15,8 @@ export interface ProductDoc extends Document {
   item_id?: string;
   shopid?: string;
   shop_id?: string;
+  shopname?: string;
+  shop_name?: string;
   name?: string;
   product_name?: string;
   price?: number;
