@@ -25,10 +25,10 @@ Active append-only integrity baseline:
 | field | value |
 | --- | --- |
 | active_file | `getoutofmywaybotkaikrook2.md` |
-| active_integrity_prefix_lines | 15081 |
-| active_integrity_prefix_sha256 | `c359bdd00b229a83a924393023ff36790ded38805c9329cd76c0c39f789d07e3` |
-| active_line_count_at_baseline | 15081 |
-| active_integrity_recorded_at | 2026-11-24 (+0700), indexed scoped Shopee live-send plan and official contract search A-370; semantic coverage partial |
+| active_integrity_prefix_lines | 15150 |
+| active_integrity_prefix_sha256 | `fb8345311b76473d9276c2b2fa73a4bdacac3ecfac023866f1f79c20f8bf6942` |
+| active_line_count_at_baseline | 15150 |
+| active_integrity_recorded_at | 2026-11-25 (+0700), indexed Inbox filter, pin, recipient count and shop-name work A-377; semantic coverage partial |
 
 Baseline ตั้งที่ EOF หลัง append closeout (บรรทัดสุดท้ายของ task นี้) แล้ววัดทั้งไฟล์
 
@@ -425,6 +425,7 @@ Baseline ตั้งที่ EOF หลัง append closeout (บรรทั
 | 15106–15114 | read + indexed (A-374 visual sticker picker, no-test boundary) |
 | 15115–15121 | read + indexed (A-375 mobile dock/media affordance correction) |
 | 15122–15126 | read + indexed (A-376 phone layout restore) |
+| 15127–15150 | read + indexed (A-377 Inbox filters, pins, recipient counts and shop-name resolution; exact task tail) |
 | 1–594, 684–6489, 6570–6896, 6967–7104, 7178–7473, 7610–10025, 10182–10382, 10427–10482 | ไม่ได้ index (gap — ดูส่วน 7) |
 
 ## 6. Ledger entries
@@ -922,4 +923,5 @@ integrity prefix กับ semantic coverage ห้ามใช้แทนก�
 | A-373 | 15098–15105 | Scoped Shopee API page-permission correction / 2026-11-25 | pending/deferred work | Three send-capable routes now check existing page access: ticket or botworker; review retains designated admin/shop fence. No sender/callsite added and switch remains OFF. | historical-unverified | User forbids tests and real sends, so runtime permission behavior remains unverified; direct API calls remain possible for users authorized for that page. Integrity prefix remains 15081; semantic coverage partial. |
 | A-374 | 15106–15114 | Visual Shopee sticker picker / 2026-11-25 | pending/deferred work | Replaced manual sticker-ID fields with public catalog pack tabs and image tiles in the shared Tickets/BotWorker composer; only explicit Send submits selected IDs. Catalog route is read-only and token-free. | historical-unverified | No tests, CDN requests, or customer sends per user instruction; pack JSON shape and UI runtime remain unverified. Integrity prefix remains 15081; semantic coverage partial. |
 | A-375 | 15115–15121 | Mobile/tablet composer dock and media affordance / 2026-11-25 | pending/deferred work | Added dock clearance to Tickets/BotWorker chat panels; enabled off-mode media selection and local preview while keeping send blocked in composer and server. | historical-unverified | Source inspection + user screenshot only; no tests or real sends. Integrity prefix remains 15081; semantic coverage partial. |
-| A-376 | 15122–15126 | Phone chat layout restore / 2026-11-25 | decision/approval | Removed only the new phone-width dock padding on scoped chat panels as requested; tablet rule remains. | historical-unverified | No runtime visual test or provider call; integrity prefix 15081 and semantic coverage partial. |
+| A-376 | 15122–15126 | Phone chat layout restore / 2026-11-25 | decision/approval | Removed only the new phone-width dock padding on scoped chat panels as requested; tablet rule remains. | historical-unverified | No runtime visual test or provider call; integrity prefix was 15081 at task start; semantic coverage partial. |
+| A-377 | 15127–15150 | Inbox filters, pagination, pins, recipient counts and shop-name resolution / 2026-11-25 | pending/deferred work | Added server-side filtered/sorted pagination to Tickets and BotWorker, retained BotWorker tail pages on head refresh, added private/global pin UI and API, server counts per recipient and pending handoff, and normalized shop-name matching. User chose to leave 258491064, 530326507, 80878682 unmapped. | historical-unverified | Source-only TypeScript diagnostics 0 and `git diff --check` passed. No lint script; both build modes stop at `.next/trace*` with EPERM before compilation. No automated tests, UI runtime checks, DB/provider operations or customer sends; runtime behavior remains unverified. Semantic coverage partial. |

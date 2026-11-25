@@ -940,7 +940,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `closed_at` | Date? | |
 | `closed_by` | string? | |
 | `close_count` | number? | |
-| `pinned` | boolean? | |
+| `pinned` | boolean? | หมุดที่ทุกแอดมินเห็นใน Tickets และ BotWorker; เขียนใน status owner ไม่แตะ imported conversation |
+| `pinned_by_admin_ids` | string[]? | หมุดเฉพาะแอดมินแต่ละคน; อยู่ใน `status_conversation` และไม่เปลี่ยน ownership ของแชท |
 | `topic` | string? | |
 | `item_ids` | string[]? | |
 | `pending_assignment` | boolean? | backlog handoff flag (หา admin ไม่ได้ → รอ distributor) — **queued outcome ของ handoff = `status:handoff` + `assigned_to:null` + flag นี้** |
@@ -969,6 +970,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 **หน้าที่เข้าถึง:** `/tickets` (จริง), ทุก conversation mutation route
 
 ---
+
+**Inbox pins:** `GET/PATCH /api/conversation-pins` อ่าน/เขียนหมุดเฉพาะ `status_conversation`; `PATCH` ต้องมีสิทธิ์แก้ Tickets หรือ BotWorker และผ่าน channel access ของบทสนทนา. `GET` คืนเฉพาะหมุดที่ผู้เรียกเห็น; แชทที่ปักหมุดแต่เก่ากว่าหน้าแรกถูกดึงเพิ่มตามตัวกรองปัจจุบัน. Index ที่ประกาศ: `{pinned:1}` และ `{pinned_by_admin_ids:1}`; ยังไม่ได้ยืนยันการสร้างบน production.
 
 ### 2.25 `test_status_conversation`
 

@@ -1,7 +1,7 @@
 "use client";
 import { useState, useEffect, useCallback, useRef } from "react";
 import { ArrowLeft, Info, X, PanelRightClose, PanelRightOpen } from "lucide-react";
-import { ChatList } from "@/components/chat/ChatList";
+import { ChatList, type InboxListFilters } from "@/components/chat/ChatList";
 import { TicketChatPanel } from "@/components/chat/TicketChatPanel";
 import { InfoTab } from "@/components/chat/InfoTab";
 import { ChatLogTab } from "@/components/chat/ChatLogTab";
@@ -13,6 +13,7 @@ import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
 import { useAuth } from "@/lib/authStore";
 import { useSharedConversations, invalidateSharedConversations } from "@/lib/useSharedConversations";
+import { useInboxPins } from "@/lib/useInboxPins";
 import { useToastError } from "@/components/ui/Toast";
 import type { Conversation, ChatMessage, ChatSendInput, CloseHistoryRecord, ProblemCategory, AdminUser } from "@/lib/types";
 import { useShopeeSendStatus } from "@/lib/useShopeeSendStatus";
@@ -27,7 +28,7 @@ function conflictPreview(payload: ChatSendInput): string {
   if (payload.type === "text") return payload.text.slice(0, 60);
   if (payload.type === "image" || payload.type === "video") return `${payload.type}: ${payload.file.name}`;
   if (payload.type === "sticker") return `sticker ${payload.sticker_id}`;
-  return `item ${payload.item_id}`;
+  return payload.type === "item" ? `item ${payload.item_id}` : "";
 }
 
 export default function TicketsPage() {
@@ -37,17 +38,25 @@ export default function TicketsPage() {
   const [chatFilter, setChatFilter] = useState<ChatFilter>("all");
   // ⚡ server-side search — ส่ง q ไป API ให้ค้นที่ DB ทั้งหมด (ไม่จำกัดแค่ 2000 ล่าสุด)
   const [searchQuery, setSearchQuery] = useState("");
+  const [listFilters, setListFilters] = useState<InboxListFilters>({
+    platforms: [], shops: [], chatStatus: "all", msgStatus: "all", sort: "recent",
+  });
+  const listFiltersParam = JSON.stringify(listFilters);
   // ⚡ G-share — ใช้ shared conversation store (แชร์กับ shadow-inbox)
   //   ⚡ Phase 1 — pagination: head (50 newest, poll 3s) + tail (load more on scroll)
   const { conversations: sharedConversations, totalCount, loading: sharedLoading, refresh: refreshConversations, loadMore, hasMore, loadingMore } = useSharedConversations({
     assigned_to: chatFilter === "me" ? "me" : chatFilter === "all" ? "all" : chatFilter,
     q: searchQuery || undefined,
+    filters: listFiltersParam,
     pageSize: 200,
   });
+  const { rows: pinnedConversations, refresh: refreshPins, canPin } = useInboxPins("tickets", chatFilter, searchQuery, listFiltersParam);
+  const pinnedIds = new Set(pinnedConversations.map((conversation) => conversation.id));
+  const listedConversations = [...pinnedConversations, ...sharedConversations.filter((conversation) => !pinnedIds.has(conversation.id))];
   // ⚡ local override สำหรับ optimistic update (close/reopen/handoff/assign)
   //   ใช้ map id → partial patch ที่ทับข้อมูลจาก shared store
   const [localOverrides, setLocalOverrides] = useState<Record<string, Partial<Conversation>>>({});
-  const conversations = sharedConversations.map((c) =>
+  const conversations = listedConversations.map((c) =>
     localOverrides[c.id] ? { ...c, ...localOverrides[c.id] } : c
   );
   const setConversations = useCallback((updater: (prev: Conversation[]) => Conversation[]) => {
@@ -194,7 +203,8 @@ export default function TicketsPage() {
         setConflictPopup({ assignedTo: res.assigned_to || "?", payload });
         return false;
       }
-      if (res.message) setMessages((prev) => [...prev, res.message]);
+      const sentMessage = res.message;
+      if (sentMessage) setMessages((prev) => [...prev, sentMessage]);
       // ⚡ G-share — invalidate shared store ให้ poll รอบถัดไปดึงใหม่ทันที
       invalidateSharedConversations();
       return true;
@@ -402,7 +412,11 @@ export default function TicketsPage() {
           onToggleAccepting={handleToggleAccepting}
           togglingAccept={togglingAccept}
           totalCount={totalCount}
+          assignmentCountScope="tickets"
+          currentAdminId={user?.admin_id}
           onSearchChange={setSearchQuery}
+          onListFiltersChange={setListFilters}
+          onPinChanged={canPin ? refreshPins : undefined}
           loading={sharedLoading}
           loadMore={loadMore}
           hasMore={hasMore}

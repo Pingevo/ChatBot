@@ -71,7 +71,13 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ con
   }
 
   const admin = auth.ctx.admin;
-  const coll = await getCollection(COLLECTIONS.botworkerMessages);
+  const coll = await getCollection<{
+    _id?: string; message_id: string; conversation_id: string; shop_id: string; platform: string;
+    role: string; actor: string; actor_name: string; bubble_color?: string; text: string;
+    products?: { item_id: string; name: string; price: number; image?: string; shop?: string }[];
+    message_type?: MessageType; media?: MessageMedia; delivery_status?: "sent" | "internal";
+    provider_message_id?: string; created_at: Date;
+  }>(COLLECTIONS.botworkerMessages);
   const live = liveResult?.state === "sent";
   const messageId = live ? outboundMessageId(requestId) : genBwMessageId();
   const messageType: MessageType | undefined = liveResult?.state === "sent"

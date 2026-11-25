@@ -445,6 +445,7 @@ export async function sendShopeeMessage(opts: {
     });
   };
 
+  let providerAccepted = false;
   try {
     if (!(await isShopeeConsoleSendEnabled())) {
       await finish("failed", "live_send_disabled");

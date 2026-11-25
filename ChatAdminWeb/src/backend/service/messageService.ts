@@ -28,6 +28,7 @@ export interface MessageProduct {
 }
 
 export interface MessageDoc extends Document {
+  _id?: string;
   message_id: string;
   conversation_id: string;
   shop_id: string;

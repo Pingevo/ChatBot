@@ -54,7 +54,7 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
     const signature = payload.type === "text" ? JSON.stringify([payload.type, payload.text])
       : payload.type === "image" || payload.type === "video" ? JSON.stringify([payload.type, payload.file.name, payload.file.size, payload.file.lastModified])
       : payload.type === "sticker" ? JSON.stringify([payload.type, payload.sticker_package_id, payload.sticker_id])
-      : JSON.stringify([payload.type, payload.item_id]);
+      : payload.type === "item" ? JSON.stringify([payload.type, payload.item_id]) : "";
     if (pendingRequestRef.current?.signature !== signature) {
       pendingRequestRef.current = { signature, requestId: newChatRequestId() };
     }

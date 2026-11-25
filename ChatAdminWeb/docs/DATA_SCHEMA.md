@@ -47,7 +47,8 @@ sellcenter เขียนข้อมูลแชทจาก Shopee (และ
 |---|---|
 | `status` | เราตั้งเอง (`open`/`closed`/`bot`/`handoff`) |
 | `assigned_to` | เราตั้งเอง (admin_id) |
-| `pinned` | เราตั้งเอง |
+| `pinned` | หมุดเห็นทุกคน เก็บใน `status_conversation` |
+| `pinned_by_admin_ids` | หมุดเฉพาะผู้ดูแล เก็บใน `status_conversation` |
 | `item_ids` | เราตั้งเอง (locked product context) |
 | `topic` | เราตั้งเอง |
 | `closed_at` | เราตั้งเอง |

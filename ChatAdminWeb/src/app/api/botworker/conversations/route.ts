@@ -1,204 +1,179 @@
 // GET /api/botworker/conversations — list conversations สำหรับหน้า /botworker
-// เหมือน /admin/conversations แต่อ่าน status/assigned_to จาก test_status_conversation source="botworker"
-// ทำให้ /botworker UI เห็น status ที่ botworker เขียน โดยไม่กระทบ /tickets
-//
-// ⛔ IRON RULE: ห้ามส่งข้อความจริง ห้ามเรียก platform API
-// ⚡ force-dynamic — กัน Next.js cache
-// ⚡ G-fix — เพิ่ม in-memory cache แบบ short-lived กัน poll รัวๆ ทำให้หน้าล็อค
+// อ่าน status/assigned_to จาก test_status_conversation source="botworker"
+// ห้ามส่งข้อความจริงหรือเรียก platform API
 export const dynamic = "force-dynamic";
 import { NextRequest } from "next/server";
-import { requireAuth } from "@/backend/middleware/authorize";
-import { json } from "@/backend/lib/http";
+import { requirePageAccess } from "@/backend/middleware/authorize";
+import { json, error } from "@/backend/lib/http";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
-import { conversationService } from "@/backend/service/conversationService";
 import { testStatusConversationService } from "@/backend/service/testStatusConversationService";
+import { statusConversationService } from "@/backend/service/statusConversationService";
+import { safeRegexSearch } from "@/backend/lib/regexEscape";
+import { parseInboxFilters, unansweredStages, messageStatusMatch } from "@/backend/lib/inboxFilters";
 import type { Conversation } from "@/lib/types";
 import type { ConversationDoc } from "@/backend/service/conversationService";
-import type { Platform, ConversationStatus } from "@/backend/service/conversationService";
 
-// ⚡ G-fix — in-memory cache (เหมือน /admin/conversations) ลด query ซ้ำจาก polling
 let bwCache: { key: string; data: Conversation[]; totalCount: number; hasMore: boolean; cursor: string | null; ts: number } | null = null;
-const BW_CACHE_TTL = 5000; // ⚡ 5 วิ — ครอบ poll interval (3s) เหมือน /admin/conversations
+const BW_CACHE_TTL = 5000;
 
-/** Invalidate botworker cache — เรียกจาก close/reopen/handoff/assign route */
 export function invalidateBotworkerCache() {
   bwCache = null;
 }
 
 export async function GET(req: NextRequest) {
-  const r = await requireAuth(req);
-  if (!r.ok) return r.response;
-
+  const auth = await requirePageAccess(req, "botworker");
+  if (!auth.ok) return auth.response;
   const url = new URL(req.url);
-  const platform = (url.searchParams.get("platform") || undefined) as Platform | undefined;
+  const rawFilters = url.searchParams.get("filters");
+  const rawPinIds = url.searchParams.get("pin_ids");
+  let pinIds: string[] | null = null;
+  if (rawPinIds) {
+    try {
+      const ids: unknown = JSON.parse(rawPinIds);
+      if (!Array.isArray(ids) || ids.length > 100 || !ids.every((id) => typeof id === "string" && id.length <= 150)) return error("invalid pin ids", 422);
+      pinIds = ids;
+    } catch { return error("invalid pin ids", 422); }
+  }
+  const listFilters = parseInboxFilters(rawFilters);
+  if (rawFilters && !listFilters) return error("invalid inbox filters", 422);
+  const platform = url.searchParams.get("platform") || undefined;
   const shopId = url.searchParams.get("shop_id") || undefined;
-  // ⚡ รองรับทั้ง search และ q (เพื่อให้ตรงกับ /admin/conversations)
   const search = url.searchParams.get("search") || url.searchParams.get("q") || undefined;
   const cursorParam = url.searchParams.get("cursor") || undefined;
   const includeCount = url.searchParams.get("include_count") === "true";
-  const limitParam = parseInt(url.searchParams.get("limit") || "200", 10);
-  const limit = Math.min(Math.max(limitParam, 1), 5000);
-  // ⚡ assigned_to filter — source of truth = test_status_conversation[source="botworker"]
-  //   "all"(default) | "me" | "unassigned" | <admin_id>
-  const assignedToParam = url.searchParams.get("assigned_to") || "all";
-  const me = r.ctx.admin.admin_id;
-
-  // ⚡ parse cursor (timestamp|conversation_id — เหมือน /admin/conversations)
-  let parsedCursor: { ts: Date; id: string } | undefined;
-  if (cursorParam) {
-    const sepIdx = cursorParam.indexOf("|");
-    if (sepIdx > 0) {
-      const tsStr = cursorParam.substring(0, sepIdx);
-      const idStr = cursorParam.substring(sepIdx + 1);
-      const ts = new Date(tsStr);
-      if (!isNaN(ts.getTime()) && idStr) parsedCursor = { ts, id: idStr };
-    }
+  const parsedLimit = Number.parseInt(url.searchParams.get("limit") || "200", 10);
+  const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 5000) : 200;
+  const assignedTo = url.searchParams.get("assigned_to") || "all";
+  const me = auth.ctx.admin.admin_id;
+  const channels = auth.ctx.admin.role === "superadmin" || auth.ctx.admin.role === "dev" || !auth.ctx.admin.channels_access?.length
+    ? null : auth.ctx.admin.channels_access;
+  const cacheKey = JSON.stringify([me, channels, assignedTo, platform, shopId, search, rawFilters, rawPinIds, limit, cursorParam]);
+  if (bwCache && bwCache.key === cacheKey && Date.now() - bwCache.ts < BW_CACHE_TTL) {
+    return json({ rows: bwCache.data, total_count: bwCache.totalCount, has_more: bwCache.hasMore, cursor: bwCache.cursor });
   }
 
-  // ⚡ G-fix — เช็ค cache ก่อน query DB (เฉพาะ head — ไม่ cache tail)
-  const cacheKey = `${assignedToParam}|${platform || ""}|${shopId || ""}|${search || ""}|${limit}|${cursorParam || ""}`;
-  const now = Date.now();
-  if (bwCache && bwCache.key === cacheKey && now - bwCache.ts < BW_CACHE_TTL) {
-    if (includeCount) {
-      return json({ rows: bwCache.data, total_count: bwCache.totalCount ?? bwCache.data.length, has_more: bwCache.hasMore ?? false, cursor: bwCache.cursor ?? null });
-    }
-    return json({ rows: bwCache.data, total_count: bwCache.totalCount ?? bwCache.data.length });
-  }
-
-  // ดึง conversations จาก conversations collection (เหมือน /admin/conversations)
-  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
-  const filter: Record<string, unknown> = {};
-  if (platform) filter.platform = platform;
-  if (shopId) filter.shop_id = shopId;
-
-  // ⚡ assigned_to filter — pre-fetch conv ids จาก test_status_conversation[botworker]
-  //   admin ที่ไม่มีงาน → $in: [] → empty list (ไม่ใช่โชว์ทั้งหมด)
-  if (assignedToParam !== "all") {
-    const testColl = await getCollection<{ conversation_id: string; assigned_to?: string | null }>(
-      COLLECTIONS.testStatusConversation
-    );
-    if (assignedToParam === "unassigned") {
-      // ยกเว้น conv ที่มี assignee ใน sandbox store
-      const assigned = await testColl
-        .find({ source: "botworker", assigned_to: { $nin: [null, ""] } }, { projection: { conversation_id: 1 } })
-        .toArray();
-      filter.conversation_id = { $nin: assigned.map((d) => d.conversation_id) };
-    } else {
-      const target = assignedToParam === "me" ? me : assignedToParam;
-      const mine = await testColl
-        .find({ source: "botworker", assigned_to: target }, { projection: { conversation_id: 1 } })
-        .toArray();
-      filter.conversation_id = { $in: mine.map((d) => d.conversation_id) };
-    }
-  }
-
-  // ⚡ cursor filter — ดึงแชทที่เก่ากว่า cursor
-  if (parsedCursor) {
-    filter.$or = [
-      { last_message_timestamp: { $lt: parsedCursor.ts } },
-      { last_message_timestamp: parsedCursor.ts, conversation_id: { $lt: parsedCursor.id } },
-    ];
-  }
+  const terms: Record<string, unknown>[] = [];
+  if (channels) terms.push({ platform: { $in: channels } });
+  if (platform) terms.push({ platform });
+  if (listFilters?.platforms.length) terms.push({ platform: { $in: listFilters.platforms } });
+  if (shopId) terms.push({ shop_id: shopId });
+  if (pinIds) terms.push({ conversation_id: { $in: pinIds } });
+  if (listFilters?.shops.length) terms.push({ $or: listFilters.shops.map((shop) => ({ platform: shop.platform, shop_id: shop.shop_id })) });
   if (search) {
-    // 🔒 escape regex metacharacters ป้องกัน $regex injection / ReDoS
-    const { safeRegexSearch } = await import("@/backend/lib/regexEscape");
     const safe = safeRegexSearch(search);
-    if (safe) {
-      if (filter.$or) {
-        // มี cursor $or อยู่แล้ว → ใช้ $and รวม search $or
-        filter.$and = [
-          { $or: filter.$or },
-          { $or: [
-            { to_name: { $regex: safe, $options: "i" } },
-            { last_message_text: { $regex: safe, $options: "i" } },
-            { shop_name: { $regex: safe, $options: "i" } },
-          ]},
-        ];
-        delete filter.$or;
-      } else {
-        filter.$or = [
-          { to_name: { $regex: safe, $options: "i" } },
-          { last_message_text: { $regex: safe, $options: "i" } },
-          { shop_name: { $regex: safe, $options: "i" } },
-        ];
-      }
-    }
+    if (safe) terms.push({ $or: [
+      { to_name: { $regex: safe, $options: "i" } },
+      { last_message_text: { $regex: safe, $options: "i" } },
+      { shop_name: { $regex: safe, $options: "i" } },
+    ] });
   }
 
-  const docs = await coll
-    .find(filter, { maxTimeMS: 5000 })
-    .sort({ last_message_timestamp: -1, conversation_id: -1 })
-    .limit(limit)
-    .toArray();
+  // Sandbox ownership is the source of truth for BotWorker recipient filters.
+  if (assignedTo !== "all") {
+    const statuses = await getCollection<{ conversation_id: string; assigned_to?: string | null }>(COLLECTIONS.testStatusConversation);
+    if (assignedTo === "unassigned") {
+      const assigned = await statuses.find({ source: "botworker", assigned_to: { $nin: [null, ""] } }, { projection: { conversation_id: 1 } }).toArray();
+      terms.push({ conversation_id: { $nin: assigned.map((row) => row.conversation_id) } });
+    } else if (assignedTo === "pending_handoff") {
+      const pending = await statuses.find({ source: "botworker", status: { $in: ["handoff", "open", "pending"] },
+        $or: [{ assigned_to: null }, { assigned_to: "" }, { assigned_to: { $exists: false } }],
+      }, { projection: { conversation_id: 1 } }).toArray();
+      terms.push({ conversation_id: { $in: pending.map((row) => row.conversation_id) } });
+    } else {
+      const target = assignedTo === "me" ? me : assignedTo;
+      const mine = await statuses.find({ source: "botworker", assigned_to: target }, { projection: { conversation_id: 1 } }).toArray();
+      terms.push({ conversation_id: { $in: mine.map((row) => row.conversation_id) } });
+    }
+  }
+  const baseMatch = terms.length ? { $and: terms } : {};
+  const sort = listFilters?.sort === "oldest"
+    ? { last_message_timestamp: 1, conversation_id: 1 }
+    : listFilters?.sort === "name"
+      ? { to_name: 1, conversation_id: 1 }
+      : { last_message_timestamp: -1, conversation_id: -1 };
 
-  // dedupe
-  const seen = new Set<string>();
-  const deduped = docs.filter((d) => {
-    if (seen.has(d.conversation_id)) return false;
-    seen.add(d.conversation_id);
-    return true;
-  });
+  const cursorTerms = [...terms];
+  if (cursorParam) {
+    if (listFilters?.sort === "name") {
+      const parts = cursorParam.split("|");
+      if (parts.length !== 3 || parts[0] !== "n" || !parts[2]) return error("invalid cursor", 422);
+      let name: string;
+      try { name = decodeURIComponent(parts[1]); } catch { return error("invalid cursor", 422); }
+      cursorTerms.push({ $or: [
+        { to_name: { $gt: name } },
+        { to_name: name, conversation_id: { $gt: parts[2] } },
+      ] });
+    } else {
+      const separator = cursorParam.indexOf("|");
+      if (separator < 1) return error("invalid cursor", 422);
+      const ts = new Date(cursorParam.slice(0, separator));
+      const id = cursorParam.slice(separator + 1);
+      if (Number.isNaN(ts.getTime()) || !id) return error("invalid cursor", 422);
+      const direction = listFilters?.sort === "oldest" ? "$gt" : "$lt";
+      cursorTerms.push({ $or: [
+        { last_message_timestamp: { [direction]: ts } },
+        { last_message_timestamp: ts, conversation_id: { [direction]: id } },
+      ] });
+    }
+  }
+  const pageMatch = cursorTerms.length ? { $and: cursorTerms } : {};
+  const chatStatus = listFilters?.msgStatus === "unreplied" ? "handoff" : listFilters?.chatStatus;
+  const statusStages: Record<string, unknown>[] = chatStatus && chatStatus !== "all" ? [
+    { $lookup: { from: COLLECTIONS.testStatusConversation, let: { cid: "$conversation_id" }, pipeline: [
+      { $match: { source: "botworker", $expr: { $eq: ["$conversation_id", "$$cid"] } } }, { $limit: 1 },
+    ], as: "_status" } },
+    { $set: { _meta: { $arrayElemAt: ["$_status", 0] } } },
+    { $set: { _effective_status: { $ifNull: ["$_meta.status", {
+      $cond: ["$_meta.closed_at", "closed", { $cond: ["$_meta.assigned_to", "handoff", "bot"] }],
+    }] } } },
+    { $match: { _effective_status: chatStatus } },
+  ] : [];
+  const filteredMessageStages = listFilters?.msgStatus && listFilters.msgStatus !== "all"
+    ? [...unansweredStages("", true), ...messageStatusMatch(listFilters.msgStatus)] : [];
+  const coll = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
+  const docs = await coll.aggregate<ConversationDoc & { _unanswered_count?: number }>([
+    { $match: pageMatch }, ...statusStages, ...filteredMessageStages,
+    { $sort: sort }, { $limit: limit + 1 },
+    ...(filteredMessageStages.length ? [] : unansweredStages("", true)),
+  ], { maxTimeMS: 15000, allowDiskUse: true }).toArray();
+  const hasMore = docs.length > limit;
+  const page = docs.slice(0, limit);
+  const totalCount = cursorParam ? 0 : includeCount
+    ? statusStages.length || filteredMessageStages.length
+      ? ((await coll.aggregate<{ n: number }>([
+          { $match: baseMatch }, ...statusStages, ...filteredMessageStages, { $count: "n" },
+        ], { maxTimeMS: 15000 }).toArray())[0]?.n ?? 0)
+      : await coll.countDocuments(baseMatch)
+    : page.length;
 
-  // ⚡ Phase 2V — อ่าน status/assigned_to จาก test_status_conversation source="botworker"
-  const convIds = deduped.map((d) => d.conversation_id);
+  const convIds = page.map((doc) => doc.conversation_id);
   const metaMap = await testStatusConversationService.getTestStatusMap(convIds, "botworker");
-
-  // ⚡ admin id→name map สำหรับ badge "ผู้รับ" (เหมือน /admin/conversations)
+  const pinMap = await statusConversationService.getMetaMap(convIds);
   const adminColl = await getCollection<{ admin_id: string; name: string; username: string }>(COLLECTIONS.admins);
   const adminRows = await adminColl.find({}, { projection: { admin_id: 1, name: 1, username: 1 } }).toArray();
-  const adminMap = new Map<string, string>();
-  for (const a of adminRows) adminMap.set(a.admin_id, a.name || a.username || "");
-
-  // map เป็น Conversation shape
-  const conversations: Conversation[] = deduped.map((doc) => {
+  const adminMap = new Map(adminRows.map((row) => [row.admin_id, row.name || row.username || ""]));
+  const rows: Conversation[] = page.map((doc) => {
     const meta = metaMap.get(doc.conversation_id);
-    const effectiveAssignedTo = meta?.assigned_to || null;
-    let derivedStatus: Conversation["status"];
-    if (meta?.status) {
-      derivedStatus = meta.status as Conversation["status"];
-    } else if (meta?.closed_at) {
-      derivedStatus = "closed";
-    } else if (effectiveAssignedTo) {
-      derivedStatus = "handoff";
-    } else {
-      derivedStatus = "bot";
-    }
+    const pin = pinMap.get(doc.conversation_id);
+    const owner = meta?.assigned_to || null;
+    const status = meta?.status || (meta?.closed_at ? "closed" : owner ? "handoff" : "bot");
     return {
-      id: doc.conversation_id,
-      platform: doc.platform,
-      shop_id: doc.shop_id,
-      shop_name: doc.shop_name,
-      customer_id: doc.customer_id,
-      customer_name: doc.to_name,
-      customer_avatar: doc.customer_avatar,
-      item_ids: meta?.item_ids || doc.item_ids || [],
-      status: derivedStatus,
-      topic: ((meta?.topic as Conversation["topic"]) || (doc.topic as Conversation["topic"]) || "general"),
-      last_message: doc.last_message_text,
-      last_timestamp: doc.last_message_timestamp.toISOString(),
-      unread: 0,
-      assigned_to: effectiveAssignedTo || undefined,
-      assigned_to_name: effectiveAssignedTo ? adminMap.get(effectiveAssignedTo) : undefined,
+      id: doc.conversation_id, platform: doc.platform, shop_id: doc.shop_id,
+      shop_name: doc.shop_name, customer_id: doc.customer_id, customer_name: doc.to_name,
+      customer_avatar: doc.customer_avatar, item_ids: meta?.item_ids || doc.item_ids || [],
+      status, topic: ((meta?.topic as Conversation["topic"]) || (doc.topic as Conversation["topic"]) || "general"),
+      last_message: doc.last_message_text, last_timestamp: doc.last_message_timestamp.toISOString(),
+      unread: doc._unanswered_count ?? 0, pin_global: pin?.pinned === true,
+      pin_personal: (pin?.pinned_by_admin_ids || []).includes(me), assigned_to: owner || undefined,
+      assigned_to_name: owner ? adminMap.get(owner) : undefined,
     };
   });
-
-  // ⚡ hasMore + cursor สำหรับ pagination (เหมือน /admin/conversations)
-  const hasMore = docs.length === limit;
-  const nextCursor = docs.length > 0
-    ? `${docs[docs.length - 1].last_message_timestamp.toISOString()}|${docs[docs.length - 1].conversation_id}`
+  const last = page.at(-1);
+  const nextCursor = last
+    ? listFilters?.sort === "name"
+      ? `n|${encodeURIComponent(last.to_name || "")}|${last.conversation_id}`
+      : `${last.last_message_timestamp.toISOString()}|${last.conversation_id}`
     : null;
-
-  // ⚡ นับ total_count แบบไม่จำกัด limit (เฉพาะ head — ไม่นับตอนมี cursor เพื่อลด query)
-  const totalCount = parsedCursor ? 0 : await coll.countDocuments(filter);
-
-  // ⚡ G-fix — save cache (เฉพาะ head)
-  //    ts จับตอน data พร้อม — ไม่ใช่ตอน request เริ่ม (query ช้า → data ไม่ควร stale ตั้งแต่เกิด)
-  if (!parsedCursor) {
-    bwCache = { key: cacheKey, data: conversations, totalCount, hasMore, cursor: nextCursor, ts: Date.now() };
-  }
-
-  if (includeCount) {
-    return json({ rows: conversations, total_count: totalCount, has_more: hasMore, cursor: nextCursor });
-  }
-  return json({ rows: conversations, total_count: totalCount });
+  if (!cursorParam) bwCache = { key: cacheKey, data: rows, totalCount, hasMore, cursor: nextCursor, ts: Date.now() };
+  return json({ rows, total_count: totalCount, has_more: hasMore, cursor: nextCursor });
 }

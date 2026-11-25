@@ -10,9 +10,10 @@
 //   - แสดง 4 สี: user (เทา) + zaapi (เขียว) + admin (สี profile) + bot เรา (ฟ้า)
 //   - ข้อความ bot มาจาก shadow_replies (ไม่ใช่ messages_shp)
 import { SelectField } from "@/components/ui/SelectField";
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+import React, { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { ArrowLeft, Info, X, PanelRightClose, PanelRightOpen, Bot, AlertCircle, Headset, RotateCcw, Lock, UserCog, ChevronDown } from "lucide-react";
-import { ChatList } from "@/components/chat/ChatList";
+import { ChatList, type InboxListFilters } from "@/components/chat/ChatList";
+import { useInboxPins } from "@/lib/useInboxPins";
 import { InfoTab } from "@/components/chat/InfoTab";
 import { ChatLogTab } from "@/components/chat/ChatLogTab";
 import { ProductsTab } from "@/components/chat/ProductsTab";
@@ -96,6 +97,10 @@ export default function BotWorkerPage() {
   const [loadingMore, setLoadingMore] = useState(false);
   // ⚡ server-side search — ส่ง q ไป API ให้ค้นที่ DB ทั้งหมด
   const [searchQuery, setSearchQuery] = useState("");
+  const [listFilters, setListFilters] = useState<InboxListFilters>({
+    platforms: [], shops: [], chatStatus: "all", msgStatus: "all", sort: "recent",
+  });
+  const listFiltersParam = JSON.stringify(listFilters);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<UnifiedMessage[]>([]);
   const [canReview, setCanReview] = useState(false); // ⚡ designated review admin+shop (server-derived)
@@ -106,6 +111,11 @@ export default function BotWorkerPage() {
   const [rightTab, setRightTab] = useState<"info" | "chatlog" | "products">("info");
   const [rightCollapsed, setRightCollapsed] = useState(false);
   const [chatFilter, setChatFilter] = useState<string>("all");
+  const listQueryKey = JSON.stringify([chatFilter, searchQuery, listFiltersParam]);
+  const { rows: pinnedConversations, refresh: refreshPins, canPin } = useInboxPins("botworker", chatFilter, searchQuery, listFiltersParam);
+  const listQueryKeyRef = useRef(listQueryKey);
+  const tailRef = useRef<Conversation[]>([]);
+  const headRef = useRef<Conversation[]>([]);
   const [admins, setAdmins] = useState<AdminUser[]>([]);
   // ⚡ D1-D3 — เพิ่ม close/reopen/handoff/transfer/accept เหมือน ticket
   const [showCloseModal, setShowCloseModal] = useState(false);
@@ -126,35 +136,58 @@ export default function BotWorkerPage() {
     });
   }, [user?.role]);
 
+  useEffect(() => {
+    listQueryKeyRef.current = listQueryKey;
+    tailRef.current = [];
+    headRef.current = [];
+    setConversations([]);
+    setTail([]);
+    setCursor(null);
+    setHasMore(false);
+  }, [listQueryKey]);
+
   // โหลด conversations (head — 200 ล่าสุด, poll 3 วิ)
   const loadConversations = useCallback(async () => {
     setLoadingConversations(true);
     try {
       const r = await api().get<{ rows: Conversation[]; total_count: number; has_more?: boolean; cursor?: string | null }>(
         "/botworker/conversations",
-        { params: { limit: "200", include_count: "true", assigned_to: chatFilter, ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
+        { params: { limit: "200", include_count: "true", assigned_to: chatFilter, filters: listFiltersParam, ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
       );
+      if (listQueryKeyRef.current !== listQueryKey) return;
       const rows = r.data.rows || [];
-      const total = r.data.total_count || rows.length;
+      const total = r.data.total_count ?? rows.length;
       const seen = new Set<string>();
       const deduped = rows.filter((c) => {
         if (seen.has(c.id)) return false;
         seen.add(c.id);
         return true;
       });
+      const previousHead = headRef.current;
+      headRef.current = deduped;
       setConversations(deduped);
       setTotalCount(total);
-      setHasMore(r.data.has_more ?? false);
-      setCursor(r.data.cursor ?? null);
-      // ⚡ reset tail เมื่อ head โหลดใหม่ (search เปลี่ยน หรือ filter เปลี่ยน)
-      setTail([]);
+      const headIds = new Set(deduped.map((c) => c.id));
+      const tailIds = new Set<string>();
+      const candidates = tailRef.current.length ? [...previousHead, ...tailRef.current] : [];
+      const retainedTail = candidates.filter((c) => {
+        if (headIds.has(c.id) || tailIds.has(c.id)) return false;
+        tailIds.add(c.id);
+        return true;
+      });
+      tailRef.current = retainedTail;
+      setTail(retainedTail);
+      if (retainedTail.length === 0) {
+        setHasMore(r.data.has_more ?? false);
+        setCursor(r.data.cursor ?? null);
+      }
     } catch (err) {
       console.error("load conversations failed", err);
       // ⚡ G-fix — ไม่ clear conversations เดิมเวลา poll ล้มเหลว (กันหน้าว่าง)
     } finally {
       setLoadingConversations(false);
     }
-  }, [searchQuery, chatFilter]);
+  }, [searchQuery, chatFilter, listFiltersParam, listQueryKey]);
 
   // ⚡ loadMore — โหลด page ถัดไป (tail) ตอน scroll ใกล้ล่าง
   const loadMore = useCallback(async () => {
@@ -163,16 +196,18 @@ export default function BotWorkerPage() {
     try {
       const r = await api().get<{ rows: Conversation[]; has_more?: boolean; cursor?: string | null }>(
         "/botworker/conversations",
-        { params: { limit: "200", cursor, assigned_to: chatFilter, ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
+        { params: { limit: "200", cursor, assigned_to: chatFilter, filters: listFiltersParam, ...(searchQuery ? { q: searchQuery } : {}) }, timeout: 45000 }
       );
+      if (listQueryKeyRef.current !== listQueryKey) return;
       const rows = r.data.rows || [];
-      const existingIds = new Set([...conversations.map((c) => c.id), ...tail.map((c) => c.id)]);
+      const existingIds = new Set([...conversations.map((c) => c.id), ...tailRef.current.map((c) => c.id)]);
       const newRows = rows.filter((c) => {
         if (existingIds.has(c.id)) return false;
         existingIds.add(c.id);
         return true;
       });
-      setTail((prev) => [...prev, ...newRows]);
+      tailRef.current = [...tailRef.current, ...newRows];
+      setTail(tailRef.current);
       setHasMore(r.data.has_more ?? false);
       setCursor(r.data.cursor ?? null);
     } catch (err) {
@@ -180,20 +215,20 @@ export default function BotWorkerPage() {
     } finally {
       setLoadingMore(false);
     }
-  }, [cursor, hasMore, loadingMore, conversations, tail, searchQuery, chatFilter]);
+  }, [cursor, hasMore, loadingMore, conversations, searchQuery, chatFilter, listFiltersParam, listQueryKey]);
 
   // ⚡ combined conversations = head + tail (deduped)
   const allConversations = useMemo(() => {
     const seen = new Set<string>();
     const result: Conversation[] = [];
-    for (const c of [...conversations, ...tail]) {
+    for (const c of [...pinnedConversations, ...conversations, ...tail]) {
       if (!seen.has(c.id)) {
         seen.add(c.id);
         result.push(c);
       }
     }
     return result;
-  }, [conversations, tail]);
+  }, [pinnedConversations, conversations, tail]);
 
   // ⚡ poll เดียวทำ initial load + refresh — immediate ยิงตอน mount/restart
   //   restartKey=loadConversations → searchQuery/chatFilter เปลี่ยน = effect เดิม refire
@@ -439,7 +474,11 @@ export default function BotWorkerPage() {
           onToggleAccepting={handleToggleAccepting}
           togglingAccept={togglingAccept}
           totalCount={totalCount}
+          assignmentCountScope="botworker"
+          currentAdminId={user?.admin_id}
           onSearchChange={setSearchQuery}
+          onListFiltersChange={setListFilters}
+          onPinChanged={canPin ? refreshPins : undefined}
           loading={loadingConversations}
           loadMore={loadMore}
           hasMore={hasMore}
@@ -799,7 +838,6 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
 
 // ─── UnifiedBubble — message bubble 3 สี ───────────────────────
 
-import { useRef } from "react";
 import { User, Zap, Bot as BotIcon } from "lucide-react";
 
 function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewAction }: { msg: UnifiedMessage; customerName?: string; customerAvatar?: string; canReview?: boolean; onReviewAction?: (msgId: string, bubbleId: string, action: string, extra?: Record<string, unknown>) => Promise<void> }) {

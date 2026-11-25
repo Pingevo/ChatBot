@@ -119,7 +119,7 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ con
       source: doc.source,
       admin_id: me,
       admin_name: adminDoc?.name || adminDoc?.username || me,
-      products: doc.products,
+      products: doc.products?.map((product) => ({ ...product, price: product.price ?? 0 })),
       message_type: doc.message_type,
       media: doc.media,
       delivery_status: doc.delivery_status,

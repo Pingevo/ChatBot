@@ -15,7 +15,8 @@
 //   auto-reopen closed→bot on inbound ไม่มี owner ใน codebase — ดู roadmap 2B.1
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
-import { json } from "@/backend/lib/http";
+import { json, error } from "@/backend/lib/http";
+import { parseInboxFilters, unansweredStages, messageStatusMatch } from "@/backend/lib/inboxFilters";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { safeRegexSearch } from "@/backend/lib/regexEscape";
 import type { Platform, ConversationStatus, ConversationDoc } from "@/backend/service/conversationService";
@@ -64,6 +65,7 @@ interface MetaRow {
   topic?: string;
   item_ids?: string[];
   pinned?: boolean;
+  pinned_by_admin_ids?: string[];
   // ⚡ Phase 2B.6 — claim lifecycle fields (transport จาก status_conversation)
   active_claim_episode_id?: string | null;
   claim_outcome?: {
@@ -80,6 +82,7 @@ export function mapToConversation(
   adminMap: Map<string, { name: string; username: string }>,
   unansweredCount: number,
   meta?: MetaRow,
+  me = "",
 ): Conversation {
   // status/assigned_to อ่านจาก meta เท่านั้น — raw conversations(_shp) เป็น dump
   //   meta ไม่มี → bot-owned
@@ -102,6 +105,8 @@ export function mapToConversation(
     topic: ((meta?.topic as Conversation["topic"]) || (doc.topic as Conversation["topic"]) || "general"),
     last_message: doc.last_message_text,
     last_timestamp: doc.last_message_timestamp.toISOString(),
+    pin_global: meta?.pinned === true,
+    pin_personal: !!me && (meta?.pinned_by_admin_ids || []).includes(me),
     unread: unansweredCount,  // ⚠️ ใช้ unanswered แทน unread_count ของ sellcenter
     assigned_to: effectiveAssignedTo || undefined,
     assigned_to_name: adminInfo?.name || adminInfo?.username,
@@ -142,16 +147,37 @@ export async function GET(req: NextRequest) {
   if (!r.ok) return r.response;
 
   const url = new URL(req.url);
+  const rawFilters = url.searchParams.get("filters");
+  const rawPinIds = url.searchParams.get("pin_ids");
+  let pinIds: string[] | null = null;
+  if (rawPinIds) {
+    try {
+      const ids: unknown = JSON.parse(rawPinIds);
+      if (!Array.isArray(ids) || ids.length > 100 || !ids.every((id) => typeof id === "string" && id.length <= 150)) return error("invalid pin ids", 422);
+      pinIds = ids;
+    } catch { return error("invalid pin ids", 422); }
+  }
+  const listFilters = parseInboxFilters(rawFilters);
+  if (rawFilters && !listFilters) return error("invalid inbox filters", 422);
   const platform = (url.searchParams.get("platform") as Platform | null) || undefined;
-  const status = (url.searchParams.get("status") as ConversationStatus | null) || undefined;
+  const status = ((listFilters?.msgStatus === "unreplied" ? "handoff"
+    : listFilters && listFilters.chatStatus !== "all" ? listFilters.chatStatus
+    : url.searchParams.get("status")) || undefined) as ConversationStatus | undefined;
   const shopId = url.searchParams.get("shop") || url.searchParams.get("shop_id") || undefined;
   const search = url.searchParams.get("q") || url.searchParams.get("search") || undefined;
   const assignedToParam = url.searchParams.get("assigned_to") || "all";
   const includeCount = url.searchParams.get("include_count") === "true";
   // ⚡ compound cursor — "timestamp|conversation_id" (tiebreaker กัน timestamp เดียวกัน)
   const cursorParam = url.searchParams.get("cursor") || undefined;
+  let nameCursor: { name: string; id: string } | undefined;
+  if (listFilters?.sort === "name" && cursorParam?.startsWith("n|")) {
+    const parts = cursorParam.split("|");
+    if (parts.length === 3 && parts[2]) {
+      try { nameCursor = { name: decodeURIComponent(parts[1]), id: parts[2] }; } catch { return error("invalid cursor", 422); }
+    }
+  }
   let parsedCursor: { ts: Date; id: string } | undefined;
-  if (cursorParam) {
+  if (cursorParam && listFilters?.sort !== "name") {
     const sepIdx = cursorParam.indexOf("|");
     if (sepIdx > 0) {
       const ts = new Date(cursorParam.substring(0, sepIdx));
@@ -171,7 +197,7 @@ export async function GET(req: NextRequest) {
   const channelPred = isPrivileged || channelsAccess.length === 0 ? undefined : { $in: channelsAccess };
 
   // me + channels ต้องอยู่ใน cache key — กันข้าม admin (assigned_to=me/authorized rows คนละชุด)
-  const cacheKey = `${me}|${channelsAccess.join(",")}|${assignedToParam}|${platform || ""}|${status || ""}|${shopId || ""}|${search || ""}|${limit}|${includeCount}|${cursorParam || ""}`;
+  const cacheKey = `${me}|${channelsAccess.join(",")}|${assignedToParam}|${platform || ""}|${status || ""}|${shopId || ""}|${search || ""}|${rawFilters || ""}|${rawPinIds || ""}|${limit}|${includeCount}|${cursorParam || ""}`;
   const now = Date.now();
   if (cache && cache.key === cacheKey && cache.ver === CACHE_VER && now - cache.ts < CACHE_TTL) {
     if (includeCount) {
@@ -198,15 +224,28 @@ export async function GET(req: NextRequest) {
     const m: Record<string, unknown> = {};
     if (platform) {
       m[`${pfx}platform`] = channelPred && !channelsAccess.includes(platform) ? { $in: [] } : platform;
+    } else if (listFilters?.platforms.length) {
+      const allowed = channelPred ? listFilters.platforms.filter((p) => channelsAccess.includes(p)) : listFilters.platforms;
+      m[`${pfx}platform`] = { $in: allowed };
     } else if (channelPred) {
       m[`${pfx}platform`] = channelPred;
     }
     if (shopId) m[`${pfx}shop_id`] = shopId;
+    if (pinIds) m[`${pfx}conversation_id`] = { $in: pinIds };
     const ands: Record<string, unknown>[] = [];
-    if (withCursor && parsedCursor) {
+    if (listFilters?.shops.length) ands.push({ $or: listFilters.shops.map((shop) => ({
+      [`${pfx}platform`]: shop.platform, [`${pfx}shop_id`]: shop.shop_id,
+    })) });
+    if (withCursor && nameCursor) {
       ands.push({ $or: [
-        { [`${pfx}last_message_timestamp`]: { $lt: parsedCursor.ts } },
-        { [`${pfx}last_message_timestamp`]: parsedCursor.ts, [`${pfx}conversation_id`]: { $lt: parsedCursor.id } },
+        { [`${pfx}to_name`]: { $gt: nameCursor.name } },
+        { [`${pfx}to_name`]: nameCursor.name, [`${pfx}conversation_id`]: { $gt: nameCursor.id } },
+      ] });
+    } else if (withCursor && parsedCursor) {
+      const direction = listFilters?.sort === "oldest" ? "$gt" : "$lt";
+      ands.push({ $or: [
+        { [`${pfx}last_message_timestamp`]: { [direction]: parsedCursor.ts } },
+        { [`${pfx}last_message_timestamp`]: parsedCursor.ts, [`${pfx}conversation_id`]: { [direction]: parsedCursor.id } },
       ]});
     }
     if (searchOr) {
@@ -227,12 +266,13 @@ export async function GET(req: NextRequest) {
     const conds: Record<string, unknown>[] = [];
     if (status === "bot") conds.push({ [`${pfx}status`]: { $nin: OWNED_STATUSES } });
     else if (status) conds.push({ [`${pfx}status`]: status });
-    if (assignedToParam === "unassigned") conds.push({ $or: [
+    if (assignedToParam === "pending_handoff") conds.push({ [`${pfx}status`]: { $in: ["handoff", "open", "pending"] } });
+    if (assignedToParam === "unassigned" || assignedToParam === "pending_handoff") conds.push({ $or: [
       { [`${pfx}assigned_to`]: { $exists: false } },
       { [`${pfx}assigned_to`]: { $in: [null, ""] } },
     ]});
     else if (assignedToParam === "me") conds.push({ [`${pfx}assigned_to`]: me });
-    else if (assignedToParam !== "all") conds.push({ [`${pfx}assigned_to`]: assignedToParam });
+    else if (assignedToParam !== "all" && assignedToParam !== "pending_handoff") conds.push({ [`${pfx}assigned_to`]: assignedToParam });
     return conds;
   };
   const metaMatch = (conds: Record<string, unknown>[]) =>
@@ -245,9 +285,17 @@ export async function GET(req: NextRequest) {
   const metaBound = (status !== undefined && status !== "bot") ||
     (assignedToParam !== "all" && assignedToParam !== "unassigned");
 
-  const SORT = { pinned: -1, last_message_timestamp: -1, conversation_id: -1 };
+  const sortKeys = listFilters?.sort === "oldest"
+    ? { last_message_timestamp: 1, conversation_id: 1 }
+    : listFilters?.sort === "name"
+      ? { to_name: 1, conversation_id: 1 }
+      : listFilters ? { last_message_timestamp: -1, conversation_id: -1 }
+        : { pinned: -1, last_message_timestamp: -1, conversation_id: -1 };
   const sortStage = (pfx: string) =>
-    ({ $sort: Object.fromEntries(Object.entries(SORT).map(([k, v]) => [`${pfx}${k}`, v])) });
+    ({ $sort: Object.fromEntries(Object.entries(sortKeys).map(([k, v]) => [`${pfx}${k}`, v])) });
+  const messageStages = listFilters?.msgStatus && listFilters.msgStatus !== "all"
+    ? (pfx: string) => [...unansweredStages(pfx), ...messageStatusMatch(listFilters.msgStatus)]
+    : () => [];
 
   let docs: ListRow[];
   let totalCount: number | undefined;
@@ -263,13 +311,14 @@ export async function GET(req: NextRequest) {
     const metaRows = await metaColl.aggregate<{ conv: ConversationDoc } & MetaRow & { conversation_id: string }>([
       mFilter, ...convLookup,
       { $match: convMatch("conv.", true) },
+      ...messageStages("conv."),
       sortStage("conv."),
       { $limit: limit + 1 }, // +1 probe → has_more เที่ยงตรง (page สุดท้ายพอดี limit ไม่ false-positive)
-    ]).toArray();
+    ], { allowDiskUse: true, maxTimeMS: 15000 }).toArray();
     fetched = metaRows.length;
     docs = metaRows.slice(0, limit).map((d) => ({
       ...d.conv,
-      meta: { status: d.status, assigned_to: d.assigned_to, topic: d.topic, item_ids: d.item_ids, pinned: d.pinned,
+      meta: { status: d.status, assigned_to: d.assigned_to, topic: d.topic, item_ids: d.item_ids, pinned: d.pinned, pinned_by_admin_ids: d.pinned_by_admin_ids,
         active_claim_episode_id: d.active_claim_episode_id, claim_outcome: d.claim_outcome,
         bot_claim_info: d.bot_claim_info },
     }));
@@ -277,6 +326,7 @@ export async function GET(req: NextRequest) {
       totalCount = ((await metaColl.aggregate<{ n: number }>([
         mFilter, ...convLookup,
         { $match: convMatch("conv.", false) },
+        ...messageStages("conv."),
         { $count: "n" },
       ]).toArray())[0]?.n ?? 0);
     }
@@ -287,26 +337,33 @@ export async function GET(req: NextRequest) {
     const pipeline: Record<string, unknown>[] = [
       { $match: convMatch("", true) },
       ...(metaFilter ? [...META_JOIN, metaFilter] : []),
+      ...messageStages(""),
       sortStage(""),
       { $limit: limit + 1 },
       ...(metaFilter ? [] : META_JOIN),
     ];
-    const convRows = await convColl.aggregate<ListRow>(pipeline).toArray();
+    const convRows = await convColl.aggregate<ListRow>(pipeline, { allowDiskUse: true, maxTimeMS: 15000 }).toArray();
     fetched = convRows.length;
     docs = convRows.slice(0, limit);
     if (includeCount) {
       totalCount = metaFilter
         ? ((await convColl.aggregate<{ n: number }>([
-            { $match: convMatch("", false) }, ...META_JOIN, metaFilter, { $count: "n" },
+            { $match: convMatch("", false) }, ...META_JOIN, metaFilter, ...messageStages(""), { $count: "n" },
           ]).toArray())[0]?.n ?? 0)
-        : await convColl.countDocuments(convMatch("", false));
+        : listFilters?.msgStatus && listFilters.msgStatus !== "all"
+          ? ((await convColl.aggregate<{ n: number }>([
+              { $match: convMatch("", false) }, ...messageStages(""), { $count: "n" },
+            ]).toArray())[0]?.n ?? 0)
+          : await convColl.countDocuments(convMatch("", false));
     }
   }
 
   // ⚡ hasMore — fetch limit+1: เหลือเกิน limit = มีหน้าถัดไปจริง
   const hasMore = fetched > limit;
   const nextCursor = docs.length > 0
-    ? `${docs[docs.length - 1].last_message_timestamp.toISOString()}|${docs[docs.length - 1].conversation_id}`
+    ? listFilters?.sort === "name"
+      ? `n|${encodeURIComponent(docs[docs.length - 1].to_name || "")}|${docs[docs.length - 1].conversation_id}`
+      : `${docs[docs.length - 1].last_message_timestamp.toISOString()}|${docs[docs.length - 1].conversation_id}`
     : null;
 
   // ⚡ dedupe by conversation_id — DB อาจมี doc ซ้ำ
@@ -322,7 +379,7 @@ export async function GET(req: NextRequest) {
   const unansweredMap = await buildUnansweredMap(pageConvIds);
   const conversations: Conversation[] = filtered.map((d) => {
     const meta = Array.isArray(d.meta) ? d.meta[0] : d.meta;
-    return mapToConversation(d, adminMap, unansweredMap.get(d.conversation_id) || 0, meta ?? undefined);
+    return mapToConversation(d, adminMap, unansweredMap.get(d.conversation_id) || 0, meta ?? undefined, me);
   });
 
   if (includeCount) {

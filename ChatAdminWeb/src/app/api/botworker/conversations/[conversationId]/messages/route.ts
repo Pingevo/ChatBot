@@ -53,6 +53,8 @@ interface UnifiedMessage {
   table?: MessageTable;
   bundle?: UnifiedMessage[];
   products?: ProductCard[];
+  delivery_status?: "internal" | "sent" | "failed" | "unknown";
+  provider_message_id?: string;
 }
 
 export async function GET(

@@ -15124,3 +15124,27 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - User requests phone layout return to prior behavior. Scope: remove only the newly added phone-width chat-panel dock padding; retain tablet-width dock clearance and scoped send safety. No tests or provider calls.
 - Removed the new `max-width: 767.98px` scoped chat-panel padding; phone layout returns to its prior spacing. Tablet dock clearance at 768–1279px remains. No sender logic or switch state changed.
 - Source inspection only; no browser/test/build/lint/provider/customer operation per user instruction. No commit or PR.
+
+## 2026-11-25 — Inbox pagination, server filters, recipient counts and pins — pre-work
+- User approved continuing on codex/shopee-ticket-botworker-live-send and instructed committing the prior Shopee send checkpoint first; commit eddb10e was made without tests or provider calls as previously required.
+- Root causes from source: BotWorker head poll clears tail every 3 seconds; ChatList applies shop/platform/status/message/sort to only loaded rows; available shop choices derive from loaded rows; recipient selection reaches API but combined client filters and badge counts do not represent the full query. Tickets and BotWorker use different status metadata owners.
+- Plan: keep pagination state across head polls, move complete filters and ordering before DB limit, derive per-recipient and pending handoff counts from correct status owner, add private/global pin UI and durable metadata independent of imported conversation dump. Preserve page permissions and no Shopee sends. Prior user prohibition on tests/provider calls remains in effect.
+- Historical ledger coverage is partial. Frozen and active prefix integrity matched before this task; source range through 15126 was indexed previously.
+
+
+## 2026-11-25 — Shop dropdown still displays transport IDs — pre-work
+- Root cause: `/api/conversation-shop-options` queries `shops.shop_id` with conversation IDs as strings and groups only one `$max shop_name`. This misses legacy `shops.shop_id=shopname` fallback rows (documented in earlier inventory) and mixed numeric/string IDs; many conversation rows also lack `shop_name`, so no alias can be recovered from the current projection.
+- Plan: gather all nonempty conversation `shop_name` candidates per `(platform, normalized transport shop_id)`; load registered shops for only the platforms in scope; resolve by normalized exact ID first, then `(platform, shopname)` alias, then a non-ID conversation name. Keep the returned transport shop ID for filtering; do not display raw IDs when no name can be resolved.
+- Impact: shop option API and dropdown labels only. No writes to MongoDB, provider/token/CDN requests, customer sends, or automated tests. Historical ledger coverage remains partial.
+
+- Follow-up finding from read-only local GETs: `/api/conversation-shop-options?scope=tickets` now returns registered/conversation names for mapped pairs, but three Shopee pairs still resolve only to the generic label `ไม่ทราบชื่อร้าน`: 258491064, 530326507, 80878682. Targeted historical census at lines 5769–5780 records these exact pairs as having no shop name and no product rows; no authoritative local name mapping exists to display for them. `/api/shops?platform=shopee` also has no matching directory rows. No customer data, provider APIs, or writes were accessed.
+
+- Public-name lookup for user candidates: Shopee Thailand profile `https://shopee.co.th/shop/530326507` resolves to `binnifaofficialstore`, confirming BinnifaOfficialStore for 530326507. Profiles for 258491064 and 80878682 display Shopee's removed/suspended message; direct profile lookup cannot confirm LuckyHomeMart or SuperAudio. Local `shops` has LuckyHomeMart and BinnifaOfficialStore only as name-fallback IDs; no pair mapping for these orphan conversation IDs. No mapping was written.
+
+- User decision: do not add any shop-name mappings for 258491064, 530326507, or 80878682; keep these three unresolved. No DB update or hard-coded alias was added.
+
+## 2026-11-25 — Inbox full-query filters, pins, recipient counts and shop names — closeout
+- Implemented database-side filter/sort/pagination for Tickets and BotWorker; BotWorker head refresh now retains loaded tail rows. Added private/global conversation pins, server-side recipient counts, and shop options resolved through normalized shop IDs/name aliases. Existing unknown shop IDs 258491064, 530326507, and 80878682 remain without mappings per user decision.
+- Updated relevant schemas and API metadata. Current branch: codex/shopee-ticket-botworker-live-send. User authorized committing the current branch changes.
+- Verification: source-only TypeScript diagnostics 0; `git diff --check` passed. `npm run` exposes no lint script. `npm run build` and `npm run build -- --webpack` both stop at `.next/trace*` with EPERM before compilation. No automated tests, UI runtime checks, database writes, provider calls, or customer sends were performed.
+- Runtime behavior, full build, visual pin/filter behavior, and provider-send paths remain unverified; commit records source state only.

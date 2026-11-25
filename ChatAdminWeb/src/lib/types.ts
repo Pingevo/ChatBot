@@ -130,6 +130,8 @@ export interface Conversation {
   last_message: string;
   last_timestamp: string; // ISO
   unread: number;
+  pin_global?: boolean;
+  pin_personal?: boolean;
   assigned_to?: string; // admin id
   assigned_to_name?: string; // admin display name (lookup)
   replay_verdict?: string; // live-assignment replay result — display only, not current state
