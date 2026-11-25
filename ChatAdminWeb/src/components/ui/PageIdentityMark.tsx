@@ -15,7 +15,7 @@ export type PageIdentityKind =
   | "support";
 
 export function getPageIdentityKind(pathname: string): PageIdentityKind {
-  if (pathname.startsWith("/analytics") || pathname === "/dashboard") return "insights";
+  if (pathname.startsWith("/analytics") || pathname.startsWith("/bot-performance") || pathname === "/dashboard") return "insights";
   if (pathname.startsWith("/ticket") || pathname.startsWith("/chats") || pathname.startsWith("/shadow-inbox") || pathname.startsWith("/admin-chat-result")) return "inbox";
   if (pathname.startsWith("/knowledge") || pathname.startsWith("/zaapi-kb")) return "knowledge";
   if (pathname.startsWith("/workflows") || pathname.startsWith("/triggers") || pathname.startsWith("/quick-replies")) return "workflow";

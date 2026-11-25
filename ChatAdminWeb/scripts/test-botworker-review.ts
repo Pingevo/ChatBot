@@ -20,8 +20,8 @@ type Rt = typeof import("../src/backend/service/botworkerRuntime");
 type ReviewRoute = typeof import("../src/app/api/botworker/conversations/[conversationId]/review/route");
 type HandoffRoute = typeof import("../src/app/api/botworker/conversations/[conversationId]/handoff-review/route");
 type MsgsRoute = typeof import("../src/app/api/botworker/conversations/[conversationId]/messages/route");
-type AnalyticsService = typeof import("../src/backend/service/botworkerReviewAnalyticsService");
-type AnalyticsRoute = typeof import("../src/app/api/botworker/review-analysis/route");
+type AnalyticsService = typeof import("../src/backend/service/botPerformanceService");
+type AnalyticsRoute = typeof import("../src/app/api/bot-performance/route");
 
 let mocks: Mocks, svc: Svc, rt: Rt, reviewRoute: ReviewRoute, handoffRoute: HandoffRoute, msgsRoute: MsgsRoute, analyticsService: AnalyticsService, analyticsRoute: AnalyticsRoute;
 
@@ -147,8 +147,8 @@ async function main() {
   reviewRoute = await import("../src/app/api/botworker/conversations/[conversationId]/review/route");
   handoffRoute = await import("../src/app/api/botworker/conversations/[conversationId]/handoff-review/route");
   msgsRoute = await import("../src/app/api/botworker/conversations/[conversationId]/messages/route");
-  analyticsService = await import("../src/backend/service/botworkerReviewAnalyticsService");
-  analyticsRoute = await import("../src/app/api/botworker/review-analysis/route");
+  analyticsService = await import("../src/backend/service/botPerformanceService");
+  analyticsRoute = await import("../src/app/api/bot-performance/route");
 
   // ═══ A — freeze at insert ═══
   await test("A1 A|||B|||C → 3 review_bubbles ใน Mongo + 0 mock request", async () => {
@@ -194,7 +194,7 @@ async function main() {
       { params: Promise.resolve({ conversationId: "conv_1" }) } as any);
     const reviewed = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "blocked" });
     const handoff = await callHandoffReview("conv_1", doc.shadow_reply_id);
-    const analysis = await analyticsRoute.GET({ url: "http://localhost/api/botworker/review-analysis" } as any);
+    const analysis = await analyticsRoute.GET({ url: "http://localhost/api/bot-performance?from=2026-11-25&to=2026-11-25" } as any);
     assert([messages.status, reviewed.status, handoff.status, analysis.status].every((status) => status === 403),
       `page access bypass: ${[messages.status, reviewed.status, handoff.status, analysis.status].join()}`);
     assert(mockEvents().length === 0, "denied page access sent a message");
@@ -203,7 +203,7 @@ async function main() {
   await test("A5 analysis is available to another page-authorized admin without fixed reviewer", async () => {
     delete (mocks.state.config as any).bot_review_admin_id;
     mocks.state.authAdminId = "other_admin";
-    const res = await analyticsRoute.GET({ url: "http://localhost/api/botworker/review-analysis?from=2026-11-25&to=2026-11-25" } as any);
+    const res = await analyticsRoute.GET({ url: "http://localhost/api/bot-performance?view=items&from=2026-11-25&to=2026-11-25" } as any);
     assert(res.status === 200, `analysis -> ${res.status}`);
   });
 
@@ -436,14 +436,73 @@ async function main() {
         type: "review_action", actor: "t_admin", metadata: { reply_id: "sr_analytics_worker", action: "save_and_approve",
           actor_name: "Test Reviewer", edited_text: "แก้" }, created_at: reviewed }
     );
-    const result = await analyticsService.getBotworkerReviewAnalysis({ from: "2026-11-24", to: "2026-11-24", group: "day" });
-    assert(result.total === 2, `worker/workflow total=${result.total}`);
-    assert(result.series[0].drafts === 2 && result.series[0].handoff_requested === 1, "daily series omitted replies or handoff flag");
+    const summary = await analyticsService.getBotPerformanceSummary({ from: "2026-11-24", to: "2026-11-24", group: "day" });
+    assert(summary.kpi.replies === 2 && summary.kpi.conversations === 2, `worker/workflow total=${summary.kpi.replies}`);
+    assert(summary.series[0].replies === 2 && summary.kpi.handoff_requested === 1, "daily series omitted replies or handoff flag");
+    const result = await analyticsService.getBotPerformanceItems({ from: "2026-11-24", to: "2026-11-24" });
     const item = result.items.find((row) => row.reply_id === "sr_analytics_worker");
     if (!item) throw new Error("analysis item missing");
     assert(item.timeline.length === 1 && item.timeline[0].type === "review_action", "linked event timeline missing or duplicated");
     assert(item.timeline[0].actor_name === "Test Reviewer", "reviewer identity missing in timeline");
-    assert(item.review_bubbles[0].edit_history?.[0].after_text === "แก้", "edit history missing from analysis item");
+    assert(item.bubbles[0].edit_history?.[0].after_text === "แก้", "edit history missing from analysis item");
+  });
+
+  await test("P1 bot performance KPIs: pass/edit/reject rates, human workload % of all BotWorker chats, edit %, reviewer timing", async () => {
+    const created = new Date("2026-11-20T09:00:00+07:00");
+    const at = (min: number) => new Date(created.getTime() + min * 60_000);
+    const bubble = (id: string, decision: string, extra: Record<string, unknown> = {}) => ({ bubble_id: id, ordinal: 0, original_text: "สวัสดีค่ะ", decision,
+      decided_by: "t_admin", decided_by_name: "Reviewer A", decided_at: at(10), delivery: { state: "not_sent_switch_off" }, ...extra });
+    const reply = (id: string, conv: string, bubbles: unknown[], extra: Record<string, unknown> = {}) => ({ _id: id, shadow_reply_id: id, conversation_id: conv,
+      shop_id: "shop_1", platform: "shopee", origin: "worker", created_at: created, updated_at: created, inbound_text: `q ${id}`, bot_reply_text: "สวัสดีค่ะ", review_bubbles: bubbles, ...extra });
+    mocks.fakeColl("shadow_replies").push(
+      reply("p1", "c1", [bubble("p1b", "approved")]),
+      reply("p2", "c1", [bubble("p2b", "approved")]),
+      reply("p3", "c2", [bubble("p3b", "edited_approved", { edited_text: "สวัสดีครับ", approved_text: "สวัสดีครับ", decided_at: at(30) })]),
+      reply("p4", "c3", [bubble("p4b", "rejected", { rejection_reason: "ราคาผิด" })]),
+      reply("p5", "c4", [bubble("p5b", "pending", { decided_by: undefined, decided_by_name: undefined, decided_at: undefined })],
+        { bot_handoff_required: true, bot_handoff_reason: "clarification_unresolved", handoff_review: { status: "approved", reviewed_by_name: "Reviewer A", selected_admin_name: "Agent B" } }),
+      reply("p_manual", "c9", [bubble("pmb", "rejected")], { origin: "manual" }),
+      reply("p_deleted", "c9", [bubble("pdb", "rejected")], { deleted_at: created }),
+    );
+    const s = await analyticsService.getBotPerformanceSummary({ from: "2026-11-20", to: "2026-11-20", group: "week" });
+    const k = s.kpi;
+    assert(k.replies === 5 && k.conversations === 4, `scope must exclude manual/deleted: replies=${k.replies} conv=${k.conversations}`);
+    assert(k.decided === 4 && k.approved === 2 && k.edited === 1 && k.rejected === 1 && k.pending === 1, `bubble counts ${JSON.stringify(k)}`);
+    assert(k.pass_rate === 50 && k.edited_rate === 25 && k.rejected_rate === 25, `rates ${k.pass_rate}/${k.edited_rate}/${k.rejected_rate}`);
+    assert(k.human_conversations === 3 && k.human_conversation_rate === 75, `human conv ${k.human_conversations} ${k.human_conversation_rate}`);
+    assert(k.human_replies === 3 && k.human_reply_rate === 60, `human replies ${k.human_replies} ${k.human_reply_rate}`);
+    assert(k.handoff_rate === 20 && k.handoff_agree_rate === 100, `handoff ${k.handoff_rate} ${k.handoff_agree_rate}`);
+    assert(k.avg_edit_pct > 0 && k.avg_edit_pct < 60, `edit pct ${k.avg_edit_pct}`);
+    assert(k.median_review_minutes === 10, `median review minutes ${k.median_review_minutes}`);
+    assert(s.series.length === 1 && s.series[0].period === "2026-11-16", `week bucket starts Monday: ${s.series[0]?.period}`);
+    assert(s.rejection_reasons[0]?.label === "ราคาผิด", "rejection reason ranking missing");
+    const a = s.by_reviewer.find((r) => r.name === "Reviewer A");
+    assert(a?.decided === 4 && a.handoffs_reviewed === 1, `reviewer row ${JSON.stringify(a)}`);
+    assert(s.by_reviewer.find((r) => r.name === "Agent B")?.handoffs_received === 1, "handoff recipient workload missing");
+  });
+
+  await test("P2 bot performance Q&A filters and export carry admin reasons and final text", async () => {
+    const created = new Date("2026-11-21T09:00:00+07:00");
+    mocks.fakeColl("shadow_replies").push(
+      { _id: "f1", shadow_reply_id: "f1", conversation_id: "cf1", shop_id: "shop_1", origin: "worker", created_at: created, inbound_text: "มีสีดำไหม",
+        bot_reply_text: "มีค่ะ", review_bubbles: [{ bubble_id: "f1b", ordinal: 0, original_text: "มีค่ะ", decision: "rejected", rejection_reason: "สีดำหมดแล้ว", decided_by_name: "Reviewer A", delivery: { state: "not_requested" } }] },
+      { _id: "f2", shadow_reply_id: "f2", conversation_id: "cf2", shop_id: "shop_2", origin: "workflow", created_at: created, inbound_text: "ส่งกี่วัน",
+        bot_reply_text: "2 วัน", review_bubbles: [{ bubble_id: "f2b", ordinal: 0, original_text: "2 วัน", approved_text: "2-3 วันทำการค่ะ", decision: "edited_approved", decided_by_name: "Reviewer B", delivery: { state: "not_requested" } }] },
+    );
+    const scope = { from: "2026-11-21", to: "2026-11-21" };
+    const rejected = await analyticsService.getBotPerformanceItems({ ...scope, outcome: "rejected" });
+    assert(rejected.total === 1 && rejected.items[0].admin_reasons[0] === "สีดำหมดแล้ว", "outcome filter / reason");
+    assert((await analyticsService.getBotPerformanceItems({ ...scope, reviewer: "Reviewer B" })).total === 1, "reviewer filter");
+    assert((await analyticsService.getBotPerformanceItems({ ...scope, q: "สีดำหมด" })).total === 1, "search over admin reasons");
+    assert((await analyticsService.getBotPerformanceItems({ ...scope, minEditPct: 30 })).items[0]?.reply_id === "f2", "min edit filter");
+    assert((await analyticsService.getBotPerformanceItems({ ...scope, shopId: "shop_2" })).total === 1, "shop scope");
+    const csv = await analyticsService.exportBotPerformance(scope, "csv");
+    assert(csv.body.includes("สีดำหมดแล้ว") && csv.body.includes("2-3 วันทำการค่ะ") && csv.body.split("\n").length === 3, "csv rows/fields");
+    const jsonl = await analyticsService.exportBotPerformance({ ...scope, outcome: "edited" }, "jsonl");
+    const parsed = jsonl.body.split("\n").map((line) => JSON.parse(line));
+    assert(parsed.length === 1 && parsed[0].bubbles[0].final_text === "2-3 วันทำการค่ะ", "jsonl export");
+    const badRange = await analyticsRoute.GET({ url: "http://localhost/api/bot-performance?from=2026-11-22&to=2026-11-21" } as any);
+    assert(badRange.status === 422, `bad range -> ${badRange.status}`);
   });
 
   await test("E3 Shopee approval while live-send switch is OFF is recorded without calling any sender", async () => {

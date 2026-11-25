@@ -122,6 +122,7 @@ const navGroups: NavGroup[] = [
       },
       { href: "/shadow-inbox", label: "กล่องเงา (Shadow Inbox)", icon: Ghost, page: "shadow-inbox" },
       { href: "/botworker", label: "เครื่องบอท (Bot Worker)", icon: Wrench, badge: "auto", page: "botworker" },
+      { href: "/bot-performance", label: "ผลงานบอท", icon: BarChart3, page: "bot-performance" },
       { href: "/test-assignment", label: "ทดสอบจ่ายงาน", icon: TestTube2, page: "test-assignment" },
       { href: "/live-assignment", label: "จ่ายงานสด (Live)", icon: Headset, page: "live-assignment" },
       { href: "/replay-compare", label: "เปรียบเทียบรีเพลย์", icon: Scale, page: "replay-compare" },

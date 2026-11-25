@@ -15203,3 +15203,16 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - ลบ pilot config fields ที่ไม่ใช้จาก systemConfigService; ปรับ UI copy, spec, plan, SRS, schema และ function/process ให้ตรงสิทธิ์ใหม่
 - Fake-Mongo/fake-sender behavioral suite 49/49 และ BotWorker boundary suite 25/25 ผ่าน; `tsc --noEmit --incremental false` และ `git diff --check` ผ่าน; ไม่เรียก Shopee/ไม่ส่งลูกค้าจริง/ไม่อ่าน secret; ไม่มี commit เพราะ working tree มีงานอื่นค้างอยู่
 - Correction mechanism net change: helper +0, guard +0, regex +0, keyword table +0, decision owner +0; ตัด fixed-reviewer/config gates และใช้ page permission owner เดิม; semantic coverage ของประวัติยัง partial
+
+## 2026-11-25 — กำลังจะทำ: แยกหน้า "ผลงานบอท" ออกจาก BotWorker
+- ผู้ใช้อนุมัติ design: หน้าใหม่ `/bot-performance` (page key `bot-performance`) แยก 2 แท็บ สถิติ/กราฟ กับ ข้อมูลถามตอบ (ตาราง+แผงรายละเอียด+export CSV/JSONL ไว้ส่ง AI วิเคราะห์ต่อ); เอาแท็บ Inbox/วิเคราะห์ผล ออกจาก `/botworker` โดยคง UX/UI inbox เดิม
+- KPI: % ผ่านไม่แก้ / แก้แล้วผ่าน + % ข้อความที่แก้ / ไม่ผ่าน, % แชทและ % ข้อความที่ต้องให้คนจัดการ เทียบทั้งหมดที่ botworker ตอบ, handoff rate+ความแม่น, รอตรวจ+เวลาตรวจ, เหตุผลพลาดบ่อย, รายแอดมิน/รายร้าน
+- อ่าน `shadow_replies`/`botworker_events` อย่างเดียว คำนวณใน Node; แทนที่ `/api/botworker/review-analysis` + `BotworkerReviewAnalysis`; ไม่แตะบอท Python, flow ส่งข้อความ หรือสวิตช์ส่งจริง
+- baseline frozen SHA และ active 1..15205 SHA ตรง ledger; tail ก่อนเริ่มว่าง; semantic coverage partial
+
+## 2026-11-25 — ผ่านแล้ว: หน้า "ผลงานบอท" แยกจาก BotWorker
+- `/botworker` คืน layout inbox เดิมก่อนมีแท็บ (ลบ tablist/sectionView เท่านั้น); ลบ `/api/botworker/review-analysis`, `botworkerReviewAnalyticsService`, `BotworkerReviewAnalysis`
+- เพิ่ม `/bot-performance` + page key `bot-performance` (default admin/superadmin read, dev edit; matrix ใน DB เดิมไม่มี key นี้ → non-dev ต้องเปิดที่ /roles) + เมนู Sidebar/MobileNav; API `GET /api/bot-performance?view=summary|items|export`; `botPerformanceService` อ่าน shadow_replies(worker/workflow, ไม่รวม deleted)+botworker_events อย่างเดียว; `lib/textDiff` ให้ edit % และไฮไลต์ diff
+- นิยาม: "ต้องให้คนจัดการ" = คำตอบถูกแก้/ไม่อนุมัติ/handoff อนุมัติ; % คิดเทียบทุกแชทและทุกคำตอบที่ BotWorker ตอบในช่วง; week bucket เริ่มวันจันทร์ Asia/Bangkok; cap 20,000 คำตอบ/ช่วง, export 5,000 แถว
+- Verify: test-botworker-review 51/51 (เพิ่ม P1 KPI/workload/edit%/reviewer/week, P2 filters/export/422; ปรับ A4/A5/analysis ไป route/service ใหม่), test-botworker-boundary 25/25, `tsc --noEmit` ผ่าน (เหลือ .next types เก่าของ route ที่ลบ), `git diff --check` ผ่าน; dev server ตอบ /bot-performance 307 และ API 401 ตอนไม่ login = compile ได้ ยังไม่ได้ดู UI ตอน login จริง
+- งานค้าง: ปุ่มเปิดแชทจากแผงรายละเอียดไปหน้า botworker ไม่ได้ทำ (botworker ไม่รองรับ deep link — แสดง conversation_id ให้คัดลอกแทน)

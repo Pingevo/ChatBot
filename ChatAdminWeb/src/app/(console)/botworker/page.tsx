@@ -35,7 +35,6 @@ import { adminBubbleColor, adminBubbleTextColor, ZAAPI_COLOR, BOT_COLOR } from "
 import type { Conversation, ChatMessage, ChatSendInput, CloseHistoryRecord, AdminUser, ProblemCategory } from "@/lib/types";
 import { ShopeeChatComposer } from "@/components/chat/ShopeeChatComposer";
 import { useShopeeSendStatus } from "@/lib/useShopeeSendStatus";
-import { BotworkerReviewAnalysis } from "@/components/botworker/BotworkerReviewAnalysis";
 
 type MobileView = "list" | "chat" | "info";
 
@@ -127,7 +126,6 @@ export default function BotWorkerPage() {
   });
   const listFiltersParam = JSON.stringify(listFilters);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [sectionView, setSectionView] = useState<"inbox" | "analysis">("inbox");
   const [messages, setMessages] = useState<UnifiedMessage[]>([]);
   const [canReview, setCanReview] = useState(false); // ⚡ BotWorker page access (server-derived)
   const [loadingMessages, setLoadingMessages] = useState(false);
@@ -486,14 +484,7 @@ export default function BotWorkerPage() {
   }, [acceptingChats]);
 
   return (
-    <div className="flex h-full min-w-0 flex-col overflow-hidden">
-      <div role="tablist" aria-label="ส่วน BotWorker" className="flex h-11 shrink-0 items-center gap-1 border-b border-border bg-surface px-3">
-        <button role="tab" aria-selected={sectionView === "inbox"} onClick={() => setSectionView("inbox")}
-          className={`h-9 rounded-lg px-4 text-sm font-medium ${sectionView === "inbox" ? "bg-brand text-white" : "text-text-muted hover:bg-surface-2 hover:text-text"}`}>Inbox</button>
-        <button role="tab" aria-selected={sectionView === "analysis"} onClick={() => setSectionView("analysis")}
-          className={`h-9 rounded-lg px-4 text-sm font-medium ${sectionView === "analysis" ? "bg-brand text-white" : "text-text-muted hover:bg-surface-2 hover:text-text"}`}>วิเคราะห์ผล</button>
-      </div>
-      {sectionView === "analysis" ? <BotworkerReviewAnalysis /> : <div className="relative flex min-h-0 flex-1 overflow-hidden">
+    <div className="relative h-full min-w-0 flex overflow-hidden">
       {/* ── Panel ซ้าย: ChatList (เหมือน tickets) ── */}
       <div className={`${mobileView === "list" ? "flex" : "hidden"} 2xl:flex h-full min-w-0 flex-col w-full 2xl:w-80 shrink-0 border-r border-border`}>
         <ChatList
@@ -644,7 +635,6 @@ export default function BotWorkerPage() {
           loading={closing}
         />
       )}
-      </div>}
     </div>
   );
 }

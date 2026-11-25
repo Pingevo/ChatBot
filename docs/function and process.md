@@ -1254,7 +1254,9 @@ reopenConversation({conversationId, reopenedBy, reopenReason, assignedTo, target
 - Shopee review ส่งได้หลังผู้ตรวจอนุมัติและ switch `shopee_console_send_enabled` เปิด; ถ้าปิดจะบันทึก `not_sent_switch_off` และไม่เรียก live หรือ mock sender
 - เมื่อ engine ส่ง `handoff_required`, BotWorker บันทึก flag, reason code, explanation, answer และ upstream turn IDs; ยังไม่ assign งานอัตโนมัติ
 - ผู้ตรวจเห็น reason/explanation และรายชื่อผู้รับที่ออนไลน์ใน assignment pool ของแชท เลือกผู้รับเองหรือใช้ตัวเลือกที่แนะนำ แล้วอนุมัติ/ปฏิเสธพร้อมเหตุผล; การอนุมัติจ่ายงานลง `test_status_conversation` ของ BotWorker เท่านั้น
-- `/botworker/review-analysis` เปิดให้แอดมินที่มีสิทธิ์เข้าหน้า BotWorker อ่านช่วงวันเดียวหรือหลายวัน, จัดกราฟรายวัน/เดือน/ปี และแสดง Q&A, สถานะ, edit/rejection reason, ผู้ตรวจ, ผู้รับงาน และ timeline
+- หน้า `/bot-performance` ("ผลงานบอท", page key `bot-performance`) แยกจากหน้า BotWorker; API `GET /api/bot-performance?view=summary|items|export` อ่าน `shadow_replies` (origin worker/workflow, ไม่รวมที่ลบ) + `botworker_events` อย่างเดียว ผ่าน `botPerformanceService`
+  - สถิติ: % ผ่านไม่ต้องแก้ / แก้แล้วผ่าน (+ % ข้อความที่แก้ จาก `lib/textDiff.editPercent`) / ไม่อนุมัติ ต่อส่วนคำตอบที่ตรวจแล้ว, % แชทและ % คำตอบที่ต้องให้คนจัดการ (ถูกแก้/ไม่ผ่าน/handoff อนุมัติ) เทียบทั้งหมดที่ BotWorker ตอบ, handoff rate + % ส่งต่อถูกเคส, รอตรวจ + มัธยฐานเวลาตรวจ, แนวโน้มรายวัน/สัปดาห์/เดือน (Asia/Bangkok), เหตุผลไม่อนุมัติ/handoff ที่พบบ่อย, รายแอดมิน, รายร้าน
+  - ข้อมูลถามตอบ: ตารางกรองผลตรวจ/handoff/ผู้ตรวจ/% แก้/คำค้น, แผงรายละเอียดไฮไลต์ส่วนที่แอดมินแก้ + timeline, export CSV/JSONL (สูงสุด 5,000 แถว) ไว้ส่ง AI วิเคราะห์ต่อ; คำนวณจากสูงสุด 20,000 คำตอบล่าสุดต่อช่วง (เกินแจ้ง `truncated`)
 
 ---
 
