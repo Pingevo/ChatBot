@@ -28,7 +28,7 @@ export const PAGES: PageDef[] = [
   { key: "testchat", label: "ทดสอบบอท", group: "การทดสอบบอท" },
   { key: "shadow-inbox", label: "กล่องเงา", group: "การทดสอบบอท" },
   { key: "botworker", label: "เครื่องบอท", group: "การทดสอบบอท" },
-  { key: "bot-performance", label: "ผลงานบอท", group: "การทดสอบบอท" },
+  { key: "bot-performance", label: "วิเคราะห์ Bot Worker", group: "การทดสอบบอท" },
   { key: "test-assignment", label: "ทดสอบจ่ายงาน", group: "การทดสอบบอท" },
   { key: "live-assignment", label: "จ่ายงานสด", group: "การทดสอบบอท" },
   { key: "replay-compare", label: "เปรียบเทียบรีเพลย์", group: "การทดสอบบอท" },

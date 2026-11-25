@@ -86,7 +86,7 @@ export default function BotPerformancePage() {
   return (
     <PageShell
       icon={BarChart3}
-      title="ผลงานบอท"
+      title="วิเคราะห์ Bot Worker"
       subtitle="บอทตอบได้ดีแค่ไหน แอดมินต้องแก้มากไหม และงานที่ต้องให้คนจัดการมีกี่ % ของทั้งหมด · เวลาประเทศไทย"
       actions={<Button variant="outline" size="sm" onClick={() => void load()} disabled={loading}><RefreshCw size={14} className={loading ? "animate-spin" : ""} />รีเฟรช</Button>}
       filterBar={filterBar}
