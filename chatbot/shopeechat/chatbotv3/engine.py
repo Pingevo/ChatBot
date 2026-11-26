@@ -93,6 +93,7 @@ def _send_handoff_to_admin(
     reason: str,
     claim: dict | None = None,
     simulate: bool = False,
+    test_source: str | None = None,
 ) -> bool:
     """ส่ง handoff ไป ChatAdminWeb — delegate ไป transport owner เดียว
     (`responses._send_handoff` — typed outcome + bounded retry อยู่ที่นั่นแห่งเดียว).
@@ -108,7 +109,7 @@ def _send_handoff_to_admin(
         shop=shop,
         platform=platform,
         simulate_assignment=simulate,
-        test_source=None,
+        test_source=test_source,
     )
     _result = _resp_mod._send_handoff(
         _req, None, reason=reason, claim=claim,
@@ -270,6 +271,7 @@ def _make_handoff_response(
     conversation_id: str | None = None,
     platform: str | None = None,
     simulate: bool = False,
+    test_source: str | None = None,
 ) -> dict:
     """สร้าง response dict สำหรับ handoff (compatible กับ ChatResponse).
 
@@ -284,6 +286,7 @@ def _make_handoff_response(
         reason=reason,
         claim=claim,
         simulate=simulate,
+        test_source=test_source,
     ) if conversation_id else False
     if not _handoff_ok:
         from .. import responses as _resp_mod
@@ -383,6 +386,7 @@ def chat_v3(req: Any, snap=_gen.SNAP_UNSET) -> dict:
     order_sn_req = (req.order_sn or "").strip() or None
     conversation_id = (req.conversation_id or "").strip() or None
     simulate_assignment = getattr(req, "simulate_assignment", False) or False
+    test_source = getattr(req, "test_source", None)
     limit = getattr(req, "limit", 10) or 10
 
     # ---- 2. parse rich message ------------------------------------------------
@@ -421,6 +425,7 @@ def chat_v3(req: Any, snap=_gen.SNAP_UNSET) -> dict:
                 conversation_id=conversation_id,
                 platform=platform,
                 simulate=simulate_assignment,
+                test_source=test_source,
             )
     except Exception as e:
         # ถ้า warranty module fail → ไม่ block flow (ยังไป LLM ได้)
@@ -440,6 +445,7 @@ def chat_v3(req: Any, snap=_gen.SNAP_UNSET) -> dict:
                 conversation_id=conversation_id,
                 platform=platform,
                 simulate=simulate_assignment,
+                test_source=test_source,
             )
     except Exception as e:
         _steps.append({"name": "emotion_check_error", "model": "emotion", "detail": str(e)[:100]})
@@ -458,6 +464,7 @@ def chat_v3(req: Any, snap=_gen.SNAP_UNSET) -> dict:
                 conversation_id=conversation_id,
                 platform=platform,
                 simulate=simulate_assignment,
+                test_source=test_source,
             )
     except Exception as e:
         _steps.append({"name": "human_request_error", "model": "emotion", "detail": str(e)[:100]})

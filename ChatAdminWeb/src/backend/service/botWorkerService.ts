@@ -51,6 +51,7 @@ import { logBotworkerEvent } from "./botworkerEventService";
 import { buildReviewBubbles } from "./reviewService";
 import { logAdminEvent } from "./adminLogService";
 import { testStatusConversationService } from "./testStatusConversationService";
+import { logWorkerResult } from "./botworkerLog";
 
 // ⚡ parallel sandbox — source ของ test_status_conversation ที่ worker ใช้
 const WORKER_SOURCE = "botworker" as const;
@@ -601,6 +602,7 @@ async function storePendingHandoffReply(opts: {
   assertBotResponseIdentity(opts.botResp, { conversationId: opts.conversationId, messageId: opts.messageId });
   const botResp = {
     ...opts.botResp,
+    answer: opts.botResp.answer?.trim() || "ขออนุญาตให้เจ้าหน้าที่ตรวจสอบคำถามนี้เพิ่มเติมนะคะ",
     conversation_id: opts.botResp.conversation_id || opts.conversationId,
     message_id: opts.botResp.message_id || opts.messageId,
   };
@@ -611,7 +613,7 @@ async function storePendingHandoffReply(opts: {
     reason: opts.botResp.reason,
     handoff_reason: opts.botResp.handoff_reason || opts.botResp.reason,
     handoff_explanation: opts.botResp.handoff_explanation,
-    answer: opts.botResp.answer,
+    answer: botResp.answer,
     upstream_conversation_id: botResp.conversation_id,
     upstream_message_id: botResp.message_id,
     status: "awaiting_reviewer",
@@ -910,7 +912,7 @@ async function processClaimedMessage(msg: {
     const effectiveStatus = meta?.status || "bot";
     const effectiveAssignedTo = meta?.assigned_to || null;
     const isClosed = effectiveStatus === "closed" || effectiveStatus === "resolved";
-    if (effectiveAssignedTo || (!isClosed && (effectiveStatus === "open" || effectiveStatus === "handoff"))) {
+    if (!isClosed && (effectiveStatus === "open" || effectiveStatus === "handoff" || effectiveStatus === "pending")) {
       // ⚡ Workflow guard — admin รับแชทแล้ว → flow ที่รอ reply ต้อง cancel อัตโนมัติ (planner ข้อ 3)
       await workflowEngine.cancelActiveRuns(
         msg.conversation_id,
@@ -1199,33 +1201,14 @@ async function processClaimedMessage(msg: {
         }
 
         if (!botResp.answer || botResp.answer.trim() === "") {
-          // บอทตอบไม่ได้ → ส่งต่อแอดมิน
-          const reason = botResp.handoff_reason || "bot empty answer";
-          const { agentId, mode, inFlight } = await pickAgent(
-            configShopKey, msg.platform, msg.conversation_id, reason,
-            opIdFor(ctx.claim_id, "handoff")
-          );
-          if (inFlight) {
-            // ⚡ handoff op กำลังถูก caller อื่น execute — ห้าม finalize
-            return { status: "in_flight", detail: `handoff op in-flight for ${msg.conversation_id}` };
-          }
-          await logBotworkerEvent({
-            type: "bot_handoff",
-            actor: "bot-worker",
-            conversation_id: msg.conversation_id,
-            shop_id: msg.shop_id,
-            platform: msg.platform,
-            metadata: { reason, assigned_to: agentId, delivered_to_platform: false },
-          });
+          // ไม่มี handoff flag → บอทไม่ตอบใน turn นี้ แต่ยังเป็นเจ้าของแชท
+          const intentionalNoReply = botResp.source === "no_reply";
           return {
-            status: "handed_off",
-            detail: `no trigger→bot empty→handoff→${agentId || "no agent"}`,
-            outcome: {
-              type: "handed_off",
-              reply_ids: [],
-              side_effects: [{ type: "handoff", ref: agentId, at: new Date() }],
-              extra: { assigned_to: agentId || undefined, assignment_mode: mode },
-            },
+            status: intentionalNoReply ? "bot_no_reply" : "bot_failed",
+            detail: `no trigger→bot empty without handoff flag (source=${botResp.source || "unknown"}, engine=${botResp.chat_engine || "unknown"}, input_length=${botText.length}, images=${botImages.length})`,
+            outcome: intentionalNoReply
+              ? { type: "no_action", reply_ids: [] }
+              : { type: "bot_failed", reply_ids: [], extra: { error: "empty_bot_answer_without_handoff_flag" } },
           };
         }
 
@@ -1585,13 +1568,12 @@ async function pollNewMessagesInEra(
         //   มีเสมอ; miss = invariant violation → fail closed ก่อน claim (0 query)
         const pair = scope.pairs.find((p) => p.platform === doc.platform && p.shop_id === doc.shop_id);
         if (!pair) {
-          console.log(`  [worker] ${doc.message_id.slice(0, 20)}... → skip: no scope pair (unresolved ctx)`);
+          logWorkerResult(doc.message_id, "skip", "no scope pair (unresolved ctx)");
           return;
         }
         const claimed = await claimMessage(doc, signal);
         if (claimed.kind !== "claimed") {
-          const detail = claimed.kind === "skip" ? claimed.detail : `${claimed.status}: ${claimed.detail}`;
-          console.log(`  [worker] ${doc.message_id.slice(0, 20)}... → ${claimed.kind}: ${detail}`);
+          logWorkerResult(doc.message_id, claimed.kind === "skip" ? "skip" : claimed.status, claimed.detail);
           return;
         }
         const result = await bufferService.bufferOrProcess(
@@ -1614,9 +1596,9 @@ async function pollNewMessagesInEra(
           markProcessed,
           signal // ⚡ era signal — debounce/retry callback ลูกต้องตายพร้อม era
         );
-        console.log(`  [worker] ${doc.message_id.slice(0, 20)}... → ${result.status}: ${result.detail}`);
+        logWorkerResult(doc.message_id, result.status, result.detail);
       } catch (err) {
-        console.error(`  [worker] ${doc.message_id.slice(0, 20)}... → error:`, err instanceof Error ? err.message : err);
+        logWorkerResult(doc.message_id, "error", err instanceof Error ? err.message : String(err));
       }
     })();
 

@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { SelectField } from "@/components/ui/SelectField";
 import { api } from "@/lib/apiClient";
-import { diffText } from "@/lib/textDiff";
+import { diffLines } from "@/lib/textDiff";
 import { formatMinutes, OUTCOME_COLORS } from "./BotPerformanceStats";
 import type { PerfScope } from "@/app/(console)/bot-performance/page";
 
@@ -14,14 +14,16 @@ type Outcome = "approved" | "edited" | "rejected" | "pending" | "none";
 type Handoff = "none" | "requested" | "approved" | "rejected" | "pending";
 interface QaBubble {
   bubble_id: string; original_text: string; final_text: string; decision: string; edit_pct: number;
-  decided_by_name?: string; decided_at?: string | null; review_minutes: number | null; rejection_reason?: string; delivery_state: string;
+  decided_by_name?: string; decided_at?: string | null; review_minutes: number | null;
+  rejection_category?: string; rejection_reason?: string; delivery_state: string; outbound_text?: string; card_item_id?: string; card_delivery_state: string;
+  edit_history?: { before_text: string; after_text: string; reason_category?: string; reason_text?: string; actor_name?: string; at?: string }[];
 }
 interface QaRow {
   reply_id: string; conversation_id: string; shop_id: string; created_at: string; chat_engine?: string; origin?: string;
   inbound_text: string; bot_reply_text: string; outcome: Outcome; handoff: Handoff;
-  handoff_reason: string; handoff_explanation: string; handoff_reviewed_by?: string; handoff_rejection_reason: string; handoff_assigned_to: string;
+  handoff_reason: string; handoff_explanation: string; handoff_reviewed_by?: string; handoff_rejection_category: string; handoff_rejection_reason: string; handoff_assigned_to: string;
   max_edit_pct: number; review_minutes: number | null; reviewers: string[]; admin_reasons: string[]; bubbles: QaBubble[];
-  timeline: { type: string; actor: string; actor_name?: string; created_at: string; action?: string; rejection_reason?: string; assigned_to_name?: string }[];
+  timeline: { type: string; actor: string; actor_name?: string; created_at: string; action?: string; rejection_category?: string; rejection_reason?: string; assigned_to_name?: string }[];
 }
 interface QaData { items: QaRow[]; page: number; total: number; total_pages: number; truncated: boolean }
 
@@ -29,6 +31,12 @@ const OUTCOME_LABEL: Record<Outcome, string> = { approved: "ผ่านไม�
 const OUTCOME_TONE: Record<Outcome, "success" | "info" | "error" | "warning" | "neutral"> = { approved: "success", edited: "info", rejected: "error", pending: "warning", none: "neutral" };
 const HANDOFF_LABEL: Record<Handoff, string> = { none: "—", requested: "ขอส่งต่อ", approved: "ส่งต่อแล้ว", rejected: "ไม่ให้ส่งต่อ", pending: "รอตัดสินส่งต่อ" };
 const BUBBLE_LABEL: Record<string, string> = { approved: "ผ่าน", edited_approved: "แก้แล้วผ่าน", rejected: "ไม่อนุมัติ", pending: "รอตรวจ" };
+const DELIVERY_LABEL: Record<string, string> = {
+  not_requested: "ยังไม่ได้ส่ง", not_sent_switch_off: "อนุมัติแล้ว แต่สวิตช์ปิด จึงยังไม่ได้ส่ง",
+  mock_sent: "บันทึกผลจำลองส่ง ลูกค้ายังไม่ได้รับ", mock_failed: "จำลองส่งไม่สำเร็จ",
+  live_sending: "กำลังส่งจริง", live_sent: "Shopee ยืนยันส่งถึงลูกค้าแล้ว",
+  live_failed: "Shopee ส่งไม่สำเร็จ", live_unknown: "ผลส่งจริงไม่ชัดเจน ต้องตรวจแชทก่อนทำซ้ำ",
+};
 
 function dateLabel(value?: string | null) {
   return value ? new Date(value).toLocaleString("th-TH", { timeZone: "Asia/Bangkok", dateStyle: "short", timeStyle: "short" }) : "—";
@@ -36,11 +44,14 @@ function dateLabel(value?: string | null) {
 
 function DiffView({ original, final }: { original: string; final: string }) {
   return (
-    <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-text">
-      {diffText(original, final).map((s, i) => s.op === "same" ? <span key={i}>{s.text}</span>
-        : s.op === "del" ? <del key={i} className="rounded-sm bg-error-soft text-error decoration-error/60">{s.text}</del>
-        : <ins key={i} className="rounded-sm bg-success-soft text-success-dark no-underline">{s.text}</ins>)}
-    </p>
+    <div className="overflow-hidden rounded-md border border-border text-sm leading-relaxed text-text">
+      {diffLines(original, final).map((s, i) => <div key={i} className={`grid grid-cols-[1.5rem_minmax(0,1fr)] whitespace-pre-wrap break-words ${
+        s.op === "del" ? "bg-error-soft text-error" : s.op === "add" ? "bg-success-soft text-success-dark" : "bg-surface"
+      }`}>
+        <span aria-hidden="true" className="select-none px-1 text-center opacity-75">{s.op === "del" ? "−" : s.op === "add" ? "+" : " "}</span>
+        <span className="py-0.5 pr-2">{s.text}</span>
+      </div>)}
+    </div>
   );
 }
 
@@ -77,9 +88,30 @@ function Drawer({ row, onClose }: { row: QaRow; onClose: () => void }) {
                   {b.decision === "edited_approved" && <span className="text-text-muted">แก้ {b.edit_pct}%</span>}
                   {b.decided_by_name && <span className="text-text-muted">โดย {b.decided_by_name} · ใช้เวลา {formatMinutes(b.review_minutes)}</span>}
                 </div>
-                {b.decision === "edited_approved" ? <DiffView original={b.original_text} final={b.final_text} />
+                {b.final_text !== b.original_text ? <DiffView original={b.original_text} final={b.final_text} />
                   : <p className="whitespace-pre-wrap break-words text-sm text-text">{b.original_text}</p>}
-                {b.rejection_reason && <p className="mt-2 rounded-md bg-error-soft px-2 py-1.5 text-xs text-error">เหตุผลไม่อนุมัติ: {b.rejection_reason}</p>}
+                <p className="mt-2 text-xs text-text-muted">ผลการส่ง: {DELIVERY_LABEL[b.delivery_state] || b.delivery_state || "ไม่ทราบสถานะ"}</p>
+                {b.outbound_text !== undefined && <div className="mt-2 rounded-md border border-border bg-surface-2 p-2.5">
+                  <div className="text-[11px] font-semibold text-text">{b.delivery_state === "live_sent" ? "ข้อความที่ส่งจริง (Shopee ยืนยันแล้ว)" : b.delivery_state === "live_unknown" ? "ข้อความในคำขอส่ง (ยังยืนยันผลไม่ได้)" : "ข้อความในคำขอส่ง (สถานะส่งไม่สำเร็จ)"}</div>
+                  <p className="mt-1 whitespace-pre-wrap break-words text-sm text-text">{b.outbound_text}</p>
+                </div>}
+                {b.card_item_id && <p className="mt-1 text-xs text-text-muted">การ์ดสินค้า {b.card_item_id} · ผลการส่ง: {DELIVERY_LABEL[b.card_delivery_state] || b.card_delivery_state || "ไม่ทราบสถานะ"}</p>}
+                {!!b.edit_history?.length && <div className="mt-3 space-y-2 border-t border-border pt-3">
+                  <div className="text-xs font-semibold text-text">ประวัติการแก้คำตอบ</div>
+                  {b.edit_history.map((edit, revisionIndex) => (
+                    <div key={`${edit.at || revisionIndex}:${revisionIndex}`} className="rounded-md bg-surface-2 p-2.5">
+                      <div className="flex flex-wrap items-center gap-1 text-xs font-medium text-text">
+                        <span>ครั้งที่ {revisionIndex + 1}</span>
+                        <span>· {edit.reason_category || "ไม่มีหมวดเหตุผลย้อนหลัง"}</span>
+                      </div>
+                      <p className="mt-1 whitespace-pre-wrap break-words text-xs text-text-muted">{edit.reason_text || "ไม่มีคำอธิบายย้อนหลัง"}</p>
+                      <p className="mt-1 text-[11px] text-text-subtle">{edit.actor_name || "ไม่ระบุผู้แก้"} · {dateLabel(edit.at)}</p>
+                      <div className="mt-2"><DiffView original={edit.before_text} final={edit.after_text} /></div>
+                    </div>
+                  ))}
+                </div>}
+                {b.final_text !== b.original_text && !b.edit_history?.length && <p className="mt-2 text-xs text-text-muted">รายการนี้มีข้อความแก้ แต่ไม่มีเหตุผลย้อนหลังบันทึกไว้</p>}
+                {b.rejection_reason && <p className="mt-2 rounded-md bg-error-soft px-2 py-1.5 text-xs text-error">เหตุผลไม่อนุมัติ: {b.rejection_category ? `${b.rejection_category} · ` : ""}{b.rejection_reason}</p>}
               </div>
             ))}
             {row.bubbles.some((b) => b.decision === "edited_approved") && <p className="text-[11px] text-text-subtle"><del className="bg-error-soft text-error">แดง</del> = บอทเขียนแต่แอดมินลบ · <ins className="bg-success-soft text-success-dark no-underline">เขียว</ins> = แอดมินเพิ่ม</p>}
@@ -90,7 +122,7 @@ function Drawer({ row, onClose }: { row: QaRow; onClose: () => void }) {
               <div className="mt-1 text-xs text-text-muted">รหัสเหตุผล: {row.handoff_reason || "ไม่ระบุ"}</div>
               {row.handoff_explanation && <div className="mt-1 text-xs text-text">{row.handoff_explanation}</div>}
               {row.handoff_reviewed_by && <div className="mt-1 text-xs text-text-muted">ผู้ตัดสิน: {row.handoff_reviewed_by}{row.handoff_assigned_to && ` · ผู้รับงาน: ${row.handoff_assigned_to}`}</div>}
-              {row.handoff_rejection_reason && <div className="mt-1 text-xs text-error">เหตุผลไม่ให้ส่งต่อ: {row.handoff_rejection_reason}</div>}
+              {row.handoff_rejection_reason && <div className="mt-1 whitespace-pre-wrap text-xs text-error">เหตุผลไม่ให้ส่งต่อ: {row.handoff_rejection_category ? `${row.handoff_rejection_category} · ` : ""}{row.handoff_rejection_reason}</div>}
             </section>
           )}
           <section>
@@ -101,7 +133,7 @@ function Drawer({ row, onClose }: { row: QaRow; onClose: () => void }) {
                   <span className="absolute -left-[21px] top-1 h-2 w-2 rounded-full bg-accent" />
                   <div className="font-medium text-text">{e.action || e.type} · {e.actor_name || e.actor}</div>
                   <div className="text-text-muted">{dateLabel(e.created_at)}</div>
-                  {e.rejection_reason && <div>เหตุผล: {e.rejection_reason}</div>}
+                  {e.rejection_reason && <div>เหตุผล: {e.rejection_category ? `${e.rejection_category} · ` : ""}{e.rejection_reason}</div>}
                   {e.assigned_to_name && <div>จ่ายให้: {e.assigned_to_name}</div>}
                 </li>
               ))}

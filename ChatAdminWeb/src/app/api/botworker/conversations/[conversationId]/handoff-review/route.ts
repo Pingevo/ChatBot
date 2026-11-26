@@ -26,7 +26,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ con
   if (!access.ok) return access.response;
   const { conversationId } = await params;
   const body = await readJson<{
-    reply_id?: string; action?: string; selected_admin_id?: string; rejection_reason?: string;
+    reply_id?: string; action?: string; selected_admin_id?: string;
+    rejection_category?: string; rejection_reason?: string;
     operation_id?: string; updated_at?: string;
   }>(req);
   if (!body?.reply_id || !body.action || !body.operation_id) return error("reply_id, action, operation_id required", 422);
@@ -35,7 +36,8 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ con
   if (body.action === "reject" && !body.rejection_reason?.trim()) return error("rejection_reason required", 422);
   const result = await applyHandoffReviewAction({
     conversationId, replyId: body.reply_id, action: body.action,
-    selectedAdminId: body.selected_admin_id, rejectionReason: body.rejection_reason,
+    selectedAdminId: body.selected_admin_id, rejectionCategory: body.rejection_category,
+    rejectionReason: body.rejection_reason,
     operationId: body.operation_id, expectedUpdatedAt: body.updated_at,
     actor: access.ctx.admin.admin_id,
     actorName: access.ctx.admin.name || access.ctx.admin.username || access.ctx.admin.admin_id,

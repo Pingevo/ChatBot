@@ -71,6 +71,8 @@ def _send_handoff(req, ctx: dict | None = None, *, reason: str, claim_topic: str
     """ส่ง handoff ไปแอดมิน — transport owner เดียวของฝั่ง Python.
 
     Contract (typed outcome เป็น authority — ไม่ใช่ HTTP status เฉยๆ):
+      - test_source=botworker → review_pending แบบยังไม่ assign/ไม่ยิง HTTP;
+        caller สร้าง draft ให้ BotWorker ส่งตรวจ ไม่ใช่ยืนยันส่งต่อแล้ว
       - 2xx + outcome.state ∈ {assigned, queued} → คืน response dict (persisted แล้ว)
       - 2xx + failed/ไม่มี outcome → None ทันที (contract violation — retry ก็ได้คำตอบเดิม)
       - 401/403/404/422/4xx อื่น → None ทันที (permanent — ห้าม blind retry)
@@ -90,10 +92,14 @@ def _send_handoff(req, ctx: dict | None = None, *, reason: str, claim_topic: str
         episode_id: open claim episode ที่ caller derive จาก authoritative
             claim_state เอง — transport owner ไม่อ่าน claim state/Mongo เอง
     Returns:
-        parsed response dict เมื่อ authoritative handoff ยืนยัน, None เมื่อไม่สำเร็จ
+        parsed response dict เมื่อ handoff ยืนยัน; botworker คืน review_pending
+        โดยไม่ assign; None เมื่อไม่สำเร็จ
     """
     if not req.conversation_id:
         return None
+    if getattr(req, "test_source", None) == "botworker":
+        return {"outcome": {"state": "review_pending", "persisted": False},
+                "assigned_to": None, "assigned_to_name": None}
     if claim is None:
         claim = {"topic": claim_topic} if claim_topic else {}
     try:

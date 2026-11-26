@@ -20,7 +20,13 @@ export async function GET(
 
   const meta = await getBwMeta(conversationId);
   return json({
-    close_history: meta?.close_history || [],
+    // sandbox entries have no record_id/sequence — derive them (history is append-only, so index is stable)
+    close_history: (meta?.close_history || []).map((entry, index) => ({
+      ...entry,
+      record_id: `${conversationId}:close:${index + 1}`,
+      conversation_id: conversationId,
+      sequence: index + 1,
+    })),
     close_count: meta?.close_count || 0,
     reopen_count: meta?.reopen_count || 0,
   });

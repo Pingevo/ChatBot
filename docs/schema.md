@@ -542,12 +542,14 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `bot_handoff_explanation` | string? | explanation shown to an admin with BotWorker page access |
 | `upstream_conversation_id` / `upstream_message_id` | string? | engine turn identity; mismatch with worker input fails closed |
 | `inbound_message_ids` | string[]? | inbound messages grouped into this worker turn |
-| `review_bubbles` | object[]? | frozen answer parts; retains original/edited/approved text, reviewer identity/time, rejection reason, edit history, and delivery status |
-| `handoff_review` | object? | pending/approving/approved/rejected; reviewer, selected sandbox assignee, reason, operation key, and errors |
+| `review_bubbles` | object[]? | frozen answer parts; retains original/edited/approved text, reviewer identity/time, rejection category + explanation, edit history with a reason category + explanation per revision, and delivery status; `delivery.outbound_text` stores the exact Shopee text request with its result status |
+| `handoff_review` | object? | pending/approving/approved/rejected; reviewer, selected sandbox assignee, engine reason, rejection category + explanation, operation key, and errors |
 | `bot_image_desc` | string? | |
 | `generation_batch_id` | string? | ⚡ Phase 3B-6 — id กลุ่มรอบ generate (unique ต่อรอบ กดซ้ำแชทเดิมแยกกัน) |
 | `created_at` | Date | |
 | `updated_at` | Date | |
+
+**BotWorker reviewer reason fields:** หมวดที่ใช้ร่วมกันคือ `สเปคผิด`, `ควรส่งแอดมิน`, `การแก้ปัญหาผิด`, `ผิดรุ่น`, `ตอบไม่ได้`. รายการ `review_bubbles[].edit_history[]` เก็บ `reason_category` และ `reason_text` ควบคู่ before/after, ผู้แก้ และเวลา; การปฏิเสธบับเบิลเก็บ `rejection_category` + `rejection_reason`; การปฏิเสธ handoff เก็บ `handoff_review.rejection_category` + `handoff_review.rejection_reason`. ฟิลด์เหตุผลเป็น optional สำหรับเอกสารเก่าที่สร้างก่อนเพิ่มการเก็บเหตุผล.
 
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
@@ -990,6 +992,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `conversation_id` | string | PK (ร่วมกับ source) |
 | `source` | string | test_assignment/shadowbot/replay_compare/test_chat/botworker |
 | `assigned_to` | string? | |
+| `previous_assigned_to` | string? | BotWorker เก็บผู้รับเดิมเมื่อ closed/resolved กลับเป็น bot; ไม่ใช่เจ้าของแชทที่กำลังตอบ และใช้แนะนำผู้รับหลังผู้ตรวจอนุมัติตาม adminconfig |
 | `assigned_at` | Date? | |
 | `assignment_mode_used` | string? | |
 | `assignment_reason` | string? | |

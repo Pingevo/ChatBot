@@ -38,6 +38,37 @@ export function diffText(a: string, b: string): DiffSegment[] {
   return out;
 }
 
+export function diffLines(a: string, b: string): DiffSegment[] {
+  const oldLines = a ? a.split("\n") : [];
+  const newLines = b ? b.split("\n") : [];
+  const out: DiffSegment[] = [];
+  const push = (op: DiffSegment["op"], line: string) => {
+    const last = out[out.length - 1];
+    if (last?.op === op) last.text = `${last.text}\n${line}`;
+    else out.push({ op, text: line });
+  };
+  if (oldLines.length * newLines.length > MAX_CELLS) {
+    if (oldLines.length) out.push({ op: "del", text: oldLines.join("\n") });
+    if (newLines.length) out.push({ op: "add", text: newLines.join("\n") });
+    return out;
+  }
+  const width = newLines.length + 1;
+  const lcs = new Uint32Array((oldLines.length + 1) * width);
+  for (let i = oldLines.length - 1; i >= 0; i--) for (let j = newLines.length - 1; j >= 0; j--) {
+    lcs[i * width + j] = oldLines[i] === newLines[j] ? lcs[(i + 1) * width + j + 1] + 1
+      : Math.max(lcs[(i + 1) * width + j], lcs[i * width + j + 1]);
+  }
+  let i = 0, j = 0;
+  while (i < oldLines.length && j < newLines.length) {
+    if (oldLines[i] === newLines[j]) push("same", oldLines[i++]), j++;
+    else if (lcs[(i + 1) * width + j] >= lcs[i * width + j + 1]) push("del", oldLines[i++]);
+    else push("add", newLines[j++]);
+  }
+  while (i < oldLines.length) push("del", oldLines[i++]);
+  while (j < newLines.length) push("add", newLines[j++]);
+  return out;
+}
+
 export function editPercent(a: string, b: string): number {
   if (a === b) return 0;
   const total = a.length + b.length;

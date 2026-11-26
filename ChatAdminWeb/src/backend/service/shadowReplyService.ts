@@ -16,6 +16,7 @@ import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { listMessages, getHistoryForBot, toBotText, toBotImages } from "./messageService";
 import { getConversation } from "./conversationService";
 import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
+import type { BotWorkerReviewReasonCategory } from "@/lib/types";
 import { logAdminEvent } from "./adminLogService";
 
 export interface ShadowReviewBubbleDoc {
@@ -28,9 +29,10 @@ export interface ShadowReviewBubbleDoc {
   decided_by_name?: string;
   decided_at?: Date;
   approved_text?: string;
+  rejection_category?: BotWorkerReviewReasonCategory;
   rejection_reason?: string;
-  edit_history?: { before_text: string; after_text: string; actor: string; actor_name: string; at: Date }[];
-  delivery: { state: string; request_id?: string; error?: string };
+  edit_history?: { before_text: string; after_text: string; reason_category?: BotWorkerReviewReasonCategory; reason_text?: string; actor: string; actor_name: string; at: Date }[];
+  delivery: { state: string; request_id?: string; error?: string; outbound_text?: string };
   card?: { item_id: string; delivery: { state: string; request_id?: string; error?: string } };
 }
 
@@ -100,6 +102,7 @@ export interface ShadowReplyDoc extends Document {
     reviewed_by?: string;
     reviewed_by_name?: string;
     reviewed_at?: Date;
+    rejection_category?: BotWorkerReviewReasonCategory;
     rejection_reason?: string;
     selected_admin_id?: string;
     selected_admin_name?: string;

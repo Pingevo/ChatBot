@@ -395,15 +395,16 @@ async function main() {
     assert(claimDoc("m1")?.status === "bot_failed");
   });
 
-  await test("E9 empty answer → handed_off (existing contract — pin)", async () => {
+  await test("E9 unexpected empty answer → bot_failed without handoff", async () => {
     const conv = "conv_e9";
     seedConv(conv);
     seedUserMsg(conv, "m1", "qempty");
     mocks.state.fetchResponse = { status: 200, body: { answer: "", source: "synthetic" } };
     const r = await processOne(conv, "m1", "qempty");
     assert(callParams().fetchCalls === 1, `fetch=${callParams().fetchCalls}`);
-    assert(r.status === "handed_off", `status=${r.status} — empty answer must hand off, not fail`);
-    assert(claimDoc("m1")?.status === "handed_off", `claim=${claimDoc("m1")?.status}`);
+    assert(r.status === "bot_failed", `status=${r.status} — empty answer without flag must fail`);
+    assert(claimDoc("m1")?.status === "bot_failed", `claim=${claimDoc("m1")?.status}`);
+    assert(mocks.fakeColl("test_status_conversation").every((d: any) => d.conversation_id !== conv || !d.assigned_to), "empty answer assigned an admin");
   });
 
   // ═══ BW-5: single outbound concurrency owner ═════════════

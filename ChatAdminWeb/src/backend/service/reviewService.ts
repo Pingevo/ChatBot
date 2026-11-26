@@ -9,6 +9,7 @@
 //   - legacy draft ไม่มี review_bubbles → แสดงได้ แต่ review ไม่ได้ (ห้ามแปลงย้อนหลัง)
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { splitAnswerSegments } from "@/lib/answerSegments";
+import { BOTWORKER_REVIEW_REASON_CATEGORIES, type BotWorkerReviewReasonCategory } from "@/lib/types";
 import { insertDeterministicEvent } from "./botworkerEventService";
 import type { ShadowReplyDoc, ShadowReviewBubbleDoc } from "./shadowReplyService";
 import { assignmentService } from "./assignmentService";
@@ -35,6 +36,7 @@ export interface ShopeeReceipt {
 export interface BubbleDelivery {
   state: DeliveryState;
   request_id?: string;
+  outbound_text?: string;
   receipt?: MockReceipt | ShopeeReceipt;
   error?: string;
 }
@@ -54,8 +56,9 @@ export interface ReviewBubble extends ShadowReviewBubbleDoc {
   decided_by_name?: string;
   decided_at?: Date;
   approved_text?: string;
+  rejection_category?: BotWorkerReviewReasonCategory;
   rejection_reason?: string;
-  edit_history?: { before_text: string; after_text: string; actor: string; actor_name: string; at: Date }[];
+  edit_history?: { before_text: string; after_text: string; reason_category?: BotWorkerReviewReasonCategory; reason_text?: string; actor: string; actor_name: string; at: Date }[];
   delivery: BubbleDelivery;
   card?: ReviewCard;
   // Keep the approved text in approved_text; delivery status remains separate.
@@ -127,6 +130,9 @@ export async function applyReviewAction(opts: {
   actor: string;              // admin_id จาก session
   actorName: string;
   liveSendEnabled: boolean;
+  reasonCategory?: string;
+  reasonText?: string;
+  rejectionCategory?: string;
   rejectionReason?: string;
   expectedUpdatedAt?: string; // optimistic version จาก client (ISO) — optional
   mockSender: (part: {
@@ -171,6 +177,11 @@ export async function applyReviewAction(opts: {
     action: opts.action,
     edited_text: opts.editedText ?? null,
     card_item_id: opts.cardItemId ?? null,
+    ...((opts.action === "save" || opts.action === "save_and_approve") ? {
+      reason_category: opts.reasonCategory ?? null,
+      reason_text: opts.reasonText ?? null,
+    } : {}),
+    ...(opts.action === "reject" ? { rejection_category: opts.rejectionCategory ?? null } : {}),
     rejection_reason: opts.rejectionReason ?? null,
   };
   const opInsert = await insertDeterministicEvent({
@@ -246,8 +257,16 @@ export async function applyReviewAction(opts: {
       return { state: "not_sent_switch_off", request_id: part.eventId, error: "live_send_switch_off" };
     }
     if (opts.liveSender) {
-      try { return await opts.liveSender(part); }
-      catch { return { state: "live_unknown", request_id: part.eventId, error: "delivery_unknown" }; }
+      try {
+        const delivery = await opts.liveSender(part);
+        return part.platform === "shopee" && part.part === "text" && part.text !== undefined
+          ? { ...delivery, outbound_text: part.text } : delivery;
+      } catch {
+        return {
+          state: "live_unknown", request_id: part.eventId, error: "delivery_unknown",
+          ...(part.platform === "shopee" && part.part === "text" && part.text !== undefined ? { outbound_text: part.text } : {}),
+        };
+      }
     }
     if (part.platform === "shopee") {
       return { state: "live_failed", request_id: part.eventId, error: "live_sender_unavailable" };
@@ -268,13 +287,20 @@ export async function applyReviewAction(opts: {
 
   const bubble = bubbles[i];
   auditDetails = { original_text: bubble.original_text, previous_edited_text: bubble.edited_text };
+  if (doc.bot_handoff_required && opts.action === "reject") {
+    return finish({ ok: false, code: "conflict", message: "handoff drafts must be rejected through the handoff review action" });
+  }
   if (bubble.card?.delivery.state === "live_sending" || bubble.card?.delivery.state === "live_unknown") {
     return finish({ ok: false, code: "conflict", message: "card delivery is unconfirmed; verify the Shopee chat before changing this bubble" });
   }
 
   // ── reject ──
   if (opts.action === "reject") {
+    const rejectionCategory = opts.rejectionCategory;
     const rejectionReason = String(opts.rejectionReason ?? "").trim();
+    if (!BOTWORKER_REVIEW_REASON_CATEGORIES.includes(rejectionCategory as BotWorkerReviewReasonCategory)) {
+      return finish({ ok: false, code: "invalid", message: "rejection_category is invalid" });
+    }
     if (!rejectionReason) return finish({ ok: false, code: "invalid", message: "rejection_reason is required" });
     if (rejectionReason.length > 1000) return finish({ ok: false, code: "invalid", message: "rejection_reason exceeds 1000 chars" });
     // ⚡ bubble ที่ส่ง card mock ไปแล้วห้าม reject — outbound event เกิดแล้ว ต้องคง record
@@ -282,8 +308,10 @@ export async function applyReviewAction(opts: {
       return finish({ ok: false, code: "conflict", message: "card already sent — cannot reject bubble" });
     }
     const next = bubbles.slice();
-    next[i] = { ...bubble, decision: "rejected", decided_by: opts.actor, decided_by_name: opts.actorName, decided_at: now, rejection_reason: rejectionReason };
-    auditDetails = { ...auditDetails, rejection_reason: rejectionReason, rejected_text: bubble.edited_text ?? bubble.original_text };
+    next[i] = { ...bubble, decision: "rejected", decided_by: opts.actor, decided_by_name: opts.actorName,
+      decided_at: now, rejection_category: rejectionCategory as BotWorkerReviewReasonCategory, rejection_reason: rejectionReason };
+    auditDetails = { ...auditDetails, rejection_category: rejectionCategory, rejection_reason: rejectionReason,
+      rejected_text: bubble.edited_text ?? bubble.original_text };
     const res = await coll.updateOne(baseFilter, { $set: { review_bubbles: next, updated_at: now } });
     if (res.matchedCount !== 1) return finish({ ok: false, code: "conflict", message: "bubble already decided or stale draft" });
     return finish({ ok: true, bubble: next[i], updated_at: now, reply_id: opts.replyId });
@@ -294,9 +322,19 @@ export async function applyReviewAction(opts: {
     const text = (opts.editedText ?? "").trim();
     if (!text) return finish({ ok: false, code: "invalid", message: "edited text is empty" });
     if (text.length > MAX_EDIT_LEN) return finish({ ok: false, code: "invalid", message: `edited text exceeds ${MAX_EDIT_LEN} chars` });
+    const reasonText = String(opts.reasonText ?? "").trim();
+    if (!BOTWORKER_REVIEW_REASON_CATEGORIES.includes(opts.reasonCategory as BotWorkerReviewReasonCategory)) {
+      return finish({ ok: false, code: "invalid", message: "reason_category is invalid" });
+    }
+    if (!reasonText) return finish({ ok: false, code: "invalid", message: "reason_text is required" });
+    if (reasonText.length > 1000) return finish({ ok: false, code: "invalid", message: "reason_text exceeds 1000 chars" });
     const next = bubbles.slice();
-    next[i] = { ...bubble, edited_text: text, edit_history: [...(bubble.edit_history || []), { before_text: bubble.edited_text ?? bubble.original_text, after_text: text, actor: opts.actor, actor_name: opts.actorName, at: now }] };
-    auditDetails = { ...auditDetails, edited_text: text };
+    next[i] = { ...bubble, edited_text: text, edit_history: [...(bubble.edit_history || []), {
+      before_text: bubble.edited_text ?? bubble.original_text, after_text: text,
+      reason_category: opts.reasonCategory as BotWorkerReviewReasonCategory, reason_text: reasonText,
+      actor: opts.actor, actor_name: opts.actorName, at: now,
+    }] };
+    auditDetails = { ...auditDetails, edited_text: text, reason_category: opts.reasonCategory, reason_text: reasonText };
     const res = await coll.updateOne(baseFilter, { $set: { review_bubbles: next, updated_at: now } });
     if (res.matchedCount !== 1) return finish({ ok: false, code: "conflict", message: "bubble already decided or stale draft" });
     return finish({ ok: true, bubble: next[i], updated_at: now, reply_id: opts.replyId });
@@ -389,6 +427,12 @@ export async function applyReviewAction(opts: {
     const text = (opts.editedText ?? "").trim();
     if (!text) return finish({ ok: false, code: "invalid", message: "edited text is empty" });
     if (text.length > MAX_EDIT_LEN) return finish({ ok: false, code: "invalid", message: `edited text exceeds ${MAX_EDIT_LEN} chars` });
+    const reasonText = String(opts.reasonText ?? "").trim();
+    if (!BOTWORKER_REVIEW_REASON_CATEGORIES.includes(opts.reasonCategory as BotWorkerReviewReasonCategory)) {
+      return finish({ ok: false, code: "invalid", message: "reason_category is invalid" });
+    }
+    if (!reasonText) return finish({ ok: false, code: "invalid", message: "reason_text is required" });
+    if (reasonText.length > 1000) return finish({ ok: false, code: "invalid", message: "reason_text exceeds 1000 chars" });
     approvedText = text;
     decision = "edited_approved";
     editedTextSet = text;
@@ -429,11 +473,16 @@ export async function applyReviewAction(opts: {
   //   ข้อความที่ log = approved_text ที่ persisted จริง (loser ออกก่อน mock)
   // CAS#1 — pending → decided + approved_text (delivery คง not_requested)
   const decidedBubbles = bubbles.slice();
-  auditDetails = { ...auditDetails, approved_text: approvedText, decision };
+  auditDetails = { ...auditDetails, approved_text: approvedText, decision,
+    ...(editedTextSet !== undefined ? { reason_category: opts.reasonCategory, reason_text: opts.reasonText?.trim() } : {}) };
   decidedBubbles[i] = {
     ...bubble,
     ...(editedTextSet !== undefined ? { edited_text: editedTextSet } : {}),
-    ...(editedTextSet !== undefined ? { edit_history: [...(bubble.edit_history || []), { before_text: bubble.edited_text ?? bubble.original_text, after_text: editedTextSet, actor: opts.actor, actor_name: opts.actorName, at: now }] } : {}),
+    ...(editedTextSet !== undefined ? { edit_history: [...(bubble.edit_history || []), {
+      before_text: bubble.edited_text ?? bubble.original_text, after_text: editedTextSet,
+      reason_category: opts.reasonCategory as BotWorkerReviewReasonCategory, reason_text: opts.reasonText?.trim(),
+      actor: opts.actor, actor_name: opts.actorName, at: now,
+    }] } : {}),
     decision,
     decided_by: opts.actor,
     decided_by_name: opts.actorName,
@@ -496,7 +545,7 @@ export async function getHandoffReviewPreview(opts: {
     return { ok: false, code: "conflict", message: "handoff reply is not attached to the selected inbound message" };
   }
   const candidates = doc.handoff_review.status === "pending" || doc.handoff_review.status === "approving"
-    ? await assignmentService.previewHandoffCandidates({ shop_id: String(doc.shop_id), platform: doc.platform }, "botworker")
+    ? await assignmentService.previewHandoffCandidates({ shop_id: String(doc.shop_id), platform: doc.platform }, "botworker", opts.conversationId)
     : [];
   return {
     ok: true,
@@ -511,6 +560,7 @@ export async function applyHandoffReviewAction(opts: {
   replyId: string;
   action: "approve" | "reject";
   selectedAdminId?: string;
+  rejectionCategory?: string;
   rejectionReason?: string;
   operationId: string;
   actor: string;
@@ -534,7 +584,11 @@ export async function applyHandoffReviewAction(opts: {
       return { ok: false, code: "conflict", message: "stale handoff review — refresh before retry" };
     }
   }
+  const rejectionCategory = opts.rejectionCategory;
   const reason = String(opts.rejectionReason ?? "").trim();
+  if (opts.action === "reject" && !BOTWORKER_REVIEW_REASON_CATEGORIES.includes(rejectionCategory as BotWorkerReviewReasonCategory)) {
+    return { ok: false, code: "invalid", message: "rejection_category is invalid" };
+  }
   if (opts.action === "reject" && !reason) return { ok: false, code: "invalid", message: "rejection_reason is required" };
   if (reason.length > 1000) return { ok: false, code: "invalid", message: "rejection_reason exceeds 1000 chars" };
   if (opts.action === "approve" && !opts.selectedAdminId) return { ok: false, code: "invalid", message: "selected_admin_id is required" };
@@ -546,6 +600,7 @@ export async function applyHandoffReviewAction(opts: {
     conversation_id: opts.conversationId,
     reply_id: opts.replyId,
     selected_admin_id: opts.selectedAdminId ?? null,
+    ...(opts.action === "reject" ? { rejection_category: rejectionCategory ?? null } : {}),
     rejection_reason: opts.action === "reject" ? reason : null,
   };
   const insert = await insertDeterministicEvent({
@@ -582,15 +637,17 @@ export async function applyHandoffReviewAction(opts: {
 
   if (opts.action === "reject") {
     const nextReview = { ...doc.handoff_review, status: "rejected" as const, reviewed_by: opts.actor,
-      reviewed_by_name: opts.actorName, reviewed_at: now, rejection_reason: reason };
+      reviewed_by_name: opts.actorName, reviewed_at: now,
+      rejection_category: rejectionCategory as BotWorkerReviewReasonCategory, rejection_reason: reason };
     const res = await coll.updateOne({ _id: doc._id, updated_at: doc.updated_at, "handoff_review.status": "pending" },
       { $set: { handoff_review: nextReview, updated_at: now } });
     if (res.matchedCount !== 1) return finish({ ok: false, code: "conflict", message: "handoff already reviewed or stale" });
-    return finish({ ok: true, handoff_review: nextReview, updated_at: now }, { rejection_reason: reason,
+    return finish({ ok: true, handoff_review: nextReview, updated_at: now }, {
+      rejection_category: rejectionCategory, rejection_reason: reason,
       answer: doc.bot_reply_text, handoff_reason: doc.bot_handoff_reason, handoff_explanation: doc.bot_handoff_explanation });
   }
 
-  const candidates = await assignmentService.previewHandoffCandidates({ shop_id: String(doc.shop_id), platform: doc.platform }, "botworker");
+  const candidates = await assignmentService.previewHandoffCandidates({ shop_id: String(doc.shop_id), platform: doc.platform }, "botworker", opts.conversationId);
   const candidate = candidates.find((item) => item.admin_id === opts.selectedAdminId);
   if (!candidate) {
     if (doc.handoff_review.status === "approving" && resumesSameAssignment) {
@@ -617,7 +674,8 @@ export async function applyHandoffReviewAction(opts: {
   const assignment = await handoffService.handoffToAdminTest({
     conversationId: opts.conversationId, shopId: String(doc.shop_id), platform: doc.platform,
     reason: doc.bot_handoff_reason || doc.bot_handoff_category || "bot_requested_handoff",
-    source: "botworker", assignedStatus: "open", selectedAdminId: candidate.admin_id, operationKey,
+    source: "botworker", assignedStatus: "open", selectedAdminId: candidate.admin_id,
+    reserveSelectedRoundRobin: candidate.suggestion_reason === "round_robin", operationKey,
   });
   if (assignment.in_flight) return { ok: false, code: "conflict", message: "handoff assignment is in progress; retry with the same operation id" };
   if (assignment.error || assignment.assignedTo !== candidate.admin_id) {

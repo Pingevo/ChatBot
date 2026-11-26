@@ -31,6 +31,7 @@ export interface TestStatusConversationDoc {
   source: TestSource;
   // assignment
   assigned_to?: string | null;
+  previous_assigned_to?: string | null;
   assigned_at?: Date | null;
   assignment_mode_used?: string;
   assignment_reason?: string;
@@ -279,13 +280,15 @@ export async function reopenTestConversation(
     closed_at: null,
     pending_assignment: false,
   };
+  const c = await coll();
   if (assignedTo !== undefined) {
     fields.assigned_to = assignedTo;
     fields.assigned_at = new Date();
   } else if (targetStatus === "bot") {
+    const previous = await c.findOne({ conversation_id: conversationId, source });
+    if (previous?.assigned_to) fields.previous_assigned_to = previous.assigned_to;
     fields.assigned_to = null; // bot reopen → เคลียร์ assigned_to (ปล่อยให้บอทตอบ)
   }
-  const c = await coll();
   await c.updateOne(
     { conversation_id: conversationId, source },
     { $set: { ...fields, updated_at: new Date() }, $inc: { reopen_count: 1 } },

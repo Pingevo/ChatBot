@@ -447,6 +447,7 @@ export async function handoffToAdminTest(opts: {
   // ⚡ botworker — assign สำเร็จ = status "open" (แอดมินกำลังตอบ); default "handoff" คงพฤติกรรม test หน้าอื่น
   assignedStatus?: "handoff" | "open";
   selectedAdminId?: string;
+  reserveSelectedRoundRobin?: boolean;
   // ⚡ botworker Part 1B — deterministic operation key: crash หลัง assign commit
   //   แต่ก่อน claim outcome → retry ด้วย key เดิมจะได้ result เดิม ไม่ assign ซ้ำ
   //   (idempotency อยู่ที่ handoff owner — dedupe doc ใน botworker_events)
@@ -547,6 +548,7 @@ async function doHandoffToAdminTest(opts: {
   source: TestSource;
   assignedStatus?: "handoff" | "open";
   selectedAdminId?: string;
+  reserveSelectedRoundRobin?: boolean;
   operationKey?: string;
 }): Promise<HandoffTestResult> {
   const meta = await testStatusConversationService.getTestStatus(opts.conversationId, opts.source);
@@ -571,8 +573,22 @@ async function doHandoffToAdminTest(opts: {
 
   let assignedTo: string | null = null;
   if (opts.selectedAdminId) {
+    if (opts.reserveSelectedRoundRobin) {
+      const mode = await assignmentService.getActiveAssignmentConfig();
+      const { poolKey, orderedAgentIds } = await assignmentService.buildPool(
+        mode, { shop_id: opts.shopId, platform: opts.platform }, opts.source);
+      const selected = await assignmentService.reserveNextAgent(poolKey, orderedAgentIds);
+      if (selected.result === "contention") {
+        return { assignedTo: null, assignedToName: null, reopened,
+          assignmentReason: "reviewed round-robin reservation contention", in_flight: true };
+      }
+      if (selected.result !== "reserved" || selected.agentId !== opts.selectedAdminId) {
+        return { assignedTo: null, assignedToName: null, reopened,
+          assignmentReason: "reviewed round-robin recipient changed", error: "ineligible_admin" };
+      }
+    }
     assignedTo = opts.selectedAdminId;
-    assignmentReason = "reviewer_selected_online_admin";
+    assignmentReason = opts.reserveSelectedRoundRobin ? "reviewer_approved_round_robin" : "reviewer_selected_online_admin";
   } else {
     // Step 1: ถ้ามี assigned_to อยู่แล้ว → ใช้คนเดิม
     assignedTo = meta?.assigned_to || null;

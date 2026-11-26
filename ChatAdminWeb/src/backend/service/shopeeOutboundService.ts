@@ -5,6 +5,7 @@ import { getCollection } from "../db/mongoClient";
 import { productService, type ProductDoc } from "./productService";
 import { conversationService } from "./conversationService";
 import { systemConfigService } from "./systemConfigService";
+import { SHOPEE_PROVIDER_ERRORS } from "@/lib/shopeeSendErrors";
 
 type OutboundType = "text" | "image" | "video" | "sticker" | "item";
 
@@ -26,8 +27,8 @@ export type ShopeeOutboundResult =
       products?: { item_id: string; name: string; price: number; image?: string; shop?: string }[];
       providerMessageId?: string;
     }
-  | { state: "failed"; code: string }
-  | { state: "unknown"; code: "delivery_unknown" };
+  | { state: "failed"; code: string; providerError?: string; providerHttpStatus?: number; providerRequestId?: string }
+  | { state: "unknown"; code: "delivery_unknown"; providerError?: string; providerHttpStatus?: number; providerRequestId?: string };
 
 export async function readShopeeOutboundInput(request: Request): Promise<{ requestId: string; input: ShopeeOutboundInput; force: boolean }> {
   const contentType = request.headers.get("content-type") || "";
@@ -83,10 +84,12 @@ interface TokenResponse {
   shop_id?: number | string;
   partner_id?: number | string;
   access_token?: string;
+  error?: string;
 }
 
 interface ShopeeResponse {
   error?: string;
+  message?: string;
   request_id?: string;
   response?: Record<string, unknown>;
 }
@@ -106,6 +109,9 @@ interface OperationDoc {
   message_type: OutboundType;
   state: "sending" | "sent" | "failed" | "unknown";
   result_code?: string;
+  provider_error?: string;
+  provider_http_status?: number;
+  provider_request_id?: string;
   provider_message_id?: string;
   media_url?: string;
   media_thumb_url?: string;
@@ -223,7 +229,15 @@ async function _credentials(shopId: string): Promise<Credentials> {
   try { body = await response.json() as TokenResponse; } catch { /* sanitized below */ }
   const tokenShopId = _numericId(body?.shop_id);
   const partnerId = _numericId(body?.partner_id);
-  if (!response.ok || body?.success !== true || !body.access_token || tokenShopId !== shopId || !partnerId) {
+  if (!response.ok) {
+    const ipDenied = response.status === 403 && /IP/i.test(String(body?.error || ""));
+    throw new Error(response.status === 401 ? "token_provider_unauthorized"
+      : ipDenied ? "token_provider_ip_denied"
+      : response.status === 403 ? "token_provider_forbidden"
+      : response.status === 404 ? "token_provider_shop_unknown"
+      : response.status === 503 ? "token_provider_reauth" : "token_provider_rejected");
+  }
+  if (body?.success !== true || !body.access_token || tokenShopId !== shopId || !partnerId) {
     throw new Error("token_provider_rejected");
   }
   return { accessToken: body.access_token, partnerId, partnerKey, shopId };
@@ -243,7 +257,7 @@ function _signedUrl(path: string, credentials: Credentials, query?: Record<strin
   return url;
 }
 
-async function _requestShopee(url: URL, method: "GET" | "POST", body?: Uint8Array, contentType?: string, timeout = 20000): Promise<{ ok: boolean; body: ShopeeResponse | null }> {
+async function _requestShopee(url: URL, method: "GET" | "POST", body?: Uint8Array, contentType?: string, timeout = 20000): Promise<{ ok: boolean; status: number; body: ShopeeResponse | null }> {
   return new Promise((resolve, reject) => {
     const req = httpsRequest(url, {
       method,
@@ -260,7 +274,8 @@ async function _requestShopee(url: URL, method: "GET" | "POST", body?: Uint8Arra
       response.on("end", () => {
         let parsed: ShopeeResponse | null = null;
         try { parsed = JSON.parse(Buffer.concat(chunks).toString("utf8")) as ShopeeResponse; } catch { /* invalid response */ }
-        resolve({ ok: (response.statusCode || 0) >= 200 && (response.statusCode || 0) < 300, body: parsed });
+        const status = response.statusCode || 0;
+        resolve({ ok: status >= 200 && status < 300, status, body: parsed });
       });
       response.on("error", reject);
     });
@@ -349,9 +364,9 @@ function _resultFromExisting(type: OutboundType, text: string, existing: Operati
     };
   }
   if (existing.state === "unknown" || existing.state === "sending") {
-    return { state: "unknown", code: "delivery_unknown" };
+    return { state: "unknown", code: "delivery_unknown", providerError: existing.provider_error, providerHttpStatus: existing.provider_http_status, providerRequestId: existing.provider_request_id };
   }
-  return { state: "failed", code: existing.result_code || "send_failed" };
+  return { state: "failed", code: existing.result_code || "send_failed", providerError: existing.provider_error, providerHttpStatus: existing.provider_http_status, providerRequestId: existing.provider_request_id };
 }
 
 export async function sendShopeeMessage(opts: {
@@ -396,6 +411,7 @@ export async function sendShopeeMessage(opts: {
   const operations = await getCollection<OperationDoc>(OPERATIONS_COLLECTION);
   const existing = await operations.findOne({ _id: operationId });
   if (existing) {
+    console.info("[shopee-send] replay", { request_id: requestId, state: existing.state, code: existing.result_code });
     if (existing.conversation_id !== opts.conversationId || existing.payload_hash !== payloadHash) {
       return { state: "failed", code: "request_id_conflict" };
     }
@@ -432,6 +448,7 @@ export async function sendShopeeMessage(opts: {
     code?: string,
     providerMessageId?: string,
     sentMedia?: { url: string; thumb_url?: string },
+    diagnostic?: { providerError?: string; providerHttpStatus?: number; providerRequestId?: string },
   ) => {
     await operations.updateOne({ _id: operationId, state: "sending" }, {
       $set: {
@@ -440,6 +457,9 @@ export async function sendShopeeMessage(opts: {
         provider_message_id: providerMessageId,
         media_url: sentMedia?.url,
         media_thumb_url: sentMedia?.thumb_url,
+        provider_error: diagnostic?.providerError,
+        provider_http_status: diagnostic?.providerHttpStatus,
+        provider_request_id: diagnostic?.providerRequestId,
         updated_at: new Date(),
       },
     });
@@ -491,13 +511,45 @@ export async function sendShopeeMessage(opts: {
 
     const postMessage = async (activeCredentials: Credentials) => {
       if (!(await isShopeeConsoleSendEnabled())) throw new Error("live_send_disabled");
+      const url = _signedUrl("/api/v2/sellerchat/send_message", activeCredentials);
+      const body = { to_id: Number(toId), message_type: messageType, content };
+      console.info("[shopee-send] request", {
+        request_id: requestId,
+        method: "POST",
+        host: url.host,
+        path: url.pathname,
+        sign_base_order: ["partner_id", "path", "timestamp", "access_token", "shop_id"],
+        query: {
+          partner_id: activeCredentials.partnerId,
+          timestamp: url.searchParams.get("timestamp"),
+          access_token: "[redacted]",
+          access_token_sha256: createHash("sha256").update(activeCredentials.accessToken).digest("hex").slice(0, 12),
+          shop_id: activeCredentials.shopId,
+          sign: "[redacted]",
+        },
+        partner_key_sha256: createHash("sha256").update(activeCredentials.partnerKey).digest("hex").slice(0, 12),
+        body: {
+          to_id: body.to_id,
+          message_type: body.message_type,
+          content_fields: Object.keys(content),
+          text_length: typeof content.text === "string" ? content.text.length : undefined,
+        },
+      });
       try {
-        return await _requestShopee(
-          _signedUrl("/api/v2/sellerchat/send_message", activeCredentials), "POST",
-          Buffer.from(JSON.stringify({ to_id: Number(toId), message_type: messageType, content })),
+        const result = await _requestShopee(
+          url, "POST",
+          Buffer.from(JSON.stringify(body)),
           "application/json", 20000,
         );
+        console.info("[shopee-send] response", {
+          request_id: requestId,
+          http_status: result.status,
+          error: result.body?.error,
+          provider_request_id: result.body?.request_id,
+        });
+        return result;
       } catch {
+        console.warn("[shopee-send] network_error", { request_id: requestId, path: url.pathname });
         return null;
       }
     };
@@ -519,13 +571,23 @@ export async function sendShopeeMessage(opts: {
       }
     }
     const providerError = String(provider.body?.error || "");
-    if (!provider.ok) {
-      await finish("unknown", "delivery_unknown");
-      return { state: "unknown", code: "delivery_unknown" };
-    }
+    const providerRequestId = typeof provider.body?.request_id === "string" && provider.body.request_id.length <= 128
+      ? provider.body.request_id : undefined;
     if (providerError && providerError !== "-") {
-      await finish("failed", "provider_rejected");
-      return { state: "failed", code: "provider_rejected" };
+      const lower = providerError.toLowerCase();
+      const safeError = /^[a-z0-9_]{1,80}$/i.test(providerError) ? providerError : undefined;
+      const diagnostic = { providerError: safeError, providerHttpStatus: provider.status, providerRequestId };
+      if ((SHOPEE_PROVIDER_ERRORS as readonly string[]).includes(lower)) {
+        const code = `shopee_${lower}`;
+        await finish("failed", code, undefined, undefined, diagnostic);
+        return { state: "failed", code, ...diagnostic };
+      }
+      await finish("unknown", "delivery_unknown", undefined, undefined, diagnostic);
+      return { state: "unknown", code: "delivery_unknown", ...diagnostic };
+    }
+    if (!provider.ok) {
+      await finish("unknown", "delivery_unknown", undefined, undefined, { providerHttpStatus: provider.status, providerRequestId });
+      return { state: "unknown", code: "delivery_unknown", providerHttpStatus: provider.status, providerRequestId };
     }
     if (!provider.body?.response || Object.keys(provider.body.response).length === 0) {
       await finish("unknown", "delivery_unknown");
@@ -548,7 +610,7 @@ export async function sendShopeeMessage(opts: {
     }] : undefined;
     return { state: "sent", type: messageType, text, media, products: productCard, providerMessageId };
   } catch (error) {
-    const allowedCodes = new Set(["live_send_disabled", "credentials_unavailable", "token_provider_unavailable", "token_provider_rejected", "file_required", "invalid_image", "invalid_video", "invalid_video_duration", "image_upload_failed", "video_upload_failed", "video_upload_status_failed", "video_upload_pending", "text_required", "sticker_required", "item_id_invalid"]);
+    const allowedCodes = new Set(["live_send_disabled", "credentials_unavailable", "token_provider_unavailable", "token_provider_unauthorized", "token_provider_ip_denied", "token_provider_forbidden", "token_provider_shop_unknown", "token_provider_reauth", "token_provider_rejected", "file_required", "invalid_image", "invalid_video", "invalid_video_duration", "image_upload_failed", "video_upload_failed", "video_upload_status_failed", "video_upload_pending", "text_required", "sticker_required", "item_id_invalid"]);
     const code = error instanceof Error && allowedCodes.has(error.message) ? error.message : "send_failed";
     if (providerAccepted) {
       try { await finish("unknown", "delivery_unknown"); } catch { /* keep sending state for safe retry */ }

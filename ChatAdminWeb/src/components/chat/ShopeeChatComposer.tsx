@@ -4,6 +4,7 @@ import { Film, ImagePlus, Loader2, Send, Smile, Sticker, X } from "lucide-react"
 import { newChatRequestId } from "@/lib/services";
 import { api } from "@/lib/apiClient";
 import type { ChatSendInput, Platform } from "@/lib/types";
+import { describeSendFailure, type SendFailureInfo } from "@/lib/shopeeSendErrors";
 
 const EMOJI = ["😊", "😂", "🥰", "🙏", "👍", "❤️", "🎉", "✨", "😅", "😉", "💙", "📦"];
 
@@ -11,6 +12,20 @@ interface QuickReply {
   quick_reply_id: string;
   title: string;
   body: string;
+}
+
+interface ImageAttachment { id: string; file: File; requestId?: string }
+
+export function removeAttachmentById<T extends { id: string }>(attachments: T[], id: string): T[] {
+  return attachments.filter((attachment) => attachment.id !== id);
+}
+
+export async function sendAttachmentsSequentially<T>(attachments: T[], send: (attachment: T) => Promise<unknown>, onSent: (attachment: T) => void) {
+  for (const attachment of attachments) {
+    const result = await send(attachment);
+    if (result === false) throw new Error("ส่งภาพไม่สำเร็จ");
+    onSent(attachment);
+  }
 }
 
 interface Props {
@@ -24,8 +39,10 @@ interface Props {
 
 export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickReplies = [], placeholder, disabled = false }: Props) {
   const [text, setText] = useState("");
+  const [images, setImages] = useState<ImageAttachment[]>([]);
   const [file, setFile] = useState<File | null>(null);
   const [filePreviewUrl, setFilePreviewUrl] = useState<string | null>(null);
+  const [imagePreviewUrls, setImagePreviewUrls] = useState<Record<string, string>>({});
   const [stickerOpen, setStickerOpen] = useState(false);
   const [stickerId, setStickerId] = useState("");
   const [stickerPackageId, setStickerPackageId] = useState("");
@@ -35,7 +52,9 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
   const [stickerError, setStickerError] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [error, setError] = useState("");
+  const [sendFailure, setSendFailure] = useState<(SendFailureInfo & { code?: string; providerError?: string; providerHttpStatus?: number; providerRequestId?: string }) | null>(null);
   const [busy, setBusy] = useState(false);
+  const failureCloseRef = useRef<HTMLButtonElement>(null);
   const pendingRequestRef = useRef<{ signature: string; requestId: string } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
@@ -46,6 +65,12 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
     setFilePreviewUrl(url);
     return () => URL.revokeObjectURL(url);
   }, [file]);
+  useEffect(() => {
+    const urls = Object.fromEntries(images.map((image) => [image.id, URL.createObjectURL(image.file)]));
+    setImagePreviewUrls(urls);
+    return () => Object.values(urls).forEach((url) => URL.revokeObjectURL(url));
+  }, [images]);
+  useEffect(() => { if (sendFailure) failureCloseRef.current?.focus(); }, [sendFailure]);
 
   const canSelectMedia = platform === "shopee" && !disabled;
   const canSendMedia = canSelectMedia && liveSendEnabled;
@@ -65,6 +90,7 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
     if (busy || disabled) return;
     setBusy(true);
     setError("");
+    setSendFailure(null);
     const payload = withRequestId(source);
     try {
       await onSend(payload);
@@ -76,9 +102,48 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
       setStickerOpen(false);
       if (textareaRef.current) textareaRef.current.style.height = "auto";
     } catch (e) {
-      const body = (e as { response?: { data?: { detail?: unknown; error?: unknown; message?: unknown } } })?.response?.data;
+      const body = (e as { response?: { data?: { detail?: unknown; error?: unknown; message?: unknown; code?: unknown; provider_error?: unknown; provider_http_status?: unknown; provider_request_id?: unknown } } })?.response?.data;
       const detail = body?.detail ?? body?.error ?? body?.message;
-      setError(typeof detail === "string" ? detail : e instanceof Error ? e.message : "ส่งไม่สำเร็จ");
+      const code = typeof body?.code === "string" ? body.code : undefined;
+      setSendFailure(code ? { ...describeSendFailure(code), code,
+        providerError: typeof body?.provider_error === "string" ? body.provider_error : undefined,
+        providerHttpStatus: typeof body?.provider_http_status === "number" ? body.provider_http_status : undefined,
+        providerRequestId: typeof body?.provider_request_id === "string" ? body.provider_request_id : undefined,
+      } : {
+        title: "ส่งข้อความไม่สำเร็จ",
+        cause: typeof detail === "string" ? detail : e instanceof Error ? e.message : "ระบบไม่สามารถระบุสาเหตุได้",
+        action: "ตรวจสถานะการส่งในแชทก่อนลองใหม่ หากยังเกิดอีกให้แจ้งทีมดูแลระบบ",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitImages() {
+    if (busy || disabled || !canSendMedia || images.length === 0) return;
+    setBusy(true);
+    setError("");
+    setSendFailure(null);
+    try {
+      await sendAttachmentsSequentially(images, async (image) => {
+        const requestId = image.requestId || newChatRequestId();
+        if (!image.requestId) setImages((current) => current.map((item) => item.id === image.id ? { ...item, requestId } : item));
+        const result = await onSend({ type: "image", file: image.file, request_id: requestId });
+        return result;
+      }, (image) => setImages((current) => removeAttachmentById(current, image.id)));
+    } catch (e) {
+      const body = (e as { response?: { data?: { detail?: unknown; error?: unknown; message?: unknown; code?: unknown; provider_error?: unknown; provider_http_status?: unknown; provider_request_id?: unknown } } })?.response?.data;
+      const detail = body?.detail ?? body?.error ?? body?.message;
+      const code = typeof body?.code === "string" ? body.code : undefined;
+      setSendFailure(code ? { ...describeSendFailure(code), code,
+        providerError: typeof body?.provider_error === "string" ? body.provider_error : undefined,
+        providerHttpStatus: typeof body?.provider_http_status === "number" ? body.provider_http_status : undefined,
+        providerRequestId: typeof body?.provider_request_id === "string" ? body.provider_request_id : undefined,
+      } : {
+        title: "ส่งข้อความไม่สำเร็จ",
+        cause: typeof detail === "string" ? detail : e instanceof Error ? e.message : "ระบบไม่สามารถระบุสาเหตุได้",
+        action: "ตรวจสถานะการส่งในแชทก่อนลองใหม่ หากยังเกิดอีกให้แจ้งทีมดูแลระบบ",
+      });
     } finally {
       setBusy(false);
     }
@@ -116,18 +181,24 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
     } finally { setStickerLoading(false); }
   }
 
-  function chooseFile(kind: "image" | "video", selected: File | undefined) {
+  function chooseFile(kind: "image" | "video", selected: FileList | File | undefined) {
     setError("");
     if (!selected) return;
     if (kind === "image") {
-      const ext = selected.name.split(".").pop()?.toLowerCase();
-      if (selected.size > 10 * 1024 * 1024 || !["jpg", "jpeg", "png", "gif"].includes(ext || "") || !selected.type.startsWith("image/")) {
-        setError("รูปต้องเป็น JPG, PNG หรือ GIF และขนาดไม่เกิน 10 MB");
-        return;
+      const files = selected instanceof File ? [selected] : Array.from(selected);
+      const valid = files.filter((image) => {
+        const ext = image.name.split(".").pop()?.toLowerCase();
+        return image.size <= 10 * 1024 * 1024 && ["jpg", "jpeg", "png", "gif"].includes(ext || "") && image.type.startsWith("image/");
+      });
+      if (valid.length !== files.length) setError("บางรูปไม่ถูกเพิ่ม: รองรับ JPG, PNG หรือ GIF ขนาดไม่เกิน 10 MB ต่อรูป");
+      if (valid.length) {
+        setImages((current) => [...current, ...valid.map((image) => ({ id: newChatRequestId(), file: image }))]);
+        setStickerOpen(false);
       }
-      setFile(selected);
       return;
     }
+    if (!(selected instanceof File)) return;
+    if (images.length) { setError("เลือกส่งรูปหรือวิดีโออย่างใดอย่างหนึ่ง"); return; }
     const ext = selected.name.split(".").pop()?.toLowerCase();
     if (selected.size > 30 * 1024 * 1024 || !["mp4", "mov", "m4v"].includes(ext || "") || !selected.type.startsWith("video/")) {
       setError("วิดีโอต้องเป็น MP4, MOV หรือ M4V และขนาดไม่เกิน 30 MB");
@@ -159,11 +230,13 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
-    if ((file || stickerOpen) && !canSendMedia) {
+    if ((file || images.length > 0 || stickerOpen) && !canSendMedia) {
       setError("สวิตช์ส่งจริงยังปิดอยู่ เลือกสื่อได้แต่ยังส่งไม่ได้");
       return;
     }
-    if (file) {
+    if (images.length) {
+      void submitImages();
+    } else if (file) {
       void submit({ type: file.type.startsWith("video/") ? "video" : "image", file, request_id: "" });
     } else if (stickerOpen) {
       if (!stickerId.trim() || !stickerPackageId.trim()) {
@@ -208,9 +281,25 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
         </div>
       )}
 
-      {(file || stickerOpen) && (
+      {(file || images.length > 0 || stickerOpen) && (
         <div className="mb-2 rounded-lg border border-border bg-surface-2 p-2.5">
-          {file ? (
+          {images.length ? (
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+              {images.map((image) => (
+                <div key={image.id} className="min-w-0 rounded-lg border border-border bg-surface p-2">
+                  <div className="flex items-center gap-2 text-xs text-text">
+                    <ImagePlus size={15} />
+                    <span className="min-w-0 flex-1 truncate" title={image.file.name}>{image.file.name} · {(image.file.size / 1024 / 1024).toFixed(1)} MB</span>
+                  </div>
+                  {imagePreviewUrls[image.id] && <img src={imagePreviewUrls[image.id]} alt={`ตัวอย่าง ${image.file.name}`} className="mt-2 h-24 w-full rounded-md object-contain" />}
+                  <button type="button" aria-label={`ลบรูป ${image.file.name}`} onClick={() => setImages((current) => removeAttachmentById(current, image.id))}
+                    className="mt-2 min-h-11 w-full rounded-md border border-red-300 bg-red-50 px-3 text-sm font-medium text-red-800 hover:bg-red-100">
+                    <span aria-hidden="true">× </span>ลบรูปนี้
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : file ? (
             <div className="space-y-2">
               <div className="flex items-center gap-2 text-xs text-text">
                 {file.type.startsWith("video/") ? <Film size={15} /> : <ImagePlus size={15} />}
@@ -256,17 +345,17 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
 
       <div className="flex items-end gap-2">
         <div className="flex gap-1 pb-1">
-          <input ref={imageInputRef} type="file" accept=".jpg,.jpeg,.png,.gif,image/jpeg,image/png,image/gif" className="hidden"
-            onChange={(e) => chooseFile("image", e.target.files?.[0])} />
+          <input ref={imageInputRef} type="file" multiple accept=".jpg,.jpeg,.png,.gif,image/jpeg,image/png,image/gif" className="hidden"
+            onChange={(e) => { chooseFile("image", e.target.files || undefined); e.currentTarget.value = ""; }} />
           <input ref={videoInputRef} type="file" accept=".mp4,.mov,.m4v,video/*" className="hidden"
             onChange={(e) => chooseFile("video", e.target.files?.[0])} />
-          <button type="button" disabled={!canSelectMedia || !!file} onClick={() => imageInputRef.current?.click()} title="เลือกรูปภาพ" aria-label="แนบรูปภาพ"
+          <button type="button" disabled={!canSelectMedia || !!file || stickerOpen} onClick={() => imageInputRef.current?.click()} title="เลือกรูปภาพ" aria-label="แนบรูปภาพ"
             className="h-11 w-11 rounded-md text-brand bg-brand/5 hover:bg-brand/10 disabled:opacity-40 flex items-center justify-center"><ImagePlus size={17} /></button>
-          <button type="button" disabled={!canSelectMedia || !!file} onClick={() => videoInputRef.current?.click()} title="เลือกวิดีโอ" aria-label="แนบวิดีโอ"
+          <button type="button" disabled={!canSelectMedia || !!file || images.length > 0 || stickerOpen} onClick={() => videoInputRef.current?.click()} title="เลือกวิดีโอ" aria-label="แนบวิดีโอ"
             className="h-11 w-11 rounded-md text-brand bg-brand/5 hover:bg-brand/10 disabled:opacity-40 flex items-center justify-center"><Film size={17} /></button>
           <button type="button" onClick={() => { setEmojiOpen((v) => !v); setStickerOpen(false); }} title="แทรกอิโมจิ" aria-label="แทรกอิโมจิ" aria-expanded={emojiOpen}
             className="h-11 w-11 rounded-md text-text-muted hover:bg-surface-2 flex items-center justify-center"><Smile size={17} /></button>
-          <button type="button" disabled={!canSelectMedia || !!file} onClick={() => void openStickerPicker()} title="เลือกสติกเกอร์" aria-label="เลือกสติกเกอร์" aria-expanded={stickerOpen}
+          <button type="button" disabled={!canSelectMedia || !!file || images.length > 0} onClick={() => void openStickerPicker()} title="เลือกสติกเกอร์" aria-label="เลือกสติกเกอร์" aria-expanded={stickerOpen}
             className="h-11 w-11 rounded-md text-brand bg-brand/5 hover:bg-brand/10 disabled:opacity-40 flex items-center justify-center"><Sticker size={17} /></button>
         </div>
         <textarea aria-label="ข้อความที่จะส่ง" ref={textareaRef} value={text} onChange={(e) => {
@@ -276,15 +365,36 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
           el.style.height = `${Math.min(el.scrollHeight, 128)}px`;
         }} onKeyDown={(e) => {
           if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); }
-        }} placeholder={placeholder || "พิมพ์ข้อความตอบลูกค้า..."} rows={1} disabled={disabled || !!file || stickerOpen}
+        }} placeholder={placeholder || "พิมพ์ข้อความตอบลูกค้า..."} rows={1} disabled={disabled || !!file || images.length > 0 || stickerOpen}
           className="flex-1 resize-none min-h-[44px] max-h-[128px] rounded-xl border border-border bg-surface-2 px-3.5 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand overflow-hidden disabled:opacity-60" />
-        <button type="submit" aria-label={busy ? "กำลังส่ง" : file ? "ส่งไฟล์แนบ" : stickerOpen ? "ส่งสติกเกอร์" : "ส่งข้อความ"}
-          disabled={busy || disabled || (!file && !stickerOpen && !text.trim()) || (!!file && !canSendMedia) || (stickerOpen && (!canSendMedia || !stickerId || !stickerPackageId))}
+        <button type="submit" aria-label={busy ? "กำลังส่ง" : images.length ? `ส่งรูป ${images.length} รูป` : file ? "ส่งไฟล์แนบ" : stickerOpen ? "ส่งสติกเกอร์" : "ส่งข้อความ"}
+          disabled={busy || disabled || (!file && images.length === 0 && !stickerOpen && !text.trim()) || ((!!file || images.length > 0) && !canSendMedia) || (stickerOpen && (!canSendMedia || !stickerId || !stickerPackageId))}
           className="h-11 w-11 shrink-0 rounded-xl bg-brand text-white flex items-center justify-center hover:bg-brand/90 disabled:opacity-50">
-          {busy ? <Loader2 size={16} className="animate-spin motion-reduce:animate-none" /> : file?.type.startsWith("video/") ? <Film size={16} /> : stickerOpen ? <Sticker size={16} /> : file ? <ImagePlus size={16} /> : <Send size={16} />}
+          {busy ? <Loader2 size={16} className="animate-spin motion-reduce:animate-none" /> : <Send size={16} />}
         </button>
       </div>
       {error && <div role="alert" className="mt-1.5 text-[11px] text-vibrant-coral">{error}</div>}
+      {sendFailure && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setSendFailure(null)}>
+          <div role="alertdialog" aria-modal="true" aria-labelledby="send-failure-title" aria-describedby="send-failure-cause"
+            onClick={(event) => event.stopPropagation()} onKeyDown={(event) => { if (event.key === "Escape") setSendFailure(null); }}
+            className="w-full max-w-md rounded-xl bg-surface p-5 text-text shadow-xl">
+            <h2 id="send-failure-title" className="text-base font-semibold">{sendFailure.title}</h2>
+            <p id="send-failure-cause" className="mt-3 text-sm">เกิดอะไรขึ้น: {sendFailure.cause}</p>
+            <p className="mt-2 text-sm">ต้องทำอย่างไร: {sendFailure.action}</p>
+            {sendFailure.code && <p className="mt-3 text-xs text-text-muted">รหัส: {sendFailure.code}</p>}
+            {sendFailure.providerError && <p className="mt-1 text-xs text-text-muted">Shopee error: {sendFailure.providerError}</p>}
+            {sendFailure.providerHttpStatus && <p className="mt-1 text-xs text-text-muted">Shopee HTTP: {sendFailure.providerHttpStatus}</p>}
+            {sendFailure.providerRequestId && <p className="mt-1 break-all text-xs text-text-muted">Shopee request ID: {sendFailure.providerRequestId}</p>}
+            <div className="mt-5 flex justify-end gap-2">
+              {sendFailure.code === "send_mode_changed" && <button type="button" onClick={() => window.location.reload()}
+                className="min-h-11 rounded-lg bg-brand px-4 text-sm text-white">รีเฟรชหน้า</button>}
+              <button ref={failureCloseRef} type="button" onClick={() => setSendFailure(null)}
+                className="min-h-11 rounded-lg border border-border px-4 text-sm">ปิด</button>
+            </div>
+          </div>
+        </div>
+      )}
     </form>
   );
 }

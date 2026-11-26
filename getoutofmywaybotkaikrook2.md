@@ -15216,3 +15216,221 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - นิยาม: "ต้องให้คนจัดการ" = คำตอบถูกแก้/ไม่อนุมัติ/handoff อนุมัติ; % คิดเทียบทุกแชทและทุกคำตอบที่ BotWorker ตอบในช่วง; week bucket เริ่มวันจันทร์ Asia/Bangkok; cap 20,000 คำตอบ/ช่วง, export 5,000 แถว
 - Verify: test-botworker-review 51/51 (เพิ่ม P1 KPI/workload/edit%/reviewer/week, P2 filters/export/422; ปรับ A4/A5/analysis ไป route/service ใหม่), test-botworker-boundary 25/25, `tsc --noEmit` ผ่าน (เหลือ .next types เก่าของ route ที่ลบ), `git diff --check` ผ่าน; dev server ตอบ /bot-performance 307 และ API 401 ตอนไม่ login = compile ได้ ยังไม่ได้ดู UI ตอน login จริง
 - งานค้าง: ปุ่มเปิดแชทจากแผงรายละเอียดไปหน้า botworker ไม่ได้ทำ (botworker ไม่รองรับ deep link — แสดง conversation_id ให้คัดลอกแทน)
+
+## 2026-11-25 — กำลังจะทำ: Shopee send — cache token ถึง expire_at + แปล error เป็นไทย
+- Sellcenter ยืนยัน: ขอ token จาก `digital.in.th/api/shopee/token` เท่านั้น ห้ามเรียก Shopee auth เอง; เก็บ access_token ถึง `expire_at`; error_auth/invalid_access_token → ขอใหม่+ลองซ้ำครั้งเดียว; ห้าม log/ส่งต่อ token; service token ผูก IP และใช้ได้เฉพาะร้าน BlackShark
+- Audit: `_credentials` ขอ token ใหม่ทุกครั้ง (ไม่ cache); error จาก Shopee/Sellcenter ถูกยุบเป็น `provider_rejected`/`token_provider_rejected` และสอง send route มี `deliveryMessage` ซ้ำกันที่ให้ข้อความรวม → แอดมินไม่รู้ว่าต้องทำอะไร (เช่น 22997004 ไม่ใช่ร้านที่ token อนุญาต, IP ไม่อยู่ whitelist)
+- แผน: (1) cache token ใน memory ต่อ shop_id ถึง expire_at-60s ล้างเมื่อ error_auth; (2) map รหัส error ของ Shopee ที่รู้จักเป็น `shopee_<error>` และ Sellcenter ตาม HTTP status เป็น code แยก + ข้อความไทยจาก owner เดียวใช้ทั้งสอง route; fake-only test ไม่มีการเรียก Sellcenter/Shopee จริง ไม่ส่งลูกค้า
+- IP ขาออกเครื่อง local ตอนนี้ 58.11.23.160 (ผู้ใช้รัน local); baseline active 1..15218 SHA ตรง ledger (branch ต่อจาก feat/bot-performance-page)
+
+## 2026-11-25 — กำลังจะทำ: log ของ bot-worker บอกเหตุผลและเป็นภาษาไทย
+- ผู้ใช้เห็น log `buffered` แล้ว `duplicate — not admitted` ซ้ำทุกรอบ แล้วเงียบ เข้าใจว่าไม่ส่งเข้าบอท; DB ยืนยัน 4 ข้อความของ shp_98777118463033313 จบ `no_action` เพราะ botworker test store status=open assigned_to แอดมิน (admin ส่งจาก composer = claim) → skip_assigned
+- Root cause ของ log: timer flush (`bufferService` setTimeout → trackedFlush) ไม่ log ผลเลย และ `flushBuffer` คืน detail `flushed N msgs → status` ทิ้ง detail ของ processMessage
+- แผน: ส่ง detail ภายในต่อใน flushBuffer + log ผล timer flush; เพิ่ม `botworkerLog` (owner เดียว) แปล status/detail ของ worker เป็นไทย + ไม่พิมพ์บรรทัดซ้ำต่อข้อความ; แปล banner/cycle ใน scripts/bot-worker.ts; ไม่เปลี่ยน status/outcome/DB fields; แตะเฉพาะข้อความ log
+- branch `feat/botworker-thai-logs` ต่อจาก feat/bot-performance-page (กัน working tree ของผู้ใช้หายหน้า); งาน Shopee ที่ append "กำลังจะทำ" ไว้ก่อนหน้ายังพักอยู่ ไม่มีโค้ด
+
+## 2026-11-25 — ผ่านแล้ว: log ของ bot-worker เป็นภาษาไทยและบอกเหตุผล
+- Root cause: timer/hand-off flush ไม่ log ผล และ `flushBuffer` ทิ้ง detail ของ processMessage → เห็นแค่ `buffered`/`duplicate` แล้วเงียบ แม้ worker ตัดสิน skip_assigned (แอดมินรับแชท)
+- แก้: `flushBuffer` ต่อ detail ภายใน (`flushed N msgs → status: detail`); timer และ hand-off flush log ผล; เพิ่ม `src/backend/service/botworkerLog.ts` เป็น owner เดียวแปล status+detail ของ worker เป็นไทย (คง detail ดิบเมื่อไม่รู้จัก) และไม่พิมพ์บรรทัดซ้ำต่อข้อความ/แชท (จำล่าสุด 5,000 key); `scripts/bot-worker.ts` banner/รอบ/error เป็นไทย, บรรทัด "เจอข้อความ…" พิมพ์เมื่อค่าต่างจากรอบก่อน, บรรทัดเปิดสวิตช์คง ISO ไว้ในวงเล็บ (test enable-checkpoint อ่านค่า)
+- ไม่เปลี่ยน status/outcome/DB field ใด ๆ — เฉพาะข้อความ console; net mechanism: +1 owner (botworkerLog) +13 regex สำหรับรูปแบบ log ภายใน (ไม่ตีความข้อความลูกค้า)
+- Verify: test-botworker-log 12/12 (ใหม่), review 51/51, boundary 25/25, idempotency 71/71, production-races 37/37, phase9-dispatch 38/38, testchat-buffer 16/16, scope-gate 107/107, config-failclosed 8/8, global-enabled-cas 8/8, enable-checkpoint 18/18 (แก้ regex ให้อ่านบรรทัดไทย), tsc ผ่าน; error-policy E9 fail อยู่แล้วบน base commit ก่อนแก้ (ยืนยันด้วย worktree) ไม่เกี่ยวกับงานนี้
+- งานค้าง: log แสดง admin id ไม่ใช่ชื่อ; test error-policy E9 (empty answer → handed_off) fail เดิม ยังไม่ได้ตรวจ
+
+## 2026-11-25 — กำลังจะทำ: popup บอกสาเหตุ/วิธีแก้เมื่อส่งข้อความ Shopee ไม่สำเร็จ
+- ผู้ใช้เจอ 409 (สวิตช์ส่งจริงหน้าจอไม่ตรง DB) แล้ว 502; DB: operation ล่าสุด shop 22997004 → `token_provider_rejected` (sellcenter ปฏิเสธขอ token — ร้านนี้/IP/สิทธิ์ ปนกันใน code เดียว) ผู้ใช้ขอ popup บอกว่าเกิดจากอะไร ต้องทำอะไร
+- แผน: (1) `lib/shopeeSendErrors.ts` = owner เดียวของข้อความไทย (title/cause/action) แทน `deliveryMessage` ที่ซ้ำ 2 route; (2) `_credentials` แยก code ตาม HTTP status ของ sellcenter (401/403-IP/403-อื่น/404/503) และ provider error ของ Shopee ที่รู้จัก → `shopee_<error>` (ไม่รู้จัก = provider_rejected เดิม) — เก็บเฉพาะ code ไม่เก็บ token/ข้อความ body; (3) route ส่ง `{detail, code}`; (4) ShopeeChatComposer เปิด dialog (ใช้ทั้ง Tickets + Bot Worker) + ปุ่มรีเฟรชเมื่อ send_mode_changed; fake-only test ไม่เรียก sellcenter/Shopee จริง ไม่ส่งลูกค้า
+- ไม่ทำใน task นี้: cache token ถึง expire_at, การ์ด order, ดึงสถานะสวิตช์อัตโนมัติ; baseline active 1..15237 SHA ตรง ledger
+
+## 2026-11-25 — ผลแก้ popup เมื่อส่ง Shopee ไม่สำเร็จ
+- Route ส่งของ Tickets และ Bot Worker คืน `detail` กับ `code` จาก owner `describeSendFailure`; 409 สวิตช์ไม่ตรงคืน `send_mode_changed` ชัดเจน
+- Composer ร่วมเปิด dialog บอกสาเหตุ วิธีแก้ รหัส และปุ่มรีเฟรชสำหรับ `send_mode_changed`; เก็บข้อความเดิมไว้เมื่อส่งล้มเหลว; Bot Worker ไม่ console.error/toast ซ้ำในเส้นทางส่ง
+- Service แยก code จาก HTTP status ของ Sellcenter และ error ที่รู้จักของ Shopee; `token_provider_rejected` ยังเป็นคำตอบกลางเมื่อ Sellcenter ไม่ให้เหตุผลที่ยืนยันได้
+- Verify: `tsc` เฉพาะ src ผ่าน, เรียก `describeSendFailure` จริงตรวจ 3 กรณีผ่าน, `git diff --check` ผ่าน; `tsc` ปกติถูก `.next/types` เก่าที่อ้าง route ลบแล้วขวาง
+- ค้าง: ยังไม่ตรวจ dialog ใน browser ที่ login และไม่ได้ลองส่งจริง; ไม่มีการเรียก Sellcenter/Shopee หรือส่งข้อความถึงลูกค้าในรอบนี้; working tree เดิมยัง dirty และยังไม่ commit
+
+## 2026-11-25 — กำลังจะทำ: Bot Worker เลือกแชทปักหมุด/โหลดเพิ่มแล้วกลางจอว่าง
+- Root cause: ChatList ใช้ `allConversations` (pinned + head + tail) แต่ `selected` หาเฉพาะ `conversations` (head); API messages คืนข้อมูลได้แต่ panel ได้ `null`; Tickets รวม pinned ใน `conversations` ก่อนหา selected
+- ผู้ใช้อนุมัติให้แก้จุดนี้ โดยคงการทำงานหลักเดิม: ให้ selected หาในรายการเดียวกับ ChatList แล้วตรวจแชท head/pinned/tail โดยไม่แตะการส่งหรือ assignment
+
+## 2026-11-25 — ผลแก้ Bot Worker เลือกแชทปักหมุด/โหลดเพิ่ม
+- ย้าย `selected` หลัง `allConversations`: ยังเลือกจาก head ก่อนเหมือนเดิม แล้ว fallback เป็นรายการรวมสำหรับ pinned/tail ที่อยู่นอก head
+- Behavioral red-green: ก่อนแก้กรณี pinned fail; หลังแก้ head/pinned/tail ผ่าน; เพิ่มกรณี pinned ซ้ำแต่ข้อมูล stale ก่อนแก้รอบสอง fail แล้วผ่านเมื่อรักษา head precedence (4/4)
+- Verify: TypeScript เฉพาะ src ผ่าน; `git diff --check` ผ่าน; ไม่เรียก API/DB/provider และไม่ส่งข้อความจริง
+- ค้าง: ยังไม่ตรวจหน้า browser ที่ login; working tree เดิมยัง dirty และยังไม่ commit; net mechanisms +0 helper, +0 guard, +0 regex, +0 keyword table, +0 decision owner
+
+## 2026-11-25 — กำลังจะทำ: รักษา error response จาก Shopee send_message
+- ผู้ใช้ให้ตัวอย่าง Sellcenter และขอแก้ให้แม่น: Sellcenter อ่าน `body.error` ก่อน HTTP error; โค้ดเราเช็ก `!provider.ok` ก่อนจึงทิ้ง `error/message/request_id` เมื่อ Shopee ตอบ 491 พร้อม JSON
+- แผน: แยก explicit Shopee error เป็น failed แม้ HTTP non-2xx; ส่งรายละเอียดที่ปลอดภัย (error code, HTTP status, request_id) กลับหน้าเว็บและเก็บใน operation เพื่อ replay; timeout/ไม่มีผลชัดเจนคง unknown; fake-only red-green ไม่ส่งลูกค้าจริง
+- เปรียบเทียบ: Sellcenter ใช้ token/partner จากฐานของตนและ `buyer_user_id`; เราขอ token จาก Sellcenter API และใช้ conversation.customer_id — ยังไม่มีหลักฐานว่าสองค่านี้ต่างกันในเคสนี้
+
+## 2026-11-25 — ผลแก้ Shopee send_message response diagnostics
+- `_requestShopee` คง HTTP status; `sendShopeeMessage` อ่าน `body.error` ก่อน status ตามตัวอย่าง Sellcenter; รหัสที่ตารางเดิมรู้แน่ว่าปฏิเสธ = failed แม้ HTTP 491; รหัสอื่น/timeout/ไม่มีผลชัด = unknown ไม่สรุปว่าส่งไม่ถึง
+- เก็บและส่งต่อเฉพาะ provider error code ที่ผ่าน schema, HTTP status, Shopee request ID ใน `shopee_outbound_operations` และ route ทั้ง Tickets/Bot Worker; composer แสดงใน popup; ไม่ส่ง raw body/message/token/sign
+- Request หลักยังเหมือนเดิม: GET token จาก Sellcenter, signed POST ไป Shopee; เทียบตัวอย่างแล้ว path/query/body text ตรง แต่ยังไม่ยืนยัน runtime partner key, egress IP, หรือ customer_id ว่าตรง buyer_user_id ของเคสจริง
+- Verify: fake-only behavioral 8/8 (URL+payload, 491 known/unknown, 200 error/success, timeout, replay) และ src-only TypeScript กับ diff check ผ่าน; ไม่มี DB/provider/customer call จริง
+- ค้าง: operation เก่าที่บันทึก unknown ก่อนแก้ไม่มีรายละเอียดให้ย้อนคืน; logged-in UI และ provider จริงยังไม่ verify; working tree เดิม dirty และยังไม่ commit; net mechanism +0 helper, +0 guard, +1 schema regex, +0 keyword table, +0 decision owner
+
+## 2026-11-25 — กำลังจะทำ: จัดประเภท Shopee error_sign 403
+- ผู้ใช้ส่งผลจริง `error_sign`, HTTP 403, Shopee request ID; โค้ดแสดง delivery_unknown เพราะรหัสนี้ไม่อยู่ในตาราง known rejection เดิม
+- ตรวจสูตร sign เทียบเอกสาร Sellcenter: ลำดับ partner_id + path + timestamp + access_token + shop_id และ HMAC-SHA256 ตรง; runtime partner key/token/เวลา ยังไม่ยืนยัน; `to_id` ไม่อยู่ใน sign
+- แผนแก้เฉพาะ classification/ข้อความ operator ของ error_sign เป็น failed พร้อมคำแนะนำตรวจคู่ partner_id/key และเวลา; ทดสอบ fake 403 และ replay; ไม่อ่าน secret/ไม่ส่งจริง
+
+## 2026-11-25 — ผลแก้ Shopee error_sign 403 classification
+- เพิ่ม `error_sign` เข้า known provider rejection และข้อความไทยใน owner เดิม; ส่งผล `shopee_error_sign` เป็น failed แทน delivery_unknown เมื่อเป็น request ใหม่
+- สูตร sign ใน source ตรงตัวอย่าง Sellcenter; สาเหตุ runtime ที่ยังต้องตรวจคือ partner_id กับ partner key เป็นคู่เดียวกัน, token/shop/env และเวลาเซิร์ฟเวอร์; ไม่อ่าน secret
+- Verify fake 8/8 รวม 403 error_sign + replay, 491 known/unknown, timeout, 200 error/success และ signed URL/body; src-only TypeScript และ diff check ผ่าน; ไม่ยิง provider/customer
+- ค้าง: 409 ของ operation เก่าที่เคยบันทึก unknown จะยัง replay ผลเก่า; ผู้ใช้ส่ง headers/payload แต่ยังไม่ได้ส่ง Response JSON; working tree dirty ไม่ commit; net +0 helper/guard/regex/decision owner, +1 provider-code table entry
+
+## 2026-11-26 — กำลังจะทำ: บันทึก Shopee outbound request diagnostic
+- ผู้ใช้อนุมัติให้เพิ่ม console log เพื่อดูคำขอส่งจริงและหาสาเหตุ error_sign; baseline 15282 บรรทัด active SHA 105a957c018384375a7b15b918f11ccc3ce4337364c65066be99cf2eb85c63a9 และ frozen SHA a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341 ตรง
+- Root cause ด้านการวินิจฉัย: send_message ไม่มี log ที่ขอบ Shopee จึงไม่เห็น partner_id/shop_id/timestamp/path และผลแต่ละ attempt; สูตร sign ถูกตามคู่มือแต่ค่า runtime ยังไม่ยืนยัน
+- แผน: เพิ่ม log เฉพาะ postMessage ใน shopeeOutboundService ก่อน/หลัง HTTP และ network error; ซ่อน token/key/sign/body text; ทดสอบ fake request+response และไม่รั่ว secret; การส่ง/การจัดประเภท error ไม่เปลี่ยน; ไม่เรียก provider จริง
+- Ledger coverage ยัง partial; branch feat/botworker-thai-logs มีงานค้างเดิมและไม่ commit ในรอบนี้
+
+## 2026-11-26 — ผลเพิ่ม Shopee outbound request diagnostic
+- `sendShopeeMessage` บันทึก `[shopee-send] request` ก่อนส่งจริง: local request_id, POST host/path, sign base order, partner_id, timestamp, shop_id, to_id, message_type, content fields/text length; token/key แสดงเฉพาะ SHA-256 prefix 12 hex, token และ sign เต็มถูกปิดบัง, ไม่ log เนื้อหาข้อความ
+- บันทึก `[shopee-send] response` พร้อม HTTP status/Shopee error/request ID, `[shopee-send] network_error` เมื่อไม่มี response, `[shopee-send] replay` เมื่อใช้ request ID เดิมและไม่ยิง Shopee ซ้ำ; payload และการจัดประเภทผลส่งเดิมไม่เปลี่ยน
+- Verify: fake behavioral suite 8/8 ผ่าน รวม log request/response, redaction และ replay; src-only TypeScript ผ่าน, `git diff --check` ผ่าน; ไม่มี DB/provider/customer call จริง; user ต้องดู log ฝั่ง Next.js server เมื่อเกิดคำขอใหม่
+- งานค้าง: runtime partner_id/key pairing และผลการส่งจริงยังไม่ยืนยัน; semantic coverage partial, working tree เดิม dirty ไม่ commit; net +0 helper/guard/regex/keyword table/decision owner
+## 2026-11-26 — กำลังจะทำ: BotWorker handoff flag และ closed reopen
+- Root cause จาก worker log และโค้ด: คำตอบบอทว่างแต่ไม่มี handoff_required ถูก pickAgent ทันที; closed ที่ยังมี assigned_to ถูก skip ก่อน reopen. กระทบแชท no-reply และแชทปิดที่ลูกค้าทักใหม่.
+- แผน: ทดสอบพฤติกรรม fake Mongo ก่อน; แก้เจ้าของการตัดสินใน botWorkerService ให้ส่งต่อเฉพาะ flag ที่ผ่าน reviewer และ reopen closed เป็น bot ก่อนตรวจ assignment; รันชุดทดสอบ/TypeScript; อัปเดต SRS. Trigger handoff_admin แบบตั้งค่าเองเป็นอีกเส้นทางและยังไม่เปลี่ยนในการแก้สองอาการนี้.
+
+## 2026-11-26 — กำลังจะทำ: เคลียร์ handoff และผู้ดูแลเก่าใน BotWorker
+- ผู้ใช้ขอ reset สถานะ handoff ของ BotWorker ทั้งหมดให้กลับเป็นบอทตอบ และล้างผู้ดูแลเดิม โดยเลือกค่า `null` เพื่อไม่ให้มีแอดมินค้างอยู่
+- แผนตรวจ: หาเจ้าของข้อมูล/collection/field และเงื่อนไข BotWorker จาก source ปัจจุบัน; นับ candidate แบบ read-only ก่อนเขียน; เปลี่ยนเฉพาะ state/assignment ที่เกี่ยวข้องโดยเก็บข้อความ ประวัติ และ event เดิม; ตรวจซ้ำว่าไม่มี handoff หรือผู้ดูแลเก่าค้างในขอบเขต
+- ยังไม่อ่าน `.env` หรือ `มาแล้วจ้า.md`; ยังไม่เรียก/เขียน production database.
+
+## 2026-11-26 — ผ่านแล้ว: BotWorker รอผู้ตรวจก่อนส่งต่อและ closed กลับให้บอท
+- Root cause: no-trigger answer ว่างไม่มี flag เคยเรียก pickAgent; closed ที่มี assigned_to ถูก skip ก่อน reopen; Python `_send_handoff` สามารถ POST assignment ระหว่างสร้างคำตอบ; legacy handoff_to_admin ไม่ถูก map เป็น review flag.
+- แก้ BotWorker: closed/resolved + inbound → status bot, active assigned_to=null และเก็บ previous_assigned_to; reviewer preview แนะนำคนเดิมเมื่อ adminconfig เปิดและ eligible/online ไม่เช่นนั้น RR; reviewer ยังต้องอนุมัติก่อน handoff. Python test_source=botworker คืน review_pending ไม่ POST handoff; Next.js map legacy flag เป็น review draft. Flag+answer ว่างสร้าง draft ที่มองเห็น; ไม่มี flag+source=no_reply ไม่ตอบและไม่ assign; empty ผิดปกติเป็น bot_failed พร้อม source/engine/input length ใน log.
+- Verify: fake BotWorker review 57/57, error-policy 38/38, boundary 25/25, idempotency 71/71, races 37/37, scope-gate 107/107, phase9 38/38, log 12/12; V4/legacy adapter ผ่าน; Python offline 2428 passed/17 skipped/1 xfailed; TypeScript source check, Python syntax และ diff check ผ่าน. ไม่ได้ยิง provider/DB/customer จริง, ไม่ commit.
+- ข้อจำกัด: log ย้อนหลังไม่มี Python response source/body จึงยังระบุไม่ได้ว่าค่าว่างของสองแชทนั้นเป็น no_reply หรือผิดปกติ; แชทที่ถูก handoff ผิดก่อนแก้ยังเป็น state เดิมจนมีการจัดการแยก; trigger/workflow ที่ตั้ง action assign โดยตรงเป็นเส้นทาง config แยกและไม่ได้เปลี่ยน. net +0 helper/guard/regex/keyword table/decision owner; เพิ่ม previous_assigned_to field 1.
+
+## 2026-11-26 — กำลังจะทำ: reviewer-approved RR cursor
+- Self-review พบว่า handoff preview แนะนำตาม RR แต่ reviewer approval ส่ง selectedAdminId แบบ direct ทำให้ cursor ไม่ขยับ; config ปิด prefer-old จึงอาจแนะนำคนเดิมซ้ำ. แผน: fake test สอง approval ต่อเนื่องก่อน; ใช้ reservation owner เดิมที่ approval เมื่อผู้ตรวจเลือก candidate แนะนำตาม RR, mismatch จาก concurrent cursor ให้ retry/รีวิวใหม่; manual override และ previous-admin ไม่ขยับ RR.
+
+## 2026-11-26 — ผ่านแล้ว: reviewer-approved RR cursor
+- เพิ่ม reservation ตอนผู้ตรวจอนุมัติ candidate ที่แนะนำตาม RR; reserveNextAgent owner เดิมยืนยัน ID ตรงก่อน assign, mismatch คืน conflict ให้เลือกใหม่; เลือก previous-admin/manual override ไม่ขยับ cursor. Fake test สอง approval แสดงสลับผู้รับจริง (RED ก่อน/58/58 หลัง).
+- Verify: review 58/58, boundary 25/25, idempotency 71/71, source-only TypeScript และ diff check ผ่าน. ไม่มี DB/provider/customer call จริง, ไม่ commit. net +0 helper/guard/regex/keyword table/decision owner; ขยาย typed option ของ handoffToAdminTest 1.
+
+## 2026-11-26 — กำลังจะตรวจ: BotWorker legacy ตอบข้อความว่าง
+- ผู้ใช้รายงานว่า BotWorker ได้คำตอบว่างใน legacy แต่ Test Chat Shopee ตอบได้; ตรวจแบบอ่านอย่างเดียวโดยเทียบ request assembly, engine selection, ticket/history และ response mapping พร้อมใช้ log ที่แนบมา
+- ไม่เรียก DB/provider, ไม่ส่งข้อความ และไม่แก้โค้ด; สรุปสิ่งที่ยืนยันได้และข้อมูลที่ยังขาดเพื่อระบุ root cause
+
+## 2026-11-26 — ผ่านแล้ว: เคลียร์ BotWorker handoff และผู้ดูแลเก่า
+- ขอบเขต `chatbot.test_status_conversation` เฉพาะ `source=botworker`; ก่อนแก้มี 7 records: handoff 3, open 3, closed 1. Update ตรง 7 และแก้ 7 records.
+- เปลี่ยน handoff/open/pending เป็น `bot` (6 records; ไม่มี pending เดิม) และคง `closed` 1 record; ตั้ง `assigned_to`, `previous_assigned_to`, `assigned_at` เป็น null และ `pending_assignment=false` ทุก record.
+- ตรวจหลังแก้: bot 6, closed 1; ทั้ง 7 ไม่มี assignee, prior assignee, assigned_at หรือ pending assignment. ไม่ลบ message/history/event และไม่แตะ real Tickets หรือ product DB; ไม่ได้ส่งข้อความจริง บอทจะตอบเมื่อมีข้อความเข้าใหม่.
+- ไม่มีการแก้โค้ดหรือ commit; ไม่อ่าน `.env` หรือ `มาแล้วจ้า.md`.
+
+## 2026-11-26 — ผลตรวจ: BotWorker legacy ตอบข้อความว่าง
+- ยืนยันจาก source: BotWorker และ Test Chat ใช้ `dispatchChatEngine`/ตัวเลือก engine กลาง และ Python `/chat`; BotWorker ส่งข้อความจาก buffer, grouped history, ticket state จาก test store และ `test_source=botworker`, ส่วน Test Chat ส่งข้อความ/history/session status ของ session ทดสอบ จึงยังไม่ใช่ request เดียวกัน
+- `callBot` ส่งต่อ `data.answer || ""` โดยไม่ลบคำตอบที่ไม่ว่าง; Python legacy มีทาง `source=no_reply` ที่คืน answer ว่างสำหรับ placeholder/noise และ `llm.answer` ก็คืน `resp.text` ว่างได้เมื่อ provider ไม่มี text. สาขา greeting ปกติคืนคำตอบคงที่
+- log worker มีสองเหตุการณ์ no-trigger→empty และ Python มี `/chat` 200 สองรายการ (`intent=greeting`, `intent=other`), แต่ไม่มี request/response body, source, routing_decision หรือ correlation ID; Next log ที่แนบไม่มี `/api/test-chat/dispatch`. จึงบอกไม่ได้ว่า request ใดเข้า `no_reply`, ได้ output ว่างจาก LLM หรือ response log เป็นคนละ run
+- ผล: สาเหตุเฉพาะแชทยังยืนยันไม่ได้; ข้อมูลตัดสินต่อคือ source/engine/input_length/images และ routing_decision ของ response เดียวกัน. BotWorker ปัจจุบัน log source/engine/input_length/images เมื่อคำตอบว่างแล้ว. ไม่มีการแก้โค้ด, รันทดสอบ, อ่าน/เขียน DB หรือเรียก provider ในรอบนี้
+
+## 2026-11-26 — กำลังจะตรวจ: Bot Worker Analysis ข้อมูลถามตอบ
+- ผู้ใช้ถามว่าหน้าข้อมูลถามตอบแสดงเหตุผลแอดมินที่แก้/ไม่อนุมัติ สถานะส่งจริง และความต่างจากคำตอบเดิมหรือไม่
+- หมายเหตุ: บันทึก marker หลังตรวจ source แบบอ่านอย่างเดียวแล้ว; ไม่มีการแก้โค้ด ทดสอบ อ่าน/เขียน DB หรือเรียก provider
+
+## 2026-11-26 — ผลตรวจ: Bot Worker Analysis ข้อมูลถามตอบ
+- หน้า `/bot-performance` มีรายการ Q&A และ drawer: แสดงคำถาม/คำตอบ, ผลตรวจ, % แก้, เหตุผลแอดมิน/ส่งต่อ, ผู้ตรวจ และเวลา; คำตอบที่แก้แล้วผ่านมี diff แดง=ลบ เขียว=เพิ่มเทียบต้นฉบับ
+- เหตุผลปฏิเสธคำตอบและเหตุผลปฏิเสธ handoff ถูกเก็บและแสดง; การแก้ข้อความไม่มีช่อง/field เหตุผล มีเพียง edit history ก่อน/หลัง ผู้แก้ เวลา ซึ่ง drawer ไม่ render. ถ้าปฏิเสธหลังมี draft แก้ หน้าแสดงต้นฉบับกับเหตุผล ไม่แสดง draft ที่ปฏิเสธ
+- `delivery_state` ต่อ bubble อยู่ใน response แต่ drawer ไม่แสดง; มีเฉพาะสถิติรวม live_sent, switch_off และ failed/unknown. ดังนั้นผลอนุมัติไม่ยืนยันการส่งจริงรายคำตอบ; `mock_sent` เป็น mock receipt delivered=false, ส่วน `live_sent` ใช้ผลจาก sender จริง
+- ยืนยันจาก source static; ไม่ได้เปิด browser หรือเชื่อม DB/provider และไม่แก้โค้ด. working tree มีการเปลี่ยนแปลงอื่นอยู่ก่อนแล้ว; ไม่มี commit
+
+## 2026-11-26 — กำลังจะทำ: เหตุผลประกอบการแก้คำตอบใน Bot Worker
+- ผู้ใช้ต้องการให้ผู้ตรวจเลือกหมวดเหตุผลตอนแก้คำตอบ (เช่น เลือกสินค้าผิด/ตอบผิด/สเปกผิด) และกรอกข้อความอธิบาย จากนั้นนำไปแสดงในหน้า Bot Performance Q&A; ผู้ใช้ยืนยันว่าไม่มีกรณี edit-then-reject
+- คำว่า “ไม่ควรส่งต่อเลย” ให้เป็นเหตุผลเฉพาะตอนปฏิเสธ handoff. ขณะนี้ตรวจ source/วาง design เพื่อขออนุมัติก่อนแก้โค้ดตาม AGENTS.md ข้อ 9
+- ยังไม่แก้โค้ดหรือรัน tests; ไม่มี DB/provider calls, customer messages, real sends หรือ commit
+
+## 2026-11-26 — ผลตรวจ/รออนุมัติ: ออกแบบเหตุผลแก้คำตอบและปฏิเสธ handoff
+- ยืนยันจาก source: `edit_history` เก็บก่อน/หลัง ผู้แก้ เวลาและถูกส่งถึง Bot Performance API แล้ว แต่ไม่มีเหตุผล; BotWorker edit form ไม่มีช่องเหตุผล. การปฏิเสธ handoff มีเพียงข้อความ free-text และ `handoff_review.rejection_reason`; API/หน้า Q&A อ่านข้อความนี้ได้
+- ข้อเสนอเพื่อยืนยันก่อน implement: ตอนข้อความเปลี่ยน ให้เลือกหมวด `เลือกสินค้าผิด`, `ตอบผิด`, `สเปกผิด`, `อื่น ๆ` และกรอกคำอธิบายบังคับ; เก็บหมวด/คำอธิบายในแต่ละ edit_history entry พร้อม diff, ผู้แก้, เวลา แล้วแสดงทุก revision ใน Q&A. ตอนปฏิเสธ handoff ให้ใช้หมวด `ไม่ควรส่งต่อเลย` พร้อมคำอธิบายบังคับ แล้วแสดงคู่กันใน Q&A
+- ผู้ใช้ยืนยันแล้วว่าไม่มี flow แก้แล้วปฏิเสธ; ข้อความก่อนหน้าใน A-406 เรื่อง draft ที่ถูกปฏิเสธไม่ใช่ requirement. รอบนี้ยังไม่มีการแก้ source/test หรือเรียก DB/provider; รอผู้ใช้อนุมัติ taxonomy และ design ก่อน implement ตาม AGENTS.md ข้อ 9
+
+## 2026-11-26 — กำลังจะตรวจ: Legacy handoff ใน BotWorker
+- ผู้ใช้ถามว่าเมื่อ Legacy ส่ง handoff flag มา BotWorker แปลง บันทึก และแสดงให้ผู้ตรวจอย่างไร
+- ตรวจ source แบบอ่านอย่างเดียว ไล่ Python response → callBot → pending draft → UI/reviewer action; ไม่แก้ code ไม่อ่าน/เขียน DB ไม่เรียก provider และไม่รันทดสอบ
+
+## 2026-11-26 — ผลตรวจ: Legacy handoff ใน BotWorker
+- Legacy ส่ง `handoff_to_admin=true`; เมื่อ `test_source=botworker`, Python `_send_handoff` คืน `review_pending` โดยไม่ POST/assign. `callBot` map เป็น `handoff_required=true`, `handoff_to_admin=false`, คำตอบร่างเป็นข้อความขอให้เจ้าหน้าที่ตรวจ และเก็บคำตอบเดิมของ Legacy เป็นคำอธิบายผู้ตรวจ
+- worker เก็บ `shadow_replies` + `handoff_review.status=pending` และ event `awaiting_reviewer`; ไม่เปลี่ยน assignment/status และไม่ส่งถึง Shopee. UI แสดงบับเบิลรอตรวจ + HANDOFF FLAG, reason/explanation, รายชื่อแอดมินออนไลน์ (แนะนำคนเดิมหรือ RR), ปุ่มอนุมัติ handoff/ไม่อนุมัติ
+- ปุ่มอนุมัติข้อความในบับเบิลกับปุ่มอนุมัติ handoff เป็นคนละ action: อันแรกส่ง/จำลองส่งข้อความตามสวิตช์; อันหลัง assign ผู้รับใน BotWorker sandbox หลัง reviewer อนุมัติ และไม่ส่งข้อความลูกค้า. ตรวจ source อย่างเดียว ไม่มี tests, DB/provider calls หรือ code changes
+
+## 2026-11-26 — กำลังจะตรวจ: ภาพ tax_invoice_handoff ไม่มีแผง handoff
+- ผู้ใช้ถามว่าภาพ BotWorker ขอใบกำกับภาษีเป็น handoff หรือไม่ และเหตุใด UI ดูเป็นข้อความธรรมดา
+- ตรวจ screenshot เทียบกับ tax invoice handler, callBot handoff mapping, shadow reply fields และ UI condition แบบอ่านอย่างเดียว
+
+## 2026-11-26 — ผลตรวจ: ภาพ tax_invoice_handoff ไม่มีแผง handoff
+- `source=tax_invoice_handoff` และข้อความตรงกับ tax invoice handler จึงยืนยันว่าเข้ากิ่งคำขอใบกำกับภาษี; แต่ UI ในภาพแสดงเฉพาะ ReviewBubbleList ปกติ (รอตรวจ/อนุมัติส่ง/แก้ไข/ไม่อนุมัติส่ง) ไม่เห็น HandoffReviewPanel
+- UI แสดงแผง handoff จาก `bot_handoff_required` เท่านั้น ไม่อนุมานจากข้อความ/source. Source ปัจจุบัน: `handoff_to_admin=true` ใน worker ควรถูก callBot map เป็น `handoff_required=true`, เปลี่ยนข้อความ bubble เป็น canned review wording และเก็บ tax answer ไว้ใน explanation; worker ควร persist `bot_handoff_required` + pending review. ภาพแสดง tax answer เดิมและไม่มี panel จึง flag ไม่ได้มาถึง UI ของ record นี้
+- ภาพอย่างเดียวบอกไม่ได้ว่า flag หายระหว่าง runtime mapping หรือ record ถูกสร้างด้วย worker เวอร์ชันเก่าก่อน mapping. ยืนยันจุดหายต้องดู shadow reply fields / matching worker log; ไม่ได้อ่าน DB, แก้โค้ด, รัน test หรือส่งข้อความ
+
+## 2026-11-26 — กำลังตรวจต่อ: tax_invoice_handoff record → BotWorker flag
+- ต่อจาก A-410 เพื่อจับคู่ screenshot กับ `shadow_replies`, `botworker_events`, worker log และ response mapping ของ Legacy ในเคส SuperITMall
+- อ่าน Mongo แบบ read-only โดยโหลด dotenv เข้า process; ไม่แสดง secret และไม่เขียนข้อมูล, ไม่เรียก provider, ไม่ส่งข้อความ และไม่แก้โค้ด
+
+## 2026-11-26 — ผลตรวจ: tax_invoice_handoff flag หายเพราะ worker process เก่า
+- จับคู่เคสภาพได้: conversation `shp_98777118463033313`, inbound `shp_msg_2448757540439622001`, shadow reply `botworker:reply:botworker:batch:3844e369ee0324b3ddee3eee68a6f389` เวลา 11:24:14 (+07), source `tax_invoice_handoff`; record มีคำตอบใบกำกับภาษีปกติ แต่ไม่มี `bot_handoff_required`, `bot_handoff_to_admin`, `bot_handoff_reason`, `bot_handoff_explanation` หรือ `handoff_review`; event ที่ผูก reply มีเพียง `bot_reply` ไม่มี `bot_handoff`
+- Python log ของ request เดียวกันแสดง intent `tax_invoice`, `TAX-HANDOFF ... ok=True`, HTTP 200; code path คืน `handoff_to_admin=true`. Current `callBot` แปลง flag นี้เป็น `handoff_required=true` แล้ว worker จึงควรเรียก `storePendingHandoffReply`
+- worker log แสดง process เริ่มก่อนสวิตช์เปิดเวลา 09:51 (+07) และยังทำงานถึง request 11:24 (+07). ไฟล์ `botCallService.ts` ที่มี mapping ปัจจุบันแก้เวลา 10:14 (+07), `botWorkerService.ts` ที่ persist handoff flag แก้เวลา 10:20 (+07); `npx tsx scripts/bot-worker.ts` เป็น process ที่โหลดโมดูลตอนเริ่ม จึงใช้โค้ดก่อนการแก้ แม้ไฟล์บนดิสก์เปลี่ยนแล้ว
+- จุดเสียจึงอยู่ที่ Next/BotWorker runtime เก่า ไม่ใช่ UI: worker เข้า path `storeBotReply` ปกติ, DB ไม่มี handoff fields, API ส่ง flag จาก record โดยตรง, หน้าแสดง `HandoffReviewPanel` เฉพาะเมื่อ `bot_handoff_required` เป็น true
+- ไม่มีการแก้โค้ด, รันทดสอบ, เขียน DB, เรียก Shopee/provider หรือส่งข้อความ. Coverage ประวัติยัง partial; ยังไม่ได้ตรวจว่า process ปัจจุบันถูก restart หลัง 10:20 หรือไม่
+
+## 2026-11-26 — กำลังจะทำ: เหตุผลตรวจคำตอบและ handoff ใน BotWorker
+- ผู้ใช้อนุมัติให้ implement และระบุ requirement ใหม่: เหตุผลแบบ dropdown + ข้อความอธิบาย สำหรับแก้ไข/ส่งและไม่อนุมัติส่ง ด้วยหมวด สเปคผิด, ควรส่งแอดมิน, การแก้ปัญหาผิด, ผิดรุ่น, ตอบไม่ได้; handoff ต้องแสดงข้อความ/เหตุผล/ผู้รับ ให้อนุมัติ ปฏิเสธ เปลี่ยนผู้รับ แก้ข้อความก่อนส่งหรือส่งข้อความเดิมได้ และเมื่อไม่อนุมัติต้องบันทึกเหตุผล
+- กำลัง trace owner/state/delivery/API และสร้าง behavioral coverage ก่อนแก้ production ตาม TDD; รักษา unrelated changes ใน working tree; ห้าม deploy/commit หรือส่งจริงระหว่างพัฒนา
+
+## 2026-11-26 — กำลังจะแก้: BotWorker เลือกและลบภาพแนบทีละภาพ
+- ผู้ใช้ต้องการเลือกภาพหลายใบ, ลบเฉพาะภาพที่เลือกออก, และให้ปุ่มส่งคงไอคอนส่ง; Shopee รับภาพหนึ่งภาพต่อ request จึงวางแผนส่งแยกทีละ request ตามลำดับ
+- ตรวจพบ `ShopeeChatComposer` เก็บไฟล์เดียวและใช้ร่วมกับ BotWorker/Tickets; จะรักษา API payload ต่อภาพเดิม ตรวจ partial failure และไม่ส่งข้อความจริงระหว่างพัฒนา
+- ทำ behavioral test ก่อนแก้ production ตาม TDD; branch เดิมมีงานค้างจำนวนมาก ห้ามทับการเปลี่ยนแปลงอื่น; ไม่ commit/deploy
+
+## 2026-11-26 — ผลแก้: เหตุผลตรวจคำตอบและ handoff ใน BotWorker
+- เพิ่มหมวดเหตุผลคงที่ 5 ค่าใน shared type และบังคับหมวด+คำอธิบายสำหรับบันทึกแก้คำตอบ, แก้แล้วส่ง, ปฏิเสธคำตอบ และปฏิเสธ handoff; เก็บประวัติข้อความก่อน/หลัง ผู้แก้ เวลา หมวด และคำอธิบายใน `shadow_replies`/audit พร้อมแสดงทุก revision ใน Bot Performance Q&A
+- Handoff panel แสดงร่างลูกค้าที่ bubble ด้านบน, รหัสเหตุผล/คำอธิบายจาก engine, ผู้รับที่เลือกได้, อนุมัติหรือปฏิเสธพร้อมเหตุผล; ส่งข้อความเดิมหรือแก้แล้วส่งทำที่ bubble และการจ่ายแชทให้แอดมินเป็น action แยกตาม owner เดิม. Q&A แสดงผลส่งของข้อความและการ์ดสินค้าแยกกัน รวมรหัสสินค้าและสถานะจริง/จำลอง/ไม่ส่ง/ล้มเหลว
+- Independent review พบ request binding ของ approval เดิมจะ replay ไม่ผ่าน และ Q&A ขาดผลส่งการ์ด; รักษา binding แบบเดิมเมื่อ retry approval เก่าและเพิ่ม behavioral assertions สำหรับ card ID/state. Follow-up review ยืนยันประเด็น card display ปิดครบ; ไม่เหลือ actionable finding จากรอบนี้
+- ตรวจ `node --import tsx scripts/test-botworker-review.ts`: 66/66 ผ่าน; targeted `npx tsc --noEmit -p /private/tmp/botworker-review-tsconfig.json` ผ่าน; `git diff --check` ผ่าน. Full `npx tsc --noEmit` ยังรายงาน stale `.next/types` อ้าง route `src/app/api/botworker/review-analysis/route.ts` ที่ไม่มี และ errors ใน untracked composer helper test ที่อยู่นอกงานนี้
+- ไม่ได้เปิด browser UI, ใช้ production DB/provider, ส่งข้อความจริง, deploy, push หรือ commit. ไม่มี edit-then-reject flow. รักษา working tree dirty ที่ไม่เกี่ยวข้อง. Net: +1 fixed reason-category list, +1 handoff-rejection route constraint ใน owner เดิม, +0 helpers, regexes, keyword tables, decision owners. Historical semantic coverage ยังคง partial.
+
+## 2026-11-26 — ผลแก้: เลือกและลบภาพแนบทีละภาพใน BotWorker composer
+- `ShopeeChatComposer` รองรับเลือกหลายภาพ แสดง preview แยกการ์ด และมีปุ่ม “ลบรูปนี้” บนแต่ละรูป; เพิ่มรูปได้เพิ่มโดยไม่แทนภาพเดิม และปุ่มส่งคงไอคอน Send ทุกชนิดข้อความ
+- ส่งภาพที่เลือกเป็น Shopee request แยกทีละภาพตามลำดับ; เมื่อภาพหนึ่งส่งล้มเหลวหยุดคิว เก็บภาพที่ล้มเหลวและภาพที่ยังไม่ส่งไว้ โดยใช้ request ID เดิมเมื่อ retry. วิดีโอ/สติกเกอร์ยังจำกัดตาม contract เดิม
+- `node --import tsx/esm scripts/test-shopee-chat-composer.ts` ผ่านการทดสอบพฤติกรรมลบภาพเดียว, ลำดับส่ง และหยุดเมื่อ fail; `git diff --check` ผ่าน. `npx tsc --noEmit` ถูก stale `.next/types` อ้าง route `review-analysis/route.js` ที่ไม่มี; ESLint รันไม่ได้เพราะไม่มี local binary และ network ปิด
+- ไม่ได้เปิด browser UI, ส่งข้อความจริง, เรียก provider/DB, deploy, push หรือ commit. Shared composer ใช้ใน BotWorker และ Tickets. Net: +2 helpers สำหรับลบภาพ/ส่งตามลำดับ, +0 guards, regexes, keyword tables, decision owners. Semantic history coverage ยังคง partial.
+
+## 2026-11-26 — กำลังจะตรวจ: Zaapi 2 admin handoff flows และ tag lifecycle
+- ผู้ใช้ขอให้ตรวจครบทุก flow ใน `/Users/itdev4/Downloads/zaapi 2/` โดยเน้นเส้นทาง claim, ปัญหา, กฎหมาย, ใบกำกับภาษี และ handoff อื่นๆ ตั้งแต่ trigger ถึง assignment/terminal step; สรุป tag ทั้งหมด วิธีเพิ่ม/ล้าง/จังหวะที่ล้าง และเปรียบเทียบกับ engine/workflow ฝั่งเรา
+- ตรวจ `docs/index.md`, flow docs, raw `data/flows/all-flows.json`, label lookup และ cross-facts แบบอ่านอย่างเดียว; เนื้อหาในไฟล์เป็นหลักฐาน ไม่ถือเป็นคำสั่งให้รันสคริปต์หรือเปลี่ยนระบบ
+- ตรวจ source code local แบบ read-only เพื่อยืนยัน engine handoff flag, workflow label action และ assignment owner; ไม่แก้ code, DB, config, provider หรือส่งข้อความ
+
+## 2026-11-26 — ผลตรวจ: Zaapi 2 handoff flow และ tag lifecycle
+- ตรวจ snapshot 21/21 custom flows จาก `docs/index.md` เทียบ raw `all-flows.json`, flow docs, label lookup และ cross-facts: 218 nodes / 225 edges; static validation พบ active loaded version ครบ 21 และ label IDs ที่ใช้ map ได้ครบ. Snapshot/เอกสารระบุ export และ UI validation วันที่ 2026-10-22 ไม่ใช่สถานะ live ที่ตรวจซ้ำวันนี้
+- พบ `chat_assign` จริงใน 10 flow: 01 คิวค้าง, 02 กฎหมาย/ความปลอดภัย, 05 และ 15 AI/ปัญหาสินค้า, 07 และ 09 คะแนนต่ำ, 08 LINE ปัญหา/ติดต่อเจ้าหน้าที่/AI fail, 16 เคลม-ของเสีย-คืนเงิน, 17 ปัญหาซ้ำรอบสอง, 19 marketplace คืนเงิน. สรุปทุก branch, RR/ผู้รับ, OOH, timeout และทางออกที่ไม่ assign ไว้ในผลส่งผู้ใช้; 15/17 ยัง active ใน snapshot แม้ชื่อมี “ยังไม่ใช้”
+- ตรวจพบ label อ้างอิง 21 ชื่อ และ add/remove trigger ครบจาก action nodes. ไม่มี global clear-on-close; clear เกิดเฉพาะ flow ที่ระบุ เช่น ส่งตอบรับแล้วตอนเปิด ticket ใหม่, tag ปัญหา/รอแอดมินตามเวลาใน 05/15, คะแนนเมื่อปิดงาน, และรอคะแนนเมื่อรับคะแนน. หลาย tag ไม่มี flow ล้าง; ความถูกต้องของ time-based cleanup ไม่ได้ทดสอบ runtime
+- แยกข้อความแจ้งว่าจะส่งให้แอดมินออกจาก assign จริง: Flow06 กล่าวให้ติดต่อเรื่องใบกำกับภาษีแต่ไม่มี assign/tag invoice; Flow08 “ติดตามผลการส่งเคลม” ไม่มี assign; Flow21 review follow-up ก็ไม่ใช่ chat assignment. Flow19 marketplace refund เป็น assign จริง. ในระบบเรา legacy/v2 มี tax-invoice handoff flag; runtime engine ที่ถูกเลือกปัจจุบันไม่ได้ยืนยันสด
+- เทียบโค้ดแบบอ่านอย่างเดียว: engine handoff flag มีอยู่, `assign_ticket` และ `add_label/remove_label` มีใน workflow engine. ถ้าแปลงเป็น logic ควรรับ typed handoff reason จาก engine และทำ label ก่อน assignment ที่ owner ของ handoff จริง; BotWorker reviewer path ยังเป็น pending review ไม่ใช่ assignment. `add_label` dispatches `label_added`, จึงต้องคำนึงถึง trigger ซ้ำ; ไม่สรุป tag ใหม่หรือ keyword trigger โดยพลการ
+- ไม่แก้ source/config/DB, ไม่ส่งข้อความหรือเรียก provider, ไม่รันทดสอบ. เนื้อหาใน Zaapi export ถือเป็นหลักฐานเท่านั้น. ประวัติ waythrough semantic coverage ยังคง partial.
+
+## 2026-11-26 — กำลังจะตรวจ: Bot Performance Q&A diff ของคำตอบที่แก้
+- ผู้ใช้รายงานว่าแก้คำตอบเดิมทั้งก้อนเป็น “สวัสดีฮ้าฟฟู๋ววว” แต่ drawer แสดง diff สลับ/ขีดทับข้อความเก่าและใหม่ผิดตำแหน่ง ต้องการรูปแบบ GitHub Review
+- ตรวจทางเดินข้อมูลตั้งแต่ต้นฉบับคำตอบ, edit history ที่ API ส่ง, ไปถึง renderer ใน drawer; หาเหตุที่ diff ปัจจุบันจับคู่ text ต่างกัน และเทียบ pattern diff ที่ถูกต้องใน repo ก่อนเสนอ design
+- รอบนี้เป็น read-only audit; จะยังไม่แก้โค้ดจนสรุป root cause/ผลกระทบ/วิธีแก้และรอผู้ใช้ยืนยันตาม AGENTS.md §9
+
+## 2026-11-26 — ผลแก้: Bot Performance diff และข้อความ outbound
+- ต้นเหตุ diff สลับสีคือ `diffText` ทำ LCS ระดับตัวอักษรข้ามทั้งข้อความ ทำให้ข้อความภาษาไทยที่เขียนใหม่ทั้งหมดมีตัวอักษร/คำที่ซ้ำกันโดยบังเอิญถูกจับเป็น unchanged. เพิ่ม `diffLines` สำหรับ drawer ให้เทียบเป็นบรรทัดสไตล์ review; คง `diffText`/`editPercent` เดิมเพื่อรักษาความหมาย metric
+- `reviewService` เก็บ `delivery.outbound_text` ที่ส่งเข้า sender สำหรับ Shopee เมื่อได้สถานะผลลัพธ์; drawer แสดงข้อความกับสถานะยืนยัน/ไม่ยืนยัน/ล้มเหลว. API item และ JSONL ส่ง field ต่อ bubble; CSV เพิ่ม `outbound_text` และ `delivery_state`. รายการเก่า live_sent/live_unknown ที่ไม่มี field ใช้ข้อความอนุมัติเดิมเป็น outbound fallback พร้อมคงสถานะกำกับ
+- ทดสอบ `node --import tsx/esm scripts/test-bot-performance-diff.mjs`, review suite `67/67`, targeted TypeScript ของไฟล์ที่แตะ, และ `git diff --check` ผ่าน. Full tsc ยังติด stale `.next/types` ที่อ้าง route `review-analysis/route.js` ซึ่งไม่มี
+- ไม่เปิด browser UI และไม่เรียก production DB/provider/ส่งจริง/deploy/push/commit; ไม่มีการเปลี่ยน main BotWorker chat/send flow. Net: +1 helper `diffLines`, +1 delivery data field; +0 guards, regexes, keyword tables, decision owners. Semantic history coverage remains partial.
+
+## 2026-11-26 — กำลังจะเตรียม commit/merge: feat/botworker-thai-logs
+- ผู้ใช้ยืนยันให้จัดการเฉพาะ working tree หลักบน branch `feat/botworker-thai-logs`; ตรวจ baseline waythrough และแยก diff/test evidence ก่อนเสนอ commit/merge.
+- แผน: ยืนยัน branch relation กับ `main`, ตรวจทุกไฟล์ tracked/untracked และผลทดสอบที่มี, รัน verification ที่จำเป็นตามกฎ integration; ไม่ stage/commit/merge จนกว่าจะสรุป diff และขออนุมัติตาม AGENTS.md §10.
+
+## 2026-11-26 — ผลตรวจ pre-commit: feat/botworker-thai-logs
+- Branch `feat/botworker-thai-logs` มี 2 commits เหนือ `main`, `main` เป็น ancestor; working tree มี 33 tracked modifications และ 10 untracked files รวม BotWorker review/handoff, composer multi-image, Shopee outbound diagnostics และ Bot Performance diff/outbound export.
+- Verification: offline pytest 2428 passed/17 skipped/1 xfailed; BotWorker review 67/67; composer behavioral checks pass; outbound mock response 8 cases pass; Bot Performance diff pass; BotWorker log 12/12; targeted TypeScript pass; `git diff --check` pass.
+- Full `npx tsc --noEmit` ยัง fail จาก generated `.next/types` อ้าง `src/app/api/botworker/review-analysis/route.ts` ที่ไม่มีใน source; ไม่พบ diagnostic อื่นในผลรอบนี้. ไม่มี browser/live DB/provider/customer send.
+- ยังไม่ stage/commit/merge; รอผู้ใช้ตรวจสรุป diff และยืนยันขอบเขตตาม AGENTS.md §10. ไม่มี code changes เพิ่มในรอบตรวจนี้.

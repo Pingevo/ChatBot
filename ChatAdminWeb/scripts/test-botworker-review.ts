@@ -13,6 +13,7 @@
 //   I  1/2/3 bubble mock count + sent_text absent เสมอ
 import { register } from "node:module";
 register(new URL("./test-botworker-review-hooks.mjs", import.meta.url));
+import { diffLines } from "../src/lib/textDiff";
 
 type Mocks = typeof import("./test-botworker-review-mocks.mjs");
 type Svc = typeof import("../src/backend/service/botWorkerService");
@@ -22,7 +23,9 @@ type HandoffRoute = typeof import("../src/app/api/botworker/conversations/[conve
 type MsgsRoute = typeof import("../src/app/api/botworker/conversations/[conversationId]/messages/route");
 type AnalyticsService = typeof import("../src/backend/service/botPerformanceService");
 type AnalyticsRoute = typeof import("../src/app/api/bot-performance/route");
+type CloseHistoryRoute = typeof import("../src/app/api/botworker/conversations/[conversationId]/close-history/route");
 
+let closeHistoryRoute: CloseHistoryRoute;
 let mocks: Mocks, svc: Svc, rt: Rt, reviewRoute: ReviewRoute, handoffRoute: HandoffRoute, msgsRoute: MsgsRoute, analyticsService: AnalyticsService, analyticsRoute: AnalyticsRoute;
 
 const results: { name: string; ok: boolean; err?: string }[] = [];
@@ -71,7 +74,7 @@ function makeCtx(messageIds: string[]) {
     claim_ids: messageIds.map((id) => `botworker:claim:${id}`),
     owner_id: rt.botworkerRuntime.ownerId, fencing_token: 7,
     lease_expires_at: new Date(Date.now() + 120000),
-    batch_id: "botworker:batch:testbatch",
+    batch_id: `botworker:batch:${messageIds[0]}`,
     message_ids: messageIds, lost: false,
   };
 }
@@ -95,7 +98,7 @@ async function runBotTurn(
     shop_ctx: { config_shop_key: shopId, shopname: "TestShop" },
   });
   (mocks.state as any).lastProcessResult = r;
-  const docs = mocks.fakeColl("shadow_replies");
+  const docs = mocks.fakeColl("shadow_replies").filter((row: any) => row.conversation_id === conversationId);
   if (options.expectReply !== false) assert(docs.length === 1, `expected 1 shadow reply, got ${docs.length} (status=${r.status} ${r.detail})`);
   return docs[0] as any;
 }
@@ -149,6 +152,13 @@ async function main() {
   msgsRoute = await import("../src/app/api/botworker/conversations/[conversationId]/messages/route");
   analyticsService = await import("../src/backend/service/botPerformanceService");
   analyticsRoute = await import("../src/app/api/bot-performance/route");
+  closeHistoryRoute = await import("../src/app/api/botworker/conversations/[conversationId]/close-history/route");
+
+  await test("review diff treats a full Thai answer replacement as removed and added lines", async () => {
+    const before = "รับทราบค่ะ ข้อมูลที่ลูกค้าให้มา: ชื่อ-นามสกุล: สวัสดีวันจันทร์\nรวบรวมแจ้งข้อมูลเพิ่มเติมด้วยนะคะ: เบอร์โทร\nและหากมีรูปหรือวิดีโอแสดงอาการ ส่งมาได้เลยค่ะ";
+    const after = "สวัสดีฮ้าฟฟู๋ววว";
+    assert(JSON.stringify(diffLines(before, after)) === JSON.stringify([{ op: "del", text: before }, { op: "add", text: after }]), "full rewrite must not preserve arbitrary matching fragments");
+  });
 
   // ═══ A — freeze at insert ═══
   await test("A1 A|||B|||C → 3 review_bubbles ใน Mongo + 0 mock request", async () => {
@@ -232,7 +242,7 @@ async function main() {
 
   await test("B3 reject A → approve B ผ่าน (reject settle gate)", async () => {
     const doc = await runBotTurn();
-    const rr = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject", { rejection_reason: "ส่งต่อเคสให้ตรวจ" });
+    const rr = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject", { rejection_category: "ควรส่งแอดมิน", rejection_reason: "ส่งต่อเคสให้ตรวจ" });
     assert(rr.status === 200, `reject ${rr.status}`);
     const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[1].bubble_id, "approve");
     assert(r.status === 200, `approve ${r.status} ${JSON.stringify(r.body)}`);
@@ -242,9 +252,38 @@ async function main() {
   });
 
   // ═══ C — save edit ═══
-  await test("C1 save edit → pending + persisted + 0 mock", async () => {
+  await test("C0 save edit requires reason category and explanation", async () => {
     const doc = await runBotTurn();
     const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "A edited" });
+    assert(r.status === 422, `missing edit reason -> ${r.status}`);
+    const invalidCategory = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", {
+      edited_text: "A edited", reason_category: "เหตุผลอื่น", reason_text: "ข้อมูลไม่ตรง",
+    });
+    assert(invalidCategory.status === 422, `unknown edit category -> ${invalidCategory.status}`);
+    const blankExplanation = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", {
+      edited_text: "A edited", reason_category: "สเปคผิด", reason_text: "  ",
+    });
+    assert(blankExplanation.status === 422, `blank edit explanation -> ${blankExplanation.status}`);
+    const bubble = (await getReplyDoc()).review_bubbles[0];
+    assert(bubble.edited_text === undefined && bubble.edit_history?.length !== 1, "invalid edit reason changed draft history");
+    assert(mockEvents().length === 0, "invalid edit reason caused delivery");
+  });
+
+  await test("C0b save edit stores category and explanation on its revision", async () => {
+    const doc = await runBotTurn();
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", {
+      edited_text: "A edited", reason_category: "สเปคผิด", reason_text: "สเปคของรุ่นนี้ไม่ตรงกับคำตอบเดิม",
+    });
+    assert(r.status === 200, `status=${r.status} ${JSON.stringify(r.body)}`);
+    const revision = (await getReplyDoc()).review_bubbles[0].edit_history?.[0];
+    assert(revision?.reason_category === "สเปคผิด", "edit category missing from revision");
+    assert(revision?.reason_text === "สเปคของรุ่นนี้ไม่ตรงกับคำตอบเดิม", "edit explanation missing from revision");
+    assert(revision?.before_text === "A" && revision?.after_text === "A edited", "edit diff was not preserved");
+  });
+
+  await test("C1 save edit → pending + persisted + 0 mock", async () => {
+    const doc = await runBotTurn();
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "A edited", reason_category: "ตอบไม่ได้", reason_text: "เติมข้อมูลที่ตอบได้ให้ชัดเจน" });
     assert(r.status === 200, `status=${r.status}`);
     const d2 = await getReplyDoc();
     assert(d2.review_bubbles[0].edited_text === "A edited", "edit not persisted");
@@ -256,7 +295,7 @@ async function main() {
 
   await test("C2 บันทึก edit แล้ว approve ภายหลัง → edited_approved (ไม่ใช่ approved)", async () => {
     const doc = await runBotTurn();
-    await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "A edited" });
+    await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "A edited", reason_category: "สเปคผิด", reason_text: "สเปคไม่ตรง" });
     const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "approve");
     assert(r.status === 200, `status=${r.status}`);
     assert(r.body.bubble.decision === "edited_approved", `decision=${r.body.bubble.decision}`);
@@ -266,11 +305,23 @@ async function main() {
   // ═══ D — save_and_approve ═══
   await test("D1 save_and_approve → edited_approved + mock ใช้ข้อความที่แก้", async () => {
     const doc = await runBotTurn();
-    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save_and_approve", { edited_text: "A new" });
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save_and_approve", { edited_text: "A new", reason_category: "ตอบไม่ได้", reason_text: "เติมข้อมูลให้ตรงกับที่ตอบได้" });
     assert(r.status === 200, `status=${r.status}`);
     const d2 = await getReplyDoc();
     assert(d2.review_bubbles[0].decision === "edited_approved" && d2.review_bubbles[0].original_text === "A", "state wrong");
     assert(mockEvents()[0].metadata.text === "A new", "mock text not the edit");
+  });
+
+  await test("D1b save_and_approve stores edit reason and sends the exact edited text", async () => {
+    const doc = await runBotTurn();
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save_and_approve", {
+      edited_text: "A corrected", reason_category: "ผิดรุ่น", reason_text: "คำตอบเดิมเป็นข้อมูลคนละรุ่น",
+    });
+    assert(r.status === 200, `status=${r.status} ${JSON.stringify(r.body)}`);
+    const bubble = (await getReplyDoc()).review_bubbles[0];
+    assert(bubble.edit_history?.[0]?.reason_category === "ผิดรุ่น", "sent edit category missing");
+    assert(bubble.edit_history?.[0]?.reason_text === "คำตอบเดิมเป็นข้อมูลคนละรุ่น", "sent edit explanation missing");
+    assert(mockEvents()[0].metadata.text === "A corrected", "sender did not receive the edited text");
   });
 
   await test("D2 save empty edit → 422 + 0 mock", async () => {
@@ -289,22 +340,42 @@ async function main() {
     assert(mockEvents().length === 0 && mocks.state.fakeShopeeCalls.length === 0, "missing reason caused delivery");
   });
 
+  await test("E0b reject requires a fixed reason category", async () => {
+    const doc = await runBotTurn();
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject", {
+      rejection_reason: "คำตอบต้องส่งให้แอดมินตรวจ",
+    });
+    assert(r.status === 422, `missing rejection category -> ${r.status}`);
+    assert((await getReplyDoc()).review_bubbles[0].decision === "pending", "missing category changed the decision");
+    assert(mockEvents().length === 0, "reject without category caused delivery");
+  });
+
+  await test("E0c reject requires a non-empty explanation", async () => {
+    const doc = await runBotTurn();
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject", {
+      rejection_category: "ตอบไม่ได้", rejection_reason: "  ",
+    });
+    assert(r.status === 422, `blank rejection explanation -> ${r.status}`);
+    assert((await getReplyDoc()).review_bubbles[0].decision === "pending", "blank explanation changed the decision");
+  });
+
   await test("E2 reject keeps reason, reviewer identity, and edit history in the audit trail", async () => {
     const doc = await runBotTurn();
     const bubbleId = doc.review_bubbles[0].bubble_id;
-    const edited = await review("conv_1", doc.shadow_reply_id, bubbleId, "save", { edited_text: "Edited answer" });
+    const edited = await review("conv_1", doc.shadow_reply_id, bubbleId, "save", { edited_text: "Edited answer", reason_category: "การแก้ปัญหาผิด", reason_text: "ขั้นตอนเดิมไม่ตรงอาการ" });
     assert(edited.status === 200, "save edit -> " + edited.status);
-    const rejected = await review("conv_1", doc.shadow_reply_id, bubbleId, "reject", { rejection_reason: "ข้อมูลสินค้าไม่ตรง" });
+    const rejected = await review("conv_1", doc.shadow_reply_id, bubbleId, "reject", { rejection_category: "ผิดรุ่น", rejection_reason: "ข้อมูลสินค้าไม่ตรง" });
     assert(rejected.status === 200, "reject -> " + rejected.status + " " + JSON.stringify(rejected.body));
     const b = (await getReplyDoc()).review_bubbles[0];
     assert(b.original_text === "A" && b.edited_text === "Edited answer", "original or edited text was lost");
-    assert(b.rejection_reason === "ข้อมูลสินค้าไม่ตรง", "rejection reason was not persisted");
+    assert(b.rejection_category === "ผิดรุ่น" && b.rejection_reason === "ข้อมูลสินค้าไม่ตรง", "rejection category/explanation was not persisted");
     assert(b.decided_by === "t_admin" && b.decided_by_name === "Test Reviewer", "reviewer identity snapshot missing");
     assert(Array.isArray(b.edit_history) && b.edit_history.length === 1, "edit history missing");
     assert(b.edit_history[0].before_text === "A" && b.edit_history[0].after_text === "Edited answer", "edit delta wrong");
+    assert(b.edit_history[0].reason_category === "การแก้ปัญหาผิด" && b.edit_history[0].reason_text === "ขั้นตอนเดิมไม่ตรงอาการ", "edit reason missing from history");
     const audit = mocks.fakeColl("botworker_events").filter((e: any) => e.type === "review_action");
     assert(audit.length === 2, "expected edit and reject audit events, got " + audit.length);
-    assert(audit.some((e: any) => e.metadata.rejection_reason === "ข้อมูลสินค้าไม่ตรง"), "rejection reason missing from event");
+    assert(audit.some((e: any) => e.metadata.rejection_category === "ผิดรุ่น" && e.metadata.rejection_reason === "ข้อมูลสินค้าไม่ตรง"), "rejection category/explanation missing from event");
     assert(audit.every((e: any) => e.actor === "t_admin" && e.metadata.actor_name === "Test Reviewer"), "action actor missing from event");
   });
 
@@ -325,6 +396,93 @@ async function main() {
     assert(doc.handoff_review.status === "pending", "handoff did not wait for reviewer");
     assert((mocks.state.lastProcessResult as any)?.status === "handoff_review_pending", "worker did not report pending review");
     assert(mocks.fakeColl("test_status_conversation").every((row: any) => !row.assigned_to), "bot auto-assigned before reviewer approval");
+  });
+
+  await test("Handoff flag with empty answer still creates a visible review draft", async () => {
+    mocks.state.callBotExtra = { handoff_required: true, handoff_reason: "insufficient_shop_evidence", chat_engine: "v4" };
+    const doc = await runBotTurn("conv_flag_empty", "m_flag_empty", "", { platform: "shopee" });
+    assert(doc.bot_reply_text.trim().length > 0, "flagged handoff draft is empty");
+    assert(doc.review_bubbles?.length === 1, "flagged handoff has no reviewable bubble");
+    assert(doc.handoff_review?.status === "pending", "flagged handoff skipped reviewer");
+    assert(mocks.fakeColl("test_status_conversation").every((row: any) => row.conversation_id !== "conv_flag_empty" || !row.assigned_to), "flagged handoff assigned before approval");
+  });
+
+  await test("A handoff draft cannot be rejected as an ordinary answer bubble", async () => {
+    mocks.state.callBotExtra = { handoff_required: true, handoff_reason: "clarification_unresolved",
+      handoff_explanation: "ต้องให้ผู้ตรวจตัดสิน", conversation_id: "conv_handoff_bubble_reject", message_id: "m_handoff_bubble_reject" };
+    const doc = await runBotTurn("conv_handoff_bubble_reject", "m_handoff_bubble_reject", "ร่างข้อความ", { platform: "shopee" });
+    const rejected = await review("conv_handoff_bubble_reject", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject", {
+      rejection_category: "ควรส่งแอดมิน", rejection_reason: "ขอปฏิเสธ handoff",
+    });
+    assert(rejected.status === 409, `ordinary bubble reject -> ${rejected.status}`);
+    const saved = await getReplyDoc();
+    assert(saved.review_bubbles[0].decision === "pending" && saved.handoff_review.status === "pending", "handoff state changed through bubble rejection");
+    assert(mockEvents().length === 0 && mocks.fakeColl("messages").every((row: any) => row.conversation_id !== "conv_handoff_bubble_reject" || row.direction !== "out"), "rejected handoff draft sent a message");
+  });
+
+  await test("Empty bot answer without handoff flag keeps bot ownership", async () => {
+    mocks.state.callBotExtra = { source: "no_reply" };
+    await runBotTurn("conv_empty", "m_empty", "", { platform: "shopee", expectReply: false });
+    assert((mocks.state.lastProcessResult as any)?.status === "bot_no_reply", "empty unflagged reply did not remain a bot no-reply");
+    assert(mocks.fakeColl("shadow_replies").length === 0, "empty unflagged reply created a review draft");
+    assert(mocks.fakeColl("test_status_conversation").every((row: any) => row.conversation_id !== "conv_empty" || (row.status === "bot" && !row.assigned_to)), "empty unflagged reply handed off");
+    assert(mocks.fakeColl("botworker_events").every((event: any) => event.conversation_id !== "conv_empty" || event.type !== "handoff"), "empty unflagged reply logged an assignment");
+  });
+
+  await test("Unexpected empty bot answer is recorded as failure without handoff", async () => {
+    mocks.state.callBotExtra = { source: "unexpected_empty" };
+    await runBotTurn("conv_bad_empty", "m_bad_empty", "", { platform: "shopee", expectReply: false });
+    assert((mocks.state.lastProcessResult as any)?.status === "bot_failed", "unexpected empty answer was silently accepted");
+    assert(mocks.fakeColl("test_status_conversation").every((row: any) => row.conversation_id !== "conv_bad_empty" || !row.assigned_to), "unexpected empty answer assigned an admin");
+  });
+
+  await test("New customer message reopens closed assigned chat for bot reply", async () => {
+    mocks.fakeColl("test_status_conversation").push({ conversation_id: "conv_closed_bot", source: "botworker", status: "closed", assigned_to: "adm_previous", close_count: 1, updated_at: new Date() });
+    const doc = await runBotTurn("conv_closed_bot", "m_closed_bot", "ตอบลูกค้า", { platform: "shopee" });
+    const status = mocks.fakeColl("test_status_conversation").find((row: any) => row.conversation_id === "conv_closed_bot");
+    assert((mocks.state.lastProcessResult as any)?.status === "bot_answered", "closed chat was skipped");
+    assert(doc.bot_reply_text === "ตอบลูกค้า", "bot answer was not stored for review");
+    assert(status?.status === "bot" && !status?.assigned_to, "closed chat did not reopen as bot");
+    assert(status?.previous_assigned_to === "adm_previous", "prior assignee was lost for the next reviewed handoff");
+  });
+
+  await test("Reviewed handoff suggests prior assignee only when admin config enables it", async () => {
+    seedAdmin("adm_previous", "Previous Admin");
+    seedAdmin("adm_other", "Other Admin");
+    mocks.state.callBotExtra = { handoff_required: true, handoff_reason: "clarification_unresolved" };
+    mocks.fakeColl("test_status_conversation").push({ conversation_id: "conv_prior_preview", source: "botworker", status: "bot", previous_assigned_to: "adm_previous", updated_at: new Date() });
+    const doc = await runBotTurn("conv_prior_preview", "m_prior_preview", "ร่างตอบ", { platform: "shopee" });
+    mocks.state.config.assignment_prefer_previous_admin = true;
+    const preferred = await callHandoffReview("conv_prior_preview", doc.shadow_reply_id);
+    assert(preferred.status === 200 && preferred.body.candidates.find((row: any) => row.admin_id === "adm_previous")?.suggested === true, "previous assignee was not suggested");
+    mocks.fakeColl("assignment_cursors").push({ pool_key: "global:botworker", last_assigned_admin_id: "adm_previous", updated_at: new Date() });
+    mocks.state.config.assignment_prefer_previous_admin = false;
+    const roundRobin = await callHandoffReview("conv_prior_preview", doc.shadow_reply_id);
+    assert(roundRobin.status === 200 && roundRobin.body.candidates.find((row: any) => row.admin_id === "adm_previous")?.suggested !== true, "previous assignee bypassed RR config");
+    assert(roundRobin.body.candidates.filter((row: any) => row.suggested).length === 1, "RR did not suggest exactly one eligible admin");
+  });
+
+  await test("Two reviewer-approved RR suggestions advance to different admins", async () => {
+    seedAdmin("adm_rr_1", "RR Admin 1");
+    seedAdmin("adm_rr_2", "RR Admin 2");
+    mocks.state.config.assignment_prefer_previous_admin = false;
+    mocks.state.callBotExtra = { handoff_required: true, handoff_reason: "clarification_unresolved" };
+    const first = await runBotTurn("conv_rr_1", "m_rr_1", "ร่างตอบ", { platform: "shopee" });
+    const preview1 = await callHandoffReview("conv_rr_1", first.shadow_reply_id);
+    const selected1 = preview1.body.candidates.find((row: any) => row.suggested)?.admin_id;
+    assert(selected1, "first RR suggestion missing");
+    const approved1 = await callHandoffReview("conv_rr_1", first.shadow_reply_id, {
+      reply_id: first.shadow_reply_id, action: "approve", selected_admin_id: selected1, operation_id: "rr_review_1", updated_at: preview1.body.updated_at,
+    });
+    assert(approved1.status === 200, "first RR approval failed");
+    const second = await runBotTurn("conv_rr_2", "m_rr_2", "ร่างตอบ", { platform: "shopee" });
+    const preview2 = await callHandoffReview("conv_rr_2", second.shadow_reply_id);
+    const selected2 = preview2.body.candidates.find((row: any) => row.suggested)?.admin_id;
+    assert(selected2 && selected2 !== selected1, "RR cursor did not advance after first approval");
+    const approved2 = await callHandoffReview("conv_rr_2", second.shadow_reply_id, {
+      reply_id: second.shadow_reply_id, action: "approve", selected_admin_id: selected2, operation_id: "rr_review_2", updated_at: preview2.body.updated_at,
+    });
+    assert(approved2.status === 200 && approved2.body.handoff_review.selected_admin_id === selected2, "second RR recipient changed after approval");
   });
 
   await test("Conflicting upstream turn IDs fail closed without a shadow draft", async () => {
@@ -399,17 +557,22 @@ async function main() {
     seedAdmin("adm_online_1", "Online Admin 1");
     const doc = await runBotTurn("conv_handoff_reject", "m_handoff_reject", "ร่างคำตอบ", { platform: "shopee" });
     const missing = await callHandoffReview("conv_handoff_reject", doc.shadow_reply_id, {
-      reply_id: doc.shadow_reply_id, action: "reject", operation_id: "handoff_reject_missing",
+      reply_id: doc.shadow_reply_id, action: "reject", rejection_reason: "ยังไม่ครบข้อมูล", operation_id: "handoff_reject_missing",
     });
-    assert(missing.status === 422, `missing rejection reason -> ${missing.status}`);
+    assert(missing.status === 422, `missing rejection category -> ${missing.status}`);
+    const blank = await callHandoffReview("conv_handoff_reject", doc.shadow_reply_id, {
+      reply_id: doc.shadow_reply_id, action: "reject", rejection_category: "ควรส่งแอดมิน", rejection_reason: "  ", operation_id: "handoff_reject_blank",
+    });
+    assert(blank.status === 422, `blank rejection explanation -> ${blank.status}`);
     const rejected = await callHandoffReview("conv_handoff_reject", doc.shadow_reply_id, {
-      reply_id: doc.shadow_reply_id, action: "reject", rejection_reason: "ยังไม่ครบข้อมูล",
+      reply_id: doc.shadow_reply_id, action: "reject", rejection_category: "ควรส่งแอดมิน", rejection_reason: "ยังไม่ครบข้อมูล",
       operation_id: "handoff_reject_1",
     });
     assert(rejected.status === 200, `reject -> ${rejected.status} ${JSON.stringify(rejected.body)}`);
-    assert(rejected.body.handoff_review.status === "rejected" && rejected.body.handoff_review.rejection_reason === "ยังไม่ครบข้อมูล", "handoff rejection not persisted");
+    assert(rejected.body.handoff_review.status === "rejected" && rejected.body.handoff_review.rejection_category === "ควรส่งแอดมิน" && rejected.body.handoff_review.rejection_reason === "ยังไม่ครบข้อมูล", "handoff rejection category/explanation not persisted");
     assert(rejected.body.handoff_review.reviewed_by_name === "Test Reviewer", "reviewer name missing");
     assert(mocks.fakeColl("test_status_conversation").every((row: any) => row.conversation_id !== "conv_handoff_reject" || !row.assigned_to), "rejected handoff assigned an admin");
+    assert(mocks.fakeColl("messages").every((row: any) => row.conversation_id !== "conv_handoff_reject" || row.direction !== "out"), "rejected handoff sent a customer message");
   });
 
   await test("Analysis includes workflow replies and all linked actions after the selected creation date", async () => {
@@ -420,10 +583,11 @@ async function main() {
         shop_id: "shop_1", platform: "shopee", origin: "worker", created_at: created, updated_at: created,
         inbound_text: "ถามสินค้า", bot_reply_text: "ร่างตอบ", bot_handoff_required: true,
         bot_handoff_reason: "clarification_unresolved", bot_handoff_explanation: "ต้องตรวจ",
-        handoff_review: { status: "pending" }, review_bubbles: [{ bubble_id: "b1", ordinal: 0, original_text: "เดิม",
+        handoff_review: { status: "rejected", reviewed_by_name: "Test Reviewer", rejection_category: "ควรส่งแอดมิน", rejection_reason: "ต้องให้เจ้าหน้าที่ตรวจ" }, review_bubbles: [{ bubble_id: "b1", ordinal: 0, original_text: "เดิม",
           edited_text: "แก้", approved_text: "แก้", decision: "edited_approved", decided_by: "t_admin",
-          decided_by_name: "Test Reviewer", edit_history: [{ before_text: "เดิม", after_text: "แก้", actor: "t_admin", actor_name: "Test Reviewer", at: reviewed }],
-          delivery: { state: "not_sent_switch_off" } }] },
+          decided_by_name: "Test Reviewer", edit_history: [{ before_text: "เดิม", after_text: "แก้", reason_category: "สเปคผิด", reason_text: "ข้อมูลเดิมไม่ตรง",
+            actor: "t_admin", actor_name: "Test Reviewer", at: reviewed }],
+          delivery: { state: "not_sent_switch_off" }, card: { item_id: "item-analytics", delivery: { state: "mock_sent" } } }] },
       { _id: "analytics_workflow", shadow_reply_id: "sr_analytics_workflow", conversation_id: "conv_analytics_workflow",
         shop_id: "shop_2", platform: "shopee", origin: "workflow", created_at: created, updated_at: created,
         inbound_text: "ถามจาก flow", bot_reply_text: "ตอบจาก flow", review_bubbles: [], }
@@ -445,6 +609,10 @@ async function main() {
     assert(item.timeline.length === 1 && item.timeline[0].type === "review_action", "linked event timeline missing or duplicated");
     assert(item.timeline[0].actor_name === "Test Reviewer", "reviewer identity missing in timeline");
     assert(item.bubbles[0].edit_history?.[0].after_text === "แก้", "edit history missing from analysis item");
+    assert(item.bubbles[0].edit_history?.[0].reason_category === "สเปคผิด" && item.bubbles[0].edit_history?.[0].reason_text === "ข้อมูลเดิมไม่ตรง", "edit reason missing from analysis item");
+    assert(item.bubbles[0].delivery_state === "not_sent_switch_off", "per-bubble send outcome missing from analysis item");
+    assert(item.bubbles[0].card_item_id === "item-analytics" && item.bubbles[0].card_delivery_state === "mock_sent", "separate product-card send outcome missing from analysis item");
+    assert(item.handoff === "rejected" && item.handoff_rejection_category === "ควรส่งแอดมิน" && item.handoff_rejection_reason === "ต้องให้เจ้าหน้าที่ตรวจ", "handoff rejection category/explanation missing from analysis item");
   });
 
   await test("P1 bot performance KPIs: pass/edit/reject rates, human workload % of all BotWorker chats, edit %, reviewer timing", async () => {
@@ -487,7 +655,7 @@ async function main() {
       { _id: "f1", shadow_reply_id: "f1", conversation_id: "cf1", shop_id: "shop_1", origin: "worker", created_at: created, inbound_text: "มีสีดำไหม",
         bot_reply_text: "มีค่ะ", review_bubbles: [{ bubble_id: "f1b", ordinal: 0, original_text: "มีค่ะ", decision: "rejected", rejection_reason: "สีดำหมดแล้ว", decided_by_name: "Reviewer A", delivery: { state: "not_requested" } }] },
       { _id: "f2", shadow_reply_id: "f2", conversation_id: "cf2", shop_id: "shop_2", origin: "workflow", created_at: created, inbound_text: "ส่งกี่วัน",
-        bot_reply_text: "2 วัน", review_bubbles: [{ bubble_id: "f2b", ordinal: 0, original_text: "2 วัน", approved_text: "2-3 วันทำการค่ะ", decision: "edited_approved", decided_by_name: "Reviewer B", delivery: { state: "not_requested" } }] },
+        bot_reply_text: "2 วัน", review_bubbles: [{ bubble_id: "f2b", ordinal: 0, original_text: "2 วัน", approved_text: "2-3 วันทำการค่ะ", decision: "edited_approved", decided_by_name: "Reviewer B", delivery: { state: "live_sent", request_id: "send-f2" } }] },
     );
     const scope = { from: "2026-11-21", to: "2026-11-21" };
     const rejected = await analyticsService.getBotPerformanceItems({ ...scope, outcome: "rejected" });
@@ -501,8 +669,27 @@ async function main() {
     const jsonl = await analyticsService.exportBotPerformance({ ...scope, outcome: "edited" }, "jsonl");
     const parsed = jsonl.body.split("\n").map((line) => JSON.parse(line));
     assert(parsed.length === 1 && parsed[0].bubbles[0].final_text === "2-3 วันทำการค่ะ", "jsonl export");
+    assert(parsed[0].bubbles[0].outbound_text === "2-3 วันทำการค่ะ" && parsed[0].bubbles[0].delivery_state === "live_sent", "jsonl omitted actual outbound text or state");
+    assert(csv.body.includes("outbound_text") && csv.body.includes("delivery_state") && csv.body.includes("2-3 วันทำการค่ะ"), "csv omitted actual outbound text or state");
     const badRange = await analyticsRoute.GET({ url: "http://localhost/api/bot-performance?from=2026-11-22&to=2026-11-21" } as any);
     assert(badRange.status === 422, `bad range -> ${badRange.status}`);
+  });
+
+  await test("C-H1 BotWorker close history returns unique record ids and sequence for sandbox entries", async () => {
+    seedConv("conv_close");
+    const at = (h: number) => new Date(`2026-11-25T0${h}:00:00+07:00`);
+    mocks.fakeColl("test_status_conversation").push({ conversation_id: "conv_close", source: "botworker", status: "bot", close_count: 2, updated_at: at(3),
+      close_history: [
+        { closed_at: at(1), closed_by: "t_admin", reason: "จบ", category: "other", resolution: "resolved" },
+        { closed_at: at(2), closed_by: "t_admin", reason: "จบอีก", category: "other", resolution: "resolved" },
+      ] });
+    const res = await closeHistoryRoute.GET({ url: "http://localhost/api/botworker/conversations/conv_close/close-history" } as any,
+      { params: Promise.resolve({ conversationId: "conv_close" }) } as any);
+    const body = await res.json();
+    const ids = body.close_history.map((r: any) => r.record_id);
+    assert(ids.length === 2 && ids.every((id: unknown) => typeof id === "string" && id) && new Set(ids).size === 2, `record ids ${JSON.stringify(ids)}`);
+    assert(body.close_history.map((r: any) => r.sequence).join() === "1,2", `sequence ${JSON.stringify(body.close_history)}`);
+    assert(body.close_history.every((r: any) => r.conversation_id === "conv_close"), "conversation_id missing");
   });
 
   await test("E3 Shopee approval while live-send switch is OFF is recorded without calling any sender", async () => {
@@ -522,14 +709,18 @@ async function main() {
     const r = await review("conv_fake_on", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "approve");
     assert(r.status === 200, "fake approval -> " + r.status);
     assert(r.body.bubble.delivery.state === "live_sent", "fake delivery outcome missing");
+    assert(r.body.bubble.delivery.outbound_text === "Safe draft", "exact text passed to Shopee was not returned");
+    assert((await getReplyDoc()).review_bubbles[0].delivery.outbound_text === "Safe draft", "outbound text was not persisted");
     assert(mocks.state.fakeShopeeCalls.length === 1, "explicit ON action did not call fake sender once");
-    assert((mocks.state.fakeShopeeCalls as unknown as any[])[0].conversationId === "conv_fake_on", "fake sender received wrong conversation");
+    const sent = (mocks.state.fakeShopeeCalls as unknown as any[])[0];
+    assert(sent.conversationId === "conv_fake_on", "fake sender received wrong conversation");
+    assert(sent.input.text === "Safe draft", "different text was passed to Shopee");
   });
 
   // ═══ E/F — reject + dedupe + authz ═══
   await test("E1 reject → 0 mock + no approved_text/sent_text", async () => {
     const doc = await runBotTurn();
-    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject", { rejection_reason: "ไม่ผ่านการตรวจ" });
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "reject", { rejection_category: "ควรส่งแอดมิน", rejection_reason: "ไม่ผ่านการตรวจ" });
     assert(r.status === 200, `status=${r.status}`);
     const b = (await getReplyDoc()).review_bubbles[0];
     assert(b.decision === "rejected" && b.decided_by === "t_admin" && b.decided_at, "reject fields wrong");
@@ -558,7 +749,7 @@ async function main() {
     const doc = await runBotTurn();
     mocks.state.authAdminId = "other_admin";
     mocks.state.config.bot_review_shop_id = "other_shop";
-    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "review remains cross-shop" });
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "review remains cross-shop", reason_category: "สเปคผิด", reason_text: "สเปคเดิมไม่ตรง" });
     assert(r.status === 200, `page-authorized admin must review, got ${r.status}`);
     const updated = await getReplyDoc();
     assert(updated.review_bubbles[0].edit_history?.[0]?.actor === "other_admin", "actual reviewer identity missing from edit history");
@@ -580,7 +771,7 @@ async function main() {
   await test("F5 config ไม่ตั้ง fixed reviewer → page-authorized admin still reviews", async () => {
     const doc = await runBotTurn();
     delete (mocks.state.config as any).bot_review_admin_id;
-    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "reviewed" });
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "reviewed", reason_category: "การแก้ปัญหาผิด", reason_text: "วิธีแก้ไม่ตรงอาการ" });
     assert(r.status === 200, `expected 200 got ${r.status}`);
     assert(mockEvents().length === 0, "saving an edit must not send");
   });
@@ -689,8 +880,8 @@ async function main() {
     const b0 = doc.review_bubbles[0].bubble_id;
     const rid = doc.shadow_reply_id;
     const [r1, r2] = await Promise.all([
-      review("conv_1", rid, b0, "save_and_approve", { edited_text: "WINNER text" }),
-      review("conv_1", rid, b0, "save_and_approve", { edited_text: "LOSER text" }),
+      review("conv_1", rid, b0, "save_and_approve", { edited_text: "WINNER text", reason_category: "สเปคผิด", reason_text: "สเปคเดิมไม่ตรง" }),
+      review("conv_1", rid, b0, "save_and_approve", { edited_text: "LOSER text", reason_category: "สเปคผิด", reason_text: "สเปคเดิมไม่ตรง" }),
     ]);
     const statuses = [r1.status, r2.status].sort();
     assert(statuses.join() === "200,409", `expected 200+409 got ${statuses} (${JSON.stringify([r1.body, r2.body])})`);
@@ -707,16 +898,16 @@ async function main() {
     const doc = await runBotTurn();
     const b0 = doc.review_bubbles[0].bubble_id;
     const op = "op_bind_1";
-    const r1 = await review("conv_1", doc.shadow_reply_id, b0, "save", { edited_text: "v1" }, op);
+    const r1 = await review("conv_1", doc.shadow_reply_id, b0, "save", { edited_text: "v1", reason_category: "สเปคผิด", reason_text: "แก้ไขข้อมูล" }, op);
     assert(r1.status === 200, `first ${r1.status}`);
     // op id เดิม + action ต่าง
-    const r2 = await review("conv_1", doc.shadow_reply_id, b0, "reject", { rejection_reason: "different action" }, op);
+    const r2 = await review("conv_1", doc.shadow_reply_id, b0, "reject", { rejection_category: "ตอบไม่ได้", rejection_reason: "different action" }, op);
     assert(r2.status === 409, `different action → ${r2.status}`);
     // op id เดิม + payload ต่าง
-    const r3 = await review("conv_1", doc.shadow_reply_id, b0, "save", { edited_text: "v2" }, op);
+    const r3 = await review("conv_1", doc.shadow_reply_id, b0, "save", { edited_text: "v2", reason_category: "สเปคผิด", reason_text: "แก้ไขข้อมูล" }, op);
     assert(r3.status === 409, `different payload → ${r3.status}`);
     // op id เดิม + request เดิม → outcome เดิม
-    const r4 = await review("conv_1", doc.shadow_reply_id, b0, "save", { edited_text: "v1" }, op);
+    const r4 = await review("conv_1", doc.shadow_reply_id, b0, "save", { edited_text: "v1", reason_category: "สเปคผิด", reason_text: "แก้ไขข้อมูล" }, op);
     assert(r4.status === 200 && r4.body.bubble.edited_text === "v1", `same request → ${r4.status}`);
     const d = await getReplyDoc();
     assert(d.review_bubbles[0].decision === "pending" && d.review_bubbles[0].edited_text === "v1", "state changed by rejected ops");
@@ -811,7 +1002,8 @@ async function main() {
         request: {
           actor: "t_admin", conversation_id: "conv_1",
           reply_id: rid, bubble_id: b0, action: "save_and_approve",
-          edited_text: "PERSISTED s&a edit", card_item_id: null, rejection_reason: null,
+          edited_text: "PERSISTED s&a edit", card_item_id: null, reason_category: "สเปคผิด",
+          reason_text: "แก้สเปคก่อนส่ง", rejection_reason: null,
         },
         status: "in_progress",
       },
@@ -825,7 +1017,7 @@ async function main() {
       delivery: { state: "not_requested" },
     };
     // retry ด้วย request เดิมเป๊ะ (op id เดิม + payload เดิม = คำขอเดิมหลัง crash)
-    const r = await review("conv_1", rid, b0, "save_and_approve", { edited_text: "PERSISTED s&a edit" }, OP);
+    const r = await review("conv_1", rid, b0, "save_and_approve", { edited_text: "PERSISTED s&a edit", reason_category: "สเปคผิด", reason_text: "แก้สเปคก่อนส่ง" }, OP);
     assert(r.status === 200, `same-op retry → ${r.status} ${JSON.stringify(r.body)}`);
     // op ทำเสร็จ + outcome ถูกบันทึก
     const opDoc = mocks.fakeColl("botworker_events").find((e: any) => e._id === `reviewop:${OP}`) as any;
@@ -835,7 +1027,7 @@ async function main() {
     assert(events.length === 1 && events[0].metadata.text === "PERSISTED s&a edit",
       `expected 1 mock with persisted text, got ${JSON.stringify(events.map((e: any) => e.metadata.text))}`);
     // retry อีกครั้งด้วย op เดิม → outcome เดิม + event ยัง 1
-    const r2 = await review("conv_1", rid, b0, "save_and_approve", { edited_text: "PERSISTED s&a edit" }, OP);
+    const r2 = await review("conv_1", rid, b0, "save_and_approve", { edited_text: "PERSISTED s&a edit", reason_category: "สเปคผิด", reason_text: "แก้สเปคก่อนส่ง" }, OP);
     assert(r2.status === 200 && r2.body.bubble.delivery.state === "mock_sent", "replay not idempotent");
     assert(mockEvents().length === 1, "duplicate mock event on replay");
   });
@@ -844,11 +1036,55 @@ async function main() {
     mocks.state.callBotProducts = [{ item_id: "it1", shop_id: "shop_1" }];
     const doc = await runBotTurn();
     const rid = doc.shadow_reply_id; const b0 = doc.review_bubbles[0].bubble_id;
-    const rr = await review("conv_1", rid, b0, "reject", { rejection_reason: "ต้องตรวจใหม่" });
+    const rr = await review("conv_1", rid, b0, "reject", { rejection_category: "ควรส่งแอดมิน", rejection_reason: "ต้องตรวจใหม่" });
     assert(rr.status === 200, `reject ${rr.status}`);
     const r = await review("conv_1", rid, b0, "send_card", { card_item_id: "it1" });
     assert(r.status === 409, `send_card on rejected → ${r.status}`);
     assert(mockEvents().length === 0, "card request on rejected bubble");
+  });
+
+  await test("J9 retry an in-flight approve created before reason fields keeps its old request binding", async () => {
+    const doc = await runBotTurn();
+    const rid = doc.shadow_reply_id; const b0 = doc.review_bubbles[0].bubble_id;
+    const operationId = "op_legacy_approve_retry";
+    mocks.fakeColl("botworker_events").push({
+      _id: `reviewop:${operationId}`, event_id: `reviewop:${operationId}`,
+      conversation_id: "conv_1", type: "review_op", actor: "t_admin", shop_id: "shop_1", platform: "shopee",
+      metadata: { request: { actor: "t_admin", conversation_id: "conv_1", reply_id: rid, bubble_id: b0,
+        action: "approve", edited_text: null, card_item_id: null, rejection_reason: null }, actor_name: "Test Reviewer", status: "in_progress" },
+      created_at: new Date(),
+    });
+    const stored = mocks.fakeColl("shadow_replies")[0] as any;
+    stored.review_bubbles[0] = { ...stored.review_bubbles[0], decision: "approved", decided_by: "t_admin",
+      approved_text: "Persisted legacy answer", delivery: { state: "not_requested" } };
+    const r = await review("conv_1", rid, b0, "approve", {}, operationId);
+    assert(r.status === 200, `legacy approve retry -> ${r.status} ${JSON.stringify(r.body)}`);
+    assert(mockEvents().length === 1 && mockEvents()[0].metadata.text === "Persisted legacy answer", "legacy retry did not deliver persisted answer once");
+  });
+
+  await test("J10 retry an in-flight handoff approval created before reason fields keeps its old request binding", async () => {
+    mocks.state.callBotExtra = { handoff_required: true, handoff_reason: "clarification_unresolved",
+      conversation_id: "conv_legacy_handoff_retry", message_id: "m_legacy_handoff_retry" };
+    seedAdmin("adm_legacy_retry", "Legacy Retry Admin");
+    const doc = await runBotTurn("conv_legacy_handoff_retry", "m_legacy_handoff_retry", "ร่างข้อความ", { platform: "shopee" });
+    const operationId = "handoff_legacy_retry";
+    const stored = mocks.fakeColl("shadow_replies").find((row: any) => row.shadow_reply_id === doc.shadow_reply_id) as any;
+    stored.handoff_review = { ...stored.handoff_review, status: "approving", selected_admin_id: "adm_legacy_retry",
+      selected_admin_name: "Legacy Retry Admin", assignment_operation_id: operationId,
+      assignment_operation_key: `${doc.shadow_reply_id}:${operationId}` };
+    stored.updated_at = new Date();
+    mocks.fakeColl("botworker_events").push({
+      _id: `handoffreviewop:${operationId}`, event_id: `handoffreviewop:${operationId}`,
+      conversation_id: "conv_legacy_handoff_retry", type: "review_op", actor: "t_admin", shop_id: "shop_1", platform: "shopee",
+      metadata: { request: { action: "approve", actor: "t_admin", conversation_id: "conv_legacy_handoff_retry",
+        reply_id: doc.shadow_reply_id, selected_admin_id: "adm_legacy_retry", rejection_reason: null },
+        actor_name: "Test Reviewer", status: "in_progress" }, created_at: new Date(),
+    });
+    const resumed = await callHandoffReview("conv_legacy_handoff_retry", doc.shadow_reply_id, {
+      reply_id: doc.shadow_reply_id, action: "approve", selected_admin_id: "adm_legacy_retry", operation_id: operationId,
+    });
+    assert(resumed.status === 200 && resumed.body.handoff_review.status === "approved", `legacy handoff retry -> ${resumed.status} ${JSON.stringify(resumed.body)}`);
+    assert(resumed.body.handoff_review.selected_admin_id === "adm_legacy_retry", "legacy retry changed the selected recipient");
   });
 
   // ═══ K — review fixes (Critical/Important จาก independent review) ═══
@@ -895,7 +1131,7 @@ async function main() {
     const rid = doc.shadow_reply_id; const b0 = doc.review_bubbles[0].bubble_id;
     const rc = await review("conv_1", rid, b0, "send_card", { card_item_id: "it1" });
     assert(rc.status === 200, `card ${rc.status}`);
-    const rr = await review("conv_1", rid, b0, "reject", { rejection_reason: "ไม่อนุมัติ" });
+    const rr = await review("conv_1", rid, b0, "reject", { rejection_category: "ตอบไม่ได้", rejection_reason: "ไม่อนุมัติ" });
     assert(rr.status === 409, `reject after card → ${rr.status}`);
     const d = await getReplyDoc();
     assert(d.review_bubbles[0].decision === "pending", "reject overwrote card-sent bubble");

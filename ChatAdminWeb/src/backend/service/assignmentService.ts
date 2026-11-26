@@ -169,12 +169,14 @@ export interface HandoffCandidate {
   name: string;
   pool_key: string;
   suggested: boolean;
+  suggestion_reason?: "previous_admin" | "round_robin";
 }
 
 /** Preview the existing assignment pool without reserving or advancing its round-robin cursor. */
 export async function previewHandoffCandidates(
   shop: { shop_id: string; platform: string },
-  source = "botworker"
+  source = "botworker",
+  conversationId?: string
 ): Promise<HandoffCandidate[]> {
   const mode = await getActiveAssignmentConfig();
   const { poolKey, orderedAgentIds } = await buildPool(mode, shop, source);
@@ -193,10 +195,21 @@ export async function previewHandoffCandidates(
   const cursor = await getCollection<AssignmentCursorDoc>(COLLECTIONS.assignmentCursors)
     .then((coll) => coll.findOne({ pool_key: poolKey }));
   const lastIndex = cursor?.last_assigned_admin_id ? onlineIds.indexOf(String(cursor.last_assigned_admin_id)) : -1;
-  const suggestedId = onlineIds[(lastIndex + 1 + onlineIds.length) % onlineIds.length];
+  let preferredId: string | undefined;
+  if (conversationId && source === "botworker") {
+    const { getSystemConfig } = await import("./systemConfigService");
+    if ((await getSystemConfig()).assignment_prefer_previous_admin !== false) {
+      const prior = await getCollection<{ conversation_id: string; source: string; previous_assigned_to?: string }>(COLLECTIONS.testStatusConversation)
+        .then((coll) => coll.findOne({ conversation_id: conversationId, source }));
+      if (prior?.previous_assigned_to && onlineIds.includes(prior.previous_assigned_to)) preferredId = prior.previous_assigned_to;
+    }
+  }
+  const suggestedId = preferredId || onlineIds[(lastIndex + 1 + onlineIds.length) % onlineIds.length];
   return onlineIds.map((id) => {
     const agent = byId.get(id)!;
-    return { admin_id: id, name: agent.name || agent.username || id, pool_key: poolKey, suggested: id === suggestedId };
+    return { admin_id: id, name: agent.name || agent.username || id, pool_key: poolKey,
+      suggested: id === suggestedId,
+      ...(id === suggestedId ? { suggestion_reason: preferredId ? "previous_admin" as const : "round_robin" as const } : {}) };
   });
 }
 

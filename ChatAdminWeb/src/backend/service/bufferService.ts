@@ -19,6 +19,7 @@ import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { logAdminEvent } from "./adminLogService";
 import { getSystemConfig } from "./systemConfigService";
+import { logWorkerResult } from "./botworkerLog";
 import type { Platform } from "./systemConfigService";
 import {
   botworkerRuntime,
@@ -732,7 +733,7 @@ export async function flushBuffer(
 
       return {
         status: "buffer_flushed",
-        detail: `flushed ${claimedMsgIds.length} msgs → ${result.status}`,
+        detail: `flushed ${claimedMsgIds.length} msgs → ${result.status}: ${result.detail}`,
       };
     } catch (err) {
       // error → dormant failed (payload retained) — ไม่มี retry อัตโนมัติ;
@@ -772,8 +773,9 @@ export async function flushBuffer(
           tupleKey,
           setTimeout(() => {
             if (signal?.aborted) return;
-            trackedFlush(platform, shopId, conversationId, processMessage, markProcessed, signal).catch((err) =>
-              console.error(`[buffer] hand-off flush error for ${conversationId}:`, err)
+            trackedFlush(platform, shopId, conversationId, processMessage, markProcessed, signal).then(
+              (r) => logWorkerResult(`แชท ${conversationId}`, r.status, r.detail),
+              (err) => console.error(`[buffer] hand-off flush error for ${conversationId}:`, err)
             );
           }, delay)
         );
@@ -894,8 +896,9 @@ export async function bufferOrProcess(
     setTimeout(() => {
       // ⚡ cancelled era — callback ที่ fired ก่อน abort แต่ยังไม่ process → ออกเงียบ
       if (signal?.aborted) return;
-      trackedFlush(msg.platform, msg.shop_id, convId, processMessage, markProcessed, signal).catch((err) =>
-        console.error(`[buffer] timer flush error for ${convId}:`, err)
+      trackedFlush(msg.platform, msg.shop_id, convId, processMessage, markProcessed, signal).then(
+        (r) => logWorkerResult(`แชท ${convId}`, r.status, r.detail),
+        (err) => console.error(`[buffer] timer flush error for ${convId}:`, err)
       );
     }, timerDelayMs)
   );
@@ -997,7 +1000,7 @@ export async function recoverStaleBuffers(
   if (rows.length === 0) {
     return { recovered: 0, conversations: [] };
   }
-  console.log(`[buffer] reconciled ${settled} stale rows across ${conversations.size} conversations`);
+  console.log(`[buffer] ตรวจข้อความค้าง: เคลียร์ ${settled} รายการ จาก ${conversations.size} แชท`);
 
   // audit write เป็น side-effect — cancelled run ไม่เขียน recovery event ต่อ
   if (!signal?.aborted) {

@@ -27,7 +27,8 @@ export async function POST(
   const body = await readJson<{
     reply_id?: string; bubble_id?: string; action?: string;
     edited_text?: string; card_item_id?: string;
-    operation_id?: string; updated_at?: string; rejection_reason?: string;
+    operation_id?: string; updated_at?: string; reason_category?: string; reason_text?: string;
+    rejection_category?: string; rejection_reason?: string;
   }>(req);
   if (!body?.reply_id || !body.bubble_id || !body.action || !body.operation_id) {
     return error("reply_id, bubble_id, action, operation_id required", 422);
@@ -88,10 +89,13 @@ export async function POST(
     action: body.action as ReviewAction,
     editedText: body.edited_text,
     cardItemId: body.card_item_id,
+    reasonCategory: body.reason_category,
+    reasonText: body.reason_text,
     operationId: body.operation_id,
     actor: r.ctx.admin.admin_id,
     actorName: r.ctx.admin.name || r.ctx.admin.username || r.ctx.admin.admin_id,
     liveSendEnabled,
+    rejectionCategory: body.rejection_category,
     rejectionReason: body.rejection_reason,
     expectedUpdatedAt: body.updated_at,
     mockSender: sendMockPart,

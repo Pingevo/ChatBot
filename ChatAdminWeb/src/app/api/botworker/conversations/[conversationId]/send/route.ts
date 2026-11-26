@@ -10,16 +10,10 @@ import { logBotworkerEvent } from "@/backend/service/botworkerEventService";
 import { sendShopeeMessage, isShopeeConsoleSendEnabled, outboundMessageId, readShopeeOutboundInput } from "@/backend/service/shopeeOutboundService";
 import { BW_SOURCE, getBwMeta, invalidateBotworkerCache } from "../../../_shared";
 import type { MessageMedia, MessageType } from "@/lib/types";
+import { describeSendFailure } from "@/lib/shopeeSendErrors";
 
 function genBwMessageId(): string {
   return "bw_" + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
-}
-
-function deliveryMessage(code: string): string {
-  if (code === "delivery_unknown") return "ยังยืนยันผลส่งจาก Shopee ไม่ได้ กรุณาตรวจสอบแชทก่อนส่งซ้ำ";
-  if (code === "live_send_disabled") return "ปิดสวิตช์ส่งจริงอยู่ — ไม่มีการส่งไป Shopee";
-  if (code === "item_shop_mismatch") return "สินค้านี้ไม่ตรงกับร้านของบทสนทนา จึงยกเลิกการส่ง";
-  return "Shopee ไม่ยืนยันการส่งข้อความ กรุณาตรวจสอบรายละเอียดก่อนลองใหม่";
 }
 
 export async function POST(req: NextRequest, { params }: { params: Promise<{ conversationId: string }> }) {
@@ -50,14 +44,16 @@ export async function POST(req: NextRequest, { params }: { params: Promise<{ con
   const liveEnabled = await isShopeeConsoleSendEnabled();
   const expectedMode = req.headers.get("x-shopee-send-mode");
   if (conv.platform === "shopee" && expectedMode !== (liveEnabled ? "on" : "off")) {
-    return error("สถานะสวิตช์ส่งจริงเปลี่ยนแล้ว กรุณารีเฟรชหน้าก่อนส่ง", 409);
+    return json({ detail: "สถานะสวิตช์ส่งจริงเปลี่ยนแล้ว กรุณารีเฟรชหน้าก่อนส่ง", code: "send_mode_changed" }, 409);
   }
   let liveResult: Awaited<ReturnType<typeof sendShopeeMessage>> | null = null;
   if (liveEnabled && conv.platform === "shopee") {
     liveResult = await sendShopeeMessage({ conversationId, requestId, input });
     if (liveResult.state !== "sent") {
       const status = liveResult.state === "unknown" ? 409 : liveResult.code === "live_send_disabled" ? 423 : 502;
-      return error(deliveryMessage(liveResult.state === "unknown" ? liveResult.code : liveResult.code), status);
+      return json({ detail: describeSendFailure(liveResult.code).title, code: liveResult.code,
+        provider_error: liveResult.providerError, provider_http_status: liveResult.providerHttpStatus,
+        provider_request_id: liveResult.providerRequestId }, status);
     }
   } else if (input.type !== "text") {
     return error("สื่อส่งได้เมื่อเปิดสวิตช์และเลือกบทสนทนา Shopee เท่านั้น", 423);

@@ -29,13 +29,13 @@ let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log("\n[bot-worker] shutting down... waiting for in-flight messages");
+  console.log("\n[bot-worker] กำลังปิด... รอข้อความที่ส่งเข้าบอทอยู่ให้เสร็จก่อน");
   running = false;
   // เคลียร์ pending work ทั้งหมด (buffer/retry/deferred-recovery timers)
   //   — ข้อความใน buffer_messages ยังอยู่ → recover ตอน enable edge ถัดไป
   botWorkerService.clearPendingWork();
   await botWorkerService.waitForInFlight(10000);
-  console.log("[bot-worker] stopped.");
+  console.log("[bot-worker] ปิดแล้ว");
   process.exit(0);
 }
 process.on("SIGINT", shutdown);
@@ -45,18 +45,18 @@ async function main() {
   // ⚡ enable-transition checkpoint — poll boundary = เวลาที่เห็น worker เปิด (rising edge)
   //   ปิด→เปิด = boundary ใหม่; backlog ช่วงปิดไม่ถูก admit เข้า poll
   let enabledSince: Date | null = null;
-  console.log("[bot-worker] starting...");
+  console.log("[bot-worker] กำลังเริ่ม...");
   // ⚡ S4 — ensure indexes ก่อน Mongo-dependent work เสมอ (worker อาจขึ้นก่อน
   //   Next instrumentation → unique index buffer_messages ยังไม่มี → re-poll insert ซ้ำ)
   try {
     const { ensureIndexes } = await import("../src/backend/db/mongoClient");
     await ensureIndexes();
   } catch (e) {
-    console.warn("[bot-worker] ensureIndexes failed (continuing):", (e as Error).message);
+    console.warn("[bot-worker] สร้าง index ใน DB ไม่สำเร็จ (ทำงานต่อได้ ไม่กระทบการตอบ):", (e as Error).message);
   }
-  console.log("[bot-worker] ⚡ FIRE-AND-FORGET: แต่ละข้อความยิงไปบอทแยกอิสระ ไม่รอคิว ไม่รอ batch");
-  console.log("[bot-worker] ⚠️ READ-ONLY messages_shp → writes to shadow_replies + chat_processing");
-  console.log("[bot-worker] ⚠️ No Shopee API calls. No real message delivery.");
+  console.log("[bot-worker] แต่ละข้อความลูกค้าถูกส่งเข้าบอทแยกกัน ไม่ต้องรอคิว");
+  console.log("[bot-worker] อ่านแชทจาก messages_shp อย่างเดียว — คำตอบบอทเป็นร่างใน shadow_replies รอแอดมินตรวจ");
+  console.log("[bot-worker] worker ไม่ส่งข้อความถึงลูกค้าเอง — ส่งจริงเฉพาะตอนแอดมินอนุมัติในหน้า Bot Worker และเปิดสวิตช์ส่งจริง");
 
   // ⚡ enabled gate ก่อน recovery — worker ปิดต้องไม่ flush/recover อะไรเลย
   const bootConfig = await getSystemConfig();
@@ -64,7 +64,7 @@ async function main() {
     // ⚡ capture enable edge ก่อน resolve/recovery — inbound ที่เข้าระหว่าง recovery
     //   ต้องถูก poll; edge = global cutoff ที่ scope resolver ใช้สร้าง pair cutoff
     enabledSince = new Date();
-    console.log(`[bot-worker] ⚡ enable edge — processing only messages after ${enabledSince.toISOString()}`);
+    console.log(`[bot-worker] สวิตช์ Bot Worker เปิดแล้ว — ทำเฉพาะข้อความลูกค้าหลัง ${enabledSince.toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })} (${enabledSince.toISOString()})`);
     // Recover stale buffers จาก buffer_messages collection (ถ้ามี)
     // กรณี bot-worker restart ขณะมีข้อความค้างใน buffer
     // ⚡ reconcile-only — finalize durable evidence / settle dormant; provider=0
@@ -73,16 +73,17 @@ async function main() {
         await botWorkerService.resolveBotworkerScope(bootConfig, enabledSince)
       );
       if (recovered.recovered > 0) {
-        console.log(`[bot-worker] reconciled ${recovered.recovered} stale buffer rows`);
+        console.log(`[bot-worker] เคลียร์ข้อความค้างจากรอบก่อน ${recovered.recovered} รายการ`);
       }
     } catch (err) {
-      console.error("[bot-worker] buffer recovery error:", err instanceof Error ? err.message : err);
+      console.error("[bot-worker] เคลียร์ข้อความค้างไม่สำเร็จ:", err instanceof Error ? err.message : err);
     }
   } else {
-    console.log("[bot-worker] bot_worker_enabled=false → skip startup recovery");
+    console.log("[bot-worker] สวิตช์ Bot Worker ปิดอยู่ — ยังไม่ทำงาน (เปิดได้ที่หน้าตั้งค่า)");
   }
 
   let cycle = 0;
+  let lastPollLine = "";
   while (running) {
     try {
       cycle++;
@@ -95,7 +96,7 @@ async function main() {
         if (enabledSince) botWorkerService.clearPendingWork();
         enabledSince = null;
         if (cycle === 1 || cycle % 30 === 0) {
-          console.log(`[bot-worker] cycle ${cycle}: bot_worker_enabled=false → paused`);
+          console.log(`[bot-worker] รอบ ${cycle}: สวิตช์ Bot Worker ปิดอยู่ — หยุดรอ`);
         }
       } else {
         // ⚡ rising edge — capture boundary ก่อน scope resolve เสมอ:
@@ -103,7 +104,7 @@ async function main() {
         const justRose = !enabledSince;
         if (justRose) {
           enabledSince = new Date();
-          console.log(`[bot-worker] ⚡ enable edge — processing only messages after ${enabledSince.toISOString()}`);
+          console.log(`[bot-worker] สวิตช์ Bot Worker เปิดแล้ว — ทำเฉพาะข้อความลูกค้าหลัง ${enabledSince.toLocaleString("th-TH", { timeZone: "Asia/Bangkok" })} (${enabledSince.toISOString()})`);
         }
         // ⚡ Phase 2D — resolve admission scope ครั้งเดียวต่อ cycle จาก config
         //   snapshot เดียวกัน → poll/recovery/timeout-resume กิน scope เดียวกันเสมอ
@@ -113,37 +114,37 @@ async function main() {
           try {
             const recovered = await botWorkerService.recoverStaleBuffers(scope);
             if (recovered.recovered > 0) {
-              console.log(`[bot-worker] reconciled ${recovered.recovered} stale buffer rows`);
+              console.log(`[bot-worker] เคลียร์ข้อความค้างจากรอบก่อน ${recovered.recovered} รายการ`);
             }
           } catch (err) {
-            console.error("[bot-worker] enable-edge recovery error:", err instanceof Error ? err.message : err);
+            console.error("[bot-worker] เคลียร์ข้อความค้างตอนเปิดสวิตช์ไม่สำเร็จ:", err instanceof Error ? err.message : err);
           }
         }
         const interval = config.bot_worker_interval_ms || DEFAULT_INTERVAL_MS;
         const result = await botWorkerService.pollNewMessages(scope);
 
-        if (result.processed > 0) {
-          console.log(`[bot-worker] cycle ${cycle}: found=${result.found} fired=${result.processed} (fire-and-forget)`);
-        }
+        const pollLine = `เจอข้อความลูกค้าที่ยังไม่จบ ${result.found} ข้อความ · ส่งไปทำต่อ ${result.processed}`;
+        if (result.processed > 0 && pollLine !== lastPollLine) console.log(`[bot-worker] รอบ ${cycle}: ${pollLine}`);
+        lastPollLine = result.processed > 0 ? pollLine : "";
 
         // ⚡ Phase 2 — เช็ค wait_for_reply timeout (ทุก cycle ถ้า workflow เปิด)
         if (config.workflow_enabled) {
           try {
             const timedOut = await botWorkerService.checkWaitTimeouts(scope);
             if (timedOut > 0) {
-              console.log(`[bot-worker] cycle ${cycle}: wait_timeout processed=${timedOut}`);
+              console.log(`[bot-worker] รอบ ${cycle}: workflow ที่รอลูกค้าตอบหมดเวลา ${timedOut} รายการ`);
             }
           } catch (err) {
-            console.error(`[bot-worker] cycle ${cycle}: wait_timeout error:`, err instanceof Error ? err.message : err);
+            console.error(`[bot-worker] รอบ ${cycle}: เช็ค workflow หมดเวลาไม่สำเร็จ:`, err instanceof Error ? err.message : err);
           }
           // ⚡ Zaapi delay timers — ปลุก run ที่ resume_at ถึงแล้ว (ทุก cycle)
           try {
             const timers = await botWorkerService.sweepDueTimerRuns(scope);
             if (timers.resumed > 0 || timers.errors.length > 0) {
-              console.log(`[bot-worker] cycle ${cycle}: timer_sweep due=${timers.due} resumed=${timers.resumed} errors=${timers.errors.length}`);
+              console.log(`[bot-worker] รอบ ${cycle}: workflow ที่ตั้งเวลาไว้ถึงเวลา ${timers.due} · ทำต่อแล้ว ${timers.resumed} · ผิดพลาด ${timers.errors.length}`);
             }
           } catch (err) {
-            console.error(`[bot-worker] cycle ${cycle}: timer_sweep error:`, err instanceof Error ? err.message : err);
+            console.error(`[bot-worker] รอบ ${cycle}: ปลุก workflow ที่ตั้งเวลาไว้ไม่สำเร็จ:`, err instanceof Error ? err.message : err);
           }
         }
 
@@ -154,7 +155,7 @@ async function main() {
         continue;
       }
     } catch (err) {
-      console.error(`[bot-worker] cycle ${cycle} error:`, err instanceof Error ? err.message : err);
+      console.error(`[bot-worker] รอบ ${cycle} ผิดพลาด:`, err instanceof Error ? err.message : err);
     }
 
     // รอ default interval กรณีปิด worker หรือ error
@@ -166,12 +167,12 @@ async function main() {
   // ถ้าออกจากลูปเพราะ running=false แต่ไม่ใช่ signal → รอ in-flight ด้วย
   if (!shuttingDown) {
     await botWorkerService.waitForInFlight(10000);
-    console.log("[bot-worker] stopped.");
+    console.log("[bot-worker] ปิดแล้ว");
     process.exit(0);
   }
 }
 
 main().catch((err) => {
-  console.error("[bot-worker] fatal:", err);
+  console.error("[bot-worker] หยุดทำงานเพราะผิดพลาดร้ายแรง:", err);
   process.exit(1);
 });

@@ -60,7 +60,7 @@ function parse(out: string) {
     if (line.includes("EV RECOVERY")) recovery++;
     if (line.includes("EV CANCEL_PENDING")) cancels++;
     if (line.includes("EV WAIT_TIMEOUT")) waits++;
-    const s = line.match(/processing only messages after (\S+)/);
+    const s = line.match(/ทำเฉพาะข้อความลูกค้าหลัง .*\((\S+)\)/);
     if (s) startedAt = new Date(s[1]);
   }
   return { polls, enables, cfgs, recovery, waits, cancels, startedAt };

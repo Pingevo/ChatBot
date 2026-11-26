@@ -16,6 +16,8 @@ sellcenter เขียนข้อมูลแชทจาก Shopee (และ
 
 Shopee outbound จาก Tickets/BotWorker ถูกควบคุมด้วย `system_configs.main_config.shopee_console_send_enabled` ซึ่งค่าเริ่มต้นปิด; BotWorker review เมื่อปิด switch จะบันทึก `not_sent_switch_off` และไม่เรียก sender.
 
+BotWorker reviewer reasons ใช้หมวด `สเปคผิด`, `ควรส่งแอดมิน`, `การแก้ปัญหาผิด`, `ผิดรุ่น`, `ตอบไม่ได้`. `review_bubbles[].edit_history[]` เก็บหมวดและคำอธิบายของการแก้แต่ละครั้ง; `review_bubbles[]` และ `handoff_review` เก็บหมวด/คำอธิบายเมื่อไม่อนุมัติ. `review_bubbles[].delivery.outbound_text` เก็บข้อความที่ส่งเป็น request ไป Shopee สำหรับการส่งจริง พร้อม `delivery.state` เพื่อแยกผลยืนยัน/ไม่ยืนยัน/ล้มเหลว. ฟิลด์เหตุผลและ outbound อาจไม่มีในเอกสารเก่าก่อนเพิ่มฟีเจอร์.
+
 **Collections ที่ห้ามแตะ** (เราเป็นเจ้าของ):
 - `admins`, `auth_tokens`, `sessions`
 - `admin_logs`, `system_configs`

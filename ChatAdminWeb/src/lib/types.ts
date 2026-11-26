@@ -3,6 +3,11 @@ import type { ChatTextSize } from "./chatTextSize";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
 
+export const BOTWORKER_REVIEW_REASON_CATEGORIES = [
+  "สเปคผิด", "ควรส่งแอดมิน", "การแก้ปัญหาผิด", "ผิดรุ่น", "ตอบไม่ได้",
+] as const;
+export type BotWorkerReviewReasonCategory = typeof BOTWORKER_REVIEW_REASON_CATEGORIES[number];
+
 export type Topic =
   | "product_inquiry"
   | "product_compare"

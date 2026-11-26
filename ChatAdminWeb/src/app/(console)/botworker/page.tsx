@@ -32,7 +32,7 @@ import { api } from "@/lib/apiClient";
 import { usePolling } from "@/lib/usePolling";
 import { useAuth } from "@/lib/authStore";
 import { adminBubbleColor, adminBubbleTextColor, ZAAPI_COLOR, BOT_COLOR } from "@/lib/bubbleColors";
-import type { Conversation, ChatMessage, ChatSendInput, CloseHistoryRecord, AdminUser, ProblemCategory } from "@/lib/types";
+import { BOTWORKER_REVIEW_REASON_CATEGORIES, type Conversation, type ChatMessage, type ChatSendInput, type CloseHistoryRecord, type AdminUser, type ProblemCategory } from "@/lib/types";
 import { ShopeeChatComposer } from "@/components/chat/ShopeeChatComposer";
 import { useShopeeSendStatus } from "@/lib/useShopeeSendStatus";
 
@@ -49,8 +49,9 @@ interface ReviewBubble {
   decided_by_name?: string;
   decided_at?: string;
   approved_text?: string;
+  rejection_category?: string;
   rejection_reason?: string;
-  edit_history?: { before_text: string; after_text: string; actor: string; actor_name: string; at: string }[];
+  edit_history?: { before_text: string; after_text: string; reason_category?: string; reason_text?: string; actor: string; actor_name: string; at: string }[];
   delivery: { state: "not_requested" | "not_sent_switch_off" | "mock_sent" | "mock_failed" | "live_sending" | "live_sent" | "live_failed" | "live_unknown"; request_id?: string; receipt?: { provider: string; delivered: boolean; request_id?: string }; error?: string };
   card?: { item_id: string; delivery: { state: string; error?: string } };
 }
@@ -61,6 +62,7 @@ interface HandoffReviewState {
   explanation?: string;
   reviewed_by_name?: string;
   reviewed_at?: string;
+  rejection_category?: string;
   rejection_reason?: string;
   selected_admin_id?: string;
   selected_admin_name?: string;
@@ -146,8 +148,6 @@ export default function BotWorkerPage() {
   const [closing, setClosing] = useState(false);
   const [acceptingChats, setAcceptingChats] = useState<boolean>(user?.is_accepting_chats ?? true);
   const [togglingAccept, setTogglingAccept] = useState(false);
-
-  const selected = conversations.find((c) => c.id === selectedId) ?? null;
 
   // โหลด admins list
   useEffect(() => {
@@ -253,6 +253,9 @@ export default function BotWorkerPage() {
     }
     return result;
   }, [pinnedConversations, conversations, tail]);
+  const selected = conversations.find((c) => c.id === selectedId)
+    ?? allConversations.find((c) => c.id === selectedId)
+    ?? null;
 
   // ⚡ poll เดียวทำ initial load + refresh — immediate ยิงตอน mount/restart
   //   restartKey=loadConversations → searchQuery/chatFilter เปลี่ยน = effect เดิม refire
@@ -428,13 +431,13 @@ export default function BotWorkerPage() {
       if (r.message) {
         setMessages((prev) => (prev.some((m) => m.id === r.message!.id) ? prev : [...prev, r.message!]));
       }
+      setConversations((prev) => prev.map((c) => (c.id === selectedId && c.status === "closed" ? { ...c, status: "open" as never } : c)));
       return true;
     } catch (e) {
       const body = (e as { response?: { data?: { conflict?: boolean; assigned_to?: string } } })?.response?.data;
       const failure = body?.conflict
         ? new Error(`แชทนี้มอบหมายให้ ${body.assigned_to || "แอดมินคนอื่น"} อยู่ — ยังไม่มีการส่งข้อความ`)
         : e;
-      catchError(failure, "ส่งข้อความไม่สำเร็จ");
       throw failure;
     }
   }, [selectedId, liveSendEnabled]);
@@ -838,7 +841,7 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
       </div>
 
       {/* ── Composer — admin reply, sandbox unless the scoped Shopee switch is on ── */}
-      {onSend && conversation.status !== "closed" && (
+      {onSend && (
         <div className="shrink-0">
           <ShopeeChatComposer
             key={conversation.id}
@@ -854,6 +857,11 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
           {conversation.status === "bot" && (
             <div className="px-3 pb-2 text-[10px] text-text-subtle">
               การตอบจะ assign แชทนี้ให้คุณใน sandbox — บอทจะหยุดตอบจนกว่าจะปิด/เปิดแชทใหม่
+            </div>
+          )}
+          {conversation.status === "closed" && (
+            <div className="px-3 pb-2 text-[10px] text-text-subtle">
+              แชทนี้ปิดอยู่ — การส่งข้อความจะเปิดแชทใหม่และ assign ให้คุณ บอทจะหยุดตอบจนกว่าจะปิดแชทอีกครั้ง
             </div>
           )}
         </div>
@@ -994,9 +1002,10 @@ function UnifiedBubble({ msg, customerName, customerAvatar, canReview, onReviewA
 
 function HandoffReviewPanel({ msg, canReview }: { msg: UnifiedMessage; canReview: boolean }) {
   const [review, setReview] = useState<HandoffReviewState>(msg.handoff_review || { status: "pending" });
-  const [candidates, setCandidates] = useState<{ admin_id: string; name: string; suggested: boolean }[]>([]);
+  const [candidates, setCandidates] = useState<{ admin_id: string; name: string; suggested: boolean; suggestion_reason?: "previous_admin" | "round_robin" }[]>([]);
   const [selectedAdminId, setSelectedAdminId] = useState("");
   const [rejecting, setRejecting] = useState(false);
+  const [rejectionCategory, setRejectionCategory] = useState("");
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
@@ -1004,12 +1013,12 @@ function HandoffReviewPanel({ msg, canReview }: { msg: UnifiedMessage; canReview
 
   useEffect(() => {
     if (msg.handoff_review) setReview(msg.handoff_review);
-  }, [msg.handoff_review?.status, msg.handoff_review?.selected_admin_id, msg.handoff_review?.assignment_operation_id, msg.handoff_review?.rejection_reason]);
+  }, [msg.handoff_review?.status, msg.handoff_review?.selected_admin_id, msg.handoff_review?.assignment_operation_id, msg.handoff_review?.rejection_category, msg.handoff_review?.rejection_reason]);
 
   useEffect(() => {
     let current = true;
     if (!canReview || (review.status !== "pending" && review.status !== "approving")) return;
-    api().get<{ handoff_review?: HandoffReviewState; candidates: { admin_id: string; name: string; suggested: boolean }[] }>(
+    api().get<{ handoff_review?: HandoffReviewState; candidates: { admin_id: string; name: string; suggested: boolean; suggestion_reason?: "previous_admin" | "round_robin" }[] }>(
       `/botworker/conversations/${msg.conversation_id || ""}/handoff-review`, { params: { reply_id: msg.id, message_id: msg.inbound_message_id } }
     ).then((r) => {
       if (!current) return;
@@ -1026,9 +1035,9 @@ function HandoffReviewPanel({ msg, canReview }: { msg: UnifiedMessage; canReview
 
   async function decide(action: "approve" | "reject") {
     if (action === "approve" && !selectedAdminId) return;
-    if (action === "reject" && !reason.trim()) { setMessage("กรุณาระบุเหตุผลที่ไม่อนุมัติ handoff"); return; }
+    if (action === "reject" && (!rejectionCategory || !reason.trim())) { setMessage("กรุณาเลือกหมวดและอธิบายเหตุผลที่ไม่อนุมัติส่งแอดมิน"); return; }
     setBusy(true); setMessage("");
-    const opKey = `${action}:${selectedAdminId}:${reason.trim()}`;
+    const opKey = `${action}:${selectedAdminId}:${rejectionCategory}:${reason.trim()}`;
     let operationId = operationIdsRef.current.get(opKey);
     if (!operationId && action === "approve" && review.status === "approving" &&
         review.selected_admin_id === selectedAdminId && review.assignment_operation_id) {
@@ -1044,7 +1053,7 @@ function HandoffReviewPanel({ msg, canReview }: { msg: UnifiedMessage; canReview
         `/botworker/conversations/${msg.conversation_id || ""}/handoff-review`, {
           reply_id: msg.id,
           action,
-          ...(action === "approve" ? { selected_admin_id: selectedAdminId } : { rejection_reason: reason }),
+          ...(action === "approve" ? { selected_admin_id: selectedAdminId } : { rejection_category: rejectionCategory, rejection_reason: reason }),
           operation_id: operationId,
         }
       );
@@ -1056,7 +1065,7 @@ function HandoffReviewPanel({ msg, canReview }: { msg: UnifiedMessage; canReview
       setMessage(e instanceof Error ? e.message : "บันทึกผล handoff ไม่สำเร็จ");
       if (action === "approve") {
         try {
-          const refreshed = await api().get<{ handoff_review?: HandoffReviewState; candidates: { admin_id: string; name: string; suggested: boolean }[] }>(
+          const refreshed = await api().get<{ handoff_review?: HandoffReviewState; candidates: { admin_id: string; name: string; suggested: boolean; suggestion_reason?: "previous_admin" | "round_robin" }[] }>(
             `/botworker/conversations/${msg.conversation_id || ""}/handoff-review`, { params: { reply_id: msg.id, message_id: msg.inbound_message_id } }
           );
           const currentReview = refreshed.data.handoff_review;
@@ -1075,8 +1084,9 @@ function HandoffReviewPanel({ msg, canReview }: { msg: UnifiedMessage; canReview
     <div className="w-full rounded-xl border border-amber-300/30 bg-[#152a42] p-3 text-white shadow-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2"><span className="rounded-full bg-amber-300/15 px-2 py-1 text-[10px] font-semibold text-amber-100">HANDOFF FLAG</span><span className="text-xs font-semibold">{review.status === "pending" ? "รอผู้ตรวจตัดสินใจ" : review.status === "approving" ? "กำลังบันทึกการจ่ายงาน" : review.status === "approved" ? "อนุมัติ handoff แล้ว" : "ไม่อนุมัติ handoff"}</span></div>
-        <span className="text-[10px] text-white/60">ยังไม่ส่งข้อความหาลูกค้า · handoff อยู่ใน BotWorker sandbox</span>
+        <span className="text-[10px] text-white/60">handoff จะจ่ายแชทให้ผู้รับที่เลือก · การส่งข้อความถึงลูกค้าอยู่ที่ร่างด้านบน</span>
       </div>
+      <p className="mt-2 text-[11px] leading-5 text-white/75">ตรวจข้อความร่างด้านบนได้จากบับเบิลบอท: ส่งข้อความเดิมได้ทันที หรือแก้ข้อความแล้วส่งได้ ปุ่ม handoff นี้ใช้อนุมัติ/ปฏิเสธการจ่ายแชทให้แอดมิน</p>
       <div className="mt-3 grid gap-2 sm:grid-cols-2">
         <div className="rounded-lg bg-white/5 p-2.5"><div className="text-[10px] text-white/60">รหัสเหตุผลจาก engine</div><div className="mt-1 break-words text-xs font-medium">{msg.bot_handoff_reason || msg.bot_handoff_category || "ไม่ระบุ"}</div></div>
         <div className="rounded-lg bg-white/5 p-2.5"><div className="text-[10px] text-white/60">คำอธิบายสำหรับผู้ตรวจ</div><div className="mt-1 whitespace-pre-wrap break-words text-xs">{msg.bot_handoff_explanation || "ไม่มีคำอธิบายจาก engine"}</div></div>
@@ -1090,24 +1100,33 @@ function HandoffReviewPanel({ msg, canReview }: { msg: UnifiedMessage; canReview
             {review.status === "approving" && review.selected_admin_id && !candidates.some((candidate) => candidate.admin_id === review.selected_admin_id) &&
               <option value={review.selected_admin_id}>{review.selected_admin_name || review.selected_admin_id} · ตรวจสอบรายการเดิม</option>}
             {candidates.map((candidate) => <option key={candidate.admin_id} value={candidate.admin_id}>
-              {candidate.name}{candidate.suggested ? " · แนะนำตามคิว" : ""}
+              {candidate.name}{candidate.suggested ? candidate.suggestion_reason === "previous_admin" ? " · แนะนำแอดมินคนเดิม" : " · แนะนำตามคิว" : ""}
             </option>)}
           </select>
           {review.status === "approving" && <p className="text-[10px] text-amber-100/80">กำลังกู้ผลการอนุมัติเดิม · กดต่อเพื่อให้ระบบตรวจและบันทึกการจ่ายงานซ้ำอย่างปลอดภัย{review.last_error ? ` · ${review.last_error}` : ""}</p>}
-          {rejecting && <textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} rows={3}
-            placeholder="ระบุเหตุผลที่ไม่อนุมัติ handoff" className="min-h-20 w-full resize-y rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/45 focus:border-amber-200 focus:outline-none" />}
+          {rejecting && <div className="space-y-2">
+            <label className="block text-[10px] text-white/70">หมวดเหตุผลที่ไม่อนุมัติส่งแอดมิน</label>
+            <SelectField value={rejectionCategory} onChange={(e) => setRejectionCategory(e.target.value)} disabled={busy}
+              className="h-10 w-full rounded-lg border border-white/15 bg-[#203954] px-3 text-sm text-white disabled:opacity-50">
+              <option value="">เลือกเหตุผล</option>
+              {BOTWORKER_REVIEW_REASON_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+            </SelectField>
+            <label className="block text-[10px] text-white/70">อธิบายเพิ่มเติม</label>
+            <textarea value={reason} onChange={(e) => setReason(e.target.value)} maxLength={1000} rows={3}
+              placeholder="อธิบายว่าทำไมจึงไม่อนุมัติส่งแอดมิน" className="min-h-20 w-full resize-y rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-sm text-white placeholder:text-white/45 focus:border-amber-200 focus:outline-none" />
+          </div>}
           <div className="flex flex-wrap gap-2">
             <button onClick={() => void decide("approve")} disabled={busy || !selectedAdminId} className="min-h-10 rounded-lg bg-emerald-500/80 px-3 py-2 text-xs font-semibold hover:bg-emerald-500 disabled:opacity-40">{busy ? "กำลังบันทึก…" : review.status === "approving" ? "ดำเนินการ handoff เดิมต่อ" : "อนุมัติ handoff ให้ผู้รับที่เลือก"}</button>
-            {review.status === "pending" && (!rejecting ? <button onClick={() => setRejecting(true)} disabled={busy} className="min-h-10 rounded-lg bg-rose-500/25 px-3 py-2 text-xs font-semibold text-rose-100 hover:bg-rose-500/40 disabled:opacity-40">ไม่อนุมัติ handoff</button> : <>
-              <button onClick={() => void decide("reject")} disabled={busy || !reason.trim()} className="min-h-10 rounded-lg bg-rose-500/70 px-3 py-2 text-xs font-semibold hover:bg-rose-500 disabled:opacity-40">บันทึกการไม่อนุมัติ</button>
-              <button onClick={() => { setRejecting(false); setReason(""); }} disabled={busy} className="min-h-10 rounded-lg bg-white/10 px-3 py-2 text-xs hover:bg-white/15">ยกเลิก</button>
+            {review.status === "pending" && (!rejecting ? <button onClick={() => setRejecting(true)} disabled={busy} className="min-h-10 rounded-lg bg-rose-500/25 px-3 py-2 text-xs font-semibold text-rose-100 hover:bg-rose-500/40 disabled:opacity-40">ไม่อนุมัติส่งแอดมิน</button> : <>
+              <button onClick={() => void decide("reject")} disabled={busy || !rejectionCategory || !reason.trim()} className="min-h-10 rounded-lg bg-rose-500/70 px-3 py-2 text-xs font-semibold hover:bg-rose-500 disabled:opacity-40">บันทึกการไม่อนุมัติ</button>
+              <button onClick={() => { setRejecting(false); setRejectionCategory(""); setReason(""); }} disabled={busy} className="min-h-10 rounded-lg bg-white/10 px-3 py-2 text-xs hover:bg-white/15">ยกเลิก</button>
             </>)}
           </div>
         </div>
       )}
       {review.status === "pending" && !canReview && <div className="mt-3 text-xs text-white/60">รอแอดมินตรวจ</div>}
       {review.status === "approved" && <div className="mt-3 rounded-lg bg-emerald-500/10 p-2.5 text-xs">ผู้ตรวจ {review.reviewed_by_name || "ไม่ระบุ"} · ผู้รับงาน {review.selected_admin_name || review.selected_admin_id || "ไม่ระบุ"} · {review.reviewed_at ? new Date(review.reviewed_at).toLocaleString("th-TH") : ""}</div>}
-      {review.status === "rejected" && <div className="mt-3 rounded-lg bg-rose-500/10 p-2.5 text-xs">ผู้ตรวจ {review.reviewed_by_name || "ไม่ระบุ"} · เหตุผล: {review.rejection_reason || "ไม่ระบุ"}</div>}
+      {review.status === "rejected" && <div className="mt-3 rounded-lg bg-rose-500/10 p-2.5 text-xs">ผู้ตรวจ {review.reviewed_by_name || "ไม่ระบุ"} · เหตุผล: {review.rejection_category || "ไม่ระบุหมวด"} · {review.rejection_reason || "ไม่มีคำอธิบาย"}</div>}
       {message && <div role="alert" className="mt-2 text-xs text-rose-200">{message}</div>}
     </div>
   );
@@ -1221,9 +1240,12 @@ function ReviewBubbleList({
   const bubbles = msg.review_bubbles || [];
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
+  const [editReasonCategory, setEditReasonCategory] = useState("");
+  const [editReasonText, setEditReasonText] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<{ bubbleId: string; message: string } | null>(null);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
+  const [rejectCategory, setRejectCategory] = useState("");
   const [rejectReason, setRejectReason] = useState("");
 
   const settled = (b: ReviewBubble) => b.decision === "rejected" || b.delivery.state === "mock_sent" || b.delivery.state === "live_sent" || b.delivery.state === "not_sent_switch_off";
@@ -1246,10 +1268,12 @@ function ReviewBubbleList({
 
   return (
     <>
+      {msg.bot_handoff_required && <div className="w-full rounded-md border border-amber-300/25 bg-amber-200/5 px-3 py-2 text-[11px] text-amber-50/85">ข้อความในบับเบิลนี้คือร่างที่ลูกค้าจะได้รับ · ส่งข้อความเดิมได้ หรือแก้ไขพร้อมระบุเหตุผลแล้วส่ง · การจ่ายแชทให้แอดมินตัดสินแยกในแผง handoff ด้านล่าง</div>}
       {bubbles.map((b, i) => {
         const decided = b.decision !== "pending";
         const sendable = canReview && !decided && gateOk(i);
         const editing = editingId === b.bubble_id;
+        const latestEdit = b.edit_history?.[b.edit_history.length - 1];
         return (
           <div key={b.bubble_id} className={`w-full min-w-0 rounded-2xl px-4 py-3 text-sm ${bubbleClass}`} style={{ backgroundColor: BOT_COLOR }}>
             {/* original vs saved edit */}
@@ -1306,6 +1330,12 @@ function ReviewBubbleList({
                 </span>
               )}
             </div>
+            {latestEdit && <div className="mt-1 rounded-md bg-white/10 px-2 py-1.5 text-[10px] text-white/80">
+              เหตุผลที่แก้ล่าสุด: {latestEdit.reason_category || "ไม่ระบุหมวด"} · {latestEdit.reason_text || "ไม่มีคำอธิบาย"}
+            </div>}
+            {b.decision === "rejected" && b.rejection_reason && <div className="mt-1 rounded-md bg-red-500/20 px-2 py-1.5 text-[10px] text-red-50">
+              เหตุผลไม่อนุมัติ: {b.rejection_category || "ไม่ระบุหมวด"} · {b.rejection_reason}
+            </div>}
 
             {/* controls */}
             {canReview && !decided && !editing && rejectingId !== b.bubble_id && (
@@ -1318,14 +1348,14 @@ function ReviewBubbleList({
                 >{liveSendEnabled ? "อนุมัติและส่งจริง" : "อนุมัติ (switch ปิด ไม่ส่งจริง)"}</button>
                 <button
                   disabled={busy}
-                  onClick={() => { setEditingId(b.bubble_id); setDraft(b.edited_text ?? b.original_text); }}
+                  onClick={() => { setEditingId(b.bubble_id); setDraft(b.edited_text ?? b.original_text); setEditReasonCategory(""); setEditReasonText(""); }}
                   className="rounded-md bg-white/15 hover:bg-white/25 disabled:opacity-40 px-2 py-1 text-[11px]"
                 >แก้ไข</button>
-                <button
+                {!msg.bot_handoff_required && <button
                   disabled={busy}
-                  onClick={() => { setRejectingId(b.bubble_id); setRejectReason(""); }}
+                  onClick={() => { setRejectingId(b.bubble_id); setRejectCategory(""); setRejectReason(""); }}
                   className="rounded-md bg-red-500/40 hover:bg-red-500/60 disabled:opacity-40 px-2 py-1 text-[11px]"
-                >ไม่อนุมัติส่ง</button>
+                >ไม่อนุมัติส่ง</button>}
                 {b.delivery.state === "mock_failed" && (
                   <button
                     disabled={!sendable || busy}
@@ -1350,35 +1380,52 @@ function ReviewBubbleList({
                 )}
               </div>
             )}
-            {canReview && !decided && rejectingId === b.bubble_id && (
+            {canReview && !msg.bot_handoff_required && !decided && rejectingId === b.bubble_id && (
               <div className="mt-3 space-y-2 rounded-lg border border-white/15 bg-black/10 p-3">
-                <label className="block text-[11px] font-medium text-white/80">เหตุผลที่ไม่อนุมัติ</label>
+                <label className="block text-[11px] font-medium text-white/80">หมวดเหตุผลที่ไม่อนุมัติส่ง</label>
+                <SelectField value={rejectCategory} onChange={(e) => setRejectCategory(e.target.value)} disabled={busy}
+                  className="h-10 w-full rounded-lg border border-white/25 bg-[#203954] px-3 text-sm text-white disabled:opacity-50">
+                  <option value="">เลือกเหตุผล</option>
+                  {BOTWORKER_REVIEW_REASON_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+                </SelectField>
+                <label className="block text-[11px] font-medium text-white/80">อธิบายเพิ่มเติม</label>
                 <textarea value={rejectReason} onChange={(e) => setRejectReason(e.target.value)} maxLength={1000} rows={3}
-                  className="min-h-20 w-full resize-y rounded-lg border border-white/25 bg-white/10 px-3 py-2 text-sm text-white placeholder:text-white/45 focus:outline-none" placeholder="ระบุเหตุผลเพื่อเก็บใน shadow_replies และ audit log" />
+                  className="min-h-20 w-full resize-y rounded-lg border border-white/25 bg-white/10 px-3 py-2 text-sm text-white placeholder:text-white/45 focus:outline-none" placeholder="อธิบายว่าทำไมจึงไม่อนุมัติส่ง" />
                 <div className="flex flex-wrap gap-2">
-                  <button disabled={busy || !rejectReason.trim()} onClick={async () => { if (await act(b.bubble_id, "reject", { rejection_reason: rejectReason })) { setRejectingId(null); setRejectReason(""); } }} className="min-h-9 rounded-md bg-red-500/60 px-3 py-1.5 text-xs font-medium disabled:opacity-40">บันทึกการไม่อนุมัติ</button>
-                  <button disabled={busy} onClick={() => { setRejectingId(null); setRejectReason(""); }} className="min-h-9 rounded-md bg-white/15 px-3 py-1.5 text-xs">ยกเลิก</button>
+                  <button disabled={busy || !rejectCategory || !rejectReason.trim()} onClick={async () => { if (await act(b.bubble_id, "reject", { rejection_category: rejectCategory, rejection_reason: rejectReason })) { setRejectingId(null); setRejectCategory(""); setRejectReason(""); } }} className="min-h-9 rounded-md bg-red-500/60 px-3 py-1.5 text-xs font-medium disabled:opacity-40">บันทึกการไม่อนุมัติ</button>
+                  <button disabled={busy} onClick={() => { setRejectingId(null); setRejectCategory(""); setRejectReason(""); }} className="min-h-9 rounded-md bg-white/15 px-3 py-1.5 text-xs">ยกเลิก</button>
                 </div>
               </div>
             )}
             {canReview && editing && (
-              <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-white/15 pt-3">
-                <button
-                  disabled={busy || !draft.trim()}
-                  onClick={async () => { if (await act(b.bubble_id, "save", { edited_text: draft })) setEditingId(null); }}
-                  className="rounded-md bg-white/20 hover:bg-white/30 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
-                >บันทึก</button>
-                <button
-                  disabled={!sendable || busy || !draft.trim()}
-                  onClick={async () => { if (await act(b.bubble_id, "save_and_approve", { edited_text: draft })) setEditingId(null); }}
-                  className="rounded-md bg-green-500/40 hover:bg-green-500/60 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
-                  title={!gateOk(i) ? "ต้องตัดสินบับเบิ้ลก่อนหน้าก่อน" : ""}
-                >{liveSendEnabled ? "บันทึกและส่งจริง" : "บันทึกและอนุมัติ (switch ปิด ไม่ส่งจริง)"}</button>
-                <button
-                  disabled={busy}
-                  onClick={() => { setEditingId(null); setDraft(b.edited_text ?? b.original_text); }}
-                  className="rounded-md bg-white/15 hover:bg-white/25 disabled:opacity-40 px-2 py-1 text-[11px]"
-                >ยกเลิก</button>
+              <div className="mt-3 space-y-2 border-t border-white/15 pt-3">
+                <label className="block text-[11px] font-medium text-white/80">หมวดเหตุผลที่แก้คำตอบ</label>
+                <SelectField value={editReasonCategory} onChange={(e) => setEditReasonCategory(e.target.value)} disabled={busy}
+                  className="h-10 w-full rounded-lg border border-white/25 bg-[#203954] px-3 text-sm text-white disabled:opacity-50">
+                  <option value="">เลือกเหตุผล</option>
+                  {BOTWORKER_REVIEW_REASON_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+                </SelectField>
+                <label className="block text-[11px] font-medium text-white/80">อธิบายว่าทำไมจึงแก้</label>
+                <textarea value={editReasonText} onChange={(e) => setEditReasonText(e.target.value)} maxLength={1000} rows={2}
+                  className="min-h-16 w-full resize-y rounded-lg border border-white/25 bg-white/10 px-3 py-2 text-sm text-white placeholder:text-white/45 focus:outline-none" placeholder="ระบุรายละเอียดประกอบการแก้คำตอบ" />
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    disabled={busy || !draft.trim() || !editReasonCategory || !editReasonText.trim()}
+                    onClick={async () => { if (await act(b.bubble_id, "save", { edited_text: draft, reason_category: editReasonCategory, reason_text: editReasonText })) { setEditingId(null); setEditReasonCategory(""); setEditReasonText(""); } }}
+                    className="rounded-md bg-white/20 hover:bg-white/30 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
+                  >บันทึก</button>
+                  <button
+                    disabled={!sendable || busy || !draft.trim() || !editReasonCategory || !editReasonText.trim()}
+                    onClick={async () => { if (await act(b.bubble_id, "save_and_approve", { edited_text: draft, reason_category: editReasonCategory, reason_text: editReasonText })) { setEditingId(null); setEditReasonCategory(""); setEditReasonText(""); } }}
+                    className="rounded-md bg-green-500/40 hover:bg-green-500/60 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
+                    title={!gateOk(i) ? "ต้องตัดสินบับเบิ้ลก่อนหน้าก่อน" : ""}
+                  >{liveSendEnabled ? "บันทึกและส่งจริง" : "บันทึกและอนุมัติ (switch ปิด ไม่ส่งจริง)"}</button>
+                  <button
+                    disabled={busy}
+                    onClick={() => { setEditingId(null); setDraft(b.edited_text ?? b.original_text); setEditReasonCategory(""); setEditReasonText(""); }}
+                    className="rounded-md bg-white/15 hover:bg-white/25 disabled:opacity-40 px-2 py-1 text-[11px]"
+                  >ยกเลิก</button>
+                </div>
               </div>
             )}
             {/* decided + mock_failed → ปุ่มลองส่งใหม่ (อยู่นอก pending block — bubble ตัดสินแล้ว) */}

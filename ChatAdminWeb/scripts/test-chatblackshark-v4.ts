@@ -15,6 +15,7 @@ const { writes } = await import("./test-chatblackshark-v4-mongo.mjs");
 const answerCalls: { url: string; authorization: string; body: Record<string, unknown> }[] = [];
 let tokenRequests = 0;
 let firstAnswerAttempt = true;
+let legacyPayload: Record<string, unknown> = { answer: "legacy response" };
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = String(input);
   if (url.endsWith("/api/engine/token")) {
@@ -36,7 +37,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return Response.json({ answer: `ตอบร้าน ${body.shop_id} ครับ`, conversation_id: body.conversation_id,
       message_id: body.message_id, image_desc: "เห็นสินค้าจากภาพ", products: [{ item_id: "1" }], handoff_required: false });
   }
-  if (url.endsWith("/chat")) return Response.json({ answer: "legacy response" });
+  if (url.endsWith("/chat")) return Response.json(legacyPayload);
   throw new Error(`unexpected URL ${url}`);
 }) as typeof fetch;
 
@@ -65,6 +66,13 @@ process.env.TEST_CHAT_ENGINE = "legacy";
 const legacy = await callBot({ platform: "shopee", shopId: "another-shop", shopName: "Shop B",
   message: "กลับไป legacy", history: [] });
 if (legacy.chat_engine !== "legacy" || legacy.answer !== "legacy response") throw new Error("global selector did not switch back to legacy");
+legacyPayload = { answer: "ส่งแอดมินแล้ว", handoff_to_admin: true, handoff_reason: "human_request" };
+const reviewHandoff = await callBot({ platform: "shopee", shopId: "another-shop", shopName: "Shop B",
+  message: "ขอคุยกับแอดมิน", history: [], conversationId: "c3", messageId: "m3", testSource: "botworker", simulate: true });
+if (reviewHandoff.handoff_required !== true || reviewHandoff.handoff_to_admin !== false ||
+    reviewHandoff.answer.includes("ส่งแอดมินแล้ว") || reviewHandoff.handoff_explanation !== "ส่งแอดมินแล้ว") {
+  throw new Error("legacy BotWorker handoff was not converted to an honest review draft");
+}
 if (tokenRequests !== 2) throw new Error("legacy selection unexpectedly requested an engine token");
 console.log("PASS global engine selection, shop-scoped V4, persona propagation, 10-minute token cache/401 refresh, and legacy switch-back");
 }

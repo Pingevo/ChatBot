@@ -76,6 +76,8 @@ function toRow(doc: ShadowReplyDoc) {
   const createdAt = new Date(doc.created_at);
   const bubbles = (doc.review_bubbles || []).map((bubble) => {
     const finalText = bubble.approved_text ?? bubble.edited_text ?? bubble.original_text;
+    const outboundText = bubble.delivery?.outbound_text ??
+      (["live_sent", "live_unknown"].includes(bubble.delivery?.state || "") ? finalText : undefined);
     const decidedAt = bubble.decided_at ? new Date(bubble.decided_at) : null;
     return {
       bubble_id: bubble.bubble_id,
@@ -87,9 +89,13 @@ function toRow(doc: ShadowReplyDoc) {
       decided_by_name: bubble.decided_by_name,
       decided_at: decidedAt,
       review_minutes: decidedAt ? Math.max(0, (decidedAt.getTime() - createdAt.getTime()) / 60_000) : null,
+      rejection_category: bubble.rejection_category,
       rejection_reason: bubble.rejection_reason,
       edit_history: bubble.edit_history,
       delivery_state: bubble.delivery?.state || "not_requested",
+      outbound_text: outboundText,
+      card_item_id: bubble.card?.item_id,
+      card_delivery_state: bubble.card?.delivery?.state || "not_requested",
     };
   });
   const decisions = bubbles.map((b) => b.decision);
@@ -119,13 +125,17 @@ function toRow(doc: ShadowReplyDoc) {
     handoff_explanation: doc.bot_handoff_explanation || "",
     handoff_reviewed_by: review?.reviewed_by_name || review?.reviewed_by,
     handoff_reviewed_at: review?.reviewed_at ? new Date(review.reviewed_at) : null,
+    handoff_rejection_category: review?.rejection_category || "",
     handoff_rejection_reason: review?.rejection_reason || "",
     handoff_assigned_to: review?.selected_admin_name || review?.selected_admin_id || "",
     needs_human: handoff === "approved" || outcome === "edited" || outcome === "rejected",
     max_edit_pct: Math.max(0, ...bubbles.map((b) => b.edit_pct)),
     review_minutes: reviewMinutes.length ? Math.max(...reviewMinutes) : null,
     reviewers,
-    admin_reasons: [...bubbles.map((b) => b.rejection_reason || ""), review?.rejection_reason || ""].filter(Boolean),
+    admin_reasons: [
+      ...bubbles.flatMap((b) => b.rejection_reason ? [`${b.rejection_category ? `${b.rejection_category}: ` : ""}${b.rejection_reason}`] : []),
+      ...(review?.rejection_reason ? [`${review.rejection_category ? `${review.rejection_category}: ` : ""}${review.rejection_reason}`] : []),
+    ],
     bubbles,
   };
 }
@@ -296,6 +306,7 @@ function toTimeline(events: BotworkerEventDoc[]) {
     actor_name: (event.metadata?.actor_name || event.metadata?.reviewer_name) as string | undefined,
     created_at: event.created_at,
     action: (event.metadata?.action || (event.metadata?.request as Record<string, unknown> | undefined)?.action) as string | undefined,
+    rejection_category: event.metadata?.rejection_category as string | undefined,
     rejection_reason: event.metadata?.rejection_reason as string | undefined,
     assigned_to_name: event.metadata?.assigned_to_name as string | undefined,
   }));
@@ -326,11 +337,12 @@ export async function exportBotPerformance(filters: PerfFilters, format: "csv" |
   const out = filtered.slice(0, EXPORT_LIMIT);
   const isTruncated = truncated || filtered.length > EXPORT_LIMIT;
   if (format === "jsonl") return { body: out.map((row) => JSON.stringify(row)).join("\n"), truncated: isTruncated };
-  const header = ["created_at", "shop_id", "conversation_id", "reply_id", "inbound_text", "bot_reply_text", "final_text", "outcome", "max_edit_pct",
+  const header = ["created_at", "shop_id", "conversation_id", "reply_id", "inbound_text", "bot_reply_text", "final_text", "outbound_text", "delivery_state", "outcome", "max_edit_pct",
     "admin_reasons", "handoff", "handoff_reason", "handoff_explanation", "handoff_assigned_to", "reviewers", "review_minutes"];
   const lines = out.map((row) => [
     row.created_at, row.shop_id, row.conversation_id, row.reply_id, row.inbound_text, row.bot_reply_text,
-    row.bubbles.map((b) => b.final_text).join("\n---\n"), row.outcome, row.max_edit_pct, row.admin_reasons.join(" | "),
+    row.bubbles.map((b) => b.final_text).join("\n---\n"), row.bubbles.map((b) => b.outbound_text ?? "").join("\n---\n"),
+    row.bubbles.map((b) => b.delivery_state).join("\n---\n"), row.outcome, row.max_edit_pct, row.admin_reasons.join(" | "),
     row.handoff, row.handoff_reason, row.handoff_explanation, row.handoff_assigned_to, row.reviewers.join(" | "),
     row.review_minutes === null ? "" : Math.round(row.review_minutes),
   ].map(csvCell).join(","));

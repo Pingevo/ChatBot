@@ -463,8 +463,9 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       },
       v4Params: { ...params, signal: fetchSignal },
     });
+    const reviewHandoff = isWorkerCall && data.handoff_to_admin === true && chatEngine !== "v4";
     return {
-      answer: data.answer || "",
+      answer: reviewHandoff ? "ขออนุญาตให้เจ้าหน้าที่ตรวจสอบคำถามนี้เพิ่มเติมนะคะ" : data.answer || "",
       source: data.source,
       model: data.model,
       elapsed: typeof data.elapsed === "number" ? data.elapsed : undefined,
@@ -483,11 +484,12 @@ export async function callBot(params: BotCallParams): Promise<BotCallResponse> {
       web_search_model: data.web_search_model,
       steps: data.steps,
       routing_decision: data.routing_decision,
-      handoff_to_admin: data.handoff_to_admin === true || data.handoff_required === true,
-      handoff_required: data.handoff_required === true,
+      handoff_to_admin: isWorkerCall ? false : data.handoff_to_admin === true || data.handoff_required === true,
+      handoff_required: data.handoff_required === true || reviewHandoff,
       reason: typeof data.reason === "string" ? data.reason : undefined,
       handoff_reason: typeof data.handoff_reason === "string" ? data.handoff_reason : undefined,
-      handoff_explanation: typeof data.handoff_explanation === "string" ? data.handoff_explanation : undefined,
+      handoff_explanation: reviewHandoff ? String(data.answer || "") :
+        typeof data.handoff_explanation === "string" ? data.handoff_explanation : undefined,
       conversation_id: typeof data.conversation_id === "string" ? data.conversation_id : undefined,
       message_id: typeof data.message_id === "string" ? data.message_id : undefined,
     };
