@@ -1204,6 +1204,39 @@ async function main() {
       && !body.bot_worker.implemented.includes("tiktok"), `implemented=${JSON.stringify(body.bot_worker?.implemented)}`);
   });
 
+  await test("X8a Shops effective filter returns only enabled shops before pagination", async () => {
+    seedShop("s1", "shopee", true);
+    seedShop("s2", "shopee", false);
+    seedShop("t1", "tiktok", true);
+    const res = await shopsRoute.GET(REQ("/api/shops?botWorker=enabled&page=1&pageSize=1", "GET") as never);
+    const body = await res.json();
+    assert(body.total === 1, `filtered total=${body.total}`);
+    assert(body.totalPages === 1, `filtered pages=${body.totalPages}`);
+    assert(body.rows.length === 1 && body.rows[0].shop_id === "s1", `filtered rows=${JSON.stringify(body.rows)}`);
+  });
+
+  await test("X8b Shops pages have a unique order when creation times match", async () => {
+    seedShop("s1", "shopee");
+    seedShop("s2", "shopee");
+    seedShop("s3", "shopee");
+    const docs = mocks.fakeColl("shops");
+    for (let i = 0; i < docs.length; i++) {
+      docs[i]._id = String(i + 1);
+      docs[i].created_at = new Date(0);
+    }
+    const first = await (await shopsRoute.GET(REQ("/api/shops?page=1&pageSize=2", "GET") as never)).json();
+    const second = await (await shopsRoute.GET(REQ("/api/shops?page=2&pageSize=2", "GET") as never)).json();
+    assert(JSON.stringify([...first.rows, ...second.rows].map((r: any) => r.shop_id)) === '["s3","s2","s1"]',
+      `unstable page order: ${JSON.stringify([...first.rows, ...second.rows].map((r: any) => r.shop_id))}`);
+  });
+
+  await test("X8c Shops effective filter is empty when global switch is off", async () => {
+    seedShop("s1", "shopee", true);
+    mocks.state.config.bot_worker_enabled = false;
+    const body = await (await shopsRoute.GET(REQ("/api/shops?botWorker=enabled&page=1&pageSize=12", "GET") as never)).json();
+    assert(body.total === 0 && body.rows.length === 0, `global off filter=${JSON.stringify(body)}`);
+  });
+
   await test("X9 PATCH bot_worker_enabled:true on tiktok shop → 422, zero write, zero audit", async () => {
     seedShop("tt1", "tiktok", false);
     const res = await shopIdRoute.PATCH(

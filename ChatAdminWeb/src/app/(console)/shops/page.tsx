@@ -68,6 +68,7 @@ export default function ShopsPage() {
   const [shops, setShops] = useState<ShopRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [platform, setPlatform] = useState<Platform | "all">("all");
+  const [botWorkerFilter, setBotWorkerFilter] = useState<"all" | "enabled">("all");
   const [search, setSearch] = useState("");
   const [searchInput, setSearchInput] = useState("");
   const [sortBy, setSortBy] = useState<SortBy>("created_at");
@@ -105,6 +106,7 @@ export default function ShopsPage() {
       const r = await api().get<ListResponse>("/shops", {
         params: {
           platform: platform === "all" ? undefined : platform,
+          botWorker: botWorkerFilter === "enabled" ? "enabled" : undefined,
           search: search || undefined,
           sortBy,
           sortDir,
@@ -125,7 +127,7 @@ export default function ShopsPage() {
     } finally {
       setLoading(false);
     }
-  }, [platform, search, sortBy, sortDir, page, pageSize]);
+  }, [platform, botWorkerFilter, search, sortBy, sortDir, page, pageSize]);
 
   useEffect(() => {
     load();
@@ -214,8 +216,9 @@ export default function ShopsPage() {
       icon={Store}
       title="ร้านค้า"
       helpHref="/help#shops"
-      subtitle={`ร้านในเครือทั้งหมด ${total} ร้าน`}
+      subtitle={botWorkerFilter === "enabled" ? `ร้านที่เปิดบอทตอบกลับ ${total} ร้าน` : `ร้านในเครือทั้งหมด ${total} ร้าน`}
       stickyMobileSearch
+      contentClassName="mx-auto w-full max-w-[1600px] p-4 md:p-6 space-y-4"
       actions={
         <Button size="sm" variant="outline" onClick={load} disabled={loading}>
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
@@ -223,11 +226,12 @@ export default function ShopsPage() {
       }
     >
       {/* Search — full row */}
-        <div className="phone-search-anchor flex items-center gap-1.5">
-          <div className="relative flex-1">
+        <div className="phone-search-anchor flex w-full items-center gap-1.5">
+          <div className="relative min-w-0 flex-1">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-subtle" />
             <input
               type="text"
+              aria-label="ค้นหาร้านค้า"
               placeholder="ค้นหาร้าน... (พิมพ์แล้วค้นหาทันที)"
               value={searchInput}
               onChange={(e) => setSearchInput(e.target.value)}
@@ -243,7 +247,7 @@ export default function ShopsPage() {
 
         {/* Filters */}
         <div className="flex flex-wrap items-center gap-2">
-          <div className="flex gap-1.5">
+          <div className="flex flex-wrap gap-1.5">
             {platformFilters.map((f) => (
               <button
                 key={f.value}
@@ -258,6 +262,19 @@ export default function ShopsPage() {
               </button>
             ))}
           </div>
+          <span className="hidden sm:block h-5 w-px bg-border mx-1" aria-hidden="true" />
+          <button
+            type="button"
+            onClick={() => { setBotWorkerFilter(botWorkerFilter === "enabled" ? "all" : "enabled"); setPage(1); }}
+            aria-pressed={botWorkerFilter === "enabled"}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs rounded-lg transition-colors ${
+              botWorkerFilter === "enabled"
+                ? "bg-brand text-white"
+                : "bg-surface-2 text-text-muted hover:bg-pale-sky-soft"
+            }`}
+          >
+            <Bot size={13} /> บอทเปิดใช้งาน
+          </button>
         </div>
 
         {/* ⚡ Phase 2D — Botworker platform scope (global meta + per-platform switches) */}
@@ -323,11 +340,11 @@ export default function ShopsPage() {
           <EmptyState
             icon={Store}
             title="ไม่มีร้านค้า"
-            description={search ? "ไม่พบผลลัพธ์ที่ตรงกับการค้นหา" : "ยังไม่มีร้านในระบบ — รอ Phase 6 sync จาก dbWallet"}
+            description={search || botWorkerFilter === "enabled" ? "ไม่พบร้านที่ตรงกับตัวกรอง" : "ยังไม่มีร้านในระบบ — รอ Phase 6 sync จาก dbWallet"}
           />
         ) : (
           <>
-            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 md:grid-cols-2 2xl:grid-cols-3 gap-4">
               {shops.map((s) => (
                 <Card
                   key={`${s.platform}-${s.shop_id}`}
@@ -420,11 +437,11 @@ export default function ShopsPage() {
 
             {/* Pagination — เลขหน้าสวยๆ */}
             {totalPages > 1 && (
-              <div className="flex items-center justify-between">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <span className="text-xs text-text-muted">
                   หน้า {page} จาก {totalPages} · ทั้งหมด {total} ร้าน
                 </span>
-                <Pagination page={page} totalPages={totalPages} onChange={setPage} />
+                <Pagination page={page} totalPages={totalPages} onChange={setPage} responsive />
               </div>
             )}
           </>

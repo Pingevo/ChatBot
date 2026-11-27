@@ -46,6 +46,7 @@ export async function listShops(platform?: Platform): Promise<ShopDoc[]> {
 export async function listShopsPaged(opts: {
   platform?: Platform;
   search?: string;
+  botWorkerPlatforms?: Platform[];
   sortBy?: "shopname" | "created_at" | "conversation_count" | "product_count";
   sortDir?: 1 | -1;
   page?: number;
@@ -54,6 +55,12 @@ export async function listShopsPaged(opts: {
   const coll = await getCollection<ShopDoc>(COLLECTIONS.shops);
   const filter: Record<string, unknown> = {};
   if (opts.platform) filter.platform = opts.platform;
+  if (opts.botWorkerPlatforms) {
+    filter.platform = opts.platform
+      ? { $in: opts.botWorkerPlatforms.filter((p) => p === opts.platform) }
+      : { $in: opts.botWorkerPlatforms };
+    filter.bot_worker_enabled = true;
+  }
   if (opts.search) {
     // 🔒 escape regex
     const safeSearch = safeRegexSearch(opts.search);
@@ -71,7 +78,7 @@ export async function listShopsPaged(opts: {
   const [rows, total] = await Promise.all([
     coll
       .find(filter)
-      .sort({ [sortBy]: sortDir })
+      .sort({ [sortBy]: sortDir, _id: sortDir })
       .skip((page - 1) * pageSize)
       .limit(pageSize)
       .toArray(),

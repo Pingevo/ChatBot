@@ -2,6 +2,7 @@
 // Query params:
 //   platform = shopee | tiktok | lazada
 //   search   = free text (matches shopname or shop_id)
+//   botWorker = enabled (global + supported platform + platform/shop switches must be on)
 //   sortBy   = shopname | created_at | conversation_count | product_count (default: created_at)
 //   sortDir  = asc | desc (default: desc)
 //   page     = 1-based page number (default: 1)
@@ -31,6 +32,7 @@ export async function GET(req: NextRequest) {
   const sortDirParam = url.searchParams.get("sortDir");
   const pageParam = url.searchParams.get("page");
   const pageSizeParam = url.searchParams.get("pageSize");
+  const botWorkerParam = url.searchParams.get("botWorker");
 
   // ⚡ Phase 2D — botworker scope meta (fail-closed: config อ่านไม่ได้ → ทุกชั้น OFF)
   const config = await systemConfigService.getSystemConfig().catch(() => null);
@@ -45,7 +47,7 @@ export async function GET(req: NextRequest) {
   };
 
   // Legacy mode: no pagination params → return all (for config page + simple callers)
-  if (!pageParam && !pageSizeParam && !search && !sortByParam) {
+  if (!pageParam && !pageSizeParam && !search && !sortByParam && !botWorkerParam) {
     const shops = await shopService.listShops(platform || undefined);
     return json({ rows: shops, total: shops.length, bot_worker: botWorker });
   }
@@ -62,6 +64,11 @@ export async function GET(req: NextRequest) {
   const { rows, total } = await shopService.listShopsPaged({
     platform: platform || undefined,
     search,
+    botWorkerPlatforms: botWorkerParam === "enabled"
+      ? botWorker.global
+        ? BOTWORKER_BACKENDS.filter((p) => botWorker.platforms[p] === true)
+        : []
+      : undefined,
     sortBy,
     sortDir,
     page,
