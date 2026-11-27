@@ -304,7 +304,14 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, onRefres
   }
 
   return (
-    <form onSubmit={handleSubmit} className="p-3 border-t border-border bg-surface shrink-0">
+    <form onSubmit={handleSubmit} onDragOver={(event) => {
+      if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
+    }} onDrop={(event) => {
+      if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+      event.preventDefault();
+      if (!event.dataTransfer.files.length || !canSelectMedia || file || stickerOpen) return;
+      chooseFile("image", event.dataTransfer.files);
+    }} className="p-3 border-t border-border bg-surface shrink-0">
       {quickReplies.length > 0 && (
         <div className="flex flex-wrap gap-1.5 mb-2 max-h-20 overflow-y-auto">
           {quickReplies.map((reply) => (
@@ -367,12 +374,18 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, onRefres
               </div>
               <div className="grid max-h-48 grid-cols-5 gap-1.5 overflow-y-auto sm:grid-cols-7" aria-label="ภาพสติกเกอร์">
                 {stickers.map((sticker) => <button key={sticker.sid} type="button" onClick={() => setStickerId(sticker.sid)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && stickerId === sticker.sid) {
+                      event.preventDefault();
+                      event.currentTarget.form?.requestSubmit();
+                    }
+                  }}
                   aria-label={`เลือกสติกเกอร์ ${sticker.sid}`} aria-pressed={stickerId === sticker.sid}
                   className={`flex h-14 items-center justify-center rounded-lg border p-1 ${stickerId === sticker.sid ? "border-brand bg-brand/10" : "border-border bg-surface"}`}>
                   <img src={sticker.url} alt="" loading="lazy" className="max-h-full max-w-full object-contain" />
                 </button>)}
               </div>
-              {stickerId && <p className="text-xs text-brand">เลือกสติกเกอร์แล้ว · กดปุ่มส่งเพื่อยืนยัน</p>}
+              {stickerId && <p className="text-xs text-brand">เลือกสติกเกอร์แล้ว · กด Enter หรือปุ่มส่งเพื่อยืนยัน</p>}
             </div>
           )}
         </div>
