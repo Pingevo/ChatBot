@@ -6,11 +6,12 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Loading } from "@/components/ui/Loading";
 import { PageShell } from "@/components/ui/PageShell";
+import { SettingsNavigation, type SettingsSection } from "@/components/settings/SettingsNavigation";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import {
   Shield, ShieldAlert, ShieldCheck, RefreshCw,
   Database, Lock, Zap, Store, Clock, Power, AlertCircle,
-  Bot, Activity, Cpu, Server,
+  Bot, Activity, Cpu, Server, ChevronDown,
 } from "lucide-react";
 import { useAuth } from "@/lib/authStore";
 import { canEditPage } from "@/lib/roles";
@@ -163,6 +164,8 @@ export default function ConfigPage() {
   const [botUrlDraft, setBotUrlDraft] = useState("");
   const [chatEngineDraft, setChatEngineDraft] = useState<"legacy" | "v2" | "v3" | "v4">("legacy");
   const [kbReadiness, setKbReadiness] = useState<{ ready: boolean; reason: string } | null>(null);
+  const [activeSection, setActiveSection] = useState<SettingsSection>("engine");
+  const [shopsExpanded, setShopsExpanded] = useState(true);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -420,6 +423,9 @@ export default function ConfigPage() {
   }
 
   const enabledShops = shops.filter((s) => s.enabled_for_chat).length;
+  const pythonEngine = config?.chat_engine !== "v4";
+  const legacyEngine = config?.chat_engine === "legacy";
+  const llmEngine = legacyEngine || config?.chat_engine === "v2";
   const shopsByPlatform = (p: Platform) => shops.filter((s) => s.platform === p);
 
   return (
@@ -427,13 +433,13 @@ export default function ConfigPage() {
       icon={Shield}
       title="ตั้งค่าระบบ"
       helpHref="/help#config"
-      subtitle="3 แพลตฟอร์ม (Shopee/TikTok/Lazada) · บริการบอท · สวิตช์อันตรายปิดถาวร"
+      subtitle="เลือกวิธีตอบแชท และจัดการค่าที่ใช้กับ engine ปัจจุบัน"
       actions={
         <Button size="sm" variant="outline" onClick={load} disabled={loading}>
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> รีเฟรช
         </Button>
       }
-      contentClassName="p-4 sm:p-6 space-y-4"
+      contentClassName="mx-auto w-full max-w-[1440px] p-3 sm:p-5 space-y-3"
     >
         {/* Read-only banner for admin role */}
         {!editable && (
@@ -443,96 +449,41 @@ export default function ConfigPage() {
           </div>
         )}
 
-        {/* Iron Rules Banner */}
-        <div className="rounded-xl border border-info-dark/50 bg-[#0a1628] p-4">
-          <div className="flex items-center gap-2 mb-2.5">
-            <ShieldAlert size={16} className="text-white/80" />
-            <span className="text-sm font-semibold text-white">กฎเหล็ก (Iron Rules) — รองรับ 3 platform</span>
-          </div>
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-x-6 gap-y-2 text-xs">
-            <div className="flex items-center gap-2 text-white">
-              <span className="w-1.5 h-1.5 rounded-full bg-info-soft flex-shrink-0" />
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_208px] lg:items-start">
+          <SettingsNavigation page="config" activeSection={activeSection} onSectionChange={setActiveSection} showDiagnostics={pythonEngine} />
+          <section id="settings-section-panel" aria-label={activeSection === "engine" ? "คำตอบบอท" : activeSection === "operations" ? "การทำงาน" : activeSection === "shops" ? "ร้านค้า" : activeSection === "diagnostics" ? "สถานะระบบ" : "ข้อจำกัด"}
+            className="order-last min-w-0 space-y-3 lg:order-first">
+
+        {/* Platform transport rules stay available without occupying the first viewport. */}
+        {activeSection === "safety" && <details className="group rounded-lg border border-border bg-surface px-3 py-2.5">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand [&::-webkit-details-marker]:hidden">
+            <ShieldAlert size={15} className="text-warning" />
+            กฎการเชื่อมต่อแพลตฟอร์ม
+            <span className="ml-auto text-xs font-normal text-text-muted">รายละเอียด</span>
+            <ChevronDown size={16} className="text-text-muted transition-transform group-open:rotate-180" aria-hidden="true" />
+          </summary>
+          <div className="mt-3 grid grid-cols-1 gap-x-6 gap-y-2 border-t border-border pt-3 text-xs sm:grid-cols-2">
+            <div className="flex items-center gap-2 text-text-muted">
+              <span className="w-1.5 h-1.5 rounded-full bg-info flex-shrink-0" />
               ห้ามยิง Shopee / TikTok / Lazada API ทุก endpoint
             </div>
-            <div className="flex items-center gap-2 text-white">
-              <span className="w-1.5 h-1.5 rounded-full bg-info-soft flex-shrink-0" />
+            <div className="flex items-center gap-2 text-text-muted">
+              <span className="w-1.5 h-1.5 rounded-full bg-info flex-shrink-0" />
               ห้ามส่ง/อ่านข้อความจริงจาก platform ใดๆ
             </div>
-            <div className="flex items-center gap-2 text-white">
-              <span className="w-1.5 h-1.5 rounded-full bg-info-soft flex-shrink-0" />
+            <div className="flex items-center gap-2 text-text-muted">
+              <span className="w-1.5 h-1.5 rounded-full bg-info flex-shrink-0" />
               แชทเข้าผ่าน data writer (พี่เขาเขียนลง MongoDB ของเรา)
             </div>
-            <div className="flex items-center gap-2 text-white">
-              <span className="w-1.5 h-1.5 rounded-full bg-info-soft flex-shrink-0" />
+            <div className="flex items-center gap-2 text-text-muted">
+              <span className="w-1.5 h-1.5 rounded-full bg-info flex-shrink-0" />
               bot แยก platform + conversation_id prefix (shp_/tt_/lz_)
             </div>
           </div>
-        </div>
-
-        {/* Bot Services — 3 ตัว แยก port */}
-        <Card className="p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <Bot size={14} className="text-brand" />
-            <h2 className="text-sm font-semibold text-text">Bot Services (3 ตัว แยก port)</h2>
-            <Badge tone="brand" className="ml-auto">3 platform</Badge>
-          </div>
-          <div>
-            {(["shopee", "tiktok", "lazada"] as Platform[]).map((p) => {
-              const url = config?.[`${p}_bot_url` as keyof SystemConfig] as string;
-              const isEditing = editingBotUrl === p;
-              return (
-                <div key={p} className="border-t border-border/60 pt-3 first:border-0 first:pt-0">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <div className="flex items-center gap-2">
-                      <Server size={13} className={platformColors[p]} />
-                      <span className="text-sm font-medium capitalize text-text">
-                        {p} Bot
-                      </span>
-                    </div>
-                    {editable && !isEditing && (
-                      <Button
-                        size="sm"
-                        variant="ghost"
-                        onClick={() => {
-                          setEditingBotUrl(p);
-                          setBotUrlDraft(url || "");
-                        }}
-                      >
-                        แก้ไข
-                      </Button>
-                    )}
-                  </div>
-                  {isEditing ? (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input
-                        type="text"
-                        value={botUrlDraft}
-                        onChange={(e) => setBotUrlDraft(e.target.value)}
-                        placeholder="http://127.0.0.1:80xx"
-                        className="min-w-0 flex-1 rounded-md bg-surface border border-border px-2 py-1 text-xs text-text"
-                      />
-                      <Button size="sm" className="shrink-0" onClick={() => handleSaveBotUrl(p)} disabled={saving}>
-                        {saving ? <Loading size={12} /> : "บันทึก"}
-                      </Button>
-                      <Button size="sm" variant="ghost" className="shrink-0" onClick={() => setEditingBotUrl(null)}>
-                        ยกเลิก
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="flex min-w-0 items-center gap-2 text-xs">
-                      <code className="min-w-0 max-w-full break-all bg-surface px-2 py-0.5 rounded text-text-muted font-mono">
-                        {url}
-                      </code>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </Card>
+        </details>}
 
         {/* Global Chat Engine — one selector for all answer entry points */}
-        <Card className="p-4">
+        {activeSection === "engine" && <Card className="p-3 sm:p-4">
           <div className="flex items-center gap-2 mb-3">
             <Cpu size={14} className="text-brand" />
             <h2 className="text-sm font-semibold text-text">Chat Engine (logic ตอบของบอท)</h2>
@@ -541,13 +492,12 @@ export default function ConfigPage() {
             </Badge>
           </div>
           <div className="border-t border-border/60 pt-3">
-            <div className="flex items-center justify-between mb-2">
-              <div className="text-xs text-text-muted">
-                ค่ากลางเดียวสำหรับทุกหน้าที่เรียก AI: BotWorker, Test Chat, Shadow Inbox, Assignment, Live Assignment, Replay และ API
-              </div>
+            <div className="mb-2 text-xs text-text-muted">
+              ใช้ร่วมกันใน BotWorker, Test Chat, Shadow Inbox, Assignment, Replay และ API
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <SelectField
+                aria-label="Chat Engine"
                 value={chatEngineDraft}
                 onChange={(e) => setChatEngineDraft(e.target.value as "legacy" | "v2" | "v3" | "v4")}
                 disabled={!editable || saving}
@@ -581,10 +531,78 @@ export default function ConfigPage() {
               </div>
             )}
           </div>
-        </Card>
+        </Card>}
 
+        {/* Python bot endpoints are not used by ChatBlackshark v4. */}
+        {activeSection === "engine" && pythonEngine && <details className="group rounded-lg border border-border bg-surface px-3 py-2.5">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand [&::-webkit-details-marker]:hidden">
+            <Bot size={15} className="text-brand" />
+            Bot Services · URL ตามแพลตฟอร์ม
+            <span className="ml-auto text-xs font-normal text-text-muted">3 บริการ</span>
+            <ChevronDown size={16} className="text-text-muted transition-transform group-open:rotate-180" aria-hidden="true" />
+          </summary>
+          <div className="mt-3 space-y-3 border-t border-border pt-3">
+            {(["shopee", "tiktok", "lazada"] as Platform[]).map((p) => {
+              const url = config?.[`${p}_bot_url` as keyof SystemConfig] as string;
+              const isEditing = editingBotUrl === p;
+              return (
+                <div key={p} className="border-t border-border/60 pt-3 first:border-0 first:pt-0">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="flex items-center gap-2">
+                      <Server size={13} className={platformColors[p]} />
+                      <span className="text-sm font-medium capitalize text-text">
+                        {p} Bot
+                      </span>
+                    </div>
+                    {editable && !isEditing && (
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => {
+                          setEditingBotUrl(p);
+                          setBotUrlDraft(url || "");
+                        }}
+                      >
+                        แก้ไข
+                      </Button>
+                    )}
+                  </div>
+                  {isEditing ? (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        aria-label={`Bot URL ${p}`}
+                        value={botUrlDraft}
+                        onChange={(e) => setBotUrlDraft(e.target.value)}
+                        placeholder="http://127.0.0.1:80xx"
+                        className="min-w-0 flex-1 rounded-md bg-surface border border-border px-2 py-1 text-xs text-text"
+                      />
+                      <Button size="sm" className="shrink-0" onClick={() => handleSaveBotUrl(p)} disabled={saving}>
+                        {saving ? <Loading size={12} /> : "บันทึก"}
+                      </Button>
+                      <Button size="sm" variant="ghost" className="shrink-0" onClick={() => setEditingBotUrl(null)}>
+                        ยกเลิก
+                      </Button>
+                    </div>
+                  ) : (
+                    <div className="flex min-w-0 items-center gap-2 text-xs">
+                      <code className="min-w-0 max-w-full break-all bg-surface px-2 py-0.5 rounded text-text-muted font-mono">
+                        {url}
+                      </code>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+        </div>
+        </details>}
+
+        {/* ⚡ LLM Context Limit ย้ายไป /admin-config แล้ว (slider version) — ตั้งค่าที่เดียว กันสับสน */}
+
+        {/* Each category flows independently, so a tall card cannot leave gaps beside a short card. */}
+        <div className="space-y-3">
         {/* ⚡ Task 5B3-D — Legacy Shopee Retrieval (grouped pipeline flags) */}
-        <Card className="p-4">
+        {activeSection === "engine" && legacyEngine && <Card className="p-3 sm:p-4">
           <div className="flex items-center gap-2 mb-3">
             <Cpu size={14} className="text-brand" />
             <h2 className="text-sm font-semibold text-text">Legacy Shopee Retrieval</h2>
@@ -601,6 +619,7 @@ export default function ConfigPage() {
                 </div>
               </div>
               <ToggleSwitch
+                ariaLabel="Grouped Retrieval Shadow"
                 enabled={!!config?.grouped_retrieval_shadow_enabled}
                 onChange={() => editable && handleRetrievalToggle("grouped_retrieval_shadow_enabled", !config?.grouped_retrieval_shadow_enabled)}
                 disabled={saving || !editable}
@@ -614,6 +633,7 @@ export default function ConfigPage() {
                 </div>
               </div>
               <ToggleSwitch
+                ariaLabel="Grouped Retrieval Selection"
                 enabled={!!config?.grouped_retrieval_selection_enabled}
                 onChange={() => editable && handleRetrievalToggle("grouped_retrieval_selection_enabled", !config?.grouped_retrieval_selection_enabled)}
                 disabled={saving || !editable}
@@ -626,14 +646,10 @@ export default function ConfigPage() {
               Selection เปิดอยู่ — มีผลกับคำตอบจริงของลูกค้า (เฉพาะ legacy engine)
             </div>
           )}
-        </Card>
+        </Card>}
 
-        {/* ⚡ LLM Context Limit ย้ายไป /admin-config แล้ว (slider version) — ตั้งค่าที่เดียว กันสับสน */}
-
-        {/* Two-column masonry — cards สูงไม่เท่ากัน → ใช้ CSS columns ให้กระจายสมดุลอัตโนมัติ */}
-        <div className="columns-1 xl:columns-2 gap-4">
             {/* ⚡ Workstream E — Evidence Pool: 4 source toggles + strict kb selector */}
-            <Card className="p-4 break-inside-avoid mb-4">
+            {activeSection === "engine" && llmEngine && <Card className="p-3 sm:p-4">
               <div className="flex items-center gap-2 mb-3">
                 <Database size={14} className="text-brand" />
                 <h2 className="text-sm font-semibold text-text">Evidence Pool</h2>
@@ -645,7 +661,7 @@ export default function ConfigPage() {
               {/* KB source selector — CAS + readiness gate ฝั่ง server */}
               <div className="mb-3">
                 <div className="text-[11px] font-semibold text-text-muted uppercase mb-1.5">Knowledge Base Source</div>
-                <div className="flex items-center gap-1 p-1 rounded-lg bg-surface-2 w-fit">
+                <div className="flex max-w-full flex-wrap items-center gap-1 rounded-lg bg-surface-2 p-1 sm:w-fit">
                   {(["legacy", "zaapi"] as const).map((s) => {
                     const active = config?.kb_source === s;
                     const blocked = s === "zaapi" && kbReadiness !== null && !kbReadiness.ready;
@@ -679,12 +695,13 @@ export default function ConfigPage() {
                 {poolSourceRows.map((s) => {
                   const enabled = config?.pool_sources?.[s.key] !== false;
                   return (
-                    <div key={s.key} className="flex items-center justify-between py-3 border-b border-border/60 last:border-0">
+                    <div key={s.key} className="flex items-center justify-between py-2 border-b border-border/60 last:border-0">
                       <div className="min-w-0 flex-1 mr-3">
                         <div className="text-sm font-medium text-text">{s.label}</div>
-                        <div className="text-[11px] text-text-muted truncate">{s.description}</div>
+                        <div className="text-xs text-text-muted">{s.description}</div>
                       </div>
                       <ToggleSwitch
+                        ariaLabel={s.label}
                         enabled={enabled}
                         onChange={() => editable && handlePoolToggle(s.key, !enabled)}
                         disabled={saving || !editable}
@@ -699,16 +716,17 @@ export default function ConfigPage() {
                   มี source ที่ปิดอยู่ — bot จะไม่ query แหล่งนั้นเลย (zero reads)
                 </div>
               )}
-            </Card>
+            </Card>}
 
             {/* Dangerous switches — แยกตาม platform */}
-            <Card className="p-4 break-inside-avoid mb-4">
-              <div className="flex items-center gap-2 mb-3">
+            {activeSection === "safety" && <details className="group rounded-lg border border-border bg-surface px-3 py-2.5">
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-sm text-text focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand [&::-webkit-details-marker]:hidden">
                 <Lock size={14} className="text-text-muted" />
-                <h2 className="text-sm font-semibold text-text">สวิตช์อันตราย (ล็อค)</h2>
+                <span className="font-medium">สวิตช์อันตราย (ล็อค)</span>
                 <Badge tone="neutral" className="ml-auto">false ถาวร</Badge>
-              </div>
-              <div className="space-y-3">
+                <ChevronDown size={16} className="text-text-muted transition-transform group-open:rotate-180" aria-hidden="true" />
+              </summary>
+              <div className="mt-3 space-y-3 border-t border-border pt-3">
                 {dangerousSwitchesByPlatform.map(({ platform, switches }) => (
                   <div key={platform}>
                     <div className={`text-[11px] font-semibold uppercase mb-1.5 ${platformColors[platform]}`}>
@@ -719,7 +737,7 @@ export default function ConfigPage() {
                         <div key={sw.key} className="flex items-center justify-between py-2 border-b border-border/50 last:border-0">
                           <div className="min-w-0">
                             <div className="text-sm text-text">{sw.label}</div>
-                            <div className="text-[11px] text-text-muted truncate">{sw.description}</div>
+                            <div className="text-xs text-text-muted">{sw.description}</div>
                           </div>
                           <div className="flex items-center gap-1.5 flex-shrink-0">
                             <span className="text-xs font-mono text-text-subtle">false</span>
@@ -731,10 +749,10 @@ export default function ConfigPage() {
                   </div>
                 ))}
               </div>
-            </Card>
+            </details>}
 
             {/* Scoped Shopee send — does not unlock the global platform switch. */}
-            <Card className="p-4 break-inside-avoid mb-4 border-warning/30">
+            {activeSection === "operations" && <Card className="p-3 sm:p-4 border-warning/30">
               <div className="flex items-center gap-2 mb-3">
                 <ShieldAlert size={14} className="text-warning" />
                 <h2 className="text-sm font-semibold text-text">ส่งจริงจาก Tickets / BotWorker</h2>
@@ -750,30 +768,32 @@ export default function ConfigPage() {
                   </div>
                 </div>
                 <ToggleSwitch
+                  ariaLabel="อนุญาตการส่งข้อความ Shopee จาก Tickets และ BotWorker"
                   enabled={config?.shopee_console_send_enabled === true}
                   onChange={() => editable && handleSafeToggle("shopee_console_send_enabled", config?.shopee_console_send_enabled !== true)}
                   disabled={saving || !editable}
                 />
               </div>
-            </Card>
+            </Card>}
 
             {/* Safe switches */}
-            <Card className="p-4 break-inside-avoid mb-4">
+            {activeSection === "operations" && <Card className="p-3 sm:p-4">
               <div className="flex items-center gap-2 mb-3">
                 <ShieldCheck size={14} className="text-success-dark" />
                 <h2 className="text-sm font-semibold text-text">สวิตช์ปลอดภัย</h2>
                 <Badge tone="brand" className="ml-auto">เปิด/ปิดได้</Badge>
               </div>
               <div className="space-y-1.5">
-                {safeSwitches.map((sw) => {
+                {safeSwitches.filter((sw) => (sw.key !== "prompt_modular" || llmEngine) && (sw.key !== "web_search_enabled" || pythonEngine)).map((sw) => {
                   const enabled = config?.[sw.key] as boolean | undefined;
                   return (
-                    <div key={sw.key} className="flex items-center justify-between py-3 border-b border-border/60 last:border-0">
+                    <div key={sw.key} className="flex items-center justify-between py-2 border-b border-border/60 last:border-0">
                       <div className="min-w-0 flex-1 mr-3">
                         <div className="text-sm font-medium text-text">{sw.label}</div>
-                        <div className="text-[11px] text-text-muted truncate">{sw.description}</div>
+                        <div className="text-xs text-text-muted">{sw.description}</div>
                       </div>
                       <ToggleSwitch
+                        ariaLabel={sw.label}
                         enabled={!!enabled}
                         onChange={() => editable && handleSafeToggle(sw.key, !enabled)}
                         disabled={saving || !editable}
@@ -782,10 +802,10 @@ export default function ConfigPage() {
                   );
                 })}
               </div>
-            </Card>
+            </Card>}
 
             {/* Polling interval (realtime inbox) */}
-            <Card className="p-4 break-inside-avoid mb-4">
+            {activeSection === "operations" && <Card className="p-3 sm:p-4">
               <div className="flex items-center gap-2 mb-3">
                 <Clock size={14} className="text-text-muted" />
                 <h2 className="text-sm font-semibold text-text">Realtime Polling</h2>
@@ -796,6 +816,7 @@ export default function ConfigPage() {
               <div className="flex items-center gap-2">
                 <input
                   type="number"
+                  aria-label="Realtime Polling เป็นมิลลิวินาที"
                   min={500}
                   max={10000}
                   step={500}
@@ -814,13 +835,13 @@ export default function ConfigPage() {
                   ค่าปัจจุบัน: {config.polling_interval_ms}ms · อัปเดตโดย {config.updated_by}
                 </div>
               )}
-            </Card>
+            </Card>}
 
             {/* ⚡ Workflow Engine ย้ายไป /admin-config แล้ว — admin เปิด/ปิด + priority + timeout ได้เอง */}
 
             {/* Data Activity (collection monitor) */}
-            {testResults?.dataActivity && (
-              <Card className="p-4 break-inside-avoid mb-4">
+            {activeSection === "diagnostics" && testResults?.dataActivity && (
+              <Card className="p-3 sm:p-4">
                 <div className="flex items-center gap-2 mb-3">
                   <Activity size={14} className="text-success-dark" />
                   <h2 className="text-sm font-semibold text-text">Data Activity</h2>
@@ -833,21 +854,24 @@ export default function ConfigPage() {
             )}
 
             {/* Per-shop toggle — แยกตาม platform — ⚡ max-h + scroll ใน card กัน card ยาวลากคอลัมน์ */}
-            <Card className="p-4 break-inside-avoid mb-4 flex flex-col max-h-[520px]">
-              <div className="flex items-center gap-2 mb-3 shrink-0">
+            {activeSection === "shops" && <Card className="flex max-h-[min(70vh,680px)] flex-col p-3 sm:p-4">
+              <button type="button" onClick={() => setShopsExpanded((expanded) => !expanded)} aria-expanded={shopsExpanded} aria-controls="settings-shop-list"
+                className="flex w-full shrink-0 items-center gap-2 rounded-md text-left focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand">
                 <Store size={14} className="text-text-muted" />
-                <h2 className="text-sm font-semibold text-text">ร้านที่เปิดใช้งาน</h2>
+                <span className="text-sm font-semibold text-text">ร้านที่เปิดใช้งาน</span>
                 <Badge tone="brand" className="ml-auto">{enabledShops}/{shops.length}</Badge>
-              </div>
-              <p className="text-xs text-text-muted mb-3 shrink-0">
+                <ChevronDown size={16} className={`text-text-muted transition-transform ${shopsExpanded ? "rotate-180" : ""}`} aria-hidden="true" />
+              </button>
+              <p hidden={!shopsExpanded} className="mb-3 mt-2 shrink-0 text-xs text-text-muted">
                 เปิด/ปิดร้านที่จะแสดงในหน้า inbox (แยกตาม platform)
               </p>
+              <div id="settings-shop-list" hidden={!shopsExpanded} className="min-h-0 flex-1 overflow-y-auto">
               {shops.length === 0 ? (
                 <div className="text-xs text-text-muted bg-surface-2 rounded-lg p-3 text-center">
                   ยังไม่มีร้านในระบบ
                 </div>
               ) : (
-                <div className="space-y-3 overflow-y-auto min-h-0 flex-1 pr-0.5">
+                <div className="space-y-2 pr-0.5">
                   {(["shopee", "tiktok", "lazada"] as Platform[]).map((p) => {
                     const shopsP = shopsByPlatform(p);
                     if (shopsP.length === 0) return null;
@@ -860,7 +884,7 @@ export default function ConfigPage() {
                           {shopsP.map((shop) => (
                             <div
                               key={shop.shop_id}
-                              className="flex items-center justify-between py-3 border-b border-border/60 last:border-0"
+                              className="flex items-center justify-between py-2 border-b border-border/60 last:border-0"
                             >
                               <div className="min-w-0 flex-1 mr-3">
                                 <div className="text-sm font-medium text-text truncate">
@@ -874,6 +898,7 @@ export default function ConfigPage() {
                                 <Loading size={16} />
                               ) : (
                                 <ToggleSwitch
+                                  ariaLabel={`เปิดรับแชทร้าน ${shop.shopname || shop.shop_id}`}
                                   enabled={!!shop.enabled_for_chat}
                                   onChange={() => editable && handleShopToggle(shop)}
                                   disabled={!editable}
@@ -887,10 +912,11 @@ export default function ConfigPage() {
                   })}
                 </div>
               )}
-            </Card>
+              </div>
+            </Card>}
 
             {/* Test connection */}
-            <Card className="p-4 break-inside-avoid mb-4">
+            {activeSection === "diagnostics" && pythonEngine && <Card className="p-3 sm:p-4">
               <div className="flex items-center justify-between mb-3">
                 <div className="flex items-center gap-2">
                   <Zap size={14} className="text-warning" />
@@ -918,7 +944,9 @@ export default function ConfigPage() {
                 <ShieldCheck size={10} className="text-success-dark" />
                 ไม่ยิง API ไป platform ใดๆ — ตรวจเฉพาะ DB + health endpoint ของ bot
               </div>
-            </Card>
+            </Card>}
+        </div>
+          </section>
         </div>
     </PageShell>
   );

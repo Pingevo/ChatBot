@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { Loading } from "@/components/ui/Loading";
 import { PageShell } from "@/components/ui/PageShell";
+import { SettingsNavigation, type SettingsSection } from "@/components/settings/SettingsNavigation";
 import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import {
   RefreshCw, Sliders, Clock, MessageCircle, Save,
@@ -101,8 +102,7 @@ interface SectionProps {
 
 function ConfigSection({ icon, title, description, badge, children, disabled }: SectionProps) {
   return (
-    // ⚡ break-inside-avoid + mb-4 — ใช้ใน columns masonry ให้ card ไม่ถูกตัดกลาง + เว้นช่องล่าง
-    <Card className={`p-5 transition-opacity break-inside-avoid mb-4 ${disabled ? "opacity-60" : ""}`}>
+    <Card className={`p-4 transition-opacity sm:p-5 ${disabled ? "opacity-60" : ""}`}>
       <div className="flex items-center gap-2.5 mb-1">
         <div className="w-8 h-8 rounded-lg bg-brand/10 flex items-center justify-center text-brand">
           {icon}
@@ -127,6 +127,7 @@ export default function AdminConfigPage() {
   const [config, setConfig] = useState<AdminConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [activeSection, setActiveSection] = useState<SettingsSection>("buffer");
 
   // Draft (local state ก่อน save)
   const [bufferEnabled, setBufferEnabled] = useState(false);
@@ -274,7 +275,7 @@ export default function AdminConfigPage() {
           )}
         </>
       }
-      contentClassName="p-4 sm:p-6 space-y-4"
+      contentClassName="mx-auto w-full max-w-[1440px] p-3 sm:p-5 space-y-3"
     >
         {/* Read-only banner */}
         {!editable && (
@@ -284,10 +285,12 @@ export default function AdminConfigPage() {
           </div>
         )}
 
-        {/* ⚡ masonry — card สูงไม่เท่ากัน CSS columns กระจายสมดุลเอง (2 cols xl+, 3 cols 2xl+) */}
-        <div className="columns-1 xl:columns-2 2xl:columns-3 gap-4">
+        <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_208px] lg:items-start">
+          <SettingsNavigation page="admin-config" activeSection={activeSection} onSectionChange={setActiveSection} />
+          <section id="settings-section-panel" aria-label={activeSection === "buffer" ? "รวมข้อความ" : activeSection === "workflow" ? "Workflow" : activeSection === "assignment" ? "มอบหมายงาน" : "LLM"}
+            className="order-last min-w-0 space-y-3 lg:order-first">
         {/* ─── Section: Bot Message Buffering ─── */}
-        <ConfigSection
+        {activeSection === "buffer" && <ConfigSection
           icon={<MessageCircle size={16} />}
           title="การรวมข้อความ (Buffering)"
           description="รอให้ลูกค้าหยุดพิมพ์ แล้วรวมทุกข้อความเป็น 1 คำถาม — ลดการตอบเกินจำเป็นและประหยัด token"
@@ -411,10 +414,10 @@ export default function AdminConfigPage() {
               ระบบจะรวมเป็น 1 คำถาม ส่งบอท 1 ครั้ง ตอบ 1 คำตอบ
             </div>
           </div>
-        </ConfigSection>
+        </ConfigSection>}
 
         {/* ─── Section: Bot Concurrency Limit (⚡ Phase 2Q) ─── */}
-        <ConfigSection
+        {activeSection === "buffer" && <ConfigSection
           icon={<Sliders size={16} />}
           title="จำนวนการยิงบอทขนานกัน (Concurrency)"
           description="จำกัดจำนวน callBot ที่ยิงไป Python bot พร้อมกัน — ป้องกันบอทโอเวอร์โหลดเมื่อข้อความเข้าเยอะ"
@@ -450,10 +453,10 @@ export default function AdminConfigPage() {
               → ถ้าตั้ง 50 → ยิงบอท 50 ขนานกัน → เสร็จ → ยิง 50 ถัดไป → ใช้เวลา ~4 รอบ
             </div>
           </div>
-        </ConfigSection>
+        </ConfigSection>}
 
         {/* ─── Section: Workflow Engine ─── */}
-        <ConfigSection
+        {activeSection === "workflow" && <ConfigSection
           icon={<GitBranch size={16} />}
           title="Workflow Engine (Flow Builder)"
           description="สวิตช์หลักเปิด/ปิดระบบ workflow — เมื่อเปิด ข้อความเข้าจะผ่าน workflow engine ก่อน trigger/bot"
@@ -507,10 +510,10 @@ export default function AdminConfigPage() {
               ปิดได้ทุกเมื่อ — ข้อความจะกลับไป trigger/bot ตามปกติ
             </div>
           </div>
-        </ConfigSection>
+        </ConfigSection>}
 
         {/* ─── Section: Assignment (G2) ─── */}
-        <ConfigSection
+        {activeSection === "assignment" && <ConfigSection
           title="การมอบหมายงาน (Assignment)"
           icon={<GitBranch size={16} className="text-brand" />}
           description="ตั้งค่าวิธีจ่ายงานเมื่อบอทส่งต่อแอดมิน"
@@ -542,10 +545,10 @@ export default function AdminConfigPage() {
               </div>
             </div>
           </div>
-        </ConfigSection>
+        </ConfigSection>}
 
         {/* ⚡ Phase 8 — LLM Context Limit */}
-        <ConfigSection
+        {activeSection === "model" && <ConfigSection
           title="LLM Context Limit"
           icon={<Sliders size={14} />}
           description="จำนวนสินค้าสูงสุดที่ส่งเป็น context ให้ LLM (แยกจาก frontend display)"
@@ -575,12 +578,13 @@ export default function AdminConfigPage() {
               <span>50 (ครอบคลุม)</span>
             </div>
           </div>
-        </ConfigSection>
+        </ConfigSection>}
+          </section>
         </div>
 
         {/* ─── Save bar (sticky bottom) ─── */}
         {hasChanges && (
-          <div className="sticky bottom-0 -mx-4 px-4 sm:-mx-6 sm:px-6 py-3 bg-surface border-t border-border flex items-center justify-between">
+          <div className="sticky bottom-0 -mx-3 px-3 sm:-mx-5 sm:px-5 py-3 bg-surface border-t border-border flex items-center justify-between">
             <div className="flex items-center gap-2 text-xs text-text-muted">
               <AlertCircle size={14} className="text-warning" />
               มีการเปลี่ยนแปลงที่ยังไม่ได้บันทึก

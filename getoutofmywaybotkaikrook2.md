@@ -15434,3 +15434,33 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - Verification: offline pytest 2428 passed/17 skipped/1 xfailed; BotWorker review 67/67; composer behavioral checks pass; outbound mock response 8 cases pass; Bot Performance diff pass; BotWorker log 12/12; targeted TypeScript pass; `git diff --check` pass.
 - Full `npx tsc --noEmit` ยัง fail จาก generated `.next/types` อ้าง `src/app/api/botworker/review-analysis/route.ts` ที่ไม่มีใน source; ไม่พบ diagnostic อื่นในผลรอบนี้. ไม่มี browser/live DB/provider/customer send.
 - ยังไม่ stage/commit/merge; รอผู้ใช้ตรวจสรุป diff และยืนยันขอบเขตตาม AGENTS.md §10. ไม่มี code changes เพิ่มในรอบตรวจนี้.
+
+## 2026-11-26 — กำลังจะทำ: BotWorker retry, Shops, Config และ layout
+- ผู้ใช้อนุมัติให้เริ่มบน branch ใหม่จาก main ในเครื่องและเห็น diff ใน IDE; ตรวจ frozen/active checksum ตรง baseline 15436 และ active tail ว่าง, semantic coverage ยัง partial.
+- ตรวจ root cause: composer เก็บ draft/request ID หลัง error แต่ popup ไม่มี retry; Shops paged sort ไม่มี stable tie-break และต้องตรวจข้อมูลร้านซ้ำจริง; Config render ทุก engine section; shared PageShell จำกัด desktop width และ mobile search margin ชน max-width.
+- แผน: แก้ retry ตามผลส่งที่ยืนยันแล้วโดยไม่ส่งซ้ำกรณี unknown, แก้ source ของร้านซ้ำ/เพิ่ม effective BotWorker filter, จัด Config ตาม engine ที่เลือก, ปรับ gutter/shared width แล้วตรวจผลก่อน commit. Net mechanism จะรายงานหลังแก้.
+
+## 2026-11-26 — ผ่านแล้ว: BotWorker retry, Shops, Config และ layout (local branch)
+- Branch `codex/botworker-shops-config-ux-20261126` จาก main; ยังไม่ stage/commit/push/deploy. Composer popup มี Retry โดยเก็บ draft/request ID; definite provider failure ใช้ ID ใหม่, unknown/code-less ใช้ ID เดิม, batch ภาพส่งซ้ำเฉพาะใบที่ล้มเหลว. send-mode 409 refresh สวิตช์ก่อน retry; ถ้าโหมดใหม่ต่างจากครั้งแรกจะหยุดและแจ้งโดยไม่เปลี่ยน live/sandbox เงียบ ๆ.
+- Shops: root cause ที่ทดสอบซ้ำได้คือหลายร้านมี `created_at` เท่ากัน แต่ sort ก่อน skip/limit ไม่มี tie-break; เพิ่ม `_id` รอง, filter ร้านที่ BotWorker เปิดจริงผ่าน global+implemented platform+platform switch+shop switch ก่อน count/pagination. ปรับ search เต็มพื้นที่และ card/pagination responsive; shared PageShell ไม่จำกัด desktop 1680px และ mobile search ไม่ดันเกิน gutter. Config จัด engine selector ก่อน, ยุบรายละเอียด, compact grid/rows, แสดง settings เฉพาะ engine ที่ใช้ โดยคง operational switches.
+- Verification: BotWorker scope gate 110/110, composer behavior และ retry behavior ผ่าน, Shopee outbound mock 8 cases ผ่าน, `git diff --check` ผ่าน. Full TypeScript พบเพียง stale generated `.next/types` อ้าง `review-analysis/route.ts` ที่ไม่มีใน source; src-only TypeScript ผ่านจากงานย่อย. Impeccable detector พบ 3 จุดใน globals.css บรรทัดเดิมที่ไม่ได้แก้ (bounce 1, width transition 2); ไม่มี finding ใน UI ที่แก้. ยังไม่ทดสอบ browser หลัง login, Mongo จริง หรือส่ง Shopee จริง.
+- Net mechanism: +1 composer retry handler, +1 status refresh callback, +1 safety mode-mismatch check; helpers อื่น 0, regex 0, keyword table 0, decision owner 0. งานค้าง: ตรวจหน้าเว็บด้วยบัญชีจริงและยืนยันจำนวนร้านจาก DB/live; ขอ approval ก่อน first commit ตาม AGENTS.md §10. Historical semantic coverage ยัง partial.
+
+## 2026-11-26 — กำลังจะทำ: Config navigation correction
+- ผู้ใช้ชี้ภาพว่า grid จัดแถวสูงตาม card ข้างเคียงจนสวิตช์อันตรายเว้นระยะมาก, หัวข้อพับได้ไม่มีลูกศร และรายการร้านกินพื้นที่; ขอเมนู Config แบบสะอาดโดยมีหมวดร้านค้าแยก. Frozen/active integrity ตรง baseline 15447; active tail ว่าง; semantic coverage partial.
+- Root cause คือ `lg:grid-cols-2 items-start` วาง card สูงต่างกันในแถวเดียวกัน และ `<details><summary>` ไม่มี affordance ชัด. จะแยกหมวด Config เป็น navigation ฝั่งขวาบนจอกว้าง/แถบบนจอเล็ก, render เฉพาะหมวดที่เลือก, ย้ายร้านค้าเป็นหมวดของตัวเอง และเพิ่ม chevron ให้ disclosure; ไม่เปลี่ยน save API หรือค่าคอนฟิก.
+- ผู้ใช้เสนอให้รวม `/admin-config` กับ `/config` ได้ แต่ต้องคง permission. Audit พบ route/API แยกสิทธิ์ `config` (ระบบ) กับ `admin-config` (แอดมิน); จัด shared Settings navigation เชื่อมสองหน้าและแสดงลิงก์ตามสิทธิ์เดิม โดยไม่รวม API หรือเพิ่มสิทธิ์ข้ามหน้า.
+
+## 2026-11-26 — ผ่านแล้ว: Config navigation correction (local branch)
+- เพิ่ม Settings sidebar ทางขวาบน desktop และแถบหมวดบน mobile ให้ `/config` กับ `/admin-config` เชื่อมกัน; ลิงก์ข้ามหน้าปรากฏเฉพาะผู้มี `canAccessPage` เดิม. Route/API และ `canEditPage` ของแต่ละหน้าไม่เปลี่ยน. Config แบ่ง engine/operations/shops/diagnostics/safety; Admin Config แบ่ง buffer/workflow/assignment/LLM. เลิกวาง card ใน grid ที่แชร์ความสูงแถว จึงไม่มีช่องว่างตามภาพ.
+- `details` ของกฎแพลตฟอร์ม, Bot Services และสวิตช์อันตรายมี chevron หมุนเมื่อเปิด; รายการร้านเป็นหมวดแยกและมีปุ่มยุบ/ขยายพร้อม chevron และ aria-expanded. ซ่อนหมวด diagnostics เมื่อ engine v4 ไม่ใช้ Python bot test. ปรับ sticky save bar ให้ตรง gutter ใหม่.
+- Verification: src-only TypeScript pass, `git diff --check` pass, Impeccable detector บน UI ที่แก้คืน `[]`. ยังไม่ได้รัน browser หลัง login; ไม่มี DB/provider/customer send. Net +1 shared UI navigation component, +2 section selection states, +1 shop disclosure state; helpers/guards/regex/keyword tables/decision owners ของ business logic 0. ยังไม่ commit ตาม AGENTS.md §10; semantic coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: commit และ merge BotWorker/Shops/Settings เข้า main
+- ผู้ใช้อนุญาตให้ merge งานชุดนี้เข้า main; branch `codex/botworker-shops-config-ux-20261126` กับ local/main และ origin/main อยู่ที่ `e69d5e6` ก่อน commit. Frozen checksum และ active prefix 15457 ตรง ledger; active tail ว่าง; coverage partial.
+- ตรวจ diff/ไฟล์ untracked ทั้ง 16 ไฟล์ในขอบเขตงานเดิม, รันทดสอบเฉพาะ Next.js ที่เกี่ยวข้องและ TypeScript source, append closeout+ledger ใน commit เดียวกัน แล้ว fast-forward local main. จะตรวจ remote ก่อนตัดสินใจ push; ไม่แตะ worktree อื่น.
+
+## 2026-11-27 — ผ่านแล้ว: pre-merge verification BotWorker/Shops/Settings
+- `git fetch origin main` สำเร็จ; `HEAD`, local `main`, `origin/main` เท่ากันที่ `e69d5e6` ก่อน commit จึง fast-forward ได้ถ้าไม่มี commit ใหม่. User อนุญาต merge; ไม่ต้องถามซ้ำ. No unrelated worktree touched.
+- Offline checks บน tree ที่จะ commit: scope gate 110/110, composer behavioral, retry behavioral, outbound mock 8 cases, source-only TypeScript และ `git diff --check` ผ่าน. Full TypeScript ยังมี stale `.next/types` route reference ตาม A-419; browser/login/live DB/provider ไม่ได้ทดสอบ. Diff ครอบคลุม Retry, Shops pagination/filter, Settings sidebar/compact UI, shared layout, behavior tests และ ledger/log.
+- งานค้างในจุดนี้: commit บน feature branch แล้ว fast-forward main/push ตามคำขอ; หากขั้นตอน integration ล้มเหลวให้หยุดและตรวจ ไม่ force. Semantic history coverage ยังคง partial; net mechanism ไม่เปลี่ยนจาก A-419/A-420.
