@@ -10,9 +10,9 @@ import { canEdit } from "@/lib/roles";
 import { api } from "@/lib/apiClient";
 import { toast, useToastError } from "@/components/ui/Toast";
 import { confirm } from "@/components/ui/ConfirmDialog";
-import { ToggleSwitch } from "@/components/ui/ToggleSwitch";
 import { adminBubbleTextColor } from "@/lib/bubbleColors";
 import { CHAT_TEXT_SIZE_OPTIONS, normalizeChatTextSize, type ChatTextSize } from "@/lib/chatTextSize";
+import { DEFAULT_NOTIFICATION_PREFERENCES, type NotificationPreferences } from "@/lib/types";
 import { Shield, Bell, Save, CheckCircle2, Moon, Sun, Type } from "lucide-react";
 
 export default function SettingsPage() {
@@ -55,13 +55,17 @@ export default function SettingsPage() {
   const [savingColor, setSavingColor] = useState(false);
   const [colorSaved, setColorSaved] = useState(false);
 
-  // Notifications (local state only — no backend yet)
-  const [notifNewTicket, setNotifNewTicket] = useState(true);
-  const [notifHandoff, setNotifHandoff] = useState(true);
-  const [notifUnanswered, setNotifUnanswered] = useState(true);
+  const [notificationPreferences, setNotificationPreferences] = useState<NotificationPreferences>(
+    user?.notification_preferences || DEFAULT_NOTIFICATION_PREFERENCES
+  );
+  const [savingNotifications, setSavingNotifications] = useState(false);
+
+  useEffect(() => {
+    setNotificationPreferences(user?.notification_preferences || DEFAULT_NOTIFICATION_PREFERENCES);
+  }, [user?.admin_id, user?.notification_preferences?.newTicket, user?.notification_preferences?.handoff, user?.notification_preferences?.unanswered]);
 
   async function handleSaveProfile() {
-    if (!name.trim()) return;
+    if (!name.trim() || name.trim() === (user?.name || "").trim()) return;
     const ok = await confirm.ask({
       title: "บันทึกโปรไฟล์?",
       message: "ยืนยันการเปลี่ยนชื่อของคุณ",
@@ -135,6 +139,24 @@ export default function SettingsPage() {
       catchError(e, "บันทึกไม่สำเร็จ");
     } finally {
       setSavingColor(false);
+    }
+  }
+
+  async function handleNotificationPreferenceChange(key: keyof NotificationPreferences) {
+    if (savingNotifications) return;
+    const previous = notificationPreferences;
+    const next = { ...previous, [key]: !previous[key] };
+    setNotificationPreferences(next);
+    setSavingNotifications(true);
+    try {
+      await api().patch("/profile", { notification_preferences: next });
+      await fetchMe?.();
+      toast.success("บันทึกการแจ้งเตือนแล้ว");
+    } catch (e: unknown) {
+      setNotificationPreferences(previous);
+      catchError(e, "บันทึกการแจ้งเตือนไม่สำเร็จ");
+    } finally {
+      setSavingNotifications(false);
     }
   }
 
@@ -303,7 +325,7 @@ export default function SettingsPage() {
             </div>
             {editable && (
               <div className="flex items-center gap-2 pt-1">
-                <Button size="sm" onClick={handleSaveProfile} disabled={savingProfile || !name.trim()}>
+                <Button size="sm" onClick={handleSaveProfile} disabled={savingProfile || !name.trim() || name.trim() === (user?.name || "").trim()}>
                   {savingProfile ? <Loading size={14} /> : <Save size={14} />} บันทึก
                 </Button>
                 {profileSaved && (
@@ -324,44 +346,33 @@ export default function SettingsPage() {
           </div>
           <div className="space-y-3">
             {[
-              { label: "แจ้งเตือนเมื่อมีตั๋วใหม่", value: notifNewTicket, set: setNotifNewTicket },
-              { label: "แจ้งเตือนเมื่อบอทส่งต่อแอดมิน", value: notifHandoff, set: setNotifHandoff },
-              { label: "แจ้งเตือนแชทที่ยังไม่ตอบเกิน 30 นาที", value: notifUnanswered, set: setNotifUnanswered },
+              { key: "newTicket" as const, label: "แจ้งเตือนเมื่อมีแชทใหม่" },
+              { key: "handoff" as const, label: "แจ้งเตือนเมื่อบอทส่งต่อแอดมิน" },
+              { key: "unanswered" as const, label: "แจ้งเตือนแชทที่ยังไม่ตอบเกิน 30 นาที" },
             ].map((item) => (
-              <div key={item.label}>
-                <div className="hidden xl:flex items-center justify-between text-sm text-text">
-                  <span>{item.label}</span>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-label={item.label}
-                    aria-checked={item.value}
-                    onClick={() => item.set(!item.value)}
-                    disabled={!editable}
-                    className={`w-10 h-5 rounded-full transition-colors ${
-                      item.value ? "bg-brand" : "bg-surface-2"
-                    } disabled:opacity-60`}
-                  >
-                    <div
-                      className={`w-4 h-4 bg-white rounded-full transition-transform ${
-                        item.value ? "translate-x-5" : "translate-x-0.5"
-                      }`}
-                    />
-                  </button>
-                </div>
-                <div className="xl:hidden flex items-center justify-between gap-3 text-sm text-text">
-                  <span className="min-w-0">{item.label}</span>
-                  <ToggleSwitch
-                    enabled={item.value}
-                    onChange={() => item.set(!item.value)}
-                    disabled={!editable}
-                    ariaLabel={item.label}
+              <div key={item.key} className="flex items-center justify-between gap-3 text-sm text-text">
+                <span className="min-w-0">{item.label}</span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-label={item.label}
+                  aria-checked={notificationPreferences[item.key]}
+                  onClick={() => { void handleNotificationPreferenceChange(item.key); }}
+                  disabled={!editable || savingNotifications}
+                  className={`w-10 h-5 shrink-0 rounded-full transition-colors ${
+                    notificationPreferences[item.key] ? "bg-brand" : "bg-surface-2"
+                  } disabled:opacity-60`}
+                >
+                  <div
+                    className={`h-4 w-4 rounded-full bg-white transition-transform ${
+                      notificationPreferences[item.key] ? "translate-x-5" : "translate-x-0.5"
+                    }`}
                   />
-                </div>
+                </button>
               </div>
             ))}
             <p className="text-[11px] text-text-subtle pt-2">
-              การตั้งค่านี้ยังเก็บในเครื่อง — จะเชื่อมกับ backend ในรอบถัดไป
+              การแจ้งเตือนจะแสดงเป็น Toast ในระบบเมื่อเปิดหน้าเว็บอยู่
             </p>
           </div>
         </Card>

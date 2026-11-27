@@ -12,5 +12,5 @@ export async function GET(req: Request) {
   if (!admin) return error("admin not found", 401);
   if (!admin.active) return error("admin disabled", 403);
   await auth.updateSessionActivity(token);
-  return json({ admin: auth.safeAdmin(admin) });
+  return json({ admin: auth.safeAdmin(admin, { includeNotificationPreferences: true }) });
 }
