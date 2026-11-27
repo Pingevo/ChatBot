@@ -15464,3 +15464,282 @@ source inputs พร้อม → **importer run (approve แยก)** → canon
 - `git fetch origin main` สำเร็จ; `HEAD`, local `main`, `origin/main` เท่ากันที่ `e69d5e6` ก่อน commit จึง fast-forward ได้ถ้าไม่มี commit ใหม่. User อนุญาต merge; ไม่ต้องถามซ้ำ. No unrelated worktree touched.
 - Offline checks บน tree ที่จะ commit: scope gate 110/110, composer behavioral, retry behavioral, outbound mock 8 cases, source-only TypeScript และ `git diff --check` ผ่าน. Full TypeScript ยังมี stale `.next/types` route reference ตาม A-419; browser/login/live DB/provider ไม่ได้ทดสอบ. Diff ครอบคลุม Retry, Shops pagination/filter, Settings sidebar/compact UI, shared layout, behavior tests และ ledger/log.
 - งานค้างในจุดนี้: commit บน feature branch แล้ว fast-forward main/push ตามคำขอ; หากขั้นตอน integration ล้มเหลวให้หยุดและตรวจ ไม่ force. Semantic history coverage ยังคง partial; net mechanism ไม่เปลี่ยนจาก A-419/A-420.
+
+## 2026-11-27 — กำลังจะทำ: เคลียร์ข้อมูล BotWorker ก่อนเริ่มทดลองจริง
+- ผู้ใช้ยืนยันให้ล้างข้อมูล BotWorker: soft-delete shadow_replies เฉพาะ origin worker/workflow ที่ mode=standalone หรือไม่มี mode; ลบ botworker_messages, botworker_events, test_status_conversation source=botworker, chat_processing, buffer_messages, workflow_runs test_source=botworker และ assignment_cursors เฉพาะ pool_key ของ botworker.
+- เก็บ botworker_state lease, config, ข้อความ/สถานะลูกค้าจริง, ai_usage และ shared admin_logs; ก่อนเขียนจะนับ candidate และตรวจสถานะงานค้าง/worker เพื่อป้องกันล้างระหว่างประมวลผล; หลังเขียนจะนับซ้ำตาม filter เดิม.
+- ไม่อ่าน .env หรือไฟล์ secret; ใช้ Studio 3T session ที่เชื่อมอยู่ถ้ายังเข้าถึงได้. หากยืนยันการหยุด worker ชั่วคราวจำเป็นแต่ไม่ได้อยู่ในขอบเขตที่อนุมัติ จะหยุดและรายงานก่อน.
+
+## 2026-11-27 — ปรับขอบเขต: เคลียร์เฉพาะคำตอบและสถานะ BotWorker
+- ผู้ใช้ชี้แจงว่าต้องการเริ่มวัดคำถาม/คำตอบที่ผู้ตรวจตรวจใหม่: เคลียร์ shadow_replies ของ BotWorker (origin worker/workflow, mode standalone หรือ legacy) และ test_status_conversation เฉพาะ source=botworker เท่านั้น; ขอบเขตกว้างใน entry ก่อนหน้านี้ถูกยกเลิก.
+- ตรวจโค้ด Bot Performance แล้ว KPI อ่านเฉพาะ shadow_replies ที่ไม่มี deleted_at; events ใช้ประกอบ timeline ไม่ใช่ตัวนับหลัก. จะเก็บ botworker_events, botworker_messages, chat_processing, buffer, workflow, cursor และข้อมูลลูกค้าจริงไว้.
+- แผน: นับเป้าหมายอีกครั้ง, soft-delete replies เดิมพร้อมเวลา cutoff, ล้าง status ของ BotWorker ให้เริ่มใหม่, แล้วนับยืนยันตาม filter เดิม. ไม่แก้โค้ดระบบ.
+
+## 2026-11-27 — งานค้าง: การเคลียร์ BotWorker ยังไม่ถูกดำเนินการ
+- ตรวจ Bot Performance source: KPI ใช้ shadow_replies origin worker/workflow ที่ไม่มี deleted_at; test_status_conversation source=botworker แยกจากสถานะลูกค้าจริง. Census ล่าสุดที่ผู้ใช้ส่งก่อนแก้ขอบเขตคือ replies active 31,574 และ statuses 8; ยังไม่ได้นับสดหลังชี้แจง.
+- พยายามใช้ Studio 3T ที่เชื่อมกับ chatbot เพื่อนับใหม่ แต่ auto-review ปฏิเสธการกด Run เพราะไม่เห็น query ทั้งหมดและไม่ยืนยัน scope ได้; การโฟกัส editor ด้วย coordinate ล้มเหลว noWindowsAvailable. ไม่มี DB write, ไม่มีการลบ/ซ่อนข้อมูล, ไม่แก้โค้ด; งานเคลียร์ยังค้าง.
+- ขอบเขตที่รอทำคือ soft-delete เฉพาะ BotWorker replies เก่า และ reset เฉพาะ status source=botworker; เก็บ collections อื่นไว้. Semantic coverage partial; net helpers/guards/regexes/keyword tables/decision owners = 0.
+
+## 2026-11-27 — กำลังจะทำ: ดำเนินการเคลียร์ตามขอบเขตที่ผู้ใช้ยืนยัน
+- ผู้ใช้สั่งให้จัดการได้เลยหลังชี้แจงขอบเขต A-422. ตรวจ frozen SHA/size/lines และ active prefix SHA ตรง ledger; active tail ว่าง; branch codex/botworker-data-cleanup-20261127 มีเฉพาะ log/ledger ที่ยังไม่ commit.
+- Root cause ของสถิติเก่าคือ Bot Performance อ่าน shadow_replies origin worker/workflow ที่ยังไม่มี deleted_at; สถานะ BotWorker อยู่ใน test_status_conversation source=botworker. จะนับก่อน, soft-delete replies เดิมด้วย filter เฉพาะ BotWorker, reset สถานะเฉพาะ source=botworker, นับหลัง. ไม่แตะ status_conversation จริงหรือ collections อื่น; ไม่มี code/function change.
+
+## 2026-11-27 — งานค้าง: ส่ง MongoDB query ให้ผู้ใช้รันเองตามคำขอล่าสุด
+- ผู้ใช้เปลี่ยนจากให้ agent ดำเนินการเป็นขอ query โดยตรง. จัดเตรียม IntelliShell script ตรวจ database=chatbot, snapshot _id ของ active shadow_replies origin worker/workflow และ test_status_conversation source=botworker, soft-delete replies และลบ status ที่ snapshot ไว้, แสดงผลก่อน/หลัง. Script ยังไม่ได้รัน.
+- ไม่มี DB write, code change, test หรือ commit ใน turn นี้. Auto-review ที่เคยปฏิเสธ Run query ของ Studio 3T ยังไม่ถูกข้าม; ผู้ใช้จะเป็นผู้รัน query เอง. Semantic coverage partial; net helpers/guards/regexes/keyword tables/decision owners = 0.
+
+## 2026-11-27 — กำลังจะทำ: ตรวจผลล้าง BotWorker ที่ผู้ใช้รัน
+- ผู้ใช้ส่งผล IntelliShell ก่อน/หลังของ query A-423: replies 31,574→0 และ statuses 8→0. จะตรวจความครบของผลลัพธ์กับ filter ที่ให้ไว้ แล้วบันทึกผล; frozen checksum/active prefix ตรง ledger และ active tail ว่าง.
+
+## 2026-11-27 — ผ่านแล้ว: ล้างคำตอบและสถานะ BotWorker สำหรับเริ่มวัดผลใหม่
+- ตามผล IntelliShell ที่ผู้ใช้ส่ง: shadow_replies origin worker/workflow 31,574 รายการถูก soft-delete; test_status_conversation source=botworker 8 รายการถูก delete. old_replies_remaining=0, old_statuses_remaining=0, active_replies_now=0, botworker_statuses_now=0.
+- Query จำกัด scope ด้วย database guard chatbot และ snapshot _id ก่อน mutation; soft-delete ใช้ deleted_at/deleted_by, status deletion จำกัด source=botworker. ไม่ได้แก้ code/function หรือ collections อื่นใน query; ไม่มี commit. Verification คือ output จาก DB ที่ผู้ใช้ส่ง ไม่ใช่การอ่าน DB ซ้ำโดย agent. Semantic coverage partial; net helpers/guards/regexes/keyword tables/decision owners = 0.
+
+## 2026-11-27 — กำลังจะทำ: ปรับ BotWorker cards, product panel, order preview และ profile notifications
+- ผู้ใช้อนุมัติแผน UI: การ์ด item ใช้ normalizer เดียวกับ rich product card, product panel แสดงเฉพาะสินค้าที่ขายได้และมีสต็อก, คลิกสินค้าใน order history เปิด refund/info แบบ modal, selection ธีมมืดอ่านได้, ปุ่มบันทึกชื่อ disabled เมื่อไม่ dirty, และ in-app toast notifications ทำงานจริง.
+- ตรวจ root cause จาก source: `shopeeOutboundService` สร้าง product card ด้วย field จำกัด; `/api/products` ยังไม่กรอง sellability ก่อน pagination; order item เป็น static row; `::selection` ใช้ maroon opacity 0.12; profile save เช็กเพียง saving/ชื่อว่าง; notification toggles เป็น local state และไม่มี event monitor.
+- แผนแก้ที่ owner เดิม: ใช้ `toProductCard` ใน outbound result; เพิ่ม server-side availability filter ก่อน pagination; แสดง refund/info URL ผ่าน modal iframe โดยใช้ `order_sn`; เพิ่ม high-contrast selection; เช็กชื่อเทียบค่าที่บันทึก; บันทึก preferences ผ่าน profile API และเฝ้าดู event จาก inbox เพื่อใช้ Toast กลางโดย dedupe.
+- ขอบเขตแจ้งเตือน: new conversation, BotWorker handoff ที่ยังรอแอดมิน, unanswered >30 นาที; polling ทำงานเมื่อ console เปิด. ความสามารถ iframe ของ `data.digital.in.th` ยังไม่ยืนยันจาก web lookup. Shared MessageContent/InfoTab/ProductsTab ใช้ใน Tickets ด้วย.
+- Frozen SHA และ active prefix SHA ตรง ledger ก่อน append; baseline เดิม 15496 lines; semantic coverage partial. สร้าง branch `codex/botworker-ui-polish-20261127` จาก HEAD ซึ่งตรง main; diff waythrough จากงานก่อนหน้าคงไว้. Code changes/verification/commit ยังไม่เริ่ม; net helpers/guards/regexes/keyword tables/decision owners = 0.
+
+## 2026-11-27 — ปรับ scope: URL พรีวิวออเดอร์ Shopee
+- ผู้ใช้แก้ URL ปลายทางสำหรับ preview: ใช้ `https://data.digital.in.th/shopee/order/{order_id}` แทน `/shp/refund/info/{order_id}`; `{order_id}` มาจาก `order_sn` ของออเดอร์ Shopee.
+- เป็นการปรับ scope ของงานเดียวกันก่อนเริ่มแก้โค้ด; branch เดิมและ baseline เดิมยังใช้.
+
+## 2026-11-27 — ผ่านแล้ว: ปรับ BotWorker cards, catalog, order preview และ notifications
+- ใช้ `toProductCard` กับ item outbound และ replay เพื่อให้การ์ดแสดงชื่อ/ราคา/รูป/ลิงก์จาก schema Shopee; `/api/products` กรองเฉพาะ `NORMAL` ที่มีสต็อกบวก รวม stock ของรุ่น `MODEL_NORMAL` ก่อนแบ่งหน้า โดยยังอ่าน dbWallet อย่างเดียว.
+- เพิ่ม modal preview จาก order card ไป `https://data.digital.in.th/shopee/order/{order_sn}`; ปิดได้ด้วยปุ่ม/Escape/คลิกฉากหลัง และมี fallback เปิดแท็บใหม่. Web tool เปิด host ไม่ได้ จึงยืนยัน frame policy ไม่ได้.
+- ปรับ selection ธีมมืดให้ตัดพื้นหลัง, ปิดปุ่มบันทึกชื่อเมื่อ trim แล้วตรงกับชื่อเดิม, บันทึก notification preferences ต่อบัญชี และแสดง Toast จาก event แชทใหม่/handoff/unanswered >30 นาทีด้วย polling ทุก 60 วินาทีขณะเปิด console พร้อม dedupe.
+- ผ่าน behavioral checks: outbound card 9 cases, catalog sellability/pagination 1 case, notification events 2 cases, preference persistence/privacy 2 cases; source TypeScript check (`tsc` excluding `.next`) ผ่าน; `git diff --check` ผ่าน. `npx tsc --noEmit` ทั้ง repo ยังอ้าง `.next/types/...review-analysis/route.js` ที่ไม่มี source route; ไม่ใช่ source type error จากงานนี้.
+- เปลี่ยนเฉพาะ ChatAdminWeb และ waythrough logs; ไม่แก้ `chatbot/shopeechat`, จึงไม่ต้องแก้ SRS. dbWallet ยังคง read-only. Branch `codex/botworker-ui-polish-20261127`; ไม่มี commit.
+- Net mechanisms: helpers +5 (`numericStock`, `shopeeStock`, `isSellableShopeeProduct`, `isHumanOwned`, `findNotificationEvents`), profile schema validation guard +1, regex +0, keyword tables +0, notification event decision owner +1. Coverage ยัง partial.
+
+## 2026-11-27 — กำลังจะทำ: ตรวจ SSO redirect ใน order preview iframe
+- ผู้ใช้รายงานว่าเมื่อเปิด preview `/shopee/order/{order_sn}` เว็บภายนอกเชื่อม Sails ได้ แต่ SSO พากลับหน้า login; console มี Permissions Policy violation เรื่อง `unload` จาก jquery.
+- ตรวจ root cause แบบ read-only: เทียบ iframe/modal, fallback link, origin/cookie context และหลักฐานที่มี; แยก warning `unload` ออกจาก auth redirect ก่อนเสนอแนวทางแก้. ยังไม่แก้โค้ด/ไม่ commitจนกว่าจะได้รับอนุมัติตาม AGENTS.md §9.
+- Integrity ก่อน append ตรง ledger: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15515 SHA `b5aa061e8bcbc4b5c5d15f5d5512138184743211e7a6decf6182f2702f27f9b7`; coverage partial. Branch เดิม `codex/botworker-ui-polish-20261127` ต่อทิศกับงาน preview.
+
+## 2026-11-27 — ตรวจ SSO redirect ใน order preview iframe
+- Source trace: `InfoTab.tsx` แสดง `https://data.digital.in.th/shopee/order/{order_sn}` ใน cross-origin iframe และมีลิงก์ปลายทางเดียวกันแบบเปิดแท็บใหม่. Log ที่ผู้ใช้ส่งยืนยันว่า script ภายนอกโหลดและ Sails เชื่อมต่อได้; warning `unload is not allowed` หมายถึง browser ปิดกั้น unload handler จึงแยกจากอาการ SSO redirect.
+- สมมติฐานที่เป็นไปได้สูง: session cookie/storage ของ SSO ใช้ไม่ได้หรือถูกจำกัดใน embedded cross-site context. หลักฐานยังไม่พอพิสูจน์ เพราะไม่มี top-level origin, cookie attributes หรือ redirect/network trace; ต้องตรวจจากข้อมูลเหล่านั้นจึงจะยืนยันได้. การแก้ embedded auth อาจต้องทำที่เว็บปลายทาง.
+- เสนอให้เปลี่ยน card click เป็นเปิด URL แบบ top-level ในหน้าต่าง/แท็บแยก เพื่อให้ ChatAdmin ยังเปิดอยู่และเว็บปลายทางทำ SSO ใน first-party context. รอผู้ใช้อนุมัติก่อนแก้ตาม AGENTS.md §9. รอบนี้ตรวจ source/docs อย่างเดียว; ไม่มี code change, test, DB/provider call หรือ commit. Net helpers/guards/regexes/keyword tables/decision owners = 0; semantic coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: ประเมินภาพ SSO เพิ่มเติมของ order preview
+- ผู้ใช้ส่งภาพหน้า Sell Center และ Sell Center 81 login พร้อมแจ้งว่าเลือก ITSR แล้วกรอกข้อมูล แต่ callback กลับมาหน้า login เดิม; ขอให้แชร์ cookie ให้พรีวิว.
+- ตรวจความเป็นไปได้แบบ read-only: แยกข้อจำกัด third-party iframe/cookie จาก SSO callback ผิดพลาด และสรุปทางเลือกที่ไม่ส่งหรืออ่าน cookie ข้าม origin. ยังไม่แก้โค้ด/ไม่ commitตาม AGENTS.md §9; integrity ก่อนเริ่มตรง baseline 15525 และ frozen SHA เดิม.
+
+## 2026-11-27 — ตรวจภาพ Sell Center/ITSR เพิ่มเติม
+- ภาพแสดง Sell Center login มีปุ่ม ITSR และหน้า Sell Center 81 สำหรับ ITSR; ตามผู้ใช้ หลังกรอกข้อมูล SSO จะกลับมาหน้า login เดิม. ยืนยันว่าเป็น redirect loop ตามการสังเกต แต่ยังไม่มี network trace/cookie attributes จึงแยก third-party cookie restriction ออกจาก callback/config issue ไม่ได้.
+- ไม่สามารถส่ง cookie ของ ChatAdmin ให้ `data.digital.in.th` จาก frontend ข้าม origin หรืออ่าน HttpOnly cookie ได้; cookie ของแต่ละ origin ต้องออกจากระบบปลายทางเอง. เสนอให้เปิด order URL แบบ top-level popup/window/tab จาก card click เพื่อให้ browser จัดการ SSO cookie ใน first-party context โดยคงหน้า ChatAdmin ไว้. หาก top-level ยังวน ต้องแก้ SSO callback/cookie ที่ Sell Center/ITSR.
+- รออนุมัติก่อนเปลี่ยน click behavior ตาม AGENTS.md §9. Read-only analysis; ไม่มี code/test/DB/provider action หรือ commit. Net helpers/guards/regexes/keyword tables/decision owners = 0; semantic coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: ตรวจ flow token SSO ที่ใช้ร่วมกับ Sell Center
+- ผู้ใช้ยืนยันว่า ChatAdmin และ Sell Center ใช้ SSO จากแหล่งเดียวกัน และอ้างว่า token/header ใช้รูปแบบเดียวกัน; ตรวจ source auth ของ ChatAdmin กับ iframe request แบบ read-only เพื่อยืนยันว่า frontend มี token ใดและ target รองรับการรับ token ผ่านช่องทางใด.
+- ไม่อ่าน `.env`/secret และไม่แก้โค้ดจนกว่าจะสรุป root cause/แผนและได้รับอนุมัติตาม AGENTS.md §9. Integrity ก่อนเริ่ม: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15534 SHA `e294ff1bf6f9261a5a3e64a8d69393cb885d4a969dd7c642d9b62ed32f8fcbc8`; coverage partial.
+
+## 2026-11-27 — ตรวจ token flow ของ ChatAdmin เทียบกับ order preview
+- Source audit พบว่า SSO login ส่ง `app_name=Chat Admin` และ callback รับ token จาก system81 เพื่อเรียก `/system81/userinfo` ด้วย `Authorization: Bearer`; จากนั้นสร้าง JWT session ของ ChatAdmin แยกและเก็บใน HttpOnly cookie. ITSR token ไม่ถูกเก็บ/ส่งต่อให้หน้า order; iframe มีเพียง `src` จึงไม่มี Authorization header. รูปแบบ Bearer เดียวกันไม่ได้ยืนยันว่า token value/audience ใช้แทนกันได้.
+- แผนที่ฝั่งเราแก้ได้คือเปิด URL order แบบ top-level window/tab เพื่อให้ Sell Center เริ่ม SSO ใน context ของตัวเองและใช้ session ของ IdP ที่ browser มีอยู่. หากยังวน ต้องยืนยัน app-specific token/redirect callback กับ Sell Center/ITSR. รออนุมัติก่อนแก้ตาม AGENTS.md §9. Static source audit; no code/test/DB/provider action or commit. Net helpers/guards/regexes/keyword tables/decision owners = 0; semantic coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: ตรวจความพร้อม ShpOrder order-details panel
+- ผู้ใช้ขอเปลี่ยน order iframe เป็น panel รายละเอียดจาก `ShpOrder` โดยต้องมีวิธีจัดส่ง `checkout_shipping_carrier` และสถานะพัสดุ/tracking; ขอบเขตรอบนี้คือ read-only audit ของ schema, query owner และ UI/API order history.
+- ตรวจว่าฟิลด์อยู่ใน source contract หรือไม่และ panel ดึงต่อจาก owner เดิมได้ไหม; ยังไม่แก้โค้ดจนกว่าจะสรุป root cause/plan และได้อนุมัติตาม AGENTS.md §9. Integrity ก่อนเริ่ม: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15542 SHA `e78983b37c4a7a53b82cbf14269fba10083ef2a5c4f636f6b798aefbf1c9d13b`; coverage partial.
+
+## 2026-11-27 — ตรวจความพร้อม ShpOrders order-details panel
+- `dbWallet.ShpOrders` เป็น source ของ API ประวัติออเดอร์อยู่แล้ว; route อ่านแบบ read-only โดย join `conversation.customer_id` กับ `buyer_user_id` และส่ง order status, carrier, `package_list[].logistics_status`, tracking numbers ให้ UI. `InfoTab` แสดงข้อมูลขนส่ง/tracking ใน card ที่ขยายอยู่แล้ว; iframe เป็นเพียง external preview แยกจาก source นี้.
+- Schema/code ระบุ `shipping_carrier`, `logistics_status`, `tracking_no`/`tracking_number`/`parcel_id`/`waybill_id`; ไม่พบ `checkout_shipping_carrier` ใน source/docs ที่ค้น. จึงยังยืนยันการมี field นี้ใน record จริงไม่ได้โดยไม่มี sample/query read-only. ข้อมูลที่มีรองรับสถานะปัจจุบันต่อ package; ไม่พบ tracking event timeline เต็ม.
+- ทำ native order-details panel จาก API เดิมได้ โดยแทน iframe; ต้องยืนยัน field `checkout_shipping_carrier` กับข้อมูลจริงก่อนผูก UI. รอบนี้ source/schema/history audit เท่านั้น; ไม่อ่าน DB, ไม่แก้ code, ไม่รัน test, ไม่มี commit. รออนุมัติตาม AGENTS.md §9 ก่อน implementation; net helpers/guards/regexes/keyword tables/decision owners = 0; semantic coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: ค้นหาแชท Inbox ด้วย order_sn
+- ผู้ใช้อนุมัติให้ search bar ของ Inbox ใช้ `order_sn` หาแชทลูกค้า โดยค้น `ShpOrders` แบบ read-only เพื่อได้ `buyer_user_id`/`shopname` แล้วจับคู่กับ conversation `customer_id`/`shop_name`; search เดิม, สิทธิ์, filters, count และ pagination ต้องคงเดิม.
+- Root cause จาก source audit: `/api/admin/conversations` ค้นเฉพาะ conversation fields; `ShpOrders` มี reverse link order → buyer/shop และ order panel ปัจจุบันใช้ buyer → order. แผนใช้ exact `order_sn`, shared Order DB connector, fake-Mongo route behavior test, schema doc และ ChatList placeholder. ห้าม query live DB/write, ห้ามทับ diff ที่ค้างอยู่. ก่อนแก้: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15551 SHA `7ae5e7a630e480c7977e22bde6b553f65e0aff8b0c7b44ef275432d3d8883243`; coverage partial. ยังไม่แก้โค้ด/ทดสอบ/commit.
+
+## 2026-11-27 — กำลังจะทำ: ปรับ audit ตามตัวอย่าง ShpOrder จากผู้ใช้
+- ผู้ใช้ส่งตัวอย่าง record ที่มี `checkout_shipping_carrier: "Express Delivery - ส่งด่วน"` และ order_sn `26112592FHWBD0`; หลักฐานนี้แก้ข้อสรุปจาก source/schema audit ว่า field มีในข้อมูลจริงตามตัวอย่าง.
+- สรุปผลที่แก้และแผนที่ใช้ field นี้ใน panel; ยังรออนุมัติ implementation ตาม AGENTS.md §9. ไม่ query DB และไม่แก้ code.
+
+## 2026-11-27 — แก้ข้อสรุป field checkout_shipping_carrier
+- ตัวอย่าง record ที่ผู้ใช้ส่งยืนยันว่า `checkout_shipping_carrier` มีค่า `Express Delivery - ส่งด่วน` สำหรับ `order_sn=26112592FHWBD0`; ข้อสรุปก่อนหน้าว่าการมี field จริงยังไม่ยืนยันถูกแทนด้วยหลักฐานจากผู้ใช้. ยังไม่ได้ query record นี้จาก DB โดยตรง.
+- Implementation plan: เพิ่ม field top-level นี้ใน projection/response ของ API order เดิม; เปลี่ยนคลิก order card จาก iframe ไปเป็น in-app panel แสดง carrier ตาม field นี้ พร้อม `package_list[].logistics_status` และ tracking numbers. API ปัจจุบันมีสถานะล่าสุดต่อ package แต่ไม่มี tracking event timeline ใน contract. รอ explicit approval ตาม AGENTS.md §9. ไม่มี code/test/DB read/write/commit; net helpers/guards/regexes/keyword tables/decision owners = 0; semantic coverage partial.
+
+## 2026-11-27 — ผ่านแล้ว: ค้นหาแชท Inbox ด้วย order_sn
+- Inbox API exact-match `order_sn` ใน Order DB แบบ read-only แล้วใช้ `buyer_user_id` + `shopname` เพิ่ม OR branch ที่จำกัด `customer_id` + Shopee platform + `shop_name`; branch prefix ทุก field เพื่อให้ filter, count, cursor/pagination และ channel access ใช้ predicate เดิม. Order history API ใช้ shared lazy connector; placeholder ระบุ `order_sn`.
+- Behavior test RED ก่อนแก้และ GREEN หลังแก้: 4/4 ผ่าน (order chat/shop identity, text-search compatibility, status/count/pagination, Order DB failure fallback). Scoped source TypeScript check และ `git diff --check` ผ่าน. Full default `tsc` ยังรายงาน stale `.next/types` ที่ import `botworker/review-analysis/route.js` ซึ่งไม่มี source; ไม่พบ error จาก source check. ไม่ query/write DB, ไม่เรียก provider, ไม่ส่งข้อความลูกค้า, ไม่ commit.
+- Files: `ChatAdminWeb/src/backend/db/orderMongoClient.ts`, Inbox/order routes, `ChatList.tsx`, `docs/schema.md`, และ fake-Mongo behavior test 3 ไฟล์. Net mechanisms: helpers +1, schema guards +1, regexes +0, keyword tables +0, decision owners +0; semantic coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: แก้ Inbox order_sn search ที่ยังหาแชทไม่พบ
+- ผู้ใช้แจ้งว่า `order_sn=261116FCSAVPNM` มีจริงแต่ Inbox หาไม่เจอ. Source audit พบ Inbox order branch ที่เพิ่งเพิ่ม join `customer_id` + `shop_name`; ใน `workflowEngine.ts` ระบุว่า `conversation.shop_name` หายบ่อย (~97% docs), จึงไม่ใช่ field ที่เชื่อถือได้สำหรับ reverse lookup. `shops` มี canonical `shop_id` และ `shopname` พร้อม index ชื่อร้าน.
+- Root cause ที่ source รองรับ: order match อาจได้ `buyer_user_id`/`shopname`, แต่ conversation candidate ถูกตัดเพราะ `shop_name` ไม่มี. ยังไม่ได้ query live record/DB จึงไม่ยืนยัน field values ของ order นี้.
+- Proposed correction: map order `shopname` ผ่าน admin `shops` โดย platform=shopee ไปยัง `shop_id`; ต้องเป็น mapping ไม่กำกวม แล้ว match `customer_id` + platform + `shop_id`. Behavior test จะครอบคลุม conversation ที่ไม่มี `shop_name`, same-buyer wrong-shop, filters/count/pagination และ fallback; อัปเดต schema doc. รออนุมัติ plan ใหม่นี้ตาม AGENTS.md §9 ก่อนแก้ source.
+- Integrity ก่อนเริ่ม: frozen 8624 lines / 892284 bytes / SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15568 SHA `292f654004a89fb2d497adeb2ede35531d15cf1cff300c9e291496105a7cbf90`; coverage partial. No live DB/provider/customer action or commit.
+
+## 2026-11-27 — กำลังจะทำ: เปลี่ยน order iframe เป็น ShpOrders details panel
+- ผู้ใช้อณุมัติ implementation: แทน iframe ใน order history ด้วย panel ภายในหน้า; แสดง top-level `checkout_shipping_carrier`, สถานะล่าสุดและ tracking ต่อ package จาก ShpOrders. ตัวอย่างจากผู้ใช้ยืนยัน `checkout_shipping_carrier` สำหรับ `order_sn=26112592FHWBD0`.
+- Branch เดิม `codex/botworker-ui-polish-20261127` เป็นทิศทางเดียวกัน; route ใช้ shared `orderMongoClient` จาก Inbox search งานล่าสุด ต้องรักษา diff นั้น. ทำ behavioral test ก่อนแก้, อัปเดต `docs/schema.md`, ไม่แก้ SRS เพราะไม่แตะ chatbot Python. Integrity ก่อนเริ่ม: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15568 SHA `292f654004a89fb2d497adeb2ede35531d15cf1cff300c9e291496105a7cbf90`; coverage partial.
+
+## 2026-11-27 — ผ่านแล้ว: เปิดรายละเอียดขนส่งจาก ShpOrders ใน panel
+- คลิกสินค้าในประวัติคำสั่งซื้อ Shopee เปิด panel ภายในหน้าเดิม แทน iframe; panel แสดง `checkout_shipping_carrier`, สถานะ/เลขติดตามต่อ package และรายการสินค้า. API order history เพิ่ม projection และ response สำหรับ field และ package detail โดยคงข้อมูลเดิมของ order list; schema doc ระบุ field. InfoTab ใช้ร่วมกับ Tickets ด้วย.
+- Verification: panel behavior 2/2; Inbox order-search regression 6/6; scoped TypeScript source check และ `git diff --check` ผ่าน. Behavior test ครอบ carrier จากตัวอย่างผู้ใช้และสถานะ/เลข tracking สอง package. ไม่มี browser/live UI run หรือ live DB query จึงยังไม่ได้ยืนยันข้อมูล order จาก DB จริง. ไม่ได้เรียก provider/ส่งข้อความ/เขียน DB และไม่ commit.
+- Files: `ChatAdminWeb/src/app/api/admin/conversations/[conversationId]/orders/route.ts`, `ChatAdminWeb/src/components/chat/InfoTab.tsx`, `docs/schema.md`, และ ShpOrders panel behavior test 3 ไฟล์. Net helpers 0, guards 0, regexes 0, keyword tables 0, business decision owners 0; เพิ่ม presentation component 1 ตัว; semantic coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: ทดลองเปิดหน้า Shopee จาก item card ใน iframe
+- ผู้ใช้อนุมัติให้คลิก item card แล้วเปิด modal ใน ChatAdmin เพื่อโหลด URL สินค้า Shopee จริงใน iframe และมีปุ่มเปิด URL เดิมในแท็บใหม่เป็น fallback. Root cause คือ `MessageContent.ProductCardView` render card เป็น `<a target="_blank">`; component ใช้ร่วมกันใน ChatWindow, TicketChatPanel และ Shadow panels.
+- แผนแก้ที่ owner เดิม: card click เปิด modal, iframe รับ URL Shopee ที่ผ่าน HTTPS/host validation, host อื่นคงพฤติกรรมเปิดแท็บใหม่, และลิงก์ fallback แสดงตลอดเพราะ CSP ของ Shopee อาจปฏิเสธ iframe. ทำ executable behavior check ก่อนแก้และตรวจ UI เท่าที่ environment อนุญาต. Net helpers 0, safety guards +1, regexes/keyword tables/decision owners 0; ไม่แตะ DB/provider/customer data หรือ chatbot/SRS.
+- Integrity ก่อนเริ่ม: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15578 SHA `87a250061642c6d081e48e38ee7a857c277a12d02c213d6c27e99e41dfa8b6f9`; coverage partial. Branch เดิมเป็นทิศทางเดียวกัน; รักษา diff ที่มีอยู่และยังไม่ commit.
+
+## 2026-11-27 — ผ่านแล้ว: แก้ Inbox order_sn join ให้ใช้ shop_id
+- Root cause: Inbox order branch เดิมต้องการ `conversation.shop_name`, field ที่ source ระบุว่าหายบ่อย (~97%). แก้ให้ order `shopname` หา `shops.shop_id` แล้ว join ด้วย `customer_id` + platform + transport `shop_id`. เมื่อ `shops.shop_id` เป็น name-fallback เก่า จะใช้ conversation evidence resolve transport ID ได้เฉพาะ mapping 1:1; mapping หายหรือกำกวม fail-closed.
+- Behavior test RED ก่อนแก้และ GREEN หลังแก้: 6/6 ผ่าน รวม `261116FCSAVPNM`, target conversation ไม่มี `shop_name`, legacy name-fallback, ambiguous mapping, text search, status/count/pagination และ DB failure fallback. Scoped source TypeScript check กับ `git diff --check` ผ่าน. Default project `tsc` ยังมี stale `.next/types` import ไป `botworker/review-analysis/route.js` ที่ไม่มี source. ไม่ query live DB, provider, ไม่ส่งข้อความลูกค้า, ไม่ commit; จึงยังยืนยันข้อมูล join ของ record จริงนี้จากฐานข้อมูลไม่ได้.
+- Files: Inbox route, fake-Mongo behavior test/mocks และ `docs/schema.md`. Correction-round net mechanisms: helpers +0, schema guards +1 (unique shop mapping), regexes +0, keyword tables +0, decision owners +0; semantic coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: เพิ่ม tracking_no และ tracking_info ใน order panel และคำตอบบอท
+- ผู้ใช้ยกตัวอย่าง `tracking_no: "TH262256426917E"`, ต้องการ `tracking_info` ด้วย และแจ้งว่าลูกค้าถามแล้วระบบตอบว่าไม่มี. Source audit พบ order-history API ไม่ project `tracking_no` ระดับเอกสารและอ่าน tracking จาก `package_list` เท่านั้น; Python `lookup_order()` ก็เก็บเลขจาก `package_list` เท่านั้น ก่อน `format_order_context()` จะแสดงเลขเมื่อ lookup คืนค่า. Archived audit เคยพบ top-level tracking_no 4,172/5,000 และ package tracking fields 0/5,000; เป็นข้อมูล historical ไม่ยืนยัน record ปัจจุบัน. ไม่พบ `tracking_info` ใน code/schema ปัจจุบัน จึงยังไม่รู้ตำแหน่งและชนิดข้อมูลของ field.
+- Root cause ที่ source รองรับสำหรับเลขที่ผู้ใช้ส่ง: field top-level ถูกละจากทั้ง projection และการดึงของ Python owner จึงส่งต่อเป็นค่าว่างได้ แม้ field มีอยู่. Proposed correction after approval: ใช้ typed owner `lookup_order()` รวม top-level tracking_no กับ package fields โดยคง per-package tracking; เพิ่ม `tracking_info` ให้ API, panel และคำตอบบอทตามตัวอย่าง schema ที่ผู้ใช้ยืนยัน; เพิ่ม executable behavior tests; อัปเดต `docs/schema.md` และ SRS section 6 สำหรับ Python function ตาม AGENTS.md ข้อ 1. No keyword/regex changes; no live DB query, provider action, customer message, or commit.
+- Scope awaits explicit approval per AGENTS.md §9. Before implementation, request a sample of the exact `tracking_info` key/value and its location (document-level or package-level) so UI and bot formatting use the real data contract. Integrity before audit: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15593 SHA `8f7e1168b59f0bb3b2b6c6a63429b8b203b5e057dec42638f5f63cea34638ac3`; coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: ไล่สาเหตุ order_sn search ยังไม่พบใน localhost
+- ผู้ใช้ยืนยันว่าทดสอบบน localhost ด้วย `order_sn=261116FCSAVPNM` และยังไม่พบทั้งที่ order มีจริง; source branch ปัจจุบันผ่าน fake-Mongo 6/6 แต่ยังไม่มี live-record evidence.
+- ตรวจ flow ช่องค้นหา → query param/API → Order DB exact lookup → `shops` mapping → conversation predicate และตรวจ error path. หากจำเป็นให้อ่านเฉพาะ order นี้กับ shop mapping แบบ read-only; ห้ามอ่าน `.env`, ห้าม write DB/provider/customer message. ยังไม่แก้ code จนสรุป root cause/แผนตาม AGENTS.md §9.
+- Integrity ก่อนเริ่ม: frozen 8624 lines / 892284 bytes / SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15593 SHA `8f7e1168b59f0bb3b2b6c6a63429b8b203b5e057dec42638f5f63cea34638ac3`; coverage partial.
+
+## 2026-11-27 — แก้ชื่อ formatter ใน tracking audit
+- Correction to A-440: formatter จริงชื่อ `build_order_context()` ที่ `chatbot/shopeechat/order_store.py:500` ไม่ใช่ `format_order_context()`; `order_flow.py` และ `chat_v2.py` เรียก formatter นี้เพื่อสร้าง context ให้ LLM. เป็นการแก้บันทึก audit เท่านั้น ไม่มี source/test/DB/provider/customer action หรือ commit.
+- Integrity ก่อน correction: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15603 SHA `7693c16da5cbe3623eb04df3b3303878eeb7b99cf7d7c6a8bada1d7edabecfaf`; coverage partial.
+
+## 2026-11-27 — ยืนยัน Inbox order_sn search บน localhost
+- ใช้ช่องค้นหาใน `http://localhost:3000/tickets` พิมพ์ `261116FCSAVPNM`; API `GET /api/admin/conversations?q=261116FCSAVPNM&include_count=true&limit=10` คืน 1 conversation. UI แสดงลูกค้า `samranaek`, ร้าน BlackShark, `customer_id=20497737`, conversation `shp_88037111248795093`; เปิด conversation แล้ว Order History แสดงเลขนี้กับสินค้า Black Shark S3 Smartwatch (สถานะรอคืนสินค้า/คืนเงิน).
+- การตรวจเป็น local UI/API read-only เพื่อยืนยัน flow จริง ไม่ได้เขียน DB/ส่งข้อความ/เรียก provider. ไม่แก้ source ในรอบนี้; branch ยังไม่ commit/deploy. Net helpers/guards/regexes/keyword tables/decision owners = 0; semantic coverage partial.
+
+## 2026-11-27 — ขยาย Inbox order_sn search ไปหน้า Botworker
+- กำลังจะ trace ช่องค้นหา `/botworker` ผ่าน `ChatList` ถึง `/api/botworker/conversations` เทียบกับ `/api/admin/conversations` ที่ tickets ใช้ เพื่อระบุ root cause และขอบเขตการแก้; ใช้ `261116FCSAVPNM` เป็นกรณีจริงสำหรับการตรวจ local แบบ read-only.
+- ผู้ใช้อนุมัติให้ค้นหาแชทจาก order_sn และยืนยันให้ทำหน้า Botworker ด้วย; เป้าหมายคือให้หน้า Botworker resolve order ผ่าน canonical `shop_id` และ customer/platform เดียวกับ fix ของ tickets โดยไม่สร้าง semantic keyword/regex หรือ decision owner เพิ่ม.
+- ยังไม่ได้แก้ source ใน entry นี้; ต้องตรวจพฤติกรรม route/list/query/pagination และรักษา botworker status/filter scope. Branch `codex/botworker-ui-polish-20261127`; no commit/deploy.
+
+## 2026-11-27 — กำลังจะทำ: modal รายละเอียดสินค้าในแชทและ InfoTab
+- ผู้ใช้ขอให้คลิก item card ในแชทแล้วเปิด modal ในหน้าเดิม และขยายให้รายการสินค้าใน InfoTab แสดงข้อมูลแบบเดียวกัน; ต้องเลื่อนดูรายละเอียดสินค้าได้
+- Root cause: Shopee iframe ที่ลองใน browser แสดงหน้าไม่ได้; ProductCard ปัจจุบันมีแค่ item_id/name/price/image/shop/url และ `getProductsByIds()` จงใจตัด description/specs/embedding. รายการสินค้าใน InfoTab ตอนนี้เป็นลิงก์ออกไปหน้า Shopee.
+- แผน: แทน iframe ด้วย modal แบบ shared ที่แสดงรูป/ชื่อ/ราคา/ร้าน/ID พร้อม description และ field รายละเอียดที่มีจากฐานสินค้า, มี body เลื่อนดูได้และปุ่มเปิด Shopee; ให้ทั้ง ProductCard ใน MessageContent และรายการสินค้าที่ถูกเสนอใน InfoTab เปิด component เดียวกัน. เพิ่ม authenticated read-only API + projection เฉพาะ field รายละเอียดที่ต้องแสดง ผ่าน owner `productService`; ไม่ส่ง full product document/embedding.
+- ขอบเขต source: MessageContent, InfoTab, shared product modal component, productService, product detail API route, ProductCard type และ executable behavior/API tests. ไม่มี Product DB write, ไม่มี provider/customer message, ไม่มีการเปลี่ยน Python bot. Branch `codex/botworker-ui-polish-20261127`; ยังไม่ commit.
+- Integrity ก่อนเริ่ม: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15616 SHA `d10aad56825a7355bcd332c1993efb37e704c7e34fbfc49d576296a3d97b951d`; coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: ส่ง tracking_no และ tracking_info ให้ panel กับคำตอบบอท
+- ผู้ใช้อนุมัติให้แก้ทั้ง order panel และ chatbot lookup หลัง audit พบว่าทั้ง TS API และ Python `lookup_order()` ดึงเลขพัสดุจาก `package_list` เท่านั้น; `ShpOrders.tracking_no` ระดับเอกสารจึงหายก่อนส่งให้ panel/`build_order_context()`. ตัวอย่างเลขจากผู้ใช้คือ `TH262256426917E`.
+- เพิ่ม projection/response สำหรับ top-level `tracking_no` และ `tracking_info`; คงเลขและข้อมูล tracking ราย package; render `tracking_info` ตามค่าเดิมโดยไม่แปล schema/ความหมาย. ใน Python owner ให้ `build_order_context()` ส่ง tracking evidence เข้า LLM. Add executable TS/Python behavior tests; update `docs/schema.md` and SRS section 6 for `lookup_order()`; no keyword/regex changes. Attachment provided for `tracking_info` cannot be read in workspace, so test generic structured passthrough and preserve raw value. No live DB/provider/customer action or commit.
+- Integrity before implementation: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15616 SHA `d10aad56825a7355bcd332c1993efb37e704c7e34fbfc49d576296a3d97b951d`; branch `codex/botworker-ui-polish-20261127`; coverage partial.
+
+## 2026-11-27 — ตรวจ parity search/filter ระหว่าง Tickets กับ Botworker
+- กำลังจะเทียบ UI state และ API query ของ `/tickets` กับ `/botworker` สำหรับ search, platform, shop, chat/message status, assigned recipient, sort, pagination และ count เพื่อระบุ behavior ที่ต่างจริงก่อนรวมให้เหมือนกัน.
+- ผู้ใช้ต้องการให้ search/filter สองหน้าทำงานเหมือนกัน และอนุมัติให้ทำต่อ. Order search ของ Botworker เพิ่มแล้วและ local UI แสดงแชท samranaek / BlackShark สำหรับ `261116FCSAVPNM`; การตรวจ parity นี้ยังไม่เริ่มแก้ source เพิ่ม. ทั้งสองหน้าคงใช้ status store คนละชุดตามหน้าที่. Branch ยังไม่ commit/deploy.
+
+## 2026-11-27 — ผ่านแล้ว: ส่งเลขพัสดุและ tracking info เข้าถึง panel/chatbot
+- API order history ส่ง top-level `tracking_no`, `tracking_info`, `checkout_shipping_carrier` และรายละเอียด tracking/status ราย package; order panel แสดงเลขจากระดับ order และ package โดยไม่ต้องเปิด iframe. Python `lookup_order()` รวมเลขระดับ order กับ package, `lookup_by_tracking()` ค้นได้ทั้งสองตำแหน่งโดยคง shop filter, และ `build_order_context()` ส่ง tracking number/info ให้ LLM.
+- Verification: offline suite 2430 passed, 17 skipped, 1 xfailed, 13 warnings; tracking Python tests 2/2; order panel behavior 2/2; order API TypeScript-only check passed; Python `py_compile` และ `git diff --check` passed.
+- Combined scoped TypeScript check for the order route + InfoTab reports one unrelated error at `ProductDetailsModal.tsx:114` (`platform` undefined), in separate product preview UI work in the shared working tree; tracking route-only typecheck passed. No live DB/browser/provider/customer action, commit, or deploy.
+- Net change for this tracking fix: private tracking-info formatter +1; guards 0; regexes 0; keyword tables 0; business decision owners 0. `tracking_info` shape remains preserved as raw input because the attached sample file was unavailable in the workspace; semantic coverage remains partial.
+
+## 2026-11-27 — ผ่านแล้ว: ค้นหาและกรอง Inbox ให้ Tickets กับ Botworker สอดคล้องกัน
+- Root cause ของเคส Botworker คือ `/api/botworker/conversations` ค้นเฉพาะชื่อ/ข้อความ/ร้านและไม่ resolve `order_sn`; API ยังอ่าน alias ของ shop/status ไม่ครบ, cache key ขาด status/count, และตีความสถานะแชทที่ไม่มี status ต่างจาก Tickets. ย้ายการ resolve order ที่มีอยู่ไปใช้ `findOrderConversationMatch()` ร่วมกัน โดยจับคู่ `buyer_user_id + platform + transport shop_id` ที่ resolve จาก `ShpOrders.shopname → shops`; ถ้าร้านหายหรือกำกวมจะไม่เดา.
+- Botworker และ Tickets ใช้ `ChatList`/`parseInboxFilters` ชุดเดียวกันอยู่แล้ว; เพิ่ม parity ที่ API สำหรับ `shop|shop_id`, `q|search`, status, bot-owned fallback, include-count cache separation, และ unassigned ที่ไม่มี `assigned_to`; เพิ่ม `created_at` ใน Botworker row ให้ shape ตรงกัน. Metadata หลักยังแยกตามหน้าที่ (`status_conversation` กับ `test_status_conversation[source=botworker]`).
+- Verification: behavior tests 12/12 ผ่าน; scoped TypeScript check ของ conversation service + สอง routes ผ่าน; `git diff --check` ผ่าน. Local `/botworker` ค้น `261116FCSAVPNM` ได้ 1 แชทและเปิดพบ order เดียวกันในประวัติของ `samranaek` ร้าน BlackShark.
+- Full-project `tsc --noEmit` ยังไม่ผ่านจากข้อผิดพลาดนอก search/filter scope: generated `.next/types` อ้าง route `botworker/review-analysis` ที่ไม่มี, `test-shporder-details-panel.tsx` มี mock/type errors, และ `ProductDetailsModal.tsx:114` ใช้ `platform` ที่ไม่ได้ประกาศ; scoped check สำหรับไฟล์ search/filter ผ่าน.
+- ไม่มี live DB write, provider/customer message, commit หรือ deploy. Net mechanism สำหรับ search/filter นี้: ใช้ shared resolver 1 ตัว (ไม่มี helper เพิ่มใน parity correction), guards +0, regexes +0, keyword tables +0, business decision owners +0; status constant ย้ายมาอยู่ shared filter owner. Semantic coverage remains partial.
+
+## 2026-11-27 — ผ่านแล้ว: modal รายละเอียดสินค้าในแชทและ InfoTab
+- แทน iframe ที่ Shopee ไม่ยอมแสดงด้วย modal รายละเอียดที่เลื่อนดูได้ ใช้ modal เดียวกันจาก item card ในข้อความและรายการสินค้าใน InfoTab; แสดงรูป/ชื่อ/ราคา/ร้าน/ID, description, สถานะ/สต็อก/คุณสมบัติ/ตัวเลือกสินค้า และลิงก์เปิด Shopee แยกต่างหาก. เพิ่ม authenticated `GET /api/products/[platform]/[itemId]` ที่อ่านผ่าน productService แบบ projection จำกัด field และไม่ส่ง embedding.
+- Verification: chat card + InfoTab + modal content/scroll behavior ผ่าน; productService projection ผ่าน; API auth/platform/404 behavior ผ่าน; scoped TypeScript check ของไฟล์ที่เกี่ยวข้องและ `git diff --check` ผ่าน. แก้ platform undefined ที่พบจาก combined typecheck ใน A-448; scoped check รอบสุดท้ายผ่าน.
+- Fake tests เท่านั้น; ไม่ได้อ่าน live Product DB, ไม่ได้เปิด modal กับสินค้าจริงใน browser, ไม่ได้เรียก provider/ส่งข้อความ/เขียน DB, ไม่มี Python bot change, commit หรือ deploy. Semantic coverage remains partial.
+- Net change: helpers 0 (ลบ iframe URL helper และเพิ่ม printable formatter); guards +3 (auth/platform/itemId/API URL validation net), regexes 0, keyword tables 0, business decision owners 0; เพิ่ม shared presentation component 1, productService detail method 1 และ authenticated API route 1.
+
+## 2026-11-27 — กำลังจะทำ: แสดง tracking_info เป็น timeline อ่านง่าย
+- ผู้ใช้ทักว่า popup แสดง `tracking_info` เป็น JSON และขอให้เปลี่ยนเป็น timeline เส้นตรง; สาเหตุใน `InfoTab.tsx` คือ `_formatTrackingInfo()` ใช้ `JSON.stringify()` กับ object แล้ว render ใน `<pre>` ทั้งระดับ order และ package.
+- แบบที่ผู้ใช้ระบุ: timeline แนวตั้งเส้นเดียว ใช้ข้อมูลตามลำดับที่ ShpOrders ส่งมา แสดงสถานะ/รายละเอียดและค่าที่มีให้อ่านง่ายโดยไม่ dump JSON; เปลี่ยนเฉพาะ presentation ใน InfoTab, ไม่เปลี่ยน API/Python/bot หรือ schema. ตัวอย่าง test ปัจจุบันมี `status`/`description`; attachment ตัวอย่างจริงยังไม่อยู่ใน workspace จึงห้ามเดา schema เพิ่ม.
+- ผู้ใช้ขอ implementation โดยตรงและชี้แบบ timeline แล้ว. ขอบเขตตรวจ behavior ด้วย UI test-first; ไม่มี live DB/provider/customer action หรือ commit. Integrity ก่อนแก้: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15651 SHA `7bb92d7a32d4dc80b074a8b1d3c5d6d34457dcf0bc013fc3880f3b0764ebd403`; coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: ค้นหาแชทจาก conversation_id และ user_id
+- ผู้ใช้ขอเพิ่มการค้นแชทด้วย `conversation_id` และ `user_id` บนช่องค้นหา โดย context ก่อนหน้ากำหนดให้ Tickets กับ Botworker ใช้พฤติกรรม search/filter สอดคล้องกัน.
+- Audit แบบ read-only จะ trace `ChatList` → API ของ Tickets/Botworker → owner ของ search predicate เพื่อยืนยันชื่อ field (`customer_id`/`user_id`), matching semantics, cache/count/filter behavior และ tests ที่มี; semantic coverage ของ ledger ยัง partial.
+- แนวทางเบื้องต้นหลัง auditและรออนุมัติ: เพิ่ม `conversation_id` กับ field ลูกค้าใน OR search ของทั้งสอง API โดย reuse `safeRegexSearch` และ search owner เดิม; คง exact `order_sn` resolver, filters, pagination/count/cache. เสนอให้ ID ค้นแบบ substring เหมือนชื่อ/ข้อความ/ร้าน พร้อม behavior tests ของสองหน้า; helper/guard/regex/keyword/decision owner ใหม่ = 0.
+- ก่อนแก้ source จะสรุป root cause, ผลกระทบ และ plan ในแชทตาม AGENTS.md §9 แล้วรอผู้ใช้อนุมัติ. ยังไม่มี source/test/DB/provider/customer action, commit หรือ deploy ในช่วงนี้. Branch `codex/botworker-ui-polish-20261127`; integrity ก่อน append: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15656 SHA `980ddf9641d4411fe5d1dc7c69e1ea25f8577b6c74d1a296de468757551200fa`; coverage partial.
+
+## 2026-11-27 — กำลังจะทำ: เปิด modal จากการ์ดแคตตาล็อกใน Info panel
+- ภาพผู้ใช้แสดงแท็บสินค้าใน Info panel ซึ่ง render ผ่าน `ProductsTab`; row สินค้าเป็น `<div>` ที่ไม่มี click handler และปุ่มเดียวใน row คือปุ่มส่งสินค้า. Modal ก่อนหน้าผูกไว้เฉพาะ `InfoTab` รายการสินค้าที่ถูกเสนอในแชท จึงไม่ครอบคลุมแคตตาล็อกในภาพ; test เดิมตรวจเฉพาะ InfoTab.
+- `ProductsTab` ใช้ร่วมกันใน Tickets, Botworker และ Live Assignment. แก้ UI owner นี้ให้พื้นที่รูป/ชื่อ/ราคา/รหัสเปิด `ProductDetailsModal` ด้วย item ID และ platform ของ conversation; ปุ่มส่งคง action แยกเดิม. เพิ่ม behavior test ที่กด catalog card และยืนยัน item/platform ของ modal พร้อมยืนยันปุ่มส่งยังส่งเพียงสินค้า.
+- Verification ใช้ fake behavior และ scoped TypeScript/diff checks; ไม่อ่าน live Product DB, ไม่ส่ง provider/customer message, ไม่เขียน DB, ไม่เปลี่ยน Python bot, ไม่ deploy/commit. Branch `codex/botworker-ui-polish-20261127`; baseline ก่อนแก้: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15662 SHA `417d97d809a23d9b5c4e15a3ee1b54fb807f398d754b01651ed65582f1ea4859`; semantic coverage partial.
+
+## 2026-11-27 — ผ่านแล้ว: เพิ่ม conversation_id และ user_id ใน Inbox search
+- Root cause: Tickets และ Botworker ใช้ search predicate คนละชุดที่มีแค่ชื่อ/ข้อความ/ร้าน แม้ UI ใช้ `ChatList` ร่วมกัน; ช่อง User ID ในข้อมูลแชทคือ `customer_id`.
+- เพิ่ม `CONVERSATION_TEXT_SEARCH_FIELDS` ใน shared owner `inboxFilters.ts` แล้วให้ API ทั้งสองสร้าง OR regex จาก field ชุดเดียวกันด้วย `safeRegexSearch`; ค้น `conversation_id` และ `customer_id` แบบ substring ได้โดยยังคง order resolver, channel/shop/status filters, count และ pagination. ปรับ placeholder ให้แสดง `order_sn / conversation_id / user_id`.
+- Verification: RED ก่อนแก้ 12 ผ่าน/4 fail ตาม ID ที่ยังค้นไม่เจอ; GREEN behavior suite 16/16 ผ่าน (Tickets/Botworker, exact/partial IDs, count และ channel access); scoped TypeScript check 4 ไฟล์ผ่าน; `git diff --check` ผ่าน.
+- Net change สำหรับงานนี้: shared search-field contract +1; helpers 0, guards 0, regexes 0, keyword tables 0, business decision owners 0. ไม่มี live DB read/write, provider/customer message, Python bot change, commit หรือ deploy; ทำบน branch `codex/botworker-ui-polish-20261127`. Semantic coverage remains partial.
+
+## 2026-11-27 — กำลังจะทำ: ย้ายสินค้าและปรับ product card ใน order preview
+- ผู้ใช้ขอให้ย้ายข้อมูลสินค้าไว้ก่อน tracking และทำ card สินค้าให้สวยขึ้น. Root cause คือ `OrderDetailsPanel` เรียง Tracking ก่อนสินค้า และสินค้าเป็นแถวข้อความชื่อ/จำนวนอย่างเดียว ทั้งที่ `OrderItem` มี `image_url`, `name`, `model_name`, `quantity`, optional `price`.
+- แผน: เปลี่ยนเฉพาะลำดับ/การนำเสนอใน `OrderDetailsPanel`; ทำ card responsive มีรูป ชื่อ/รุ่น จำนวน และราคาเมื่อมีข้อมูล; คง API/order data และ tracking behavior เดิม. เพิ่ม behavior assertions จากตัวอย่าง API fixture ที่มีภาพ/รุ่น/ราคา; ไม่เขียน DB, ไม่เรียก provider/ส่งข้อความ, ไม่มี deploy/commit.
+- ผู้ใช้ระบุรูปแบบการจัดวางโดยตรง; branch `codex/botworker-ui-polish-20261127`. Integrity ก่อนแก้: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15673 SHA `9536762f7ca16944621369fe65a972da59fc7683ddeb4e1b641017d426b9454f`; coverage partial.
+
+## 2026-11-27 — ผ่านแล้ว: เปิด modal จากแคตตาล็อกสินค้าใน Info panel
+- Root cause: ภาพอยู่ใน `ProductsTab` แคตตาล็อกที่ row เป็น non-interactive `<div>`; modal ก่อนหน้าผูกเฉพาะการ์ด `InfoTab` ที่ถูกเสนอในแชท. เปลี่ยนพื้นที่ข้อมูลสินค้าใน row เป็นปุ่มเปิด `ProductDetailsModal` เดิม พร้อมส่ง item ID, image/name/price/shop/url และ platform จาก conversation; ปุ่มส่งสินค้าเป็นปุ่มแยก action เดิม. ครอบคลุม Tickets, Botworker และ Live Assignment ที่ใช้ `ProductsTab` ร่วมกัน.
+- Verification: behavior test ใหม่ล้มก่อนแก้เพราะไม่มีปุ่มเปิดรายละเอียด; หลังแก้ `test-chat-product-preview.mjs` ผ่านทั้ง MessageContent, InfoTab, catalog card, modal fields และ scroll. Scoped TypeScript check สำหรับ `ProductsTab` + `ProductDetailsModal` ผ่าน; `git diff --check` ผ่าน. Scoped check กว้างที่รวม InfoTab พบ TS2345 ใน `InfoTab.tsx:372` จาก `_formatTrackingInfo` ที่ส่งเป็น callback ให้ `.map()`; ไฟล์นี้ไม่อยู่ใน patch งานนี้.
+- ไม่ได้เปิด modal กับฐานสินค้า live/browser, ไม่อ่านหรือเขียน DB, ไม่เรียก provider/ส่งข้อความลูกค้า, ไม่แก้ Python bot, ไม่มี commit/deploy. Net: production helper 0, guard +1 (ปิดปุ่มเมื่อไม่มี item ID), regex 0, keyword table 0, business decision owner 0; presentation state +1; reused existing shared modal.
+
+## 2026-11-27 — ผ่านแล้ว: ทำ tracking เป็น timeline และย้ายสินค้าไว้ด้านบน
+- เปลี่ยน raw `tracking_info` JSON เป็น timeline ต่อเส้นตามลำดับที่ ShpOrders ส่งมา; ใช้ `update_time` แสดงวันเวลาไทย, ให้คำอธิบายเป็นข้อความหลัก และแสดง `logistics_status` เป็น badge. ย้ายสินค้าไว้ก่อน Tracking และทำ card พร้อมรูป ชื่อ/รุ่น ราคา และจำนวน; ไม่มีรูปจะใช้ไอคอนสินค้า. API, order schema และ bot ไม่เปลี่ยน.
+- Verification: test ก่อนแก้ fail ที่ timeline/order-section order; หลังแก้ panel behavior 2/2 ผ่าน. Scoped TypeScript สำหรับ order route + InfoTab ผ่าน; local preview แสดงข้อมูลจริงได้ตามลำดับใหม่; layout detector คืน `[]`; `git diff --check` ผ่าน. รูปแบบจริงของ `tracking_info` เห็นจาก local UI แบบ read-only: list ของ `update_time`, `description`, `logistics_status`; ไม่ได้อ่าน attachment path ที่ไม่มีใน workspace.
+- ไม่มี DB write, provider/customer message, deploy หรือ commit. Net change: formatter แทน helper เดิม (net 0); เพิ่ม timeline component 1; timestamp validity check 1; regex 0, keyword tables 0, business decision owners 0. Semantic coverage remains partial.
+
+## 2026-11-27 — กำลังจะทำ: แก้ป้ายแอดมินใน InfoTab และสีข้อความที่ถูกเลือก
+- ผู้ใช้ขอแก้ป้ายใน info panel เป็น “แอดมินรับผิดชอบ” และปรับสีเวลาลากคลุมข้อความให้อ่านออกจากพื้นหลัง; ผู้ใช้สั่งให้ทำต่อจนเสร็จ. ภาพแนบเป็นภาพอ้างอิงหน้าตา ไม่ใช่เอกสารคำสั่ง.
+- สาเหตุจาก source: InfoTab แสดงคำผิด “แอดมินผิดชอบ”; global `::selection` ใช้ maroon โปร่ง 24% ใน light mode และ 78% ใน dark mode ทำให้พื้น/ตัวอักษรยังแยกไม่ชัด. งานนี้แก้ที่ InfoTab และ global selection style เดิม; ไม่มี helper/guard/regex/keyword/business-decision owner เพิ่ม.
+- แผน: ทดสอบข้อความที่ render จาก InfoTab และสี selection จาก browser ก่อน/หลัง; แก้เฉพาะ label และ CSS selection ให้ทึบพร้อม foreground ที่อ่านชัดทั้ง light/dark; ตรวจ diff และ type scope. ไม่แตะ function bot/SRS/DB/provider/customer send/deploy; คง dirty work ใน branch `codex/botworker-ui-polish-20261127`.
+- ก่อนเริ่ม: frozen SHA ตรง `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active integrity prefix 15688 บรรทัด SHA ตรง `ac1a19cbe6134ad65e4806043a6b0ff4eedb2158128dc5f11429c97d33e68266`; ไม่มี active tail ก่อนงาน. Coverage ใน ledger ยัง partial.
+
+## 2026-11-27 — ผ่านแล้ว: แก้ป้ายแอดมินและสีข้อความที่เลือก
+- แก้ InfoTab จาก “แอดมินผิดชอบ” เป็น “แอดมินรับผิดชอบ” โดยคงการคำนวณแอดมินที่รับผิดชอบเดิม; ปรับ global `::selection` ให้พื้นน้ำเงินทึบ `#1d4ed8` และตัวอักษรขาวเหมือนกันทุกธีม เพื่อให้แยกจากพื้นหลังและอ่านข้อความได้ชัด.
+- Verification: behavior test ที่ render InfoTab จริง fail ก่อนแก้และผ่านหลังแก้ (`node --import tsx scripts/test-info-tab-admin-label.tsx`); หน้า local จริงแสดง label ใหม่; browser CSSOM ได้ selection `rgb(29, 78, 216)` / `rgb(255, 255, 255)` และภาพเลือกข้อความอ่านชัด; `git diff --check` ผ่าน. ตรวจภาพจริงใน light mode; กฎ CSS ใช้ selector กลางไม่ผูกธีม.
+- Net change: helpers 0, guards 0, regexes 0, keyword tables 0, business decision owners 0. เปลี่ยน presentation/label 2 จุดและเพิ่ม behavior test 1 ไฟล์. ไม่มี SRS/function bot change, DB write, provider/customer send, deploy หรือ commit; คงงานอื่นที่ dirty ใน branch `codex/botworker-ui-polish-20261127`. Coverage ยังคง partial.
+
+## 2026-11-27 — กำลังจะทำ: ลากรูปจากโฟลเดอร์ลงช่องแชท
+- ผู้ใช้ขอให้ลากรูปจาก folder มาวางในช่องแชทแล้วแนบได้ทันที; source audit พบว่า shared `ShopeeChatComposer` รับภาพผ่าน image input และ `chooseFile("image", ...)` อยู่แล้ว แต่ `<form>` ยังไม่มี drag/drop event. Existing owner validates JPG/PNG/GIF up to 10 MB, previews, removes, and sends queued images sequentially.
+- แผน: รับไฟล์ที่ drop บน composer form แล้วส่งเข้าทาง `chooseFile("image", files)` เดิม เพื่อใช้ validation/preview/send flow เดิม; เคารพข้อจำกัดปัจจุบันของรูป/วิดีโอ/สติกเกอร์. เพิ่ม executable behavioral coverage สำหรับ drop และ invalid files. Shared component ใช้ทั้ง Tickets และ BotWorker; ไม่ต้องเปลี่ยน API, DB, bot, หรือ SRS. ยังไม่แก้ source; รออนุมัติ design ก่อนตาม AGENTS.md §9.
+- ก่อนแก้: frozen SHA `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active baseline 15699 บรรทัด SHA `f47c9aedc4846b4f71abbfd111b19d3fcde183786100b64393e8c6cb3852f3f1`; branch `codex/botworker-ui-polish-20261127` มี working tree dirty จากงานอื่น; semantic coverage partial.
+
+## 2026-11-27 — อนุมัติและเพิ่มเงื่อนไข: drop รูปไม่ส่งอัตโนมัติ; Enter ส่งสติกเกอร์
+- ผู้ใช้อนุมัติการเพิ่มรูปผ่าน drag/drop และย้ำว่าการวางไฟล์ต้องเพิ่มเข้าคิว/พรีวิวเท่านั้น ห้ามส่งลูกค้าจนกดปุ่มส่ง. เพิ่มคำขอให้ Enter ส่งสติกเกอร์ที่เลือกได้.
+- Root cause สติกเกอร์: Enter handler อยู่เฉพาะ textarea ซึ่งถูก disable ระหว่างเปิด sticker picker; sticker buttons เป็น `type="button"` และไม่มี submit key behavior. `handleSubmit()` มี owner ส่งสติกเกอร์อยู่แล้ว. แผนคือ Enter บน sticker ที่เลือกส่งผ่าน `requestSubmit()`; Enter บนตัวเลือกที่ยังไม่เลือกคงทำงานเป็นการเลือกตาม native button. ใช้ `ShopeeChatComposer` เดิมสำหรับ Tickets/BotWorker; ไม่มี API/DB/SRS change.
+- Scope อนุมัติ: test-first สำหรับ no-auto-send, queue/validation รูป, และ Enter ส่ง selected sticker; source change รอ red behavior test. Branch ยังมี unrelated dirty work; ห้ามทับ.
+
+## 2026-11-27 — กำลังจะทำ: เพิ่มหัวข้อเหตุผลเองใน BotWorker
+- ผู้ใช้ต้องการให้ dropdown “หมวดเหตุผลที่แก้คำตอบ” มีทางเพิ่มหัวข้อที่แอดมินพิมพ์เอง และหัวข้อใหม่นั้นกลับมาเลือกได้ครั้งหน้า. ภาพเป็นหลักฐาน UI ปัจจุบัน ไม่ใช่คำสั่งจากเอกสาร.
+- Root cause: `BOTWORKER_REVIEW_REASON_CATEGORIES` เป็น array คงที่ใน frontend และ `reviewService` ตรวจ `reason_category` กับ array เดียวกัน; ยังไม่มี owner ที่ persist รายการ custom. เก็บรายการ custom แบบกลางใน `system_configs.main_config` ผ่าน `systemConfigService` แบบ atomic add-to-set; ให้ default เดิมอยู่ครบและ custom list ใช้กับการแก้คำตอบเท่านั้น. ไม่เปลี่ยนหมวด rejection.
+- Plan: เพิ่ม API GET/POST ที่ใช้สิทธิ์ BotWorker เดิม เพื่ออ่าน/เพิ่ม label; dropdown มีทางเลือกเพิ่มหัวข้อ, ช่องกรอก และยืนยันแล้วเลือกหัวข้อที่เพิ่ม; `reviewService` owner ตรวจ category กับรายการปัจจุบันก่อน persist `edit_history`. เพิ่ม behavioral tests สำหรับ add/persist/duplicate/invalid/auth และ save/edit ด้วย custom category. ไม่เขียน real DB, ไม่ส่ง provider/customer, ไม่ deploy/commit.
+- ผู้ใช้สั่ง “ถ้าทำได้ทำเลย”; branch `codex/botworker-ui-polish-20261127` มีงานอื่น dirty อยู่แล้ว. Frozen SHA ตรง `a67b91526019270975652ab8cbd07aadeab482d8a59d442e679eafc40f520341`; active prefix 15709 SHA `6c7ab82b3b99c40235895154549ab9eaefe450b1b4d4a665e871e574995e8c6c`; coverage partial. Design summary will be shown before implementation per brainstorming skill.
+
+## 2026-11-27 — ผ่านแล้ว: ลากรูปเข้าคิวและส่งสติกเกอร์ด้วย Enter
+- `ShopeeChatComposer` รับไฟล์จาก drag/drop บน composer form แล้วส่งเข้าทาง `chooseFile("image", ...)` เดิม; รูปที่ผ่าน validation จะอยู่ในพรีวิว/คิวและไม่ส่งจนกด submit เอง. ประเภท/ขนาดเดิมและข้อจำกัดเลือกสื่อยังคงทำงาน.
+- สติกเกอร์ที่เลือกอยู่กด Enter บนปุ่มสติกเกอร์เพื่อ submit form ผ่าน `requestSubmit()` และใช้ `handleSubmit()` เดิม; Enter บนตัวเลือกที่ยังไม่เลือกยังคงเป็นการเลือก. ปรับคำแนะนำให้บอก shortcut Enter. Shared UI ใช้กับ Tickets และ BotWorker.
+- Verification: test ใหม่ล้มก่อนแก้ที่ drag handlers และ sticker keydown; หลังแก้ `test-shopee-chat-composer-drop-sticker.ts` ผ่านทั้ง queue/no-auto-send/explicit-submit, invalid-file feedback, และ Enter sticker submit. Existing `test-shopee-chat-composer.ts` และ `test-shopee-chat-composer-retry.ts` ผ่าน; `git diff --check` ผ่าน. Full `tsc` ยังล้มจาก stale `.next/types` ที่อ้าง `review-analysis/route.js` หาย และ type errors ใน `scripts/test-shporder-details-panel.tsx`; ไม่มี error ในไฟล์ source/test ที่เพิ่ม.
+- Net change: production helpers 0, drop eligibility guard +1, regexes 0, keyword tables 0, business decision owners 0. เปลี่ยน shared composer 1 ไฟล์และเพิ่ม behavior test 1 ไฟล์. ไม่มี live provider/customer send, DB change, deploy หรือ commit; semantic coverage partial.
+
+## 2026-11-27 — ผู้ใช้ยืนยันหัวข้อ custom ใช้ร่วมกัน
+- ผู้ใช้ตอบยืนยันให้หัวข้อใหม่ที่เพิ่มใน BotWorker ใช้ร่วมกันทุกแอดมิน. Design ที่นำเสนอได้รับอนุมัติ; scope คงเดิม: เพิ่มเฉพาะ edit-reason, ใช้ SystemConfig owner สำหรับรายการกลาง, rejection reason ไม่เปลี่ยน. เริ่ม TDD ก่อน production code.
+
+## 2026-11-27 — ผ่านแล้ว: หัวข้อเหตุผลแก้คำตอบแบบกำหนดเอง ใช้ร่วมกันทุกแอดมิน
+- เพิ่มรายการหัวข้อ custom ใน `system_configs.main_config` ผ่าน `systemConfigService` owner เดิม: อ่านรวมค่าเริ่มต้นและค่าที่เพิ่ม, เพิ่มแบบ `$addToSet`, trim, ปฏิเสธค่าว่าง/ยาวเกิน 60 ตัวอักษร, และบันทึก `updated_by`/`updated_at`. เพิ่ม BotWorker-authorized GET/POST `/api/botworker/review-reasons`; POST เขียน audit log เฉพาะรายการใหม่. รายการจึงเป็นชุดกลางที่ admin คนอื่นโหลดและใช้ได้.
+- ใน BotWorker ช่องแก้คำตอบโหลดรายการจาก API และมี “เพิ่มหัวข้ออื่น ๆ”; เมื่อเพิ่มสำเร็จระบบเลือกหัวข้อนั้นให้ทันทีและคงไว้ให้เลือกครั้งต่อไป. `reviewService` ตรวจหัวข้อ edit กับรายการที่บันทึกไว้ก่อนเก็บ `edit_history`; หมวดปฏิเสธคำตอบยังใช้รายการคงที่เดิม. อัปเดต `docs/schema.md` ระบุ field และ API.
+- Verification: test-first พบ POST/save custom category ถูกปฏิเสธด้วย 422 และ storage API ยังไม่มี; หลังแก้ `test-botworker-review.ts` ผ่าน 71/71, test จริงของ `systemConfigService` บน fake Mongo ผ่าน (ค่า default, trim/persist, creator, duplicate idempotence, blank/length rejection), scoped TypeScript ของทุกไฟล์ source ที่เปลี่ยน exit 0, `git diff --check` ผ่าน. ไม่มี real DB/provider/customer send, deploy หรือ commit.
+- Net change: เพิ่ม method ใน owner เดิม 2 รายการและ route GET/POST 2 รายการ; UI เพิ่ม handler สำหรับการเพิ่มหัวข้อ 1 รายการ. Regexes 0, keyword tables 0, business decision owners 0; rejection behavior ไม่เปลี่ยน. Files ของงานนี้: BotWorker page, API route, systemConfigService, review/shadow reply types, admin audit action type, tests 2 ไฟล์ และ schema doc. Working tree ยังมีงานอื่น dirty ซึ่งไม่ได้แก้หรือรวมในงานนี้. Semantic history coverage remains partial.
+
+## 2026-11-27 — กำลังจะทำ: ตรวจความพร้อม commit, push และรวมงานเข้า main
+- ผู้ใช้สั่งให้ตรวจความพร้อม, commit, push ไป GitHub, รวมเข้า main และทำให้ checkout local ตรงกับ main โดยรักษางานทั้งหมดที่แก้ไว้.
+- สถานะก่อนจัดเตรียม: branch `codex/botworker-ui-polish-20261127`; `HEAD`, `main` และ `origin/main` ยังอยู่ที่ `6a34e6c`; working tree มี 34 ไฟล์ modified (git diff 1,534 additions / 236 deletions) และไฟล์ใหม่หลายรายการ; ยังไม่มี commit งานเหล่านี้. ห้าม reset/clean หรือทับ diff.
+- แผนตรวจ: แจกแจง diff เป็นชุดงาน, รัน verification ที่เกี่ยวข้องจาก source ปัจจุบัน, ทวน branch/remote/merge path และ conflict risk. จากนั้นแสดง diff summary, test results และรายชื่อไฟล์จริงให้ผู้ใช้ตรวจ ก่อนสร้าง commit/PR ตาม AGENTS.md §10; หาก scope มีงานที่ยังไม่ผ่านให้หยุดและรายงานโดยเก็บ working tree ไว้.
+
+## 2026-11-27 — กำลังจะทำ: render ตารางใน bubble ของ BotWorker และ Tickets
+- ผู้ใช้ต้องการให้ bubble แสดง Markdown table เป็นตารางที่จัดรูปแบบแล้ว ทั้งหน้า BotWorker และ Tickets โดยออกแบบให้ดีบนทุกขนาดจอ และย่อขนาดตารางกับตัวอักษรบนจอเล็ก.
+- แผนตรวจแบบ read-only: ไล่เส้นทาง render ของทั้งสองหน้า, ตรวจ dependency/pattern ที่ใช้อยู่และ dirty diff ที่เกี่ยวข้อง, ระบุ root cause และขอบเขต regression; จากนั้นเสนอ design/ไฟล์/วิธีตรวจในแชตและรออนุมัติก่อนแก้ตาม AGENTS.md §9.
+
+## 2026-11-27 — ผ่านแล้ว: ตรวจชุดงานก่อน commit/push/merge
+- ตรวจ branch `codex/botworker-ui-polish-20261127`, local `main` และ GitHub `origin/main`: ทั้งหมดอยู่ที่ `6a34e6c2838349b6cbaa9c2f35fcedc80f65560a`; branch งานยังไม่มีบน remote. ผู้ใช้ยืนยันให้ commit, push, merge เข้า `main` และทำ local ให้ตรง main โดยเก็บงานทั้งหมด.
+- Staged scope มี 55 ไฟล์ (3,413 additions / 236 deletions): order/inbox search/tracking/product preview, persisted notification preferences + in-app toasts, composer drag/drop + sticker Enter, Shopee outbound handling, shared custom BotWorker edit reasons, tests และเอกสาร. แก้ test contract 2 จุดจากการตรวจเต็ม: expected outbound product card ให้รวม `platform`, และ panel test ใช้ mock response `{body,status}`/types ให้ตรง test hook; production behavior ไม่เปลี่ยนจากการแก้สองจุดนี้.
+- Verification: frontend behavior suites ผ่าน (Inbox 16, review 71, order panel 2, outbound 9 และ suites ของ product details/catalog/notifications/composer/admin label); full offline pytest 2,430 passed / 17 skipped / 1 xfailed (13 warnings); full TypeScript `tsc --noEmit` ผ่านหลังสร้าง route types และนำ stale ignored `.next/types/.../review-analysis/route.ts` ที่ชี้ไป source ซึ่งไม่มีอยู่ออกจาก generated cache; Python `py_compile` และ `git diff --cached --check` ผ่าน.
+- ไม่ได้ทำ production build ต่อ: Next แสดงว่าจะโหลด `.env` ซึ่ง repo ห้ามเข้าถึง. ไม่มี real DB write/provider/customer send/deploy. ขั้นต่อไป: commit แยกตาม feature บน branch, push, สร้าง PR เข้า main และ merge; ถ้า policy/check ของ GitHub ปฏิเสธ merge ให้คง branch/PR และรายงานตรงตามจริง. Semantic history coverage remains partial.
