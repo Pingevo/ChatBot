@@ -17,6 +17,7 @@ import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { SAFETY } from "../lib/safety";
 import { isSafeFetchUrl } from "../lib/urlSafety";
+import { BOTWORKER_REVIEW_REASON_CATEGORIES } from "@/lib/types";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
 export type ChatEngine = "legacy" | "v2" | "v3" | "v4";
@@ -74,6 +75,7 @@ export interface SystemConfigDoc extends Document {
   // === Assignment — admin-configurable ===
   // ⚡ G2 — true = จ่ายงานให้แอดมินคนเดิมที่เคยตอบก่อน, false = round-robin เลย
   assignment_prefer_previous_admin: boolean;
+  botworker_edit_reason_categories?: string[];
 
   // === Bot service URLs (3 ตัว แยก port) ===
   shopee_bot_url: string;
@@ -403,6 +405,56 @@ export async function updateSystemConfig(
   // Force refresh cache
   cachedConfig = null;
   return getSystemConfig(true);
+}
+
+export async function getBotWorkerEditReasonCategories(): Promise<string[]> {
+  const coll = await getCollection<SystemConfigDoc>(COLLECTIONS.systemConfigs);
+  const config = await coll.findOne(
+    { config_key: "main_config" },
+    { projection: { botworker_edit_reason_categories: 1 } }
+  );
+  const custom = Array.isArray(config?.botworker_edit_reason_categories)
+    ? config.botworker_edit_reason_categories
+        .filter((category): category is string => typeof category === "string")
+        .map((category) => category.trim())
+        .filter(Boolean)
+    : [];
+  return [...new Set([...BOTWORKER_REVIEW_REASON_CATEGORIES, ...custom])];
+}
+
+export async function addBotWorkerEditReasonCategory(
+  input: unknown,
+  updatedBy = "admin"
+): Promise<
+  | { ok: true; category: string; categories: string[]; added: boolean }
+  | { ok: false; message: string }
+> {
+  if (typeof input !== "string") return { ok: false, message: "กรุณาระบุหัวข้อ" };
+  const category = input.trim();
+  if (!category) return { ok: false, message: "หัวข้อห้ามว่าง" };
+  if (category.length > 60) return { ok: false, message: "หัวข้อต้องไม่เกิน 60 ตัวอักษร" };
+
+  const categories = await getBotWorkerEditReasonCategories();
+  if (categories.includes(category)) return { ok: true, category, categories, added: false };
+
+  const coll = await getCollection<SystemConfigDoc>(COLLECTIONS.systemConfigs);
+  const config = await coll.findOne(
+    { config_key: "main_config" },
+    { projection: { botworker_edit_reason_categories: 1 } }
+  );
+  if (config?.botworker_edit_reason_categories !== undefined && !Array.isArray(config.botworker_edit_reason_categories)) {
+    return { ok: false, message: "รายการหัวข้อที่จัดเก็บมีรูปแบบไม่ถูกต้อง" };
+  }
+
+  await coll.updateOne(
+    { config_key: "main_config" },
+    {
+      $addToSet: { botworker_edit_reason_categories: category },
+      $set: { updated_by: updatedBy, updated_at: new Date() },
+    },
+    { upsert: true }
+  );
+  return { ok: true, category, categories: await getBotWorkerEditReasonCategories(), added: true };
 }
 
 /**
@@ -819,4 +871,6 @@ export const systemConfigService = {
   testIntegration,
   getAdminConfig,
   updateAdminConfig,
+  getBotWorkerEditReasonCategories,
+  addBotWorkerEditReasonCategory,
 };

@@ -458,7 +458,7 @@ export function ChatList({
             type="text"
             value={search}
             onChange={(e) => handleSearchChange(e.target.value)}
-            placeholder="ค้นหา ชื่อ / ข้อความ / ร้าน..."
+            placeholder="ค้นหา ชื่อ / ข้อความ / ร้าน / order_sn / conversation_id / user_id..."
               className="mobile-chat-search w-full h-8 pl-8 pr-3 rounded-lg border border-border bg-surface text-xs text-text placeholder:text-text-subtle focus:outline-none focus:ring-2 focus:ring-brand/40 focus:border-brand/40"
           />
         </div>

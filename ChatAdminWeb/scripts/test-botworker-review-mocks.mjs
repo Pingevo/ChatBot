@@ -10,6 +10,8 @@ import {
   getBotProductLimit,
 } from "./test-botworker-fakemongo.mjs";
 
+const DEFAULT_EDIT_REASON_CATEGORIES = ["สเปคผิด", "ควรส่งแอดมิน", "การแก้ปัญหาผิด", "ผิดรุ่น", "ตอบไม่ได้"];
+
 export const state = {
   calls: { callBot: 0 },
   callBotParams: [],
@@ -20,6 +22,7 @@ export const state = {
   authAdminId: "t_admin",         // actor ที่ requireAuth คืน (เปลี่ยนต่อเทสได้)
   authAdminName: "Test Reviewer",
   pageAccessAllowed: true,
+  editReasonCategories: [...DEFAULT_EDIT_REASON_CATEGORIES],
   shopeeSendEnabled: false,
   fakeShopeeCalls: [],
   mockFail: false,                // mockSendService throw → mock_failed path
@@ -62,6 +65,7 @@ export function resetState() {
   state.authAdminId = "t_admin";
   state.authAdminName = "Test Reviewer";
   state.pageAccessAllowed = true;
+  state.editReasonCategories = [...DEFAULT_EDIT_REASON_CATEGORIES];
   state.shopeeSendEnabled = false;
   state.fakeShopeeCalls.length = 0;
   state.mockFail = false;
@@ -84,7 +88,19 @@ export async function callBot(params) {
 
 // ── systemConfigService mock ──
 export const getSystemConfig = makeGetSystemConfigMock(state);
-export const systemConfigService = { getSystemConfig };
+export async function getBotWorkerEditReasonCategories() {
+  return [...state.editReasonCategories];
+}
+export async function addBotWorkerEditReasonCategory(category) {
+  if (typeof category !== "string") return { ok: false, message: "กรุณาระบุหัวข้อ" };
+  const value = category.trim();
+  if (!value) return { ok: false, message: "หัวข้อห้ามว่าง" };
+  if (value.length > 60) return { ok: false, message: "หัวข้อต้องไม่เกิน 60 ตัวอักษร" };
+  const added = !state.editReasonCategories.includes(value);
+  if (added) state.editReasonCategories.push(value);
+  return { ok: true, category: value, categories: await getBotWorkerEditReasonCategories(), added };
+}
+export const systemConfigService = { getSystemConfig, getBotWorkerEditReasonCategories, addBotWorkerEditReasonCategory };
 export { shouldUseChatV2, shouldUseChatV3, getBotProductLimit };
 
 // ── authorize mock — admin จาก state.authAdminId ──

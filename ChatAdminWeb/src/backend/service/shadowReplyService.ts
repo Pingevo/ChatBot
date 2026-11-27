@@ -16,7 +16,7 @@ import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { listMessages, getHistoryForBot, toBotText, toBotImages } from "./messageService";
 import { getConversation } from "./conversationService";
 import { assertPlatformApiDisabled, type Platform } from "../lib/safety";
-import type { BotWorkerReviewReasonCategory } from "@/lib/types";
+import type { BotWorkerEditReasonCategory, BotWorkerReviewReasonCategory } from "@/lib/types";
 import { logAdminEvent } from "./adminLogService";
 
 export interface ShadowReviewBubbleDoc {
@@ -31,7 +31,7 @@ export interface ShadowReviewBubbleDoc {
   approved_text?: string;
   rejection_category?: BotWorkerReviewReasonCategory;
   rejection_reason?: string;
-  edit_history?: { before_text: string; after_text: string; reason_category?: BotWorkerReviewReasonCategory; reason_text?: string; actor: string; actor_name: string; at: Date }[];
+  edit_history?: { before_text: string; after_text: string; reason_category?: BotWorkerEditReasonCategory; reason_text?: string; actor: string; actor_name: string; at: Date }[];
   delivery: { state: string; request_id?: string; error?: string; outbound_text?: string };
   card?: { item_id: string; delivery: { state: string; request_id?: string; error?: string } };
 }

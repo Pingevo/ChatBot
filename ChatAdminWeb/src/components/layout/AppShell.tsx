@@ -16,10 +16,13 @@ import { Sidebar } from "./Sidebar";
 import { MobileNav } from "./MobileNav";
 import { MobilePageNavigationProvider } from "./MobilePageNavigation";
 import { Loading } from "@/components/ui/Loading";
-import { ToastContainer } from "@/components/ui/Toast";
+import { ToastContainer, toast } from "@/components/ui/Toast";
 import { ConfirmDialog } from "@/components/ui/ConfirmDialog";
 import { ImageViewerOverlay } from "@/components/ui/ImageViewer";
 import { getPageIdentityKind } from "@/components/ui/PageIdentityMark";
+import { canAccessPage } from "@/lib/roles";
+import { DEFAULT_NOTIFICATION_PREFERENCES } from "@/lib/types";
+import { findNotificationEvents, type NotificationConversation } from "@/lib/notificationMonitor";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, initialized, fetchMe } = useAuth();
@@ -28,6 +31,69 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [mobileOpen, setMobileOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(true);
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+
+  useEffect(() => {
+    if (!user) return;
+    const preferences = user.notification_preferences || DEFAULT_NOTIFICATION_PREFERENCES;
+    const monitorStartedAt = Date.now();
+    const storageKey = `chat-notifications:v1:${user.admin_id}`;
+    const previous = new Map<string, NotificationConversation>();
+    const seen = new Set<string>();
+    try {
+      const saved = JSON.parse(localStorage.getItem(storageKey) || "[]");
+      if (Array.isArray(saved)) for (const key of saved) if (typeof key === "string") seen.add(key);
+    } catch { /* use a fresh in-memory set */ }
+    let disposed = false;
+    let polling = false;
+
+    const poll = async () => {
+      if (polling || disposed) return;
+      polling = true;
+      try {
+        const includeBotworker = canAccessPage(user, "botworker");
+        const responses = await Promise.allSettled([
+          fetch("/api/admin/conversations?limit=100", { cache: "no-store" }).then(async (response) => {
+            if (!response.ok) throw new Error(`admin conversations ${response.status}`);
+            const payload = await response.json();
+            const rows = Array.isArray(payload) ? payload : payload.rows;
+            return Array.isArray(rows) ? rows.map((row) => ({ ...row, source: "admin" as const })) : [];
+          }),
+          includeBotworker
+            ? fetch("/api/botworker/conversations?limit=300", { cache: "no-store" }).then(async (response) => {
+                if (!response.ok) throw new Error(`botworker conversations ${response.status}`);
+                const payload = await response.json();
+                return Array.isArray(payload.rows) ? payload.rows.map((row: Record<string, unknown>) => ({ ...row, source: "botworker" as const })) : [];
+              })
+            : Promise.resolve([]),
+        ]);
+        const rows: NotificationConversation[] = responses.flatMap((result) =>
+          result.status === "fulfilled" ? result.value as NotificationConversation[] : []
+        );
+        const events = findNotificationEvents({ rows, previous, preferences, now: Date.now(), monitorStartedAt });
+        for (const event of events) {
+          if (seen.has(event.key)) continue;
+          seen.add(event.key);
+          toast.info(event.message, 8000);
+        }
+        try {
+          localStorage.setItem(storageKey, JSON.stringify([...seen].slice(-500)));
+        } catch { /* notifications still dedupe for this page session */ }
+        previous.clear();
+        for (const row of rows) previous.set(`${row.source}:${row.id}`, row);
+      } catch (error) {
+        console.warn("Notification polling failed", error);
+      } finally {
+        polling = false;
+      }
+    };
+
+    void poll();
+    const timer = window.setInterval(poll, 60_000);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [user?.admin_id, user?.role, user?.notification_preferences?.newTicket, user?.notification_preferences?.handoff, user?.notification_preferences?.unanswered]);
 
   // ⚡ test-chat pages — เดิมออกแบบให้ bypass login แต่ตอนนี้ middleware บังคับ SSO ทุกหน้า
   //   (PUBLIC_PAGES = ["/login"] เท่านั้น) — flag นี้เป็น dead path ไว้เผื่อ middleware whitelist ภายหลัง

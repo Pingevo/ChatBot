@@ -5,6 +5,7 @@ import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error, readJson } from "@/backend/lib/http";
 import { auth } from "@/backend/service/authService";
 import { isChatTextSize, type ChatTextSize } from "@/lib/chatTextSize";
+import type { NotificationPreferences } from "@/lib/types";
 
 export async function PATCH(req: NextRequest) {
   const r = await requireAuth(req);
@@ -16,6 +17,7 @@ export async function PATCH(req: NextRequest) {
     bubble_color?: string;
     theme_preference?: "light" | "dark";
     chat_text_size?: unknown;
+    notification_preferences?: unknown;
   }>(req).catch(() => null);
   if (!body) return error("invalid body", 400);
 
@@ -25,6 +27,7 @@ export async function PATCH(req: NextRequest) {
     bubble_color?: string;
     theme_preference?: "light" | "dark";
     chat_text_size?: ChatTextSize;
+    notification_preferences?: NotificationPreferences;
   } = {};
   if (typeof body.name === "string" && body.name.trim()) updates.name = body.name.trim();
   if (Array.isArray(body.channels_access)) updates.channels_access = body.channels_access;
@@ -48,6 +51,21 @@ export async function PATCH(req: NextRequest) {
       return error("invalid chat_text_size", 400);
     }
     updates.chat_text_size = body.chat_text_size;
+  }
+  if (body.notification_preferences !== undefined) {
+    const preferences = body.notification_preferences;
+    if (!preferences || typeof preferences !== "object" || Array.isArray(preferences)) {
+      return error("invalid notification_preferences", 400);
+    }
+    const value = preferences as Record<string, unknown>;
+    if (typeof value.newTicket !== "boolean" || typeof value.handoff !== "boolean" || typeof value.unanswered !== "boolean") {
+      return error("invalid notification_preferences", 400);
+    }
+    updates.notification_preferences = {
+      newTicket: value.newTicket,
+      handoff: value.handoff,
+      unanswered: value.unanswered,
+    };
   }
 
   if (Object.keys(updates).length === 0) return error("no fields to update", 400);

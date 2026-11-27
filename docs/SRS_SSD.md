@@ -675,14 +675,14 @@ listing path:
 | `extract_order_sn` | สกัดเลข order | message | str/None | regex patterns | order_flow, chat_v2, rich_parse, warranty | SN pattern | — |
 | `extract_tracking_number` | สกัดเลขพัสดุ | message | str/None | regex | order_flow, chat_v2, rich_parse | carrier patterns (SPX/Kerry/Flash/J&T/ไปรษณีย์) | — |
 | `_normalize_tracking` | normalize tracking | tn | str | — | lookup_by_tracking | — | — |
-| `lookup_by_tracking` | tracking→order | tn, shop_filter | order/None | _get_order_collection, _normalize_tracking | order_flow, chat_v2._check_tracking_lookup | find by tracking — **A-325: ไม่มี cross-shop fallback (order ข้ามร้าน = data leak)** | DB read |
-| `_map_order_status` | status→ไทย | status | str | map | build_order_context | — | — |
-| `_map_logistics_status` | logistics→ไทย | status | str | map | build_order_context | — | — |
-| `_format_create_time` | เวลาสั่งซื้อ | ts | str | — | build_order_context | — | — |
-| `_format_unix_ts` | unix ts→text | ts | str | — | build_order_context | — | — |
-| `_format_address` | address→text | addr dict | str | — | build_order_context | — | — |
-| `lookup_order` | **order lookup** | order_sn, shop_filter | dict/None | _get_order_collection.find_one | order_flow, chat_v2, engine v3, warranty.auto_check_* | full doc — **A-325: ตัด cross-shop fallback (shop ที่ให้ต้อง exact — ไม่พบ = None ไม่ query ทั้ง DB)** | DB read |
-| `build_order_context` | order→prompt ctx | order | str | _map_*/_format_* | all order paths | items/status/tracking/address block | — |
+| `lookup_by_tracking` | tracking→order | `tracking_no: str` (customer tracking number), `shop_filter: str\|None` (exact shop) | `dict[str, Any]\|None` from `lookup_order` | `_normalize_tracking`, `_get_order_collection().find_one`, `lookup_order` | `order_flow.py:428` (tracking number from current turn); `chat_v2.py:472` (deterministic tracking lookup) | normalize input; exact-match top-level `tracking_no` OR package tracking fields; apply exact `shopname` when provided; call `lookup_order` to build the shared order result | DB read; no match/cross-shop → `None`; MongoDB/other errors log and return `None`; no cross-shop fallback (A-325) |
+| `_map_order_status` | status→ไทย | status: str | str | status map | `lookup_order` | map raw Shopee order status for order result | — |
+| `_map_logistics_status` | logistics→ไทย | status: str | str | logistics map | `lookup_order` | map package logistics status for order result | — |
+| `_format_create_time` | เวลาสั่งซื้อ | ts: Any | str | date formatter | `lookup_order` | format Unix order time in Thai Buddhist calendar | — |
+| `_format_unix_ts` | unix ts→text | ts: Any | str | date formatter | `lookup_order` | format payment, ship, pickup, delivery, and update times | — |
+| `_format_address` | address→text | addr: dict | str | address formatter | `lookup_order` | mask address fields before returning the order result | — |
+| `lookup_order` | **read-only order lookup** | `order_sn: str` (exact order number), `shop_filter: str\|None` (exact optional shop) | `dict[str, Any]\|None`; includes order data, top-level and package `tracking_no`, raw `tracking_info`, and package tracking info | `_get_order_collection().find_one`, `_map_order_status`, `_map_logistics_status`, `_format_create_time`, `_format_unix_ts`, `_format_address` | `order_store.py:203` (enrich tracking match); `order_flow.py:264` (return/refund/order problem), `:479` (order number); `chat_v2.py:425`; `chatbotv3/engine.py:150`; `warranty.py:987,1068` | query exact `order_sn` + optional shop; collect top-level tracking first and unique package numbers; preserve tracking info; map status/date/address fields | DB read; missing/cross-shop order → `None`; MongoDB/other errors log and return `None`; no cross-shop fallback (A-325) |
+| `build_order_context` | order→LLM context | `order: dict[str, Any]` (result from order lookup) | str | `json.dumps` for structured tracking details | `order_flow.py:430` (tracking lookup), `:481` (order number); `chat_v2.py:435` (order number), `:475` (tracking lookup); `chatbotv3/engine.py:152`; `order_store.py:674` diagnostic | return empty for missing order; format status/dates/carrier and tracking numbers; serialize tracking info; append address/payment/items for grounded LLM context | no DB/write side effects; not-found order returns `""` |
 
 ### 6.12 `order_flow.py` — early order flow
 

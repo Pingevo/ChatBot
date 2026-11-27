@@ -84,7 +84,7 @@
 |----|-----|---------|---------|
 | admin DB (`chatbot_admin`) | `ADMIN_MONGO_URI` หรือ `ADMIN_MONGO_HOST/USERNAME/PASSWORD/AUTH_SOURCE/TLS` + `ADMIN_MONGO_DB` | Next.js (หลัก) + Python (`conversation_products`, `test_chat_*`, import scripts) + sellcenter dump (conversations/messages/customers) | Next.js ทุก service + Python bot runtime |
 | product DB (`dbWallet`) | `MONGO_URI`, `MONGO_DB`, `MONGO_COLLECTION` | ภายนอก (Shopee sync) | Python `product_store`/`units`/`knowledge_base`/`app.py`/`chat_v2`/`chatbotv3` + Next.js `dbWalletClient.ts` (ReadOnlyCollection บล็อกทุก write) |
-| order DB (default `dbWallet`) | `ORDER_URI_MONGO`, `ORDER_DB`, `ORDER_COLLECTION` | ภายนอก | Python `order_store.py` + Next.js `/admin/conversations/[id]/orders` route |
+| order DB (default `dbWallet`) | `ORDER_URI_MONGO`, `ORDER_DB`, `ORDER_COLLECTION` | ภายนอก | Python `order_store.py` + Next.js order history และ Inbox search routes |
 | stock DB (`itStock`) | `STOCK_URI`, `STOCK_DB` | ภายนอก | Python `product_store.py` (cert flags — cert search path เท่านั้น) |
 
 ### 1.4 Collections ใน admin DB ที่อยู่นอก `COLLECTIONS` (Python-owned)
@@ -809,7 +809,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 
 | `config_key` | schema | เขียนโดย | อ่านโดย |
 |--------------|--------|---------|---------|
-| `main_config` | `SystemConfigDoc` (systemConfigService.ts บรรทัด 23-71) | systemConfigService (`/config`, `/admin-config`) | systemConfigService, bot worker, buffer service |
+| `main_config` | `SystemConfigDoc` (systemConfigService.ts บรรทัด 25-118) | systemConfigService (`/config`, `/admin-config`, `/botworker/review-reasons`) | systemConfigService, bot worker, buffer service, BotWorker edit-reason selector |
 | `llm_config` | `LlmConfigDoc` (llmConfigService.ts — key pool AES-GCM + per-role models/providers) | llmConfigService (`/llm`) | **Python `llm.py` `get_llm_config()`** (TTL 10s, env `GEMINI_API_KEY*` fallback), `web_search.py` (`openrouter_keys`) |
 | `role_permissions` | `RolePermissionsDoc` (rolePermissionService.ts — seed จาก DEFAULT_PERMISSIONS, cache 30s) | rolePermissionService (`/roles`) | rolePermissionService |
 
@@ -842,6 +842,7 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 | `workflow_priority` | string | workflow_first/trigger_first/both |
 | `workflow_run_timeout_ms` | number | 60000-86400000 |
 | `assignment_prefer_previous_admin` | boolean | |
+| `botworker_edit_reason_categories` | `string[]` | Optional custom answer-edit reason headings shared by all BotWorker admins; default headings remain in code and rejection reasons stay fixed |
 | `shopee_bot_url` | string | |
 | `tiktok_bot_url` | string | |
 | `lazada_bot_url` | string | |
@@ -851,8 +852,8 @@ collection เพิ่มอีก 7 ตัวใน admin DB เดียว�
 **Access:**
 | การกระทำ | โดยใคร | ผ่านไหน |
 |---------|-------|--------|
-| Read | getSystemConfig (cache 5s), getAdminConfig, rolePermissionService, Python `llm.py`/`web_search.py` | `/config`, `/admin-config`, `/roles`, `/llm`, bot worker, buffer service, Python `/chat` |
-| Write | updateSystemConfig (internal), updateAdminConfig, updateRolePermissions, llmConfigService | `/admin-config` PUT, `/config` PUT, `/roles` PUT, `/llm` PUT |
+| Read | getSystemConfig (cache 5s), getBotWorkerEditReasonCategories, getAdminConfig, rolePermissionService, Python `llm.py`/`web_search.py` | `/config`, `/admin-config`, `/roles`, `/llm`, `/botworker/review-reasons`, bot worker, buffer service, Python `/chat` |
+| Write | updateSystemConfig (internal), addBotWorkerEditReasonCategory, updateAdminConfig, updateRolePermissions, llmConfigService | `/admin-config` PUT, `/config` PUT, `/roles` PUT, `/llm` PUT, `/botworker/review-reasons` POST |
 
 **หน้าที่เข้าถึง:** `/config` (superadmin), `/admin-config` (editor), `/roles`, `/llm`, Python bot (อ่าน `llm_config`)
 
@@ -1451,7 +1452,7 @@ Idempotency ledger สำหรับข้อความ Shopee ที่ส�
 
 **ไฟล์:**
 - Python: `chatbot/shopeechat/order_store.py` — lazy singleton client
-- Next.js: `src/app/api/admin/conversations/[conversationId]/orders/route.ts` — lazy client ของตัวเอง
+- Next.js: `src/backend/db/orderMongoClient.ts` — shared lazy singleton สำหรับ API order history และ Inbox search
 
 **env:** `ORDER_URI_MONGO`, `ORDER_DB` (default `dbWallet`), `ORDER_COLLECTION` (default `ShpOrders`)
 
@@ -1460,11 +1461,14 @@ Idempotency ledger สำหรับข้อความ Shopee ที่ส�
 **ใช้ที่:**
 - Python `order_store.py` (read-only) — ตอบลูกค้าใน `/chat` + warranty flow
 - Next.js `orders/route.ts` (read-only) — order panel ในหน้า conversation (lookup ด้วย `buyer_user_id` ← `conversation.customer_id`)
+- Next.js `/api/admin/conversations` (read-only) — ค้น `order_sn` แบบ exact match แล้วใช้ `buyer_user_id` + `shopname` map ผ่าน `shops` เป็น canonical `shop_id` จากนั้นหา Shopee conversation ด้วย `customer_id` + `shop_id`; ถ้า `shops.shop_id` เป็น name-fallback เก่า จะ resolve ผ่าน conversation evidence แบบ 1:1 และ fail-closed เมื่อหาย/กำกวม. Filters, channel access, count และ pagination ใช้ predicate ของ Inbox เดิม
 
 **Fields ที่ใช้:**
 - `order_sn`, `order_status`, `buyer_user_id`, `buyer_username`, `shopname`
+- `checkout_shipping_carrier` (วิธีจัดส่งที่เลือก เช่น `Express Delivery - ส่งด่วน`), `shipping_carrier`
+- `tracking_no` (เลขพัสดุระดับ order), `tracking_info` (ข้อมูลติดตามดิบ; คง shape ตามเอกสาร)
 - `item_list[]` (`item_name`, `model_name`, `model_sku`, `item_sku`, `model_quantity_purchased`, `model_discounted_price`, `model_original_price`, `image_info.image_url`, `item_id`, `model_id`)
-- `package_list[]` (`logistics_status`, `shipping_carrier`, `tracking_no`, `tracking_number`, `parcel_id`, `waybill_id`)
+- `package_list[]` (`logistics_status`, `shipping_carrier`, `tracking_no`, `tracking_number`, `parcel_id`, `waybill_id`, optional raw `tracking_info`)
 - `create_time`, `pay_time`, `ship_by_date`, `pickup_done_time`, `update_time`
 - `recipient_address` (name/phone ถูก Shopee mask อยู่แล้ว), `total_amount`, `currency`, `estimated_shipping_fee`, `actual_shipping_fee`, `payment_method`, `cod`, `days_to_ship`, `cancel_by`, `cancel_reason`, `buyer_cancel_reason`
 
@@ -1881,7 +1885,7 @@ Task 3/4 canonical artifacts — **ไม่ถูก runtime อ่าน** (fi
 
 | Collection | DB/env | Read โดย |
 |------------|--------|----------|
-| `ShpProducts` | `MONGO_*` (dbWallet) | Python `product_store`/`units`/`knowledge_base`/`app.py`/`chat_v2`/`chatbotv3`, Next.js `productService`+`systemConfigService` (ReadOnlyCollection), test/replay scripts |
+| `ShpProducts` | `MONGO_*` (dbWallet) | Python `product_store`/`units`/`knowledge_base`/`app.py`/`chat_v2`/`chatbotv3`, Next.js `productService` (`GET /api/products/[platform]/[itemId]` details via projection) + `systemConfigService` (ReadOnlyCollection), test/replay scripts |
 | `TiksProduct` | `TIKTOK_PRODUCTS_COLLECTION` (dbWallet) | Next.js `productService` |
 | `OpenLazadaProducts` | `LAZADA_PRODUCTS_COLLECTION` (dbWallet) | Next.js `productService` |
 | `ShpOrders` | `ORDER_*` | Python `order_store.py`, Next.js `/admin/conversations/[id]/orders` |

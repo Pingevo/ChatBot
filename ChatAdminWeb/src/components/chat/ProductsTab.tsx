@@ -5,7 +5,8 @@ import { Search, Send, Ticket, Package, Loader2 } from "lucide-react";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Pagination } from "@/components/ui/Pagination";
 import { api } from "@/lib/apiClient";
-import type { Conversation } from "@/lib/types";
+import type { Conversation, ProductCard } from "@/lib/types";
+import { ProductDetailsModal } from "./ProductDetailsModal";
 
 interface ProductRow {
   itemid?: string;
@@ -83,6 +84,7 @@ function extractUrl(p: ProductRow): string | undefined {
 
 export function ProductsTab({ conversation, onSendProduct, sendDisabled = false }: Props) {
   const [products, setProducts] = useState<ProductRow[]>([]);
+  const [selectedProduct, setSelectedProduct] = useState<ProductCard | null>(null);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const pageSize = 20;
@@ -195,7 +197,8 @@ export function ProductsTab({ conversation, onSendProduct, sendDisabled = false 
               <>
                 <div className="text-[10px] text-text-subtle mb-1">{total} สินค้า · หน้า {page}/{totalPages}</div>
                 {products.map((p, idx) => {
-                  const itemId = String(p.itemid || p.item_id || p.id || idx);
+                  const productId = String(p.itemid || p.item_id || p.id || "");
+                  const itemId = productId || String(idx);
                   const name = extractName(p);
                   const img = extractImage(p);
                   const price = extractPrice(p);
@@ -204,30 +207,47 @@ export function ProductsTab({ conversation, onSendProduct, sendDisabled = false 
                       key={itemId}
                       className="flex items-center gap-2.5 rounded-lg border border-border bg-surface p-2.5 hover:border-brand/30 transition-colors"
                     >
-                      {/* Thumbnail — เล็กลงเพื่อโหลดไวขึ้น */}
-                      <div className="w-10 h-10 rounded-lg bg-surface-2 flex items-center justify-center shrink-0 overflow-hidden">
-                        {img ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={img}
-                            alt={name}
-                            className="w-full h-full object-cover"
-                            loading="lazy"
-                            width={40}
-                            height={40}
-                          />
-                        ) : (
-                          <Package size={14} className="text-text-subtle" />
-                        )}
-                      </div>
-                      {/* Info */}
-                      <div className="flex-1 min-w-0">
-                        <div className="text-xs font-medium text-text line-clamp-2">{name}</div>
-                        {price > 0 && (
-                          <div className="text-xs text-brand font-semibold mt-0.5">฿{price.toLocaleString()}</div>
-                        )}
-                        <div className="text-[10px] text-text-subtle font-mono mt-0.5 truncate">{itemId}</div>
-                      </div>
+                      <button
+                        type="button"
+                        disabled={!productId}
+                        onClick={() => setSelectedProduct({
+                          item_id: productId,
+                          name,
+                          price,
+                          image: img,
+                          shop: p.shopname || conversation.shop_name || undefined,
+                          url: extractUrl(p),
+                          platform: conversation.platform,
+                        })}
+                        className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5 rounded-md text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-default"
+                        aria-label={`ดูข้อมูลสินค้า ${name}`}
+                        title={productId ? "ดูรายละเอียดสินค้า" : "ไม่มีรหัสสินค้าให้เปิดรายละเอียด"}
+                      >
+                        {/* Thumbnail — เล็กลงเพื่อโหลดไวขึ้น */}
+                        <div className="w-10 h-10 rounded-lg bg-surface-2 flex items-center justify-center shrink-0 overflow-hidden">
+                          {img ? (
+                            // eslint-disable-next-line @next/next/no-img-element
+                            <img
+                              src={img}
+                              alt={name}
+                              className="w-full h-full object-cover"
+                              loading="lazy"
+                              width={40}
+                              height={40}
+                            />
+                          ) : (
+                            <Package size={14} className="text-text-subtle" />
+                          )}
+                        </div>
+                        {/* Info */}
+                        <div className="flex-1 min-w-0">
+                          <div className="text-xs font-medium text-text line-clamp-2">{name}</div>
+                          {price > 0 && (
+                            <div className="text-xs text-brand font-semibold mt-0.5">฿{price.toLocaleString()}</div>
+                          )}
+                          <div className="text-[10px] text-text-subtle font-mono mt-0.5 truncate">{itemId}</div>
+                        </div>
+                      </button>
                       {/* Send button */}
                       <button
                         type="button"
@@ -261,6 +281,13 @@ export function ProductsTab({ conversation, onSendProduct, sendDisabled = false 
             กำลังอยู่ระหว่างพัฒนา — ยังไม่เชื่อม API จริง
           </p>
         </div>
+      )}
+      {selectedProduct && (
+        <ProductDetailsModal
+          product={selectedProduct}
+          platform={selectedProduct.platform ?? conversation.platform}
+          onClose={() => setSelectedProduct(null)}
+        />
       )}
     </div>
   );

@@ -13,6 +13,8 @@ import { serverConfig } from "../lib/config";
 import { logAdminEvent } from "./adminLogService";
 import { normalizeChatTextSize } from "../../lib/chatTextSize";
 import type { ChatTextSize } from "../../lib/chatTextSize";
+import { DEFAULT_NOTIFICATION_PREFERENCES } from "../../lib/types";
+import type { NotificationPreferences } from "../../lib/types";
 
 export interface AdminDoc extends Document {
   admin_id: string;
@@ -28,6 +30,7 @@ export interface AdminDoc extends Document {
   bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex)
   theme_preference?: "light" | "dark";
   chat_text_size?: ChatTextSize;
+  notification_preferences?: NotificationPreferences;
   failed_login_count?: number;
   locked_until?: Date | null;
   last_login_at?: Date | null;
@@ -52,12 +55,13 @@ export interface SafeAdmin {
   bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex)
   theme_preference: "light" | "dark";
   chat_text_size: ChatTextSize;
+  notification_preferences?: NotificationPreferences;
   last_login_at: string | null;
   created_at: string;
 }
 
-function safeAdmin(admin: AdminDoc): SafeAdmin {
-  return {
+function safeAdmin(admin: AdminDoc, options: { includeNotificationPreferences?: boolean } = {}): SafeAdmin {
+  const safe: SafeAdmin = {
     admin_id: admin.admin_id,
     email: admin.email,
     username: admin.username,
@@ -72,6 +76,10 @@ function safeAdmin(admin: AdminDoc): SafeAdmin {
     last_login_at: admin.last_login_at ? admin.last_login_at.toISOString() : null,
     created_at: admin.created_at ? admin.created_at.toISOString() : "",
   };
+  if (options.includeNotificationPreferences) {
+    safe.notification_preferences = admin.notification_preferences || DEFAULT_NOTIFICATION_PREFERENCES;
+  }
+  return safe;
 }
 
 function genAdminId(): string {
@@ -212,7 +220,7 @@ export async function updateSessionActivity(token: string): Promise<void> {
 export async function listAdmins(): Promise<SafeAdmin[]> {
   const coll = await getCollection<AdminDoc>(COLLECTIONS.admins);
   const docs = await coll.find({ is_deleted: { $ne: true } }, { projection: { password_hash: 0 } }).toArray();
-  return docs.map(safeAdmin);
+  return docs.map((admin) => safeAdmin(admin));
 }
 
 export async function toggleAdminActive(adminId: string, active: boolean): Promise<boolean> {
@@ -238,6 +246,7 @@ export async function updateAdminProfile(
     bubble_color?: string;
     theme_preference?: "light" | "dark";
     chat_text_size?: ChatTextSize;
+    notification_preferences?: NotificationPreferences;
     role?: string;
   }
 ): Promise<boolean> {
@@ -251,6 +260,7 @@ export async function updateAdminProfile(
   if (fields.bubble_color !== undefined) update.bubble_color = fields.bubble_color;
   if (fields.theme_preference !== undefined) update.theme_preference = fields.theme_preference;
   if (fields.chat_text_size !== undefined) update.chat_text_size = fields.chat_text_size;
+  if (fields.notification_preferences !== undefined) update.notification_preferences = fields.notification_preferences;
   if (Object.keys(update).length === 0) return false;
   const result = await coll.updateOne({ admin_id: adminId }, { $set: update });
   if (result.modifiedCount > 0) {

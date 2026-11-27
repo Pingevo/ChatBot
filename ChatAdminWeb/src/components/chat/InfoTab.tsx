@@ -1,13 +1,14 @@
 "use client";
 // InfoTab — แสดงข้อมูล conversation + stats + ประวัติปิดแชท (card ยืด/หด ได้)
 import { useState, useEffect } from "react";
-import { ChevronDown, ChevronRight, User, Store, MessageSquare, Bot, Headset, History, Package, ShoppingCart, ShieldCheck } from "lucide-react";
+import { ChevronDown, ChevronRight, User, Store, MessageSquare, Bot, Headset, History, Package, ShoppingCart, ShieldCheck, X } from "lucide-react";
 import { PlatformIcon } from "@/components/ui/PlatformIcon";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { confirm } from "@/components/ui/ConfirmDialog";
 import { ZAAPI_COLOR, BOT_COLOR, ADMIN_COLOR } from "@/lib/bubbleColors";
 import type { Conversation, ChatMessage, CloseHistoryRecord, ProblemCategory, ProductCard } from "@/lib/types";
+import { ProductDetailsModal } from "./ProductDetailsModal";
 
 const CATEGORY_LABELS: Record<ProblemCategory, string> = {
   shipping: "การจัดส่ง",
@@ -30,6 +31,7 @@ interface Props {
 }
 
 export function InfoTab({ conversation, messages, closeHistory }: Props) {
+  const [selectedProduct, setSelectedProduct] = useState<ProductCard | null>(null);
   // คำนวณ stats
   const userMsgs = messages.filter((m) => m.role === "user").length;
   const botMsgs = messages.filter((m) => m.role === "bot").length;
@@ -80,7 +82,7 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
       <Section title="แชท" icon={MessageSquare}>
         <InfoRow label="Conversation ID" value={conversation.id} mono />
         <InfoRow
-          label="แอดมินผิดชอบ"
+          label="แอดมินรับผิดชอบ"
           value={responsibleLabel}
         />
         <InfoRow label="สถานะแชท" value={statusLabel} badge={conversation.status === "closed" ? "red" : "brand"} />
@@ -115,12 +117,13 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
         <Section title={`สินค้าที่ถูกเสนอในแชท (${productsOffered.length})`} icon={Package}>
           <div className="space-y-1.5">
             {productsOffered.map((p, idx) => {
-              const safeUrl = typeof p.url === "string" && p.url.startsWith("http") ? p.url : undefined;
               return (
-                <a
+                <button
                   key={`${p.item_id}-${idx}`}
-                  {...(safeUrl ? { href: safeUrl, target: "_blank", rel: "noopener noreferrer" } : {})}
-                  className="flex items-center gap-2 rounded-md bg-surface-2 p-1.5 hover:bg-pale-sky-soft transition-colors"
+                  type="button"
+                  onClick={() => setSelectedProduct(p)}
+                  aria-label={`ดูข้อมูลสินค้า ${p.name}`}
+                  className="flex w-full items-center gap-2 rounded-md bg-surface-2 p-1.5 text-left transition-colors hover:bg-pale-sky-soft"
                 >
                   {p.image ? (
                     // eslint-disable-next-line @next/next/no-img-element
@@ -141,7 +144,7 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
                       )}
                     </div>
                   </div>
-                </a>
+                </button>
               );
             })}
           </div>
@@ -195,9 +198,16 @@ export function InfoTab({ conversation, messages, closeHistory }: Props) {
 
       {/* ── ประวัติปิดแชท (card ยืด/หด ได้) ── */}
       {/* ── ประวัติคำสั่งซื้อ ── */}
-      <OrderHistorySection conversationId={conversation.id} />
+      <OrderHistorySection conversationId={conversation.id} platform={conversation.platform} />
 
       <CloseHistoryCards history={closeHistory} />
+      {selectedProduct && (
+        <ProductDetailsModal
+          product={selectedProduct}
+          platform={conversation.platform}
+          onClose={() => setSelectedProduct(null)}
+        />
+      )}
     </div>
   );
 }
@@ -306,6 +316,12 @@ interface OrderItem {
   item_id?: string;
   model_id?: string;
 }
+interface OrderPackageRecord {
+  shipping_carrier: string;
+  logistics_status: string;
+  tracking_numbers: string[];
+  tracking_info?: unknown;
+}
 interface OrderRecord {
   order_sn: string;
   order_status: string;
@@ -315,6 +331,9 @@ interface OrderRecord {
   create_time_raw?: number;
   shopname: string;
   shipping_carrier: string;
+  checkout_shipping_carrier?: string;
+  tracking_info?: unknown;
+  packages?: OrderPackageRecord[];
   tracking_no?: string;
   tracking_numbers?: string[];
   items: OrderItem[];
@@ -326,13 +345,138 @@ interface OrderRecord {
   payment_method?: string;
 }
 
-function OrderHistorySection({ conversationId }: { conversationId: string }) {
+function _formatTrackingValue(value: unknown, fieldName?: string): string {
+  if (value === null || value === undefined || value === "") return "";
+  if (fieldName === "update_time") {
+    const timestamp = typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+    const date = Number.isFinite(timestamp) && timestamp > 0 ? new Date(timestamp * 1000) : null;
+    if (date && !Number.isNaN(date.getTime())) {
+      return new Intl.DateTimeFormat("th-TH", {
+        dateStyle: "medium",
+        timeStyle: "short",
+        timeZone: "Asia/Bangkok",
+      }).format(date);
+    }
+  }
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        return _formatTrackingValue(JSON.parse(trimmed));
+      } catch {
+        return value;
+      }
+    }
+    return value;
+  }
+  if (Array.isArray(value)) return value.map((item) => _formatTrackingValue(item)).filter(Boolean).join(" · ");
+  if (typeof value === "object") {
+    return Object.entries(value)
+      .map(([key, item]) => {
+        const formatted = _formatTrackingValue(item, key);
+        return formatted ? `${key.replaceAll("_", " ")}: ${formatted}` : "";
+      })
+      .filter(Boolean)
+      .join(" · ");
+  }
+  return String(value);
+}
+
+function TrackingTimeline({ value }: { value: unknown }) {
+  let timelineValue = value;
+  if (typeof timelineValue === "string") {
+    try {
+      timelineValue = JSON.parse(timelineValue);
+    } catch {
+      // Keep plain-text tracking details as a single timeline entry.
+    }
+  }
+  const events = (Array.isArray(timelineValue)
+    ? timelineValue
+    : timelineValue === null || timelineValue === undefined || timelineValue === ""
+      ? []
+      : [timelineValue]
+  ).filter((event) => _formatTrackingValue(event) !== "");
+
+  if (!events.length) return null;
+
+  return (
+    <ol aria-label="ประวัติการติดตาม" className="space-y-0">
+      {events.map((event, index) => {
+        const record = event && typeof event === "object" && !Array.isArray(event)
+          ? event as Record<string, unknown>
+          : null;
+        const fields = record ? Object.entries(record) : [];
+        const time = _formatTrackingValue(record?.update_time, "update_time");
+        const description = _formatTrackingValue(record?.description, "description");
+        const status = _formatTrackingValue(record?.logistics_status, "logistics_status");
+        const details = fields.filter(([key]) => key !== "update_time" && key !== "description" && key !== "logistics_status");
+        const fallback = record ? "" : _formatTrackingValue(event);
+
+        return (
+          <li key={index} className="relative grid grid-cols-[12px_minmax(0,1fr)] gap-x-3 pb-4 last:pb-0">
+            {index < events.length - 1 && (
+              <span aria-hidden="true" className="absolute bottom-[-12px] left-[6px] top-3 w-px bg-border" />
+            )}
+            <span aria-hidden="true" className="relative z-10 mt-1.5 h-3 w-3 rounded-full border-2 border-brand bg-surface" />
+            <div className="min-w-0 rounded-lg border border-border bg-surface-2 px-3 py-2.5">
+              {(time || status) && (
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  {time && (
+                    <div className="flex items-center gap-1.5 text-[10px] text-text-muted">
+                      <History size={12} aria-hidden="true" />
+                      <span>อัปเดตเมื่อ</span>
+                      <time className="font-medium tabular-nums text-text">{time}</time>
+                    </div>
+                  )}
+                  {status && (
+                    <span className="inline-flex rounded-full border border-brand/20 bg-brand/10 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-brand">
+                      {status}
+                    </span>
+                  )}
+                </div>
+              )}
+              {description && <p className={`whitespace-pre-wrap break-words text-sm leading-relaxed text-text ${(time || status) ? "mt-2" : ""}`}>{description}</p>}
+              {fallback && <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-text">{fallback}</p>}
+              {details.length > 0 && (
+                <dl className={`space-y-1.5 ${time || description || status ? "mt-2 border-t border-border/60 pt-2" : ""}`}>
+                  {details.map(([key, item]) => {
+                    const formatted = _formatTrackingValue(item, key);
+                    if (!formatted) return null;
+                    return (
+                      <div key={key}>
+                        <dt className="text-[10px] font-medium text-text-subtle">{key.replaceAll("_", " ")}</dt>
+                        <dd className="mt-0.5 whitespace-pre-wrap break-words text-xs leading-relaxed text-text">{formatted}</dd>
+                      </div>
+                    );
+                  })}
+                </dl>
+              )}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
+function OrderHistorySection({ conversationId, platform }: { conversationId: string; platform: Conversation["platform"] }) {
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   // ⚡ Phase 1C — collapsible per-order card
   const [openOrders, setOpenOrders] = useState<Set<string>>(new Set());
+  const [previewOrderId, setPreviewOrderId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!previewOrderId) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setPreviewOrderId(null);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [previewOrderId]);
 
   useEffect(() => {
     let cancelled = false;
@@ -354,6 +498,7 @@ function OrderHistorySection({ conversationId }: { conversationId: string }) {
   }, [conversationId]);
 
   const shown = expanded ? orders : orders.slice(0, 5);
+  const previewOrder = previewOrderId ? orders.find((order) => order.order_sn === previewOrderId) : undefined;
 
   const toggleOrder = (sn: string) => {
     setOpenOrders((prev) => {
@@ -418,7 +563,14 @@ function OrderHistorySection({ conversationId }: { conversationId: string }) {
                   {o.items.length > 0 && !isOpen && (
                     <div className="text-[11px] text-text space-y-0.5">
                       {o.items.slice(0, 2).map((i, idx) => (
-                        <div key={idx} className="flex items-center gap-1.5 truncate">
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => platform === "shopee" && setPreviewOrderId(o.order_sn)}
+                          disabled={platform !== "shopee"}
+                          className="flex w-full items-center gap-1.5 truncate rounded-md px-1 text-left hover:bg-surface disabled:cursor-default disabled:hover:bg-transparent"
+                          title={platform === "shopee" ? "ดูรายละเอียดออเดอร์" : undefined}
+                        >
                           {i.image_url && (
                             // eslint-disable-next-line @next/next/no-img-element
                             <img src={i.image_url} alt="" className="w-6 h-6 rounded object-cover shrink-0" />
@@ -426,7 +578,7 @@ function OrderHistorySection({ conversationId }: { conversationId: string }) {
                           <span className="truncate">
                             {i.name} {i.quantity > 1 && `×${i.quantity}`}
                           </span>
-                        </div>
+                        </button>
                       ))}
                       {o.items.length > 2 && (
                         <div className="text-text-subtle">+{o.items.length - 2} รายการ (กดเปิดดู)</div>
@@ -440,7 +592,20 @@ function OrderHistorySection({ conversationId }: { conversationId: string }) {
                       {o.items.length > 0 && (
                         <div className="space-y-1.5">
                           {o.items.map((i, idx) => (
-                            <div key={idx} className="flex items-start gap-2">
+                            <div
+                              key={idx}
+                              role={platform === "shopee" ? "button" : undefined}
+                              tabIndex={platform === "shopee" ? 0 : undefined}
+                              onClick={() => { if (platform === "shopee") setPreviewOrderId(o.order_sn); }}
+                              onKeyDown={(event) => {
+                                if (platform === "shopee" && (event.key === "Enter" || event.key === " ")) {
+                                  event.preventDefault();
+                                  setPreviewOrderId(o.order_sn);
+                                }
+                              }}
+                              aria-label={platform === "shopee" ? `ดูรายละเอียดออเดอร์ ${o.order_sn}: ${i.name}` : undefined}
+                              className={`flex w-full items-start gap-2 rounded-md p-1 text-left ${platform === "shopee" ? "cursor-pointer hover:bg-surface focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand" : ""}`}
+                            >
                               {i.image_url ? (
                                 // eslint-disable-next-line @next/next/no-img-element
                                 <img src={i.image_url} alt="" className="w-12 h-12 rounded object-cover shrink-0" />
@@ -496,6 +661,157 @@ function OrderHistorySection({ conversationId }: { conversationId: string }) {
           )}
         </>
       )}
+      {previewOrder && platform === "shopee" && (
+        <OrderDetailsPanel order={previewOrder} onClose={() => setPreviewOrderId(null)} />
+      )}
+    </div>
+  );
+}
+
+export function OrderDetailsPanel({ order, onClose }: { order: OrderRecord; onClose: () => void }) {
+  const trackingNumbers = order.tracking_numbers?.length ? order.tracking_numbers : order.tracking_no ? [order.tracking_no] : [];
+  const packages = order.packages?.length
+    ? order.packages
+    : [{ shipping_carrier: order.shipping_carrier || "", logistics_status: order.logistics_status || "", tracking_numbers: trackingNumbers }];
+  const packageTrackingNumbers = new Set(packages.flatMap((pkg) => pkg.tracking_numbers));
+  const orderLevelTrackingNumbers = trackingNumbers.filter((trackingNumber) => !packageTrackingNumbers.has(trackingNumber));
+
+  return (
+    <div
+      className="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 p-3 sm:p-6"
+      role="presentation"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+    >
+      <section
+        role="dialog"
+        aria-modal="true"
+        aria-label={`รายละเอียดคำสั่งซื้อ ${order.order_sn}`}
+        className="flex max-h-[min(88dvh,820px)] w-full max-w-3xl flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-2xl"
+      >
+        <header className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <Package size={18} className="shrink-0 text-brand" />
+            <div className="min-w-0">
+              <h2 className="truncate text-sm font-semibold text-text">ข้อมูลการจัดส่ง</h2>
+              <p className="truncate font-mono text-xs text-text-muted">{order.order_sn}</p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-text-muted hover:bg-surface-2 hover:text-text"
+            aria-label="ปิดรายละเอียดคำสั่งซื้อ"
+          >
+            <X size={18} />
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-4">
+          <section className="rounded-xl border border-border bg-surface-2 p-3">
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <div className="text-[11px] text-text-muted">วิธีการจัดส่ง</div>
+                <div className="mt-1 text-sm font-medium text-text">{order.checkout_shipping_carrier || "ไม่ระบุ"}</div>
+              </div>
+              <div>
+                <div className="text-[11px] text-text-muted">สถานะคำสั่งซื้อ</div>
+                <div className="mt-1 text-sm font-medium text-text">{order.order_status || "—"}</div>
+              </div>
+              <div>
+                <div className="text-[11px] text-text-muted">วันที่สั่งซื้อ</div>
+                <div className="mt-1 text-sm text-text">{order.create_time || "—"}</div>
+              </div>
+              {order.total_amount ? (
+                <div>
+                  <div className="text-[11px] text-text-muted">ยอดรวม</div>
+                  <div className="mt-1 text-sm text-text">฿{order.total_amount.toLocaleString()} {order.currency || "THB"}</div>
+                </div>
+              ) : null}
+            </div>
+          </section>
+
+          {order.items.length > 0 && (
+            <section className="rounded-xl border border-border p-3">
+              <div className="mb-2.5 flex items-center justify-between gap-2">
+                <h3 className="text-xs font-semibold text-text">สินค้าในออเดอร์</h3>
+                <span className="rounded-full bg-surface-2 px-2 py-0.5 text-[10px] font-medium text-text-muted">{order.items.length} รายการ</span>
+              </div>
+              <div className="space-y-2">
+                {order.items.map((item, index) => (
+                  <article key={`${item.item_id || item.name}-${index}`} aria-label={item.name} className="flex items-center gap-3 rounded-lg border border-border bg-surface-2 p-2.5">
+                    {item.image_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={item.image_url} alt={item.name} className="h-16 w-16 shrink-0 rounded-lg bg-surface object-cover" />
+                    ) : (
+                      <div className="flex h-16 w-16 shrink-0 items-center justify-center rounded-lg bg-surface text-text-subtle" aria-hidden="true">
+                        <Package size={20} />
+                      </div>
+                    )}
+                    <div className="min-w-0 flex-1">
+                      <p className="line-clamp-2 text-sm font-medium leading-snug text-text">{item.name}</p>
+                      {item.model_name && item.model_name !== item.name && (
+                        <p className="mt-0.5 truncate text-[11px] text-text-muted">ตัวเลือก: {item.model_name}</p>
+                      )}
+                      <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                        {item.price != null && item.price > 0 ? (
+                          <span className="text-sm font-semibold text-brand">฿{item.price.toLocaleString("th-TH")}</span>
+                        ) : <span />}
+                        <span className="rounded-full bg-surface px-2 py-1 text-[10px] font-medium text-text-muted">จำนวน ×{item.quantity}</span>
+                      </div>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section className="rounded-xl border border-border p-3">
+            <h3 className="mb-2 text-xs font-semibold text-text">สถานะพัสดุและ Tracking</h3>
+            <div className="space-y-2">
+              {orderLevelTrackingNumbers.length > 0 && (
+                <div className="rounded-lg bg-surface-2 p-3">
+                  <div className="text-xs text-text-muted">เลขพัสดุ</div>
+                  <div className="mt-1 space-y-1">
+                    {orderLevelTrackingNumbers.map((trackingNumber) => (
+                      <div key={trackingNumber} className="font-mono text-xs text-text">{trackingNumber}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {_formatTrackingValue(order.tracking_info) && (
+                <div className="rounded-lg bg-surface-2 p-3">
+                  <div className="mb-1 text-xs text-text-muted">ข้อมูลติดตาม</div>
+                  <TrackingTimeline value={order.tracking_info} />
+                </div>
+              )}
+              {packages.map((pkg, index) => (
+                <div key={`${order.order_sn}-${index}`} className="rounded-lg bg-surface-2 p-3">
+                  {packages.length > 1 && <div className="mb-1 text-[10px] font-medium text-text-subtle">พัสดุ {index + 1}</div>}
+                  {pkg.shipping_carrier && <div className="text-xs text-text-muted">ขนส่ง: <span className="text-text">{pkg.shipping_carrier}</span></div>}
+                  <div className="text-xs text-text-muted">สถานะ: <span className="text-text">{pkg.logistics_status || "ยังไม่มีสถานะ"}</span></div>
+                  {_formatTrackingValue(pkg.tracking_info) && (
+                    <div className="mt-2">
+                      <div className="mb-1 text-xs text-text-muted">ข้อมูลติดตามพัสดุ</div>
+                      <TrackingTimeline value={pkg.tracking_info} />
+                    </div>
+                  )}
+                  <div className="mt-1 text-xs text-text-muted">เลขพัสดุ:</div>
+                  {pkg.tracking_numbers.length > 0 ? (
+                    <div className="mt-1 space-y-1">
+                      {pkg.tracking_numbers.map((trackingNumber) => (
+                        <div key={trackingNumber} className="font-mono text-xs text-text">{trackingNumber}</div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-1 text-xs text-text-subtle">
+                      {orderLevelTrackingNumbers.length > 0 ? "เลขพัสดุแสดงไว้ระดับคำสั่งซื้อด้านบน" : "ยังไม่มีเลขพัสดุ"}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+      </section>
     </div>
   );
 }

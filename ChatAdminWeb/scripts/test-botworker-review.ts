@@ -281,6 +281,53 @@ async function main() {
     assert(revision?.before_text === "A" && revision?.after_text === "A edited", "edit diff was not preserved");
   });
 
+  await test("C0c page-authorized admin can save an edit with a shared custom reason category", async () => {
+    mocks.state.editReasonCategories.push("หัวข้อจากแอดมิน");
+    const doc = await runBotTurn();
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", {
+      edited_text: "A edited", reason_category: "หัวข้อจากแอดมิน", reason_text: "เหตุผลที่เพิ่มเอง",
+    });
+    assert(r.status === 200, `status=${r.status} ${JSON.stringify(r.body)}`);
+    const revision = (await getReplyDoc()).review_bubbles[0].edit_history?.[0];
+    assert(revision?.reason_category === "หัวข้อจากแอดมิน", "custom category missing from revision");
+    assert(revision?.reason_text === "เหตุผลที่เพิ่มเอง", "custom category explanation missing from revision");
+    assert(mockEvents().length === 0, "saving custom edit reason must not send");
+  });
+
+  await test("C0d custom edit reason category is shared after an admin adds it", async () => {
+    const route = await import("../src/app/api/botworker/review-reasons/route");
+    const request = (body?: Record<string, unknown>) => ({ json: async () => body });
+    const added = await route.POST(request({ category: "  หัวข้อใหม่  " }) as any);
+    assert(added.status === 200, `add status=${added.status}`);
+    mocks.state.authAdminId = "another_admin";
+    const loaded = await route.GET(request() as any);
+    const result = await loaded.json();
+    assert(result.categories.includes("หัวข้อใหม่"), "another admin could not load the new category");
+    assert(result.categories.filter((category: string) => category === "หัวข้อใหม่").length === 1, "shared category duplicated");
+    assert(mocks.fakeColl("admin_logs").some((row: any) => row.action_type === "botworker.review_reason_category.add"), "category addition missing from admin audit log");
+  });
+
+  await test("C0e reason category API rejects blank/oversized input and enforces BotWorker access", async () => {
+    const route = await import("../src/app/api/botworker/review-reasons/route");
+    const request = (category: string) => ({ json: async () => ({ category }) });
+    assert((await route.POST(request("   ") as any)).status === 422, "blank category accepted");
+    assert((await route.POST(request("ก".repeat(61)) as any)).status === 422, "oversized category accepted");
+    mocks.state.pageAccessAllowed = false;
+    assert((await route.GET(request("") as any)).status === 403, "GET bypassed BotWorker access");
+    assert((await route.POST(request("blocked") as any)).status === 403, "POST bypassed BotWorker access");
+  });
+
+  await test("C0f save_and_approve accepts and records a shared custom edit category", async () => {
+    mocks.state.editReasonCategories.push("แก้เนื้อหาเพิ่มเติม");
+    const doc = await runBotTurn();
+    const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save_and_approve", {
+      edited_text: "A edited", reason_category: "แก้เนื้อหาเพิ่มเติม", reason_text: "อธิบายให้ครบขึ้น",
+    });
+    assert(r.status === 200, `status=${r.status} ${JSON.stringify(r.body)}`);
+    assert(r.body.bubble.edit_history?.[0]?.reason_category === "แก้เนื้อหาเพิ่มเติม", "custom category missing from approved edit history");
+    assert(mockEvents().length === 1, "save_and_approve should keep its existing mock send behavior");
+  });
+
   await test("C1 save edit → pending + persisted + 0 mock", async () => {
     const doc = await runBotTurn();
     const r = await review("conv_1", doc.shadow_reply_id, doc.review_bubbles[0].bubble_id, "save", { edited_text: "A edited", reason_category: "ตอบไม่ได้", reason_text: "เติมข้อมูลที่ตอบได้ให้ชัดเจน" });

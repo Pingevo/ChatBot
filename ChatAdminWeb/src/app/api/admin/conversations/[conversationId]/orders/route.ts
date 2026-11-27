@@ -1,21 +1,10 @@
 // GET /api/admin/conversations/:id/orders — ดึงประวัติคำสั่งซื้อของลูกค้า
 // เชื่อม customer_id ใน conversation กับ buyer_user_id ใน order collection (dbWallet)
 import { NextRequest } from "next/server";
-import { MongoClient } from "mongodb";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
 import { conversationService } from "@/backend/service/conversationService";
-
-// Order DB connection (read-only, lazy singleton)
-let _orderClient: MongoClient | null = null;
-
-function getOrderClient(): MongoClient {
-  if (_orderClient) return _orderClient;
-  const uri = process.env.ORDER_URI_MONGO?.trim();
-  if (!uri) throw new Error("ORDER_URI_MONGO not configured");
-  _orderClient = new MongoClient(uri, { serverSelectionTimeoutMS: 5000 });
-  return _orderClient;
-}
+import { getOrderCollection } from "@/backend/db/orderMongoClient";
 
 // Order status mapping (Thai)
 const ORDER_STATUS_TH: Record<string, string> = {
@@ -62,10 +51,7 @@ export async function GET(
   }
 
   try {
-    const client = getOrderClient();
-    await client.connect();
-    const db = client.db(process.env.ORDER_DB || "dbWallet");
-    const coll = db.collection(process.env.ORDER_COLLECTION || "ShpOrders");
+    const coll = await getOrderCollection();
 
     // ดึง orders ล่าสุด 50 รายการ
     const docs = await coll
@@ -78,6 +64,9 @@ export async function GET(
             create_time: 1,
             shopname: 1,
             shipping_carrier: 1,
+            checkout_shipping_carrier: 1,
+            tracking_no: 1,
+            tracking_info: 1,
             total_amount: 1,
             currency: 1,
             buyer_username: 1,
@@ -107,21 +96,28 @@ export async function GET(
       });
       // ⚡ Phase 1C — ดึง tracking จากทุก package_list entry
       const pkgs = (d.package_list || []) as Record<string, unknown>[];
-      const trackingNumbers: string[] = [];
-      let logisticsStatus = "";
-      let shippingCarrier = (d.shipping_carrier as string) || "";
-      for (const pkg of pkgs) {
-        const pStatus = (pkg.logistics_status as string) || "";
-        if (pStatus && !logisticsStatus) logisticsStatus = pStatus;
-        const pCarrier = (pkg.shipping_carrier as string) || "";
-        if (pCarrier && !shippingCarrier) shippingCarrier = pCarrier;
+      const packages = pkgs.map((pkg) => {
+        const trackingNumbers: string[] = [];
         for (const tk of ["tracking_no", "tracking_number", "parcel_id", "waybill_id"]) {
           const tn = (pkg[tk] as string) || "";
           if (tn && String(tn).trim() && !trackingNumbers.includes(String(tn).trim())) {
             trackingNumbers.push(String(tn).trim());
           }
         }
-      }
+        return {
+          shipping_carrier: (pkg.shipping_carrier as string) || "",
+          logistics_status: (pkg.logistics_status as string) || "",
+          tracking_numbers: trackingNumbers,
+          tracking_info: pkg.tracking_info ?? null,
+        };
+      });
+      const documentTrackingNo = String(d.tracking_no ?? "").trim();
+      const trackingNumbers = [...new Set([
+        ...(documentTrackingNo ? [documentTrackingNo] : []),
+        ...packages.flatMap((pkg) => pkg.tracking_numbers),
+      ])];
+      const logisticsStatus = packages.find((pkg) => pkg.logistics_status)?.logistics_status || "";
+      const shippingCarrier = (d.shipping_carrier as string) || packages.find((pkg) => pkg.shipping_carrier)?.shipping_carrier || "";
       return {
         order_sn: d.order_sn,
         order_status: ORDER_STATUS_TH[(d.order_status as string) || ""] || d.order_status || "—",
@@ -131,7 +127,10 @@ export async function GET(
         create_time_raw: d.create_time,
         shopname: d.shopname || "",
         shipping_carrier: shippingCarrier || "ไม่ระบุ",
-        tracking_no: trackingNumbers[0] || "",
+        checkout_shipping_carrier: (d.checkout_shipping_carrier as string) || "",
+        tracking_info: d.tracking_info ?? null,
+        packages,
+        tracking_no: documentTrackingNo || trackingNumbers[0] || "",
         tracking_numbers: trackingNumbers,
         items,
         item_count: items.length,

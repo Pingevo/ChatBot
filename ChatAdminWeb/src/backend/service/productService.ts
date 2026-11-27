@@ -18,12 +18,40 @@ export interface ProductDoc extends Document {
   shopname?: string;
   shop_name?: string;
   name?: string;
+  item_name?: string;
   product_name?: string;
+  title?: string;
   price?: number;
+  new_check_price?: number;
+  gen_price?: number;
   stock?: number;
+  total_stock?: number;
+  brand?: string | { original_brand_name?: string };
+  cat_name?: string;
+  description?: string;
+  description_info?: { extended_description?: { field_list?: { type?: string; text?: string }[] } };
+  field_list?: unknown[];
+  attribute_list?: unknown[];
+  warranty?: unknown;
+  condition?: string;
+  weight?: number;
+  dimension?: unknown;
+  item_status?: string;
+  model?: {
+    model_id?: string | number;
+    model_name?: string;
+    model_sku?: string;
+    model_status?: string;
+    price_info?: { current_price?: number }[];
+    stock_info_v2?: Record<string, unknown>;
+  }[];
+  tier_variation?: unknown[];
+  stock_info_v2?: Record<string, unknown>;
+  image?: unknown;
   images?: string[];
   image_url?: string;
   url?: string;
+  short_link?: string;
   product_link?: string;
   status?: string;
 }
@@ -49,6 +77,63 @@ function itemIdVariants(itemId: string): (string | number)[] {
     variants.push(n);
   }
   return variants;
+}
+
+function numericStock(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function shopeeStock(source: Record<string, unknown>, includeListingFallback: boolean): number | null {
+  const stockInfo = source.stock_info_v2 && typeof source.stock_info_v2 === "object"
+    ? source.stock_info_v2 as Record<string, unknown>
+    : {};
+  const summary = stockInfo.summary_info && typeof stockInfo.summary_info === "object"
+    ? stockInfo.summary_info as Record<string, unknown>
+    : {};
+  if (numericStock(summary.total_available_stock)) return summary.total_available_stock;
+
+  const shopeeStockRows = Array.isArray(stockInfo.shopee_stock) ? stockInfo.shopee_stock : [];
+  const shopeeStocks = shopeeStockRows
+    .filter((row): row is Record<string, unknown> => !!row && typeof row === "object" && numericStock((row as Record<string, unknown>).stock))
+    .map((row) => row.stock as number);
+  if (shopeeStocks.length > 0) return shopeeStocks.reduce((sum, stock) => sum + stock, 0);
+
+  const sellerStockRows = Array.isArray(stockInfo.seller_stock) ? stockInfo.seller_stock : [];
+  const sellerStocks = sellerStockRows
+    .filter((row): row is Record<string, unknown> => !!row && typeof row === "object"
+      && (row as Record<string, unknown>).if_saleable !== false
+      && numericStock((row as Record<string, unknown>).stock))
+    .map((row) => row.stock as number);
+  if (sellerStocks.length > 0) return sellerStocks.reduce((sum, stock) => sum + stock, 0);
+
+  if (!includeListingFallback) return null;
+  const fallback = source.stock !== undefined ? source.stock : source.total_stock;
+  if (numericStock(fallback)) return fallback;
+  return null;
+}
+
+function isSellableShopeeProduct(product: ProductDoc): boolean {
+  const status = String(product.item_status || product.status || "").toUpperCase();
+  if (status !== "NORMAL") return false;
+
+  const models = Array.isArray(product.model) ? product.model : [];
+  if (models.length > 0) {
+    const activeModels = models.filter((model) => String(model.model_status || "").toUpperCase() === "MODEL_NORMAL");
+    if (activeModels.length === 0) return false;
+    let stockKnown = false;
+    let totalStock = 0;
+    for (const model of activeModels) {
+      const stock = shopeeStock(model, false);
+      if (stock !== null) {
+        stockKnown = true;
+        totalStock += stock;
+      }
+    }
+    return stockKnown && totalStock > 0;
+  }
+
+  const stock = shopeeStock(product, true);
+  return stock !== null && stock > 0;
 }
 
 /**
@@ -102,13 +187,19 @@ export async function listProducts(opts: {
 
   const limit = opts.limit || 50;
   const skip = opts.skip || 0;
+  const rows = await coll.find(filter).project({
+    itemid: 1, item_id: 1, id: 1,
+    name: 1, item_name: 1, product_name: 1, title: 1,
+    price: 1, new_check_price: 1, gen_price: 1,
+    images: 1, image: 1, image_url: 1, main_images: 1,
+    url: 1, short_link: 1, product_link: 1,
+    shopid: 1, shop_id: 1, shopname: 1, shop_name: 1,
+    item_status: 1, status: 1, stock: 1, total_stock: 1,
+    stock_info_v2: 1, "model.model_status": 1, "model.stock_info_v2": 1,
+  }).toArray();
+  const sellable = opts.platform === "shopee" ? rows.filter(isSellableShopeeProduct) : rows;
 
-  const [products, total] = await Promise.all([
-    coll.find(filter).skip(skip).limit(limit).toArray(),
-    coll.countDocuments(filter),
-  ]);
-
-  return { products, total };
+  return { products: sellable.slice(skip, skip + limit), total: sellable.length };
 }
 
 /**
@@ -127,6 +218,40 @@ export async function getProduct(opts: {
       { item_id: { $in: variants } },
     ],
   });
+}
+
+/** ดึง field รายละเอียดที่ใช้ใน modal โดยไม่อ่าน embedding หรือ field อื่นทั้ง document */
+export async function getProductDetails(opts: {
+  platform: Platform;
+  itemId: string;
+}): Promise<ProductDoc | null> {
+  const coll = await getDbWalletCollection<ProductDoc>(COLLECTION_MAP[opts.platform]);
+  const variants = itemIdVariants(opts.itemId);
+
+  return coll
+    .find({
+      $or: [
+        { itemid: { $in: variants } },
+        { item_id: { $in: variants } },
+      ],
+    })
+    .project({
+        _id: 0,
+        itemid: 1, item_id: 1,
+        name: 1, item_name: 1, product_name: 1, title: 1,
+        price: 1, new_check_price: 1, gen_price: 1,
+        url: 1, short_link: 1, product_link: 1,
+        shopid: 1, shop_id: 1, shopname: 1, shop_name: 1,
+        description: 1, "description_info.extended_description.field_list": 1,
+        field_list: 1, attribute_list: 1,
+        brand: 1, cat_name: 1, item_status: 1, status: 1,
+        stock: 1, total_stock: 1, warranty: 1, condition: 1, weight: 1, dimension: 1,
+        "model.model_id": 1, "model.model_name": 1, "model.model_sku": 1,
+        "model.model_status": 1, "model.price_info.current_price": 1,
+        "model.stock_info_v2.summary_info.total_available_stock": 1, tier_variation: 1,
+    })
+    .limit(1)
+    .next();
 }
 
 /**
@@ -208,6 +333,7 @@ export async function listCatalogShopNames(platform: Platform = "shopee"): Promi
 export const productService = {
   listProducts,
   getProduct,
+  getProductDetails,
   getProductsByIds,
   listShopsByPlatform,
   listCatalogShopNames,

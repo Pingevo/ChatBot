@@ -3,10 +3,23 @@ import type { ChatTextSize } from "./chatTextSize";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
 
+export interface NotificationPreferences {
+  newTicket: boolean;
+  handoff: boolean;
+  unanswered: boolean;
+}
+
+export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = {
+  newTicket: true,
+  handoff: true,
+  unanswered: true,
+};
+
 export const BOTWORKER_REVIEW_REASON_CATEGORIES = [
   "สเปคผิด", "ควรส่งแอดมิน", "การแก้ปัญหาผิด", "ผิดรุ่น", "ตอบไม่ได้",
 ] as const;
 export type BotWorkerReviewReasonCategory = typeof BOTWORKER_REVIEW_REASON_CATEGORIES[number];
+export type BotWorkerEditReasonCategory = string;
 
 export type Topic =
   | "product_inquiry"
@@ -119,6 +132,44 @@ export interface ProductCard {
   image?: string;
   shop?: string;
   url?: string;
+  platform?: Platform;
+}
+
+export interface ProductDetails {
+  item_id?: string | number;
+  itemid?: string | number;
+  name?: string;
+  item_name?: string;
+  product_name?: string;
+  title?: string;
+  price?: number;
+  new_check_price?: number;
+  gen_price?: number;
+  shopname?: string;
+  shop_name?: string;
+  description?: string;
+  description_info?: { extended_description?: { field_list?: { type?: string; text?: string }[] } };
+  brand?: string | { original_brand_name?: string };
+  cat_name?: string;
+  item_status?: string;
+  status?: string;
+  stock?: number;
+  total_stock?: number;
+  warranty?: unknown;
+  condition?: string;
+  weight?: number;
+  dimension?: unknown;
+  field_list?: unknown[];
+  attribute_list?: unknown[];
+  model?: {
+    model_id?: string | number;
+    model_name?: string;
+    model_sku?: string;
+    model_status?: string;
+    price_info?: { current_price?: number }[];
+    stock_info_v2?: { summary_info?: { total_available_stock?: number } };
+  }[];
+  tier_variation?: unknown[];
 }
 
 export interface Conversation {
@@ -134,6 +185,7 @@ export interface Conversation {
   topic: Topic;
   last_message: string;
   last_timestamp: string; // ISO
+  created_at?: string; // ISO
   unread: number;
   pin_global?: boolean;
   pin_personal?: boolean;
@@ -186,6 +238,7 @@ export interface AdminUser {
   bubble_color?: string; // ⚡ สี bubble ของ admin คนนี้ (hex) — ใช้ใน ChatWindow/TicketChatPanel
   theme_preference?: "light" | "dark";
   chat_text_size?: ChatTextSize;
+  notification_preferences?: NotificationPreferences;
   last_login_at?: string | null;
   created_at?: string;
 }

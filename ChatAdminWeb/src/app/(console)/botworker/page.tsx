@@ -1245,6 +1245,12 @@ function ReviewBubbleList({
   const [draft, setDraft] = useState("");
   const [editReasonCategory, setEditReasonCategory] = useState("");
   const [editReasonText, setEditReasonText] = useState("");
+  const [editReasonCategories, setEditReasonCategories] = useState<string[]>([...BOTWORKER_REVIEW_REASON_CATEGORIES]);
+  const [editReasonCategoriesLoading, setEditReasonCategoriesLoading] = useState(false);
+  const [showAddEditReasonCategory, setShowAddEditReasonCategory] = useState(false);
+  const [newEditReasonCategory, setNewEditReasonCategory] = useState("");
+  const [addingEditReasonCategory, setAddingEditReasonCategory] = useState(false);
+  const [editReasonCategoryError, setEditReasonCategoryError] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<{ bubbleId: string; message: string } | null>(null);
   const [rejectingId, setRejectingId] = useState<string | null>(null);
@@ -1260,6 +1266,36 @@ function ReviewBubbleList({
     try { await onAction(msg.id, bubbleId, action, extra); return true; }
     catch (e) { setErr({ bubbleId, message: e instanceof Error ? e.message : "action failed" }); return false; }
     finally { setBusy(false); }
+  }
+
+  useEffect(() => {
+    if (!editingId) return;
+    let current = true;
+    setEditReasonCategoriesLoading(true);
+    setEditReasonCategoryError("");
+    api().get<{ categories: string[] }>("/botworker/review-reasons")
+      .then((r) => { if (current) setEditReasonCategories(r.data.categories || [...BOTWORKER_REVIEW_REASON_CATEGORIES]); })
+      .catch(() => { if (current) setEditReasonCategoryError("โหลดหัวข้อเหตุผลไม่สำเร็จ"); })
+      .finally(() => { if (current) setEditReasonCategoriesLoading(false); });
+    return () => { current = false; };
+  }, [editingId]);
+
+  async function addEditReasonCategory() {
+    const category = newEditReasonCategory.trim();
+    if (!category || editReasonCategoriesLoading || addingEditReasonCategory) return;
+    setAddingEditReasonCategory(true);
+    setEditReasonCategoryError("");
+    try {
+      const r = await api().post<{ category: string; categories: string[] }>("/botworker/review-reasons", { category });
+      setEditReasonCategories(r.data.categories);
+      setEditReasonCategory(r.data.category);
+      setNewEditReasonCategory("");
+      setShowAddEditReasonCategory(false);
+    } catch (e) {
+      setEditReasonCategoryError(e instanceof Error ? e.message : "บันทึกหัวข้อไม่สำเร็จ");
+    } finally {
+      setAddingEditReasonCategory(false);
+    }
   }
 
   const products = (msg.bot_products || []).map((p, i) => ({
@@ -1351,7 +1387,7 @@ function ReviewBubbleList({
                 >{liveSendEnabled ? "อนุมัติและส่งจริง" : "อนุมัติ (switch ปิด ไม่ส่งจริง)"}</button>
                 <button
                   disabled={busy}
-                  onClick={() => { setEditingId(b.bubble_id); setDraft(b.edited_text ?? b.original_text); setEditReasonCategory(""); setEditReasonText(""); }}
+                  onClick={() => { setEditingId(b.bubble_id); setDraft(b.edited_text ?? b.original_text); setEditReasonCategory(""); setEditReasonText(""); setShowAddEditReasonCategory(false); setNewEditReasonCategory(""); setEditReasonCategoryError(""); }}
                   className="rounded-md bg-white/15 hover:bg-white/25 disabled:opacity-40 px-2 py-1 text-[11px]"
                 >แก้ไข</button>
                 {!msg.bot_handoff_required && <button
@@ -1403,29 +1439,47 @@ function ReviewBubbleList({
             {canReview && editing && (
               <div className="mt-3 space-y-2 border-t border-white/15 pt-3">
                 <label className="block text-[11px] font-medium text-white/80">หมวดเหตุผลที่แก้คำตอบ</label>
-                <SelectField value={editReasonCategory} onChange={(e) => setEditReasonCategory(e.target.value)} disabled={busy}
+                <SelectField value={editReasonCategory} onChange={(e) => setEditReasonCategory(e.target.value)} disabled={busy || editReasonCategoriesLoading || addingEditReasonCategory}
                   className="h-10 w-full rounded-lg border border-white/25 bg-[#203954] px-3 text-sm text-white disabled:opacity-50">
-                  <option value="">เลือกเหตุผล</option>
-                  {BOTWORKER_REVIEW_REASON_CATEGORIES.map((category) => <option key={category} value={category}>{category}</option>)}
+                  <option value="">{editReasonCategoriesLoading ? "กำลังโหลดหัวข้อ..." : "เลือกเหตุผล"}</option>
+                  {editReasonCategories.map((category) => <option key={category} value={category}>{category}</option>)}
                 </SelectField>
+                <button type="button" disabled={busy || editReasonCategoriesLoading || addingEditReasonCategory}
+                  onClick={() => { setShowAddEditReasonCategory((show) => !show); setNewEditReasonCategory(""); setEditReasonCategoryError(""); }}
+                  className="rounded-md border border-white/20 bg-white/10 px-2 py-1 text-[11px] text-white/85 hover:bg-white/15 disabled:opacity-40">
+                  {showAddEditReasonCategory ? "ยกเลิกเพิ่มหัวข้อ" : "+ เพิ่มหัวข้ออื่น ๆ"}
+                </button>
+                {showAddEditReasonCategory && (
+                  <div className="flex flex-wrap items-center gap-2 rounded-md border border-white/15 bg-black/10 p-2">
+                    <input value={newEditReasonCategory} onChange={(e) => setNewEditReasonCategory(e.target.value)}
+                      maxLength={60} disabled={addingEditReasonCategory} placeholder="พิมพ์หัวข้อใหม่ (ไม่เกิน 60 ตัวอักษร)"
+                      className="min-w-48 flex-1 rounded-md border border-white/20 bg-white/10 px-2 py-1.5 text-xs text-white placeholder:text-white/45" />
+                    <button type="button" onClick={() => void addEditReasonCategory()}
+                      disabled={!newEditReasonCategory.trim() || editReasonCategoriesLoading || addingEditReasonCategory}
+                      className="rounded-md bg-green-500/40 px-2 py-1.5 text-[11px] font-medium text-white hover:bg-green-500/55 disabled:opacity-40">
+                      {addingEditReasonCategory ? "กำลังบันทึก..." : "เพิ่มหัวข้อ"}
+                    </button>
+                  </div>
+                )}
+                {editReasonCategoryError && <p role="alert" className="text-[11px] text-red-300">{editReasonCategoryError}</p>}
                 <label className="block text-[11px] font-medium text-white/80">อธิบายว่าทำไมจึงแก้</label>
                 <textarea value={editReasonText} onChange={(e) => setEditReasonText(e.target.value)} maxLength={1000} rows={2}
                   className="min-h-16 w-full resize-y rounded-lg border border-white/25 bg-white/10 px-3 py-2 text-sm text-white placeholder:text-white/45 focus:outline-none" placeholder="ระบุรายละเอียดประกอบการแก้คำตอบ" />
                 <div className="flex flex-wrap items-center gap-2">
                   <button
-                    disabled={busy || !draft.trim() || !editReasonCategory || !editReasonText.trim()}
-                    onClick={async () => { if (await act(b.bubble_id, "save", { edited_text: draft, reason_category: editReasonCategory, reason_text: editReasonText })) { setEditingId(null); setEditReasonCategory(""); setEditReasonText(""); } }}
+                    disabled={busy || showAddEditReasonCategory || addingEditReasonCategory || !draft.trim() || !editReasonCategory || !editReasonText.trim()}
+                    onClick={async () => { if (await act(b.bubble_id, "save", { edited_text: draft, reason_category: editReasonCategory, reason_text: editReasonText })) { setEditingId(null); setEditReasonCategory(""); setEditReasonText(""); setShowAddEditReasonCategory(false); setNewEditReasonCategory(""); } }}
                     className="rounded-md bg-white/20 hover:bg-white/30 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
                   >บันทึก</button>
                   <button
-                    disabled={!sendable || busy || !draft.trim() || !editReasonCategory || !editReasonText.trim()}
-                    onClick={async () => { if (await act(b.bubble_id, "save_and_approve", { edited_text: draft, reason_category: editReasonCategory, reason_text: editReasonText })) { setEditingId(null); setEditReasonCategory(""); setEditReasonText(""); } }}
+                    disabled={!sendable || busy || showAddEditReasonCategory || addingEditReasonCategory || !draft.trim() || !editReasonCategory || !editReasonText.trim()}
+                    onClick={async () => { if (await act(b.bubble_id, "save_and_approve", { edited_text: draft, reason_category: editReasonCategory, reason_text: editReasonText })) { setEditingId(null); setEditReasonCategory(""); setEditReasonText(""); setShowAddEditReasonCategory(false); setNewEditReasonCategory(""); } }}
                     className="rounded-md bg-green-500/40 hover:bg-green-500/60 disabled:opacity-40 px-2 py-1 text-[11px] font-medium"
                     title={!gateOk(i) ? "ต้องตัดสินบับเบิ้ลก่อนหน้าก่อน" : ""}
                   >{liveSendEnabled ? "บันทึกและส่งจริง" : "บันทึกและอนุมัติ (switch ปิด ไม่ส่งจริง)"}</button>
                   <button
                     disabled={busy}
-                    onClick={() => { setEditingId(null); setDraft(b.edited_text ?? b.original_text); setEditReasonCategory(""); setEditReasonText(""); }}
+                    onClick={() => { setEditingId(null); setDraft(b.edited_text ?? b.original_text); setEditReasonCategory(""); setEditReasonText(""); setShowAddEditReasonCategory(false); setNewEditReasonCategory(""); setEditReasonCategoryError(""); }}
                     className="rounded-md bg-white/15 hover:bg-white/25 disabled:opacity-40 px-2 py-1 text-[11px]"
                   >ยกเลิก</button>
                 </div>

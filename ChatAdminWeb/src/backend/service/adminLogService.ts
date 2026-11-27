@@ -48,6 +48,7 @@ export type AdminActionType =
   | "config.shop_toggle"
   | "config.test_integration"
   | "admin_config.update"
+  | "botworker.review_reason_category.add"
   | "admin.maintenance.clear_status"
   | "bot.buffer_flush"
   | "bot.buffer_recover"
