@@ -112,7 +112,7 @@ interface UnifiedMessage {
 export default function BotWorkerPage() {
   const { user } = useAuth();
   const { catchError } = useToastError();
-  const liveSendEnabled = useShopeeSendStatus();
+  const { enabled: liveSendEnabled, refresh: refreshSendMode } = useShopeeSendStatus();
   const productRequestIdsRef = useRef<Map<string, string>>(new Map());
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [totalCount, setTotalCount] = useState<number>(0);
@@ -424,10 +424,10 @@ export default function BotWorkerPage() {
   }, [selectedId]);
 
   // ⚡ admin reply — OFF: sandbox only; ON+Shopee: send through the provider and mirror botworker_messages
-  const handleSend = useCallback(async (payload: ChatSendInput) => {
+  const handleSend = useCallback(async (payload: ChatSendInput, modeOverride?: boolean) => {
     if (!selectedId || (payload.type === "text" && !payload.text.trim())) return false;
     try {
-      const r = await postOutboundChat(`/botworker/conversations/${selectedId}/send`, payload, false, liveSendEnabled) as { message?: UnifiedMessage; conflict?: boolean; assigned_to?: string };
+      const r = await postOutboundChat(`/botworker/conversations/${selectedId}/send`, payload, false, modeOverride ?? liveSendEnabled) as { message?: UnifiedMessage; conflict?: boolean; assigned_to?: string };
       if (r.message) {
         setMessages((prev) => (prev.some((m) => m.id === r.message!.id) ? prev : [...prev, r.message!]));
       }
@@ -524,6 +524,7 @@ export default function BotWorkerPage() {
           onReopen={handleReopen}
           onTransfer={handleTransfer}
           onSend={handleSend}
+          onRefreshSendMode={refreshSendMode}
           liveSendEnabled={liveSendEnabled}
           platform={selected?.platform}
           admins={admins}
@@ -653,7 +654,8 @@ interface BotWorkerChatPanelProps {
   onResolve?: () => void;
   onReopen?: () => void;
   onTransfer?: (newAdminId: string) => void;
-  onSend?: (payload: ChatSendInput) => Promise<unknown>;
+  onSend?: (payload: ChatSendInput, modeOverride?: boolean) => Promise<unknown>;
+  onRefreshSendMode?: () => Promise<boolean>;
   liveSendEnabled: boolean;
   platform?: string;
   admins?: AdminUser[];
@@ -664,7 +666,7 @@ interface BotWorkerChatPanelProps {
   onInfo?: () => void;
 }
 
-function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, onSend, liveSendEnabled, platform, admins = [], canReview, onReviewAction, onBack, onInfo }: BotWorkerChatPanelProps) {
+function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onResolve, onReopen, onTransfer, onSend, onRefreshSendMode, liveSendEnabled, platform, admins = [], canReview, onReviewAction, onBack, onInfo }: BotWorkerChatPanelProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [sending, setSending] = useState(false);
   // ⚡ track ว่า user อยู่ใกล้ล่างไหม — ถ้าไม่ใช่ (กำลังเลื่อนขึ้นอ่าน) จะไม่ auto-scroll
@@ -847,10 +849,11 @@ function BotWorkerChatPanel({ conversation, messages, loading, onHandoff, onReso
             key={conversation.id}
             platform={conversation.platform}
             liveSendEnabled={liveSendEnabled}
-            onSend={async (payload) => {
+            onSend={async (payload, modeOverride) => {
               setSending(true);
-              try { await onSend(payload); } finally { setSending(false); }
+              try { await onSend(payload, modeOverride); } finally { setSending(false); }
             }}
+            onRefreshSendMode={onRefreshSendMode}
             disabled={sending}
             placeholder="ตอบแชทใน BotWorker..."
           />

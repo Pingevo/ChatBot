@@ -1,9 +1,15 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/apiClient";
 
 export function useShopeeSendStatus() {
   const [enabled, setEnabled] = useState(false);
+  const refresh = useCallback(async () => {
+    const response = await api().get<{ enabled: boolean }>("/system/shopee-send-status");
+    const next = response.data.enabled === true;
+    setEnabled(next);
+    return next;
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -13,5 +19,5 @@ export function useShopeeSendStatus() {
     return () => { active = false; };
   }, []);
 
-  return enabled;
+  return { enabled, refresh };
 }

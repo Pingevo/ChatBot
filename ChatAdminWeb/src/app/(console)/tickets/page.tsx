@@ -94,7 +94,7 @@ export default function TicketsPage() {
   // Phase 7.9 — popup เตือนตอบทับ
   const [conflictPopup, setConflictPopup] = useState<{ assignedTo: string; payload: ChatSendInput } | null>(null);
   const productRequestIdsRef = useRef<Map<string, string>>(new Map());
-  const liveSendEnabled = useShopeeSendStatus();
+  const { enabled: liveSendEnabled, refresh: refreshSendMode } = useShopeeSendStatus();
 
   const selected = conversations.find((c) => c.id === selectedId) ?? null;
 
@@ -195,9 +195,9 @@ export default function TicketsPage() {
 
   // Phase 7.9 — send พร้อมเช็ค conflict (assigned_to ไม่ใช่ตัวเอง)
   const sendInternal = useCallback(
-    async (payload: ChatSendInput, force: boolean) => {
+    async (payload: ChatSendInput, force: boolean, modeOverride?: boolean) => {
       if (!selectedId) return;
-      const res = await chatService.sendPart(selectedId, payload, force, liveSendEnabled);
+      const res = await chatService.sendPart(selectedId, payload, force, modeOverride ?? liveSendEnabled);
       if (res.conflict) {
         // backend บอกว่า assigned ให้คนอื่น → เปิด popup
         setConflictPopup({ assignedTo: res.assigned_to || "?", payload });
@@ -213,13 +213,13 @@ export default function TicketsPage() {
   );
 
   const handleSend = useCallback(
-    async (payload: ChatSendInput) => {
+    async (payload: ChatSendInput, modeOverride?: boolean) => {
       if (!selectedId) return;
       setSending(true);
       // ไม่ต้องสร้าง tempMsg — sendInternal จะเพิ่ม message จริงจาก API แล้ว
       // ถ้าสร้าง tempMsg ด้วยจะซ้อนกัน 2 อัน (temp + ของจริง) เพราะ id ต่างกัน merge ไม่ออก
       try {
-        return await sendInternal(payload, false);
+        return await sendInternal(payload, false, modeOverride);
       } catch (e) {
         const body = (e as { response?: { data?: { conflict?: boolean; assigned_to?: string } } })?.response?.data;
         if (body?.conflict) {
@@ -430,6 +430,7 @@ export default function TicketsPage() {
           conversation={selected}
           messages={messages}
           onSend={handleSend}
+          onRefreshSendMode={refreshSendMode}
           liveSendEnabled={liveSendEnabled}
           onHandoff={handleHandoff}
           onResolve={handleResolve}

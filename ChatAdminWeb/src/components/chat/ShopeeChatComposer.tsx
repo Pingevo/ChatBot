@@ -31,13 +31,14 @@ export async function sendAttachmentsSequentially<T>(attachments: T[], send: (at
 interface Props {
   platform: Platform;
   liveSendEnabled: boolean;
-  onSend: (payload: ChatSendInput) => Promise<unknown> | void;
+  onSend: (payload: ChatSendInput, modeOverride?: boolean) => Promise<unknown> | void;
+  onRefreshSendMode?: () => Promise<boolean>;
   quickReplies?: QuickReply[];
   placeholder?: string;
   disabled?: boolean;
 }
 
-export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickReplies = [], placeholder, disabled = false }: Props) {
+export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, onRefreshSendMode, quickReplies = [], placeholder, disabled = false }: Props) {
   const [text, setText] = useState("");
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [file, setFile] = useState<File | null>(null);
@@ -52,10 +53,12 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
   const [stickerError, setStickerError] = useState("");
   const [emojiOpen, setEmojiOpen] = useState(false);
   const [error, setError] = useState("");
-  const [sendFailure, setSendFailure] = useState<(SendFailureInfo & { code?: string; providerError?: string; providerHttpStatus?: number; providerRequestId?: string }) | null>(null);
+  const [sendFailure, setSendFailure] = useState<(SendFailureInfo & { code?: string; providerError?: string; providerHttpStatus?: number; providerRequestId?: string; expectedMode?: boolean }) | null>(null);
   const [busy, setBusy] = useState(false);
   const failureCloseRef = useRef<HTMLButtonElement>(null);
   const pendingRequestRef = useRef<{ signature: string; requestId: string } | null>(null);
+  const failedPayloadRef = useRef<ChatSendInput | null>(null);
+  const attemptedImageRef = useRef<string | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const imageInputRef = useRef<HTMLInputElement>(null);
   const videoInputRef = useRef<HTMLInputElement>(null);
@@ -86,15 +89,16 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
     return { ...payload, request_id: pendingRequestRef.current.requestId } as ChatSendInput;
   }
 
-  async function submit(source: ChatSendInput) {
+  async function submit(source: ChatSendInput, retry = false, modeOverride?: boolean) {
     if (busy || disabled) return;
     setBusy(true);
     setError("");
     setSendFailure(null);
-    const payload = withRequestId(source);
+    const payload = retry ? source : withRequestId(source);
     try {
-      await onSend(payload);
+      await onSend(payload, modeOverride);
       pendingRequestRef.current = null;
+      failedPayloadRef.current = null;
       setText("");
       setFile(null);
       setStickerId("");
@@ -102,10 +106,11 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
       setStickerOpen(false);
       if (textareaRef.current) textareaRef.current.style.height = "auto";
     } catch (e) {
+      failedPayloadRef.current = payload;
       const body = (e as { response?: { data?: { detail?: unknown; error?: unknown; message?: unknown; code?: unknown; provider_error?: unknown; provider_http_status?: unknown; provider_request_id?: unknown } } })?.response?.data;
       const detail = body?.detail ?? body?.error ?? body?.message;
       const code = typeof body?.code === "string" ? body.code : undefined;
-      setSendFailure(code ? { ...describeSendFailure(code), code,
+      setSendFailure(code ? { ...describeSendFailure(code), code, expectedMode: modeOverride ?? liveSendEnabled,
         providerError: typeof body?.provider_error === "string" ? body.provider_error : undefined,
         providerHttpStatus: typeof body?.provider_http_status === "number" ? body.provider_http_status : undefined,
         providerRequestId: typeof body?.provider_request_id === "string" ? body.provider_request_id : undefined,
@@ -119,23 +124,27 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
     }
   }
 
-  async function submitImages() {
+  async function submitImages(newRequestForImage?: string, modeOverride?: boolean) {
     if (busy || disabled || !canSendMedia || images.length === 0) return;
     setBusy(true);
     setError("");
     setSendFailure(null);
     try {
       await sendAttachmentsSequentially(images, async (image) => {
-        const requestId = image.requestId || newChatRequestId();
-        if (!image.requestId) setImages((current) => current.map((item) => item.id === image.id ? { ...item, requestId } : item));
-        const result = await onSend({ type: "image", file: image.file, request_id: requestId });
+        attemptedImageRef.current = image.id;
+        const requestId = image.id === newRequestForImage ? newChatRequestId() : image.requestId || newChatRequestId();
+        if (image.requestId !== requestId) setImages((current) => current.map((item) => item.id === image.id ? { ...item, requestId } : item));
+        const result = await onSend({ type: "image", file: image.file, request_id: requestId }, modeOverride);
         return result;
-      }, (image) => setImages((current) => removeAttachmentById(current, image.id)));
+      }, (image) => {
+        attemptedImageRef.current = null;
+        setImages((current) => removeAttachmentById(current, image.id));
+      });
     } catch (e) {
       const body = (e as { response?: { data?: { detail?: unknown; error?: unknown; message?: unknown; code?: unknown; provider_error?: unknown; provider_http_status?: unknown; provider_request_id?: unknown } } })?.response?.data;
       const detail = body?.detail ?? body?.error ?? body?.message;
       const code = typeof body?.code === "string" ? body.code : undefined;
-      setSendFailure(code ? { ...describeSendFailure(code), code,
+      setSendFailure(code ? { ...describeSendFailure(code), code, expectedMode: modeOverride ?? liveSendEnabled,
         providerError: typeof body?.provider_error === "string" ? body.provider_error : undefined,
         providerHttpStatus: typeof body?.provider_http_status === "number" ? body.provider_http_status : undefined,
         providerRequestId: typeof body?.provider_request_id === "string" ? body.provider_request_id : undefined,
@@ -247,6 +256,38 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
     } else {
       submitText();
     }
+  }
+
+  async function retryFailedSend() {
+    if (!sendFailure || busy || disabled) return;
+    let modeOverride: boolean | undefined;
+    if (sendFailure.code === "send_mode_changed") {
+      if (!onRefreshSendMode) return;
+      try {
+        modeOverride = await onRefreshSendMode();
+      } catch {
+        setSendFailure({ ...sendFailure, title: "ตรวจสถานะสวิตช์ไม่ได้", cause: "โหลดสถานะส่งจริงล่าสุดไม่สำเร็จ", action: "ตรวจการเชื่อมต่อแล้วลองใหม่" });
+        return;
+      }
+      if (modeOverride !== sendFailure.expectedMode) {
+        setSendFailure({ ...sendFailure, title: "สถานะส่งจริงเปลี่ยนแล้ว",
+          cause: modeOverride ? "ตอนนี้สวิตช์ส่งจริงเปิดอยู่" : "ตอนนี้สวิตช์ส่งจริงปิดอยู่",
+          action: modeOverride ? "ปิดหน้าต่างนี้ ตรวจโหมดล่าสุด แล้วกดส่งอีกครั้งหากต้องการส่งจริง" : "เปิดสวิตช์ส่งจริงก่อน แล้วกดลองใหม่" });
+        return;
+      }
+    }
+    const definiteFailure = !!sendFailure.code && sendFailure.code !== "delivery_unknown" && sendFailure.code !== "send_mode_changed";
+    if (images.length) {
+      void submitImages(definiteFailure ? attemptedImageRef.current || undefined : undefined, modeOverride);
+      return;
+    }
+    const failed = failedPayloadRef.current;
+    if (!failed) return;
+    const payload = definiteFailure ? { ...failed, request_id: newChatRequestId() } as ChatSendInput : failed;
+    if (definiteFailure && pendingRequestRef.current?.requestId === failed.request_id) {
+      pendingRequestRef.current.requestId = payload.request_id;
+    }
+    void submit(payload, true, modeOverride);
   }
 
   function insertEmoji(emoji: string) {
@@ -386,9 +427,12 @@ export function ShopeeChatComposer({ platform, liveSendEnabled, onSend, quickRep
             {sendFailure.providerError && <p className="mt-1 text-xs text-text-muted">Shopee error: {sendFailure.providerError}</p>}
             {sendFailure.providerHttpStatus && <p className="mt-1 text-xs text-text-muted">Shopee HTTP: {sendFailure.providerHttpStatus}</p>}
             {sendFailure.providerRequestId && <p className="mt-1 break-all text-xs text-text-muted">Shopee request ID: {sendFailure.providerRequestId}</p>}
+            {sendFailure.code === "delivery_unknown" && <p className="mt-2 text-xs text-text-muted">ลองใหม่จะตรวจผลคำขอเดิมเท่านั้น ระบบจะไม่ส่งข้อความใหม่</p>}
+            {!sendFailure.code && <p className="mt-2 text-xs text-text-muted">ลองใหม่จะใช้คำขอเดิมเพื่อป้องกันการส่งซ้ำ หากระบบบันทึกว่าล้มเหลว จะไม่ส่งใหม่อัตโนมัติ</p>}
+            {sendFailure.code === "send_mode_changed" && <p className="mt-2 text-xs text-text-muted">ลองใหม่จะตรวจสถานะสวิตช์ล่าสุดก่อนส่งคำขอเดิม</p>}
             <div className="mt-5 flex justify-end gap-2">
-              {sendFailure.code === "send_mode_changed" && <button type="button" onClick={() => window.location.reload()}
-                className="min-h-11 rounded-lg bg-brand px-4 text-sm text-white">รีเฟรชหน้า</button>}
+              <button type="button" onClick={() => void retryFailedSend()} disabled={busy || disabled || (sendFailure.code === "send_mode_changed" && !onRefreshSendMode)}
+                className="min-h-11 rounded-lg bg-brand px-4 text-sm text-white disabled:opacity-50">ลองใหม่</button>
               <button ref={failureCloseRef} type="button" onClick={() => setSendFailure(null)}
                 className="min-h-11 rounded-lg border border-border px-4 text-sm">ปิด</button>
             </div>

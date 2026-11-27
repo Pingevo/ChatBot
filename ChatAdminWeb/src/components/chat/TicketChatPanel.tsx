@@ -338,7 +338,8 @@ function TransferDropdown({
 interface Props {
   conversation: Conversation | null;
   messages: ChatMessage[];
-  onSend: (payload: ChatSendInput) => Promise<unknown> | void;
+  onSend: (payload: ChatSendInput, modeOverride?: boolean) => Promise<unknown> | void;
+  onRefreshSendMode?: () => Promise<boolean>;
   liveSendEnabled: boolean;
   onHandoff: () => void;
   onResolve: () => void;
@@ -357,6 +358,7 @@ export function TicketChatPanel({
   conversation,
   messages,
   onSend,
+  onRefreshSendMode,
   liveSendEnabled,
   onHandoff,
   onResolve,
@@ -569,6 +571,7 @@ export function TicketChatPanel({
           platform={conversation.platform}
           liveSendEnabled={liveSendEnabled}
           onSend={onSend}
+          onRefreshSendMode={onRefreshSendMode}
           quickReplies={quickReplies}
           disabled={sending}
         />
