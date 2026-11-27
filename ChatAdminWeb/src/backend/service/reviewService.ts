@@ -9,7 +9,8 @@
 //   - legacy draft ไม่มี review_bubbles → แสดงได้ แต่ review ไม่ได้ (ห้ามแปลงย้อนหลัง)
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
 import { splitAnswerSegments } from "@/lib/answerSegments";
-import { BOTWORKER_REVIEW_REASON_CATEGORIES, type BotWorkerReviewReasonCategory } from "@/lib/types";
+import { BOTWORKER_REVIEW_REASON_CATEGORIES, type BotWorkerEditReasonCategory, type BotWorkerReviewReasonCategory } from "@/lib/types";
+import { systemConfigService } from "./systemConfigService";
 import { insertDeterministicEvent } from "./botworkerEventService";
 import type { ShadowReplyDoc, ShadowReviewBubbleDoc } from "./shadowReplyService";
 import { assignmentService } from "./assignmentService";
@@ -58,7 +59,7 @@ export interface ReviewBubble extends ShadowReviewBubbleDoc {
   approved_text?: string;
   rejection_category?: BotWorkerReviewReasonCategory;
   rejection_reason?: string;
-  edit_history?: { before_text: string; after_text: string; reason_category?: BotWorkerReviewReasonCategory; reason_text?: string; actor: string; actor_name: string; at: Date }[];
+  edit_history?: { before_text: string; after_text: string; reason_category?: BotWorkerEditReasonCategory; reason_text?: string; actor: string; actor_name: string; at: Date }[];
   delivery: BubbleDelivery;
   card?: ReviewCard;
   // Keep the approved text in approved_text; delivery status remains separate.
@@ -323,7 +324,8 @@ export async function applyReviewAction(opts: {
     if (!text) return finish({ ok: false, code: "invalid", message: "edited text is empty" });
     if (text.length > MAX_EDIT_LEN) return finish({ ok: false, code: "invalid", message: `edited text exceeds ${MAX_EDIT_LEN} chars` });
     const reasonText = String(opts.reasonText ?? "").trim();
-    if (!BOTWORKER_REVIEW_REASON_CATEGORIES.includes(opts.reasonCategory as BotWorkerReviewReasonCategory)) {
+    const editReasonCategories = await systemConfigService.getBotWorkerEditReasonCategories();
+    if (!editReasonCategories.includes(String(opts.reasonCategory ?? ""))) {
       return finish({ ok: false, code: "invalid", message: "reason_category is invalid" });
     }
     if (!reasonText) return finish({ ok: false, code: "invalid", message: "reason_text is required" });
@@ -331,7 +333,7 @@ export async function applyReviewAction(opts: {
     const next = bubbles.slice();
     next[i] = { ...bubble, edited_text: text, edit_history: [...(bubble.edit_history || []), {
       before_text: bubble.edited_text ?? bubble.original_text, after_text: text,
-      reason_category: opts.reasonCategory as BotWorkerReviewReasonCategory, reason_text: reasonText,
+      reason_category: opts.reasonCategory as BotWorkerEditReasonCategory, reason_text: reasonText,
       actor: opts.actor, actor_name: opts.actorName, at: now,
     }] };
     auditDetails = { ...auditDetails, edited_text: text, reason_category: opts.reasonCategory, reason_text: reasonText };
@@ -428,7 +430,8 @@ export async function applyReviewAction(opts: {
     if (!text) return finish({ ok: false, code: "invalid", message: "edited text is empty" });
     if (text.length > MAX_EDIT_LEN) return finish({ ok: false, code: "invalid", message: `edited text exceeds ${MAX_EDIT_LEN} chars` });
     const reasonText = String(opts.reasonText ?? "").trim();
-    if (!BOTWORKER_REVIEW_REASON_CATEGORIES.includes(opts.reasonCategory as BotWorkerReviewReasonCategory)) {
+    const editReasonCategories = await systemConfigService.getBotWorkerEditReasonCategories();
+    if (!editReasonCategories.includes(String(opts.reasonCategory ?? ""))) {
       return finish({ ok: false, code: "invalid", message: "reason_category is invalid" });
     }
     if (!reasonText) return finish({ ok: false, code: "invalid", message: "reason_text is required" });
@@ -480,7 +483,7 @@ export async function applyReviewAction(opts: {
     ...(editedTextSet !== undefined ? { edited_text: editedTextSet } : {}),
     ...(editedTextSet !== undefined ? { edit_history: [...(bubble.edit_history || []), {
       before_text: bubble.edited_text ?? bubble.original_text, after_text: editedTextSet,
-      reason_category: opts.reasonCategory as BotWorkerReviewReasonCategory, reason_text: opts.reasonText?.trim(),
+      reason_category: opts.reasonCategory as BotWorkerEditReasonCategory, reason_text: opts.reasonText?.trim(),
       actor: opts.actor, actor_name: opts.actorName, at: now,
     }] } : {}),
     decision,
