@@ -7,6 +7,7 @@ import { useState, type ReactNode } from "react";
 import { Package, ShoppingBag, Image as ImageIcon, Video, Sticker, Bell, Headset } from "lucide-react";
 import { imageViewer } from "@/components/ui/ImageViewer";
 import type { ChatMessage, ProductCard } from "@/lib/types";
+import { ProductDetailsModal } from "./ProductDetailsModal";
 
 // ─── Markdown inline parser (image + link + bold) ─────────────
 // แปลง ![alt](url), [text](url), **bold** ในข้อความเป็น React elements
@@ -66,6 +67,72 @@ function renderMarkdownInline(text: string): ReactNode[] {
     nodes.push(text.slice(lastIndex));
   }
   return nodes.length > 0 ? nodes : [text];
+}
+
+function _renderMarkdownBlocks(text: string, variant: "user" | "out"): ReactNode[] {
+  const lines = text.split("\n");
+  const nodes: ReactNode[] = [];
+  const textColor = variant === "user" ? "text-text" : "text-white";
+  let textLines: string[] = [];
+  let blockIndex = 0;
+  let lineIndex = 0;
+
+  while (lineIndex < lines.length) {
+    const headerLine = lines[lineIndex].trim();
+    const separatorLine = lines[lineIndex + 1]?.trim() || "";
+    let headers = headerLine.split("|").map((cell) => cell.trim());
+    let separators = separatorLine.split("|").map((cell) => cell.trim());
+    if (headers[0] === "") headers = headers.slice(1);
+    if (headers[headers.length - 1] === "") headers = headers.slice(0, -1);
+    if (separators[0] === "") separators = separators.slice(1);
+    if (separators[separators.length - 1] === "") separators = separators.slice(0, -1);
+
+    let isTable = headerLine.includes("|") && separatorLine.includes("|") && headers.length > 0 && headers.length === separators.length;
+    for (const cell of separators) {
+      let divider = cell;
+      if (divider.startsWith(":")) divider = divider.slice(1);
+      if (divider.endsWith(":")) divider = divider.slice(0, -1);
+      if (divider.length < 3 || [...divider].some((character) => character !== "-")) {
+        isTable = false;
+        break;
+      }
+    }
+
+    if (isTable) {
+      if (textLines.length > 0) {
+        nodes.push(
+          <div key={`text-${blockIndex++}`} className={`chat-message-copy ${textColor} whitespace-pre-wrap break-words`}>
+            {renderMarkdownInline(textLines.join("\n"))}
+          </div>
+        );
+        textLines = [];
+      }
+
+      const rows: string[][] = [];
+      lineIndex += 2;
+      while (lineIndex < lines.length && lines[lineIndex].trim() && lines[lineIndex].includes("|")) {
+        let cells = lines[lineIndex].trim().split("|").map((cell) => cell.trim());
+        if (cells[0] === "") cells = cells.slice(1);
+        if (cells[cells.length - 1] === "") cells = cells.slice(0, -1);
+        rows.push(headers.map((_, index) => cells[index] ?? ""));
+        lineIndex += 1;
+      }
+      nodes.push(<TableView key={`table-${blockIndex++}`} table={{ headers, rows }} variant={variant} />);
+      continue;
+    }
+
+    textLines.push(lines[lineIndex]);
+    lineIndex += 1;
+  }
+
+  if (textLines.length > 0) {
+    nodes.push(
+      <div key={`text-${blockIndex}`} className={`chat-message-copy ${textColor} whitespace-pre-wrap break-words`}>
+        {renderMarkdownInline(textLines.join("\n"))}
+      </div>
+    );
+  }
+  return nodes;
 }
 
 interface Props {
@@ -155,7 +222,7 @@ export function MessageContent({ msg, variant }: Props) {
             onClick={() => imageViewer.show(msg.media!.url!, { type: "image", alt: msg.text || "รูปภาพ" })}
           />
           {msg.text && msg.text !== "(รูปภาพ)" && (
-            <div className={`chat-message-copy ${bubbleText} opacity-80`}>{renderMarkdownInline(msg.text)}</div>
+            <div className="space-y-1">{_renderMarkdownBlocks(msg.text, variant)}</div>
           )}
         </div>
       );
@@ -192,7 +259,7 @@ export function MessageContent({ msg, variant }: Props) {
             </div>
           </div>
           {msg.text && msg.text !== "(วิดีโอ)" && (
-            <div className={`chat-message-copy ${bubbleText} opacity-80`}>{renderMarkdownInline(msg.text)}</div>
+            <div className="space-y-1">{_renderMarkdownBlocks(msg.text, variant)}</div>
           )}
         </div>
       );
@@ -219,7 +286,7 @@ export function MessageContent({ msg, variant }: Props) {
           onClick={() => imageViewer.show(msg.media!.url!, { type: "image", alt: msg.text || "รูปภาพ" })}
         />
         {msg.text && (
-          <div className={`chat-message-copy ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>
+          <div className="space-y-1">{_renderMarkdownBlocks(msg.text, variant)}</div>
         )}
       </div>
     );
@@ -232,7 +299,7 @@ export function MessageContent({ msg, variant }: Props) {
       return (
         <div className="space-y-1.5">
           {msg.text && msg.text !== "(สินค้า)" && msg.text !== "(สินค้าพร้อมตัวเลือก)" && msg.text !== "[item]" && msg.text !== "[variation_card]" && (
-            <div className={`chat-message-copy ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>
+            <div className="space-y-1">{_renderMarkdownBlocks(msg.text, variant)}</div>
           )}
           {msg.products.map((p, i) => (
             <ProductCardView key={`${p.item_id}-${i}`} product={p} variant={variant} />
@@ -273,7 +340,7 @@ export function MessageContent({ msg, variant }: Props) {
   // ── fallback: text + product cards (กรณี bot/admin ตอบพร้อม product) ──
   return (
     <div className="space-y-1.5">
-      {msg.text && <div className={`chat-message-copy ${bubbleText} whitespace-pre-wrap break-words`}>{renderMarkdownInline(msg.text)}</div>}
+      {msg.text && _renderMarkdownBlocks(msg.text, variant)}
       {msg.products && msg.products.length > 0 && (
         <div className="space-y-1.5">
           {msg.products.map((p, i) => (
@@ -292,17 +359,15 @@ function ProductCardView({ product, variant }: { product: ProductCard; variant: 
   // ⚡ รองรับทั้ง url (Next.js) และ short_link (Python bot) — กัน url เป็น object หรือค่าผิดประเภท
   const rawUrl = (product.url ?? (product as unknown as { short_link?: string }).short_link) as unknown;
   const safeUrl = typeof rawUrl === "string" && rawUrl.startsWith("http") ? rawUrl : undefined;
+  const [detailsOpen, setDetailsOpen] = useState(false);
   // ⚡ รองรับทั้ง image (Next.js) และ image_url (Python bot)
   const rawImage = (product.image ?? (product as unknown as { image_url?: string }).image_url) as unknown;
   const safeImage = typeof rawImage === "string" && rawImage.startsWith("http") ? rawImage : undefined;
-  const CardTag = safeUrl ? "a" : "div";
-  return (
-    <CardTag
-      {...(safeUrl ? { href: safeUrl, target: "_blank", rel: "noopener noreferrer" } : {})}
-      className={`flex items-center gap-2.5 rounded-lg p-2 transition-colors ${
-        isUser ? "bg-surface-2 hover:bg-pale-sky-soft" : "bg-white/10 hover:bg-white/15"
-      }`}
-    >
+  const cardClass = `flex items-center gap-2.5 rounded-lg p-2 transition-colors ${
+    isUser ? "bg-surface-2 hover:bg-pale-sky-soft" : "bg-white/10 hover:bg-white/15"
+  }`;
+  const cardContent = (
+    <>
       {safeImage ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
@@ -312,30 +377,60 @@ function ProductCardView({ product, variant }: { product: ProductCard; variant: 
           loading="lazy"
         />
       ) : (
-        <div className={`w-14 h-14 rounded flex items-center justify-center shrink-0 ${
+        <span className={`w-14 h-14 rounded flex items-center justify-center shrink-0 ${
           isUser ? "bg-surface" : "bg-white/10"
         }`}>
           <Package size={20} className={isUser ? "text-text-subtle" : "text-white/60"} />
-        </div>
+        </span>
       )}
-      <div className="min-w-0 flex-1">
-        <div className={`truncate text-sm font-medium ${isUser ? "text-text" : "text-white"}`}>
+      <span className="min-w-0 flex-1">
+        <span className={`block truncate text-sm font-medium ${isUser ? "text-text" : "text-white"}`}>
           {product.name}
-        </div>
-        <div className="flex items-center gap-2 mt-0.5">
+        </span>
+        <span className="mt-0.5 flex items-center gap-2">
           {product.price > 0 && (
             <span className={`text-xs font-medium ${isUser ? "text-brand" : "text-white/90"}`}>
               ฿{product.price.toLocaleString()}
             </span>
           )}
           {product.shop && (
-            <span className={`text-[10px] truncate ${isUser ? "text-text-muted" : "text-white/60"}`}>
+            <span className={`truncate text-[10px] ${isUser ? "text-text-muted" : "text-white/60"}`}>
               {product.shop}
             </span>
           )}
-        </div>
-      </div>
-    </CardTag>
+        </span>
+      </span>
+    </>
+  );
+
+  return (
+    <>
+      {product.item_id ? (
+        <button
+          type="button"
+          onClick={() => setDetailsOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={detailsOpen}
+          aria-label={`ดูรายละเอียดสินค้า ${product.name}`}
+          className={`w-full text-left ${cardClass}`}
+        >
+          {cardContent}
+        </button>
+      ) : safeUrl ? (
+        <a href={safeUrl} target="_blank" rel="noopener noreferrer" className={cardClass}>
+          {cardContent}
+        </a>
+      ) : (
+        <div className={cardClass}>{cardContent}</div>
+      )}
+      {detailsOpen && (
+        <ProductDetailsModal
+          product={product}
+          platform={product.platform || "shopee"}
+          onClose={() => setDetailsOpen(false)}
+        />
+      )}
+    </>
   );
 }
 
@@ -343,12 +438,12 @@ function ProductCardView({ product, variant }: { product: ProductCard; variant: 
 function TableView({ table, variant }: { table: NonNullable<ChatMessage["table"]>; variant: "user" | "out" }) {
   const isUser = variant === "user";
   return (
-    <div className={`rounded-lg overflow-x-auto max-w-full text-[11px] ${isUser ? "bg-surface-2" : "bg-white/10"}`}>
+    <div className={`min-w-0 max-w-full overflow-x-auto rounded-lg border text-[10px] leading-4 sm:text-[11px] sm:leading-5 ${isUser ? "border-border/70 bg-surface-2" : "border-white/10 bg-white/10"}`}>
       <table className="w-full max-w-full table-fixed">
         <thead>
           <tr className={isUser ? "bg-surface" : "bg-white/10"}>
             {table.headers.map((h, i) => (
-              <th key={i} className={`text-left px-2 py-1 font-medium whitespace-nowrap overflow-hidden text-ellipsis ${isUser ? "text-text-muted" : "text-white/80"}`}>
+              <th key={i} scope="col" className={`break-words px-1 py-1 text-left align-top font-medium sm:px-2 ${isUser ? "text-text-muted" : "text-white/80"}`}>
                 {h}
               </th>
             ))}
@@ -358,7 +453,7 @@ function TableView({ table, variant }: { table: NonNullable<ChatMessage["table"]
           {table.rows.map((row, ri) => (
             <tr key={ri} className="border-t border-white/5">
               {row.map((cell, ci) => (
-                <td key={ci} className={`px-2 py-1 break-words ${isUser ? "text-text" : "text-white/90"}`}>
+                <td key={ci} className={`break-words px-1 py-1 align-top sm:px-2 ${isUser ? "text-text" : "text-white/90"}`}>
                   {cell}
                 </td>
               ))}

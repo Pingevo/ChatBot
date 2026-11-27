@@ -3,6 +3,7 @@
 //   raw conversations fields are dump-owned and never authoritative.
 import { Document } from "mongodb";
 import { getCollection, COLLECTIONS } from "../db/mongoClient";
+import { getOrderCollection } from "../db/orderMongoClient";
 import { statusConversationService } from "./statusConversationService";
 
 export type Platform = "shopee" | "tiktok" | "lazada";
@@ -41,6 +42,44 @@ export interface ConversationDoc extends Document {
   closed_at?: Date | null;
   closed_by?: string;
   close_count?: number;
+}
+
+export async function findOrderConversationMatch(orderSn: string): Promise<Pick<ConversationDoc, "customer_id" | "platform" | "shop_id"> | null> {
+  const order = await (await getOrderCollection()).findOne(
+    { order_sn: orderSn.trim() },
+    { projection: { buyer_user_id: 1, shopname: 1 } },
+  );
+  const buyerUserId = Number(order?.buyer_user_id);
+  const shopName = typeof order?.shopname === "string" ? order.shopname.trim() : "";
+  if (!Number.isFinite(buyerUserId) || buyerUserId <= 0 || !shopName) return null;
+
+  const shopsColl = await getCollection<{ shop_id?: string }>(COLLECTIONS.shops);
+  const shops = await shopsColl.find(
+    { platform: "shopee", shopname: shopName },
+    { projection: { shop_id: 1 } },
+  ).toArray();
+  const configuredShopIds = [...new Set(shops
+    .map((shop) => shop.shop_id?.trim())
+    .filter((shopId): shopId is string => !!shopId))];
+  if (configuredShopIds.length !== 1) return null;
+
+  const convColl = await getCollection<ConversationDoc>(COLLECTIONS.conversations);
+  // shops.shop_id may be a legacy name fallback; resolve transport ID from conversation evidence.
+  const directShopIds = [...new Set((await convColl.distinct("shop_id", {
+    platform: "shopee",
+    shop_id: { $in: configuredShopIds },
+  })).filter((shopId): shopId is string => typeof shopId === "string" && !!shopId))];
+  let transportShopId = directShopIds.length === 1 ? directShopIds[0] : undefined;
+  if (directShopIds.length === 0) {
+    const evidenceShopIds = [...new Set((await convColl.distinct("shop_id", {
+      platform: "shopee",
+      shop_name: shopName,
+    })).filter((shopId): shopId is string => typeof shopId === "string" && !!shopId))];
+    if (evidenceShopIds.length === 1) transportShopId = evidenceShopIds[0];
+  }
+  if (!transportShopId) return null;
+
+  return { customer_id: String(buyerUserId), platform: "shopee", shop_id: transportShopId };
 }
 
 export async function getConversation(conversationId: string): Promise<ConversationDoc | null> {

@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -167,13 +168,9 @@ def lookup_by_tracking(
     tracking_no: str,
     shop_filter: str | None = None,
 ) -> dict[str, Any] | None:
-    """ค้น order จาก tracking number (MongoDB only).
+    """ค้น order ด้วยเลขพัสดุระดับ order หรือ package.
 
-    ค้นใน package_list ทุก entry ใน field:
-    - tracking_no
-    - tracking_number
-    - parcel_id
-    - waybill_id
+    ค้น `tracking_no` ระดับเอกสารและทุก package tracking field จาก Order DB.
 
     Args:
         tracking_no: เลขพัสดุ
@@ -181,16 +178,18 @@ def lookup_by_tracking(
 
     Returns:
         dict เหมือน lookup_order หรือ None ถ้าไม่พบ.
+
+    Calls: `_get_order_collection().find_one`, `lookup_order`; errors log and return None.
     """
     tn = _normalize_tracking(tracking_no)
     if not tn:
         return None
     try:
         coll = _get_order_collection()
-        # ค้นใน package_list ทุก field ที่อาจเก็บ tracking
+        # ค้น top-level tracking_no และทุก field ใน package_list
         _tk_fields = ["tracking_no", "tracking_number", "parcel_id", "waybill_id"]
         query: dict[str, Any] = {
-            "$or": [{f"package_list.{f}": tn} for f in _tk_fields]
+            "$or": [{"tracking_no": tn}, *[{f"package_list.{f}": tn} for f in _tk_fields]]
         }
         if shop_filter:
             query["shopname"] = shop_filter
@@ -350,6 +349,8 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
         - shipping_carrier: str
         - tracking_no: str
         - tracking_numbers: list[str]
+        - tracking_info: raw tracking data (optional)
+        - package_tracking_info: list[raw package tracking data]
         - create_time: str (วันที่สั่งซื้อ ภาษาไทย)
         - pay_time: str (วันที่ชำระเงิน ภาษาไทย)
         - ship_by_date: str (วันที่ส่งกำหนด ภาษาไทย)
@@ -415,6 +416,10 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
         logistics_status_raw = ""
         shipping_carrier = doc.get("shipping_carrier") or ""
         tracking_numbers: list[str] = []
+        document_tracking_no = doc.get("tracking_no")
+        if document_tracking_no and str(document_tracking_no).strip():
+            tracking_numbers.append(str(document_tracking_no).strip())
+        package_tracking_info: list[Any] = []
         pkg_list = doc.get("package_list") or []
         if pkg_list:
             for pkg in pkg_list:
@@ -424,6 +429,9 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
                 _pkg_carrier = pkg.get("shipping_carrier") or ""
                 if _pkg_carrier and not shipping_carrier:
                     shipping_carrier = _pkg_carrier
+                _pkg_tracking_info = pkg.get("tracking_info")
+                if _pkg_tracking_info and _pkg_tracking_info != doc.get("tracking_info") and _pkg_tracking_info not in package_tracking_info:
+                    package_tracking_info.append(_pkg_tracking_info)
                 # ⚡ tracking_no อาจอยู่ในหลาย field — เก็บทุกที่ที่เจอ
                 for _tk in ("tracking_no", "tracking_number", "parcel_id", "waybill_id"):
                     _tn = pkg.get(_tk)
@@ -465,6 +473,8 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
             "shipping_carrier": shipping_carrier or "ไม่ระบุ",
             "tracking_no": tracking_numbers[0] if tracking_numbers else "",
             "tracking_numbers": tracking_numbers,  # ทุก tracking ถ้ามีหลาย package
+            "tracking_info": doc.get("tracking_info"),
+            "package_tracking_info": package_tracking_info,
             "create_time": _format_create_time(doc.get("create_time")),
             "create_time_raw": doc.get("create_time"),  # ⚡ Phase 1C — unix ts สำหรับ warranty calc
             # ⚡ Phase 3C — ฟิลด์ใหม่
@@ -500,7 +510,7 @@ def lookup_order(order_sn: str, shop_filter: str | None = None) -> dict[str, Any
 def build_order_context(order: dict[str, Any]) -> str:
     """สร้าง context string สำหรับส่งให้ LLM.
 
-    ⚡ Phase 3C — ขยายให้ครบ: วันที่ซื้อ/ชำระ/ส่ง/ถึง, ที่อยู่, ราคา, วิธีชำระ, สถานะ, ขนส่ง, สินค้า+ราคา
+    ⚡ Phase 3C — สร้าง order context: dates, status, carrier, tracking number/info, address, payment, and items
 
     รูปแบบ:
     === ข้อมูลคำสั่งซื้อ ===
@@ -553,6 +563,13 @@ def build_order_context(order: dict[str, Any]) -> str:
         lines.append(f"เลขพัสดุ: {', '.join(_all_tracking)}")
     elif _tracking:
         lines.append(f"เลขพัสดุ: {_tracking}")
+    _tracking_info = order.get("tracking_info")
+    if _tracking_info:
+        _tracking_info_text = _tracking_info if isinstance(_tracking_info, str) else json.dumps(_tracking_info, ensure_ascii=False, default=str)
+        lines.append(f"ข้อมูลติดตาม: {_tracking_info_text}")
+    _package_tracking_info = order.get("package_tracking_info") or []
+    if _package_tracking_info:
+        lines.append(f"ข้อมูลติดตามรายพัสดุ: {json.dumps(_package_tracking_info, ensure_ascii=False, default=str)}")
 
     # ที่อยู่
     _addr = order.get("recipient_address") or ""

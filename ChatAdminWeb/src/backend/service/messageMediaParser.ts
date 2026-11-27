@@ -476,5 +476,5 @@ export function toProductCard(
   // ดึงชื่อร้าน
   const shop = String(doc.shopname || doc.shop_name || "");
 
-  return { item_id: itemId, name, price, image, shop, url };
+  return { item_id: itemId, name, price, image, shop, url, platform };
 }

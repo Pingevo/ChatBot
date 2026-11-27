@@ -9,8 +9,9 @@ import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { testStatusConversationService } from "@/backend/service/testStatusConversationService";
 import { statusConversationService } from "@/backend/service/statusConversationService";
 import { safeRegexSearch } from "@/backend/lib/regexEscape";
-import { parseInboxFilters, unansweredStages, messageStatusMatch } from "@/backend/lib/inboxFilters";
+import { CONVERSATION_TEXT_SEARCH_FIELDS, OWNED_CHAT_STATUSES, parseInboxFilters, unansweredStages, messageStatusMatch } from "@/backend/lib/inboxFilters";
 import { getBotworkerConversationCache, setBotworkerConversationCache } from "@/backend/service/botworkerConversationCache";
+import { findOrderConversationMatch } from "@/backend/service/conversationService";
 import type { Conversation } from "@/lib/types";
 import type { ConversationDoc } from "@/backend/service/conversationService";
 
@@ -31,8 +32,11 @@ export async function GET(req: NextRequest) {
   const listFilters = parseInboxFilters(rawFilters);
   if (rawFilters && !listFilters) return error("invalid inbox filters", 422);
   const platform = url.searchParams.get("platform") || undefined;
-  const shopId = url.searchParams.get("shop_id") || undefined;
+  const shopId = url.searchParams.get("shop") || url.searchParams.get("shop_id") || undefined;
   const search = url.searchParams.get("search") || url.searchParams.get("q") || undefined;
+  const status = listFilters?.msgStatus === "unreplied" ? "handoff"
+    : listFilters && listFilters.chatStatus !== "all" ? listFilters.chatStatus
+    : url.searchParams.get("status") || undefined;
   const cursorParam = url.searchParams.get("cursor") || undefined;
   const includeCount = url.searchParams.get("include_count") === "true";
   const parsedLimit = Number.parseInt(url.searchParams.get("limit") || "200", 10);
@@ -41,7 +45,7 @@ export async function GET(req: NextRequest) {
   const me = auth.ctx.admin.admin_id;
   const channels = auth.ctx.admin.role === "superadmin" || auth.ctx.admin.role === "dev" || !auth.ctx.admin.channels_access?.length
     ? null : auth.ctx.admin.channels_access;
-  const cacheKey = JSON.stringify([me, channels, assignedTo, platform, shopId, search, rawFilters, rawPinIds, limit, cursorParam]);
+  const cacheKey = JSON.stringify([me, channels, assignedTo, platform, shopId, search, status, rawFilters, rawPinIds, includeCount, limit, cursorParam]);
   const cached = getBotworkerConversationCache(cacheKey);
   if (cached) {
     return json({ rows: cached.data, total_count: cached.totalCount, has_more: cached.hasMore, cursor: cached.cursor });
@@ -56,18 +60,27 @@ export async function GET(req: NextRequest) {
   if (listFilters?.shops.length) terms.push({ $or: listFilters.shops.map((shop) => ({ platform: shop.platform, shop_id: shop.shop_id })) });
   if (search) {
     const safe = safeRegexSearch(search);
-    if (safe) terms.push({ $or: [
-      { to_name: { $regex: safe, $options: "i" } },
-      { last_message_text: { $regex: safe, $options: "i" } },
-      { shop_name: { $regex: safe, $options: "i" } },
-    ] });
+    const searchMatches: Record<string, unknown>[] = safe
+      ? CONVERSATION_TEXT_SEARCH_FIELDS.map((field) => ({
+          [field]: { $regex: safe, $options: "i" },
+        }))
+      : [];
+    if (search.trim()) {
+      try {
+        const orderMatch = await findOrderConversationMatch(search);
+        if (orderMatch) searchMatches.push(orderMatch);
+      } catch (e) {
+        console.error("[botworker/conversations] order lookup failed:", e);
+      }
+    }
+    if (searchMatches.length) terms.push({ $or: searchMatches });
   }
 
   // Sandbox ownership is the source of truth for BotWorker recipient filters.
   if (assignedTo !== "all") {
     const statuses = await getCollection<{ conversation_id: string; assigned_to?: string | null }>(COLLECTIONS.testStatusConversation);
     if (assignedTo === "unassigned") {
-      const assigned = await statuses.find({ source: "botworker", assigned_to: { $nin: [null, ""] } }, { projection: { conversation_id: 1 } }).toArray();
+      const assigned = await statuses.find({ source: "botworker", assigned_to: { $exists: true, $nin: [null, ""] } }, { projection: { conversation_id: 1 } }).toArray();
       terms.push({ conversation_id: { $nin: assigned.map((row) => row.conversation_id) } });
     } else if (assignedTo === "pending_handoff") {
       const pending = await statuses.find({ source: "botworker", status: { $in: ["handoff", "open", "pending"] },
@@ -112,16 +125,14 @@ export async function GET(req: NextRequest) {
     }
   }
   const pageMatch = cursorTerms.length ? { $and: cursorTerms } : {};
-  const chatStatus = listFilters?.msgStatus === "unreplied" ? "handoff" : listFilters?.chatStatus;
-  const statusStages: Record<string, unknown>[] = chatStatus && chatStatus !== "all" ? [
+  const statusStages: Record<string, unknown>[] = status && status !== "all" ? [
     { $lookup: { from: COLLECTIONS.testStatusConversation, let: { cid: "$conversation_id" }, pipeline: [
       { $match: { source: "botworker", $expr: { $eq: ["$conversation_id", "$$cid"] } } }, { $limit: 1 },
     ], as: "_status" } },
     { $set: { _meta: { $arrayElemAt: ["$_status", 0] } } },
-    { $set: { _effective_status: { $ifNull: ["$_meta.status", {
-      $cond: ["$_meta.closed_at", "closed", { $cond: ["$_meta.assigned_to", "handoff", "bot"] }],
-    }] } } },
-    { $match: { _effective_status: chatStatus } },
+    { $match: status === "bot"
+      ? { "_meta.status": { $nin: OWNED_CHAT_STATUSES } }
+      : { "_meta.status": status } },
   ] : [];
   const filteredMessageStages = listFilters?.msgStatus && listFilters.msgStatus !== "all"
     ? [...unansweredStages("", true), ...messageStatusMatch(listFilters.msgStatus)] : [];
@@ -151,13 +162,14 @@ export async function GET(req: NextRequest) {
     const meta = metaMap.get(doc.conversation_id);
     const pin = pinMap.get(doc.conversation_id);
     const owner = meta?.assigned_to || null;
-    const status = meta?.status || (meta?.closed_at ? "closed" : owner ? "handoff" : "bot");
+    const status = meta?.status || "bot";
     return {
       id: doc.conversation_id, platform: doc.platform, shop_id: doc.shop_id,
       shop_name: doc.shop_name, customer_id: doc.customer_id, customer_name: doc.to_name,
       customer_avatar: doc.customer_avatar, item_ids: meta?.item_ids || doc.item_ids || [],
       status, topic: ((meta?.topic as Conversation["topic"]) || (doc.topic as Conversation["topic"]) || "general"),
       last_message: doc.last_message_text, last_timestamp: doc.last_message_timestamp.toISOString(),
+      created_at: doc.created_at.toISOString(),
       unread: doc._unanswered_count ?? 0, pin_global: pin?.pinned === true,
       pin_personal: (pin?.pinned_by_admin_ids || []).includes(me), assigned_to: owner || undefined,
       assigned_to_name: owner ? adminMap.get(owner) : undefined,

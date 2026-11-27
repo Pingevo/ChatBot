@@ -9,6 +9,17 @@ export interface InboxQueryFilters {
   sort: "recent" | "oldest" | "name";
 }
 
+// ownership statuses ที่เป็น human/lifecycle-managed — นอกเหนือจากนี้ (missing meta, no status, "bot") = bot-owned
+export const OWNED_CHAT_STATUSES = ["handoff", "open", "pending", "closed", "resolved"] as const;
+
+export const CONVERSATION_TEXT_SEARCH_FIELDS = [
+  "to_name",
+  "last_message_text",
+  "shop_name",
+  "conversation_id",
+  "customer_id",
+] as const;
+
 const PLATFORMS = new Set(["shopee", "tiktok", "lazada"]);
 
 export function parseInboxFilters(raw: string | null): InboxQueryFilters | null {

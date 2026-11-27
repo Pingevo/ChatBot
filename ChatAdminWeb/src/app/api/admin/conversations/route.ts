@@ -5,7 +5,7 @@
 //   platform     = shopee | tiktok | lazada
 //   status       = open | closed | bot | handoff | resolved | pending
 //   shop_id      = filter by shop
-//   q            = search to_name / last_message_text / shop_name
+//   q            = search name / message / shop / conversation_id / user_id / exact order_sn
 //   assigned_to  = "me" | "unassigned" | "all" | "<admin_id>"  (default: all)
 //   limit        = default 2000, max 10000 (โหลดครบทั้งหมด)
 //
@@ -16,9 +16,10 @@
 import { NextRequest } from "next/server";
 import { requireAuth } from "@/backend/middleware/authorize";
 import { json, error } from "@/backend/lib/http";
-import { parseInboxFilters, unansweredStages, messageStatusMatch } from "@/backend/lib/inboxFilters";
+import { CONVERSATION_TEXT_SEARCH_FIELDS, OWNED_CHAT_STATUSES, parseInboxFilters, unansweredStages, messageStatusMatch } from "@/backend/lib/inboxFilters";
 import { getCollection, COLLECTIONS } from "@/backend/db/mongoClient";
 import { safeRegexSearch } from "@/backend/lib/regexEscape";
+import { findOrderConversationMatch } from "@/backend/service/conversationService";
 import type { Platform, ConversationStatus, ConversationDoc } from "@/backend/service/conversationService";
 import type { Conversation } from "@/lib/types";
 
@@ -105,6 +106,7 @@ export function mapToConversation(
     topic: ((meta?.topic as Conversation["topic"]) || (doc.topic as Conversation["topic"]) || "general"),
     last_message: doc.last_message_text,
     last_timestamp: doc.last_message_timestamp.toISOString(),
+    created_at: doc.created_at.toISOString(),
     pin_global: meta?.pinned === true,
     pin_personal: !!me && (meta?.pinned_by_admin_ids || []).includes(me),
     unread: unansweredCount,  // ⚠️ ใช้ unanswered แทน unread_count ของ sellcenter
@@ -126,16 +128,12 @@ export function mapToConversation(
 //    (ผ่าน invalidateConversationsCache)
 let cache: { key: string; data: Conversation[]; totalCount?: number; hasMore?: boolean; cursor?: string | null; ts: number; ver: number } | null = null;
 const CACHE_TTL = 5000;
-const CACHE_VER = 4; // bump เมื่อเปลี่ยน shape/contract
+const CACHE_VER = 5; // bump เมื่อเปลี่ยน shape/contract
 
 /** Invalidate cache — เรียกจาก send/assign/resolve/handoff route */
 export function invalidateConversationsCache() {
   cache = null;
 }
-
-// ownership statuses ที่เป็น human/lifecycle-managed — นอกเหนือจากนี้ (missing
-// meta, no status, "bot") = bot-owned
-const OWNED_STATUSES = ["handoff", "open", "pending", "closed", "resolved"];
 
 const META_JOIN = [
   { $lookup: { from: COLLECTIONS.statusConversation, localField: "conversation_id", foreignField: "conversation_id", as: "meta" } },
@@ -210,13 +208,20 @@ export async function GET(req: NextRequest) {
   const convColl = await getCollection<ListRow>(COLLECTIONS.conversations);
 
   const safeSearch = search ? safeRegexSearch(search) : undefined;
-  const searchOr = safeSearch
-    ? [
-        { to_name: { $regex: safeSearch, $options: "i" } },
-        { last_message_text: { $regex: safeSearch, $options: "i" } },
-        { shop_name: { $regex: safeSearch, $options: "i" } },
-      ]
+  let searchOr: Record<string, unknown>[] | undefined = safeSearch
+    ? CONVERSATION_TEXT_SEARCH_FIELDS.map((field) => ({
+        [field]: { $regex: safeSearch, $options: "i" },
+      }))
     : undefined;
+
+  if (search?.trim()) {
+    try {
+      const orderMatch = await findOrderConversationMatch(search);
+      if (orderMatch) (searchOr ||= []).push(orderMatch);
+    } catch (e) {
+      console.error("[admin/conversations] order lookup failed:", e);
+    }
+  }
 
   // conv-side predicate (pfx = "" บน conv doc / "conv." หลัง meta-first lookup)
   //   channel/platform/shop/search/cursor ทั้งหมดก่อน sort/limit — rows/count predicate เดียวกัน
@@ -249,10 +254,9 @@ export async function GET(req: NextRequest) {
       ]});
     }
     if (searchOr) {
-      ands.push({ $or: searchOr.map((c) => {
-        const k = Object.keys(c)[0];
-        return { [`${pfx}${k}`]: (c as Record<string, unknown>)[k] };
-      })});
+      ands.push({ $or: searchOr.map((c) => Object.fromEntries(
+        Object.entries(c).map(([key, value]) => [`${pfx}${key}`, value]),
+      )) });
     }
     if (ands.length === 1) Object.assign(m, ands[0]);
     else if (ands.length > 1) m.$and = ands;
@@ -264,7 +268,7 @@ export async function GET(req: NextRequest) {
   //   assigned_to=<id|me> → meta.assigned_to = id;  unassigned → ไม่มี owner
   const metaConds = (pfx: string) => {
     const conds: Record<string, unknown>[] = [];
-    if (status === "bot") conds.push({ [`${pfx}status`]: { $nin: OWNED_STATUSES } });
+    if (status === "bot") conds.push({ [`${pfx}status`]: { $nin: OWNED_CHAT_STATUSES } });
     else if (status) conds.push({ [`${pfx}status`]: status });
     if (assignedToParam === "pending_handoff") conds.push({ [`${pfx}status`]: { $in: ["handoff", "open", "pending"] } });
     if (assignedToParam === "unassigned" || assignedToParam === "pending_handoff") conds.push({ $or: [

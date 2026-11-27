@@ -316,10 +316,10 @@ body:has(.auth-gradient-bg) {
   overflow-y: auto;
 }
 
-/* Text selection — maroon tint */
+/* Text selection — keep selected text readable over light and dark surfaces. */
 ::selection {
-  background: rgba(139, 30, 40, 0.12);
-  color: var(--color-text);
+  background: #1d4ed8;
+  color: #ffffff;
 }
 
 /* Scrollbar — clean */
