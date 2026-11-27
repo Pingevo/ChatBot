@@ -10,6 +10,7 @@ export const state = {
   shopeeCalls: [],
   tokenResponder: null,
   shopeeResponder: null,
+  product: null,
 };
 const fm = createFakeMongo(state);
 export const getCollection = fm.getCollection;
@@ -19,7 +20,7 @@ export const store = fm.store;
 
 export const systemConfigService = { getSystemConfig: async () => ({ ...state.config }) };
 export const conversationService = { getConversation: async (id) => state.conversations[id] || null };
-export const productService = { getProduct: async () => null };
+export const productService = { getProduct: async () => state.product };
 
 globalThis.fetch = async (url, init) => {
   state.tokenCalls.push({ url: String(url), headers: init?.headers });

@@ -6,6 +6,8 @@ import { productService, type ProductDoc } from "./productService";
 import { conversationService } from "./conversationService";
 import { systemConfigService } from "./systemConfigService";
 import { SHOPEE_PROVIDER_ERRORS } from "@/lib/shopeeSendErrors";
+import { toProductCard } from "./messageMediaParser";
+import type { ProductCard } from "@/lib/types";
 
 type OutboundType = "text" | "image" | "video" | "sticker" | "item";
 
@@ -24,7 +26,7 @@ export type ShopeeOutboundResult =
       type: OutboundType;
       text: string;
       media?: { url: string; thumb_url?: string };
-      products?: { item_id: string; name: string; price: number; image?: string; shop?: string }[];
+      products?: ProductCard[];
       providerMessageId?: string;
     }
   | { state: "failed"; code: string; providerError?: string; providerHttpStatus?: number; providerRequestId?: string }
@@ -407,6 +409,9 @@ export async function sendShopeeMessage(opts: {
       return { state: "failed", code: "item_shop_mismatch" };
     }
   }
+  const productCard = product
+    ? [{ ...toProductCard(product as Record<string, unknown>, "shopee"), shop: product.shopname || product.shop_name || conversation.shop_name }]
+    : undefined;
 
   const operations = await getCollection<OperationDoc>(OPERATIONS_COLLECTION);
   const existing = await operations.findOne({ _id: operationId });
@@ -416,9 +421,7 @@ export async function sendShopeeMessage(opts: {
       return { state: "failed", code: "request_id_conflict" };
     }
     const prior = _resultFromExisting(opts.input.type, opts.input.text || "", existing);
-    if (prior.state === "sent" && opts.input.type === "item" && product) {
-      prior.products = [{ item_id: String(product.itemid ?? product.item_id), name: String(product.name ?? product.product_name ?? "สินค้า"), price: Number(product.price || 0), image: typeof product.image_url === "string" ? product.image_url : undefined, shop: conversation.shop_name }];
-    }
+    if (prior.state === "sent" && productCard) prior.products = productCard;
     return prior;
   }
 
@@ -601,13 +604,6 @@ export async function sendShopeeMessage(opts: {
     }
     providerAccepted = true;
     await finish("sent", undefined, providerMessageId, media);
-    const productCard = product ? [{
-      item_id: String(product.itemid ?? product.item_id),
-      name: String(product.name ?? product.product_name ?? "สินค้า"),
-      price: Number(product.price || 0),
-      image: typeof product.image_url === "string" ? product.image_url : undefined,
-      shop: conversation.shop_name,
-    }] : undefined;
     return { state: "sent", type: messageType, text, media, products: productCard, providerMessageId };
   } catch (error) {
     const allowedCodes = new Set(["live_send_disabled", "credentials_unavailable", "token_provider_unavailable", "token_provider_unauthorized", "token_provider_ip_denied", "token_provider_forbidden", "token_provider_shop_unknown", "token_provider_reauth", "token_provider_rejected", "file_required", "invalid_image", "invalid_video", "invalid_video_duration", "image_upload_failed", "video_upload_failed", "video_upload_status_failed", "video_upload_pending", "text_required", "sticker_required", "item_id_invalid"]);

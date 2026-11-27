@@ -19,12 +19,12 @@ const { sendShopeeMessage } = await import("../src/backend/service/shopeeOutboun
 const token = { success: true, shop_id: "1191420560", partner_id: "2006107", access_token: "fake-access-token" };
 let number = 0;
 
-async function send(response) {
+async function send(response, input = { type: "text", text: "hello" }) {
   mocks.reset();
   mocks.state.tokenResponder = () => ({ status: 200, body: token });
   mocks.state.shopeeResponder = () => response;
   number += 1;
-  return sendShopeeMessage({ conversationId: "conv_bs", requestId: `fake_request_${number}`, input: { type: "text", text: "hello" } });
+  return sendShopeeMessage({ conversationId: "conv_bs", requestId: `fake_request_${number}`, input });
 }
 
 const diagnostics = [];
@@ -92,4 +92,28 @@ const accepted = await send({ status: 200, body: { error: "", response: { messag
 assert.equal(accepted.state, "sent");
 assert.equal(accepted.providerMessageId, "msg-123");
 
-console.log("Shopee outbound response: 8 cases passed");
+mocks.state.product = {
+  itemid: "24154834657",
+  item_name: "Black Shark S1 สมาร์ทวอทช์ AMOLED",
+  price: 1190,
+  image: { image_id_list: ["black-shark-watch"] },
+  shopid: "1191420560",
+  shopname: "BlackShark",
+  short_link: "https://shopee.co.th/product/1191420560/24154834657",
+};
+const itemCard = await send(
+  { status: 200, body: { error: "", response: { message_id: "msg-item" } } },
+  { type: "item", itemId: "24154834657" },
+);
+assert.equal(itemCard.state, "sent");
+assert.deepEqual(itemCard.products, [{
+  item_id: "24154834657",
+  name: "Black Shark S1 สมาร์ทวอทช์ AMOLED",
+  price: 1190,
+  image: "https://cf.shopee.co.th/file/black-shark-watch",
+  shop: "BlackShark",
+  url: "https://shopee.co.th/product/1191420560/24154834657",
+  platform: "shopee",
+}]);
+
+console.log("Shopee outbound response and item card: 9 cases passed");
